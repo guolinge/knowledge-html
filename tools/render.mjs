@@ -207,8 +207,11 @@ function main() {
     return;
   }
 
-  // 首页（只构建单篇时，仍从磁盘汇总全部条目，避免索引被截断）
-  const allEntries = ONLY ? collectAll() : entries;
+  // 首页索引：从磁盘汇总全部笔记，再用刚构建的条目覆盖。
+  // 这样某篇写坏时它只是不能构建，不会从首页凭空消失。
+  const byslug = new Map(collectAll().map((e) => [e.slug, e]));
+  for (const e of entries) byslug.set(e.slug, e);
+  const allEntries = [...byslug.values()].sort((a, b) => a.slug.localeCompare(b.slug));
   write(
     path.join(ROOT, 'index.html'),
     renderHome(allEntries, { site: '知识笔记', assetPrefix: '' }),
