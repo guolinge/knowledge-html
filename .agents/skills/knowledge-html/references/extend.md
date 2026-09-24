@@ -1,0 +1,109 @@
+# 积木不够用时，怎么加一个
+
+**判断标准**：同一类知识你已经用 `raw` 块手写过**第三次**了，就该抽象成积木。
+在这之前，用现有积木拼一拼。
+
+加一个积木只需要动两个文件，外加两个示例。
+
+---
+
+## 第 1 步 · 在 `tools/lib/blocks.mjs` 写渲染函数
+
+找到文件里 `/* ---------- 注册 ---------- */` 上面的区域，加一个函数：
+
+```js
+/* ===== 积木 11 · my-block ===== */
+function myBlock(body) {
+  const cfg = YAML.parse(body) || {};
+  const items = cfg.items || (Array.isArray(cfg) ? cfg : []);
+  return `<div class="my-block">${items
+    .map(
+      (it) => `<div class="mcard tone-${it.tone || 'muted'}">
+        <b>${inline(it.title)}</b>
+        ${it.desc ? `<p>${inline(it.desc)}</p>` : ''}
+      </div>`,
+    )
+    .join('')}</div>`;
+}
+```
+
+可用的三个辅助函数（都定义在 `blocksPlugin` 内部，闭包里就能拿到）：
+
+| 函数 | 作用 |
+|---|---|
+| `inline(s)` | 渲染**行内** Markdown（粗体、代码、链接），并转义 HTML |
+| `esc(s)` | 纯转义，当纯文本用 |
+| `md.render(s)` | 渲染**整块** Markdown（可含多段、列表） |
+
+## 第 2 步 · 注册
+
+```js
+const RENDERERS = {
+  'lane-stack': laneStack,
+  journey,
+  // ...
+  'my-block': myBlock,     // ← 加这里
+};
+```
+
+**注册名就是围栏语言名。** 名字里带连字符没问题（`lane-stack` 就是）。
+漏注册的话，`npm run check` 会报「未知围栏语言」—— 不会静默失效。
+
+## 第 3 步 · 在 `assets/blocks.css` 写样式
+
+```css
+.my-block { display: grid; gap: 12px; margin: 0 0 20px; }
+.mcard {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--tone, var(--border-strong));
+  border-radius: 12px; padding: 14px 16px;
+}
+```
+
+**只准用 `theme.css` 里的 CSS 变量，不准写死色值。**
+`--tone` / `--tone-soft` 由 `.tone-*` 类自动提供，只要给元素加上 `tone-xxx` 类就能着色。
+这条规矩换来的是：换肤不用动任何内容。
+
+## 第 4 步 · 加示例（必做）
+
+积木没有示例就等于不存在 —— 下次没人记得怎么用。
+
+1. `tools/templates/note.md` 加一段（新建笔记时的模板）
+2. `notes/blocks-cheatsheet/note.md` 加一段（可运行示例）
+3. `.agents/skills/knowledge-html/references/blocks.md` 加一节（agent 的参考）
+
+## 第 5 步 · 验证
+
+```bash
+npm run check                      # 语法与约定
+npm run view -- blocks-cheatsheet  # 打开示例页看效果
+```
+
+顺便看一眼**深色模式**和**窄屏**（浏览器窗口拖到 400px 左右）——
+积木最容易在这两个地方崩。
+
+---
+
+## 设计积木时的两条经验
+
+**① 数据驱动，不要为每个用例写一个积木。**
+`demo` 是唯一一个例外（它必须挂外部 JS），其余积木都是纯 YAML → HTML。
+如果新积木的 body 里出现了 HTML 字符串，说明它应该被拆成「积木 + 数据」。
+
+**② 想清楚它在窄屏下怎么塌。**
+参考已有做法：
+
+- 横向排列 → 改纵向（`lane`、`demo-body`）
+- 表格 → 折叠成卡片，用 `data-label` 保留表头（`compare`）
+- 网格 → `auto-fit` 自动降列数（`cards`）
+
+---
+
+## 什么时候**不该**加积木
+
+- 只出现一次的表达方式 → 用 `raw` 块，或者用现有积木拼
+- 只是配色/间距不同 → 那是 `tone` 和 CSS 的事，不是新积木
+- 「想要一个更漂亮的列表」 → 先用 `cards` 或 `checklist`，别急着造新的
+
+积木是资产，页面只是实例。**资产越少越锋利。**

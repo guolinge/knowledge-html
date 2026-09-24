@@ -1,14 +1,15 @@
 # 积木速查
 
-> 这份文件既是新建笔记的模板，也是积木语法参考。
+> 这份文件既是新建笔记的模板，也是积木语法参考。**写笔记之前先读一遍。**
 > 正文用标准 Markdown，需要更强表达力时用下面的自定义围栏块（围栏内是 YAML）。
 
 ## 01 · 基本约定
 
-- **一级标题只写一次**，渲染成页面 hero 的标题。它同时应该写进 `meta.json` 的 `title`。
+- **一级标题只写在 `meta.json` 的 `title`**，正文再写一遍会被构建时剥掉。
 - **`## 01 · 标题`** 会自动把 `01` 渲染成编号徽章，并生成锚点进目录。
 - **`### 标题`** 进目录，作为二级项。
 - 行内支持 `**粗体**`、`` `代码` ``、`[链接](url)`，以及裸 HTML（用于 `<span class="en">` 这类微调）。
+- **每篇结尾必须有 `quiz`** —— 见下面第 09 节。
 
 ## 02 · lane-stack —— 分层 / 泳道流程
 
@@ -89,7 +90,42 @@ rows:
 
 要点：单元格写字符串就是普通文本，写 `{text, tone}` 就渲染成彩色标签。窄屏会自动折叠成卡片。
 
-## 05 · callout —— 提示 / 陷阱 / 引用
+## 05 · cards —— 并列概念网格
+
+适合：一堆**没有先后关系**的并列概念。用文字排会很平，卡片能一眼扫完。
+
+```cards
+cols: 3
+items:
+  - { title: ODS 贴源层, desc: 与业务库一一对应，只做类型转换 + 按天分区, tag: LAYER 03, tone: amber }
+  - { title: DWD 明细层, desc: 一行 = 一个业务事件，字段已翻译成业务语义, tag: LAYER 04, tone: violet }
+  - { title: ADS 应用层, desc: 直接给报表用的结果表，查询毫秒级, tag: LAYER 06, tone: green }
+```
+
+要点：`cols` 可选 `2` / `3` / `4`，不写则按宽度自动排。卡片还可带 `code` 字段放一小段代码。
+
+## 06 · timeline —— 时间线 / 版本演进
+
+适合：按时间顺序发生的事件、技术选型的演进、事故时间线。
+
+```timeline
+- when: 2020
+  title: Hive on MR
+  desc: 只能跑批，报表 T+1，半夜跑数
+  tone: muted
+- when: 2022
+  title: Flink 实时数仓
+  desc: 开始用 CDC 读 binlog，大盘做到分钟级
+  tone: blue
+- when: 2024
+  title: 湖仓一体
+  desc: Iceberg + Flink，批流同一份存储
+  tone: violet
+```
+
+要点：`when` 会渲染成等宽小字并着色，`tone` 同时决定时间轴圆点的颜色。
+
+## 07 · callout —— 提示 / 陷阱 / 引用
 
 ```callout
 tone: amber
@@ -102,7 +138,7 @@ text: |
 
 要点：`quote: true` 会把正文放大加粗，用于一句话结论。`text` 里可以写多行 Markdown。
 
-## 06 · checklist —— 正例 / 反例
+## 08 · checklist —— 正例 / 反例
 
 ```checklist
 tone: cross
@@ -113,7 +149,7 @@ items:
 
 要点：`tone` 可选 `cross`（红叉）和 `warn`（黄叹号），不写就是绿勾。
 
-## 07 · quiz —— 自测
+## 09 · quiz —— 自测
 
 **这是最容易被忽略、但最重要的一块。** 知识库死于「收藏代替理解」，
 每篇笔记结尾放 2~3 题，逼自己合上答案复述一遍。
@@ -128,7 +164,23 @@ items:
 
 同一时刻只允许展开一题，避免一口气看完答案。
 
-## 08 · demo —— 可交互模拟
+## 10 · demo —— 可交互模拟
+
+**只在「静态图讲不清」时用。** 判据：用一句话说不清「A 和 B 差在哪」，
+但让用户亲手跑一遍就秒懂。
+
+需要两步。先在 `assets/app.js` 的 `WIDGETS` 里注册控件：
+
+```js
+WIDGETS['my-widget'] = (root) => {
+  const log = root.querySelector('[data-log="main"]');   // 对应下面的 log: main
+  root.querySelector('[data-run]').addEventListener('click', () => { /* ... */ });
+};
+```
+
+可用钩子：`[data-log="<name>"]`、`[data-run]`、`[data-reset]`、`[data-status]`。
+
+再在 note.md 里声明外壳：
 
 ```demo
 widget: polling-vs-cdc
@@ -148,10 +200,9 @@ panes:
     foot: [近实时, 含删除, 只读 binlog]
 ```
 
-要点：`widget` 必须和 `assets/app.js` 里 `WIDGETS` 注册表的名字对应。
-控件逻辑写在 app.js，页面只声明外壳和分栏，两边靠 `log` 这个 key 对接。
+两边靠 `log` 这个 key 对接。页面只声明外壳，逻辑全在 `app.js`。
 
-## 09 · summary / raw
+## 11 · summary / raw
 
 ```summary
 title: 一句话总结
@@ -159,17 +210,18 @@ text: |
   `CDC` 负责把变化**实时通知出来**；`Flink` 负责**加工变化**。
 ```
 
-`raw` 块直接输出 HTML，用于一次性的一次性排版实验，不推荐长期使用。
+`raw` 块直接输出 HTML，是一次性排版实验的逃生口，**不要长期使用** ——
+它绕过了积木系统，换肤和校验都管不到它。
 
-## 10 · 写完之后
+## 12 · 写完之后
 
 ```bash
-npm run build              # 生成页面 + 首页索引
-npm run serve              # 本地预览
-npm run build:standalone   # 额外产出 dist/*.html（单文件，可直接发给别人）
+npm run check              # 先校验。会指出第几行哪个积木有问题
+npm run view -- <slug>     # 构建 + 在浏览器打开
+npm run build:standalone   # 产出 dist/*.html（内联全部资源，可直接发给别人）
 ```
 
-## 11 · 自测
+## 13 · 自测
 
 ```quiz
 - q: 什么时候该用 journey 而不是 lane-stack？
@@ -177,8 +229,16 @@ npm run build:standalone   # 额外产出 dist/*.html（单文件，可直接发
     lane-stack 描述**结构**（有哪几层、每层是什么）；
     journey 描述**变化**（同一个东西在每一步长什么样）。
     如果重点是「字段从 status=1 变成 '已支付'」，那是 journey。
+- q: 什么时候该用 cards 而不是 compare？
+  a: |
+    compare 是**同一组维度下的横向对比**（每行一个维度，每列一个方案）。
+    cards 是**一堆并列概念**，彼此之间没有共同维度可比。
 - q: 为什么每页必须带 meta.json 里的 status 和 sources？
   a: |
     因为漂亮的 HTML 会自带「这应该是对的」的暗示。
     status=draft 会在页面顶部挂黄条，sources 让半年后的你能查证。
+- q: 积木名拼错了会怎样？
+  a: |
+    围栏会静默退化成普通代码块 —— 页面看着正常，但图没了。
+    所以写完一定要跑 npm run check，它会报「未知围栏语言」。
 ```

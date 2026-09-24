@@ -239,11 +239,46 @@ export function blocksPlugin(md) {
     </div>`;
   }
 
+  /* ===== 积木 9 · cards ===== */
+  function cards(body) {
+    const cfg = YAML.parse(body) || {};
+    const items = cfg.items || (Array.isArray(cfg) ? cfg : []);
+    const inner = items
+      .map((it) => {
+        const tone = it.tone || 'muted';
+        return `<div class="ccard tone-${tone}">
+          ${it.tag ? `<span class="tag tone-${tone}">${esc(it.tag)}</span>` : ''}
+          <h4>${inline(it.title)}</h4>
+          ${it.desc ? `<p>${inline(it.desc)}</p>` : ''}
+          ${it.code ? `<pre>${esc(it.code)}</pre>` : ''}
+        </div>`;
+      })
+      .join('');
+    return `<div class="cards"${cfg.cols ? ` data-cols="${esc(cfg.cols)}"` : ''}>${inner}</div>`;
+  }
+
+  /* ===== 积木 10 · timeline ===== */
+  function timeline(body) {
+    const items = YAML.parse(body) || [];
+    return `<div class="timeline">${items
+      .map((it) => {
+        const tone = it.tone || 'blue';
+        return `<div class="titem tone-${tone}">
+          ${it.when ? `<span class="when">${esc(it.when)}</span>` : ''}
+          <h4>${inline(it.title)}</h4>
+          ${it.desc ? `<p>${inline(it.desc)}</p>` : ''}
+        </div>`;
+      })
+      .join('')}</div>`;
+  }
+
   /* ---------- 注册 ---------- */
   const RENDERERS = {
     'lane-stack': laneStack,
     journey,
     compare,
+    cards,
+    timeline,
     callout,
     checklist,
     quiz,
@@ -252,11 +287,55 @@ export function blocksPlugin(md) {
     raw: (body) => body,
   };
 
-  md.renderer.rules.fence = (tokens, idx, opts, env, self) => {
+  /** 已知的代码语言。不在这张表里、也不在 RENDERERS 里的围栏名会被报警告 ——
+   *  否则积木名拼错会静默退化成普通代码块，作者根本发现不了。 */
+  const CODE_LANGS = new Set([
+    'bash', 'sh', 'shell', 'zsh', 'console', 'text', 'txt', 'plain',
+    'js', 'javascript', 'ts', 'typescript', 'tsx', 'jsx', 'json', 'jsonc',
+    'sql', 'python', 'go', 'java', 'rust', 'ruby', 'php', 'c', 'cpp', 'kotlin', 'swift',
+    'yaml', 'yml', 'toml', 'ini', 'env', 'diff', 'patch',
+    'html', 'xml', 'css', 'scss', 'vue', 'svelte', 'md', 'markdown',
+    'http', 'graphql', 'proto', 'dockerfile', 'makefile', 'nginx',
+  ]);
+
+  md.renderer.rules.fence = (tokens, idx, _opts, env) => {
     const token = tokens[idx];
-    const lang = (token.info || '').trim().split(/\s+/)[0];
+    const info = (token.info || '').trim();
+    const lang = info.split(/\s+/)[0];
+    const line = token.map ? token.map[0] + 1 : null;
     const render = RENDERERS[lang];
-    if (render) return render(token.content);
+
+    if (render) {
+      try {
+        return render(token.content);
+      } catch (e) {
+        // 把 YAML 报错定位到具体文件和行号，并回显原始内容 ——
+        // 这是 agent 自纠的唯一依据，不能只丢一个堆栈。
+        const at = `${env?.file || 'note.md'}${line ? ':' + line : ''}`;
+        const body = token.content
+          .split('\n')
+          .map((l) => `  | ${l}`)
+          .join('\n');
+        throw new Error(
+          `${at} 积木 \`${lang}\` 解析失败\n` +
+            `  ${String(e.message).split('\n').join('\n  ')}\n` +
+            `  --- 原始内容 ---\n${body}`,
+        );
+      }
+    }
+
+    // 拼错积木名 / 未知语言：报警告，不要静默
+    if (lang && !CODE_LANGS.has(lang) && env) {
+      env.warnings = env.warnings || [];
+      env.warnings.push({
+        line,
+        lang,
+        message:
+          `未知围栏语言 \`${lang}\`` +
+          `。如果这是想用积木，可用的是：${Object.keys(RENDERERS).join(' / ')}` +
+          `；否则请换成已知的代码语言（如 text、sql、js）。`,
+      });
+    }
 
     // 普通代码块：包一层以便放复制按钮
     const cls = lang ? ` class="language-${esc(lang)}"` : '';
@@ -264,6 +343,10 @@ export function blocksPlugin(md) {
       token.content,
     )}</code></pre></div>\n`;
   };
+
+  /** 供校验脚本使用的元信息 */
+  md.blockNames = Object.keys(RENDERERS);
+  md.codeLangs = CODE_LANGS;
 }
 
 /* ---------- 正文后处理：给 h2/h3 加锚点并收集目录 ---------- */

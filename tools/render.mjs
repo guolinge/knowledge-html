@@ -1,9 +1,9 @@
-#!/usr/bin/env node
 /* ============================================================
    render.mjs — 构建
    ------------------------------------------------------------
    node tools/render.mjs                  # → notes/<slug>/index.html + index.html
    node tools/render.mjs --standalone     # 额外输出 dist/<slug>.html（内联 CSS/JS）
+   node tools/render.mjs --check          # 只校验不写文件；有问题退出码 1
    node tools/render.mjs --only <slug>    # 只构建一篇
    ============================================================ */
 
@@ -21,6 +21,7 @@ const DIST = path.join(ROOT, 'dist');
 
 const argv = process.argv.slice(2);
 const STANDALONE = argv.includes('--standalone');
+const CHECK = argv.includes('--check');
 const onlyIdx = argv.indexOf('--only');
 const ONLY = onlyIdx >= 0 ? argv[onlyIdx + 1] : null;
 
@@ -79,6 +80,36 @@ function inlineAssets(html) {
     );
 }
 
+/* ---------- 校验 ---------- */
+const VALID_STATUS = new Set(['draft', 'reviewed', 'verified']);
+
+const indent = (s, n) =>
+  String(s)
+    .split('\n')
+    .map((l) => ' '.repeat(n) + l)
+    .join('\n');
+
+/**
+ * 约定校验。这些不是语法错（不会让构建挂掉），但会直接决定笔记质量，
+ * 所以必须报出来 —— 尤其是 agent 写的笔记，没人盯着看。
+ */
+function lintNote(meta, src, warnings) {
+  const issues = warnings.map((w) => `第 ${w.line} 行：${w.message}`);
+
+  if (!meta.title) issues.push('meta.json 缺 title');
+  if (!meta.summary) issues.push('meta.json 缺 summary —— 首页卡片会空着');
+  if (!meta.status) issues.push('meta.json 缺 status，已按 draft 处理');
+  else if (!VALID_STATUS.has(meta.status))
+    issues.push(`meta.json 的 status="${meta.status}" 不是 draft/reviewed/verified 之一`);
+  if (meta.status === 'verified' && !meta.verified)
+    issues.push('status=verified 但没写 verified 日期');
+  if (!/^```quiz\b/m.test(src))
+    issues.push(
+      '没有 quiz 积木 —— 约定要求每篇结尾放 2~3 道自测题（见 README「这个仓库会怎么死」）',
+    );
+  return issues;
+}
+
 /* ---------- 主流程 ---------- */
 function main() {
   if (!fs.existsSync(NOTES)) {
@@ -100,15 +131,32 @@ function main() {
 
   const entries = [];
   const now = new Date().toISOString().slice(0, 10);
+  let errors = 0;
+  let warnings = 0;
 
   for (const slug of slugs) {
     const dir = path.join(NOTES, slug);
-    const metaPath = path.join(dir, 'meta.json');
-    const meta = readMeta(metaPath, slug);
-
+    const meta = readMeta(path.join(dir, 'meta.json'), slug);
     const raw = read(path.join(dir, 'note.md'));
     const { title: h1, body: src } = stripLeadingH1(raw);
-    const { html: anchored, toc } = addAnchors(md.render(src));
+    const env = { file: `notes/${slug}/note.md`, warnings: [] };
+
+    let anchored;
+    let toc;
+    try {
+      ({ html: anchored, toc } = addAnchors(md.render(src, env)));
+    } catch (e) {
+      // 一篇写坏不应该阻塞其他笔记的构建
+      console.error(`\n  ✗ ${slug}\n${indent(e.message, 4)}\n`);
+      errors++;
+      continue;
+    }
+
+    const issues = lintNote(meta, src, env.warnings);
+    for (const it of issues) console.warn(`  ⚠ ${slug}: ${it}`);
+    warnings += issues.length;
+
+    if (CHECK) continue;
 
     const full = renderPage({
       meta: { site: '知识笔记', ...meta, title: meta.title || h1 || slug },
@@ -121,15 +169,17 @@ function main() {
     write(path.join(dir, 'index.html'), full);
 
     if (STANDALONE) {
-      // 内联后不应再有任何外部资源标签，否则单文件分发会缺样式
-  // 注意：只查真实标签，正文里提到 assets/ 路径属于正常内容
-  const standalone = inlineAssets(full);
-  const leftover = standalone.match(/<(?:link|script)[^>]*(?:href|src)="[^"]*assets\/[^"]*"/g);
-  if (leftover) {
-    console.error(`  ✗ ${slug}: standalone 仍残留外部引用 ${leftover.join(', ')}`);
-    process.exitCode = 1;
-  }
-  write(path.join(DIST, `${slug}.html`), standalone);
+      // 内联后不应再有任何外部资源标签，否则单文件分发会缺样式。
+      // 注意：只查真实标签，正文里提到 assets/ 路径属于正常内容。
+      const standalone = inlineAssets(full);
+      const leftover = standalone.match(
+        /<(?:link|script)[^>]*(?:href|src)="[^"]*assets\/[^"]*"/g,
+      );
+      if (leftover) {
+        console.error(`  ✗ ${slug}: standalone 仍残留外部引用 ${leftover.join(', ')}`);
+        errors++;
+      }
+      write(path.join(DIST, `${slug}.html`), standalone);
     }
 
     entries.push({
@@ -148,6 +198,15 @@ function main() {
     );
   }
 
+  if (CHECK) {
+    console.log(
+      `\n  ${slugs.length} 篇：${errors} 个错误，${warnings} 个提醒` +
+        (errors + warnings === 0 ? '  —— 没问题' : ''),
+    );
+    if (errors + warnings > 0) process.exitCode = 1;
+    return;
+  }
+
   // 首页（只构建单篇时，仍从磁盘汇总全部条目，避免索引被截断）
   const allEntries = ONLY ? collectAll() : entries;
   write(
@@ -155,6 +214,8 @@ function main() {
     renderHome(allEntries, { site: '知识笔记', assetPrefix: '' }),
   );
   console.log(`  ✓ index.html (${allEntries.length} 篇)`);
+
+  if (errors) process.exitCode = 1;
 }
 
 /** 只读 meta，用于 --only 时重建完整索引 */

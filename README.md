@@ -18,7 +18,8 @@ npm install
 npm run new -- mysql-index-internals   # 新建一篇（会生成 meta.json + note.md）
 # ...编辑 notes/mysql-index-internals/note.md...
 
-npm run build              # 构建页面 + 首页索引
+npm run check              # 校验：YAML 错误会定位到文件+行号，拼错的积木名会被抓出来
+npm run view -- <slug>     # 构建 + 在浏览器打开
 npm run serve              # → http://localhost:4321 本地预览
 npm run build:standalone   # 额外产出 dist/<slug>.html（单文件，可直接发人）
 ```
@@ -44,13 +45,16 @@ npm run build:standalone   # 额外产出 dist/<slug>.html（单文件，可直�
 │     ├─ note.md                  # 唯一真相源                   ← 你只改这里
 │     └─ index.html               # 构建产物
 ├─ dist/                          # 单文件版本（内联全部资源，可直接发人）
-├─ .githooks/pre-push             # 推送前强制重新构建
+├─ .agents/skills/knowledge-html/   # AI skill（工作流 + DSL 参考）
+├─ .githooks/pre-push               # 推送前强制重新构建
+├─ AGENTS.md                        # 通用 agent 入口
 └─ tools/
-   ├─ render.mjs                  # 构建入口
-   ├─ serve.mjs                   # 零依赖预览服务器
-   ├─ new.mjs                     # 新建笔记
-   ├─ templates/note.md           # 模板 + 积木语法参考
-   └─ lib/{blocks,page,home}.mjs  # 积木渲染 / 页面外壳 / 首页
+   ├─ render.mjs                    # 构建入口（--check / --standalone / --only）
+   ├─ view.mjs                      # 构建 + 浏览器打开
+   ├─ serve.mjs                     # 零依赖预览服务器
+   ├─ new.mjs                       # 新建笔记
+   ├─ templates/note.md             # 模板 + 积木语法参考
+   └─ lib/{blocks,page,home}.mjs    # 积木渲染 / 页面外壳 / 首页
 ```
 
 **唯一的真相源是 `note.md`。** `index.html` 是产物，改了会被覆盖。
@@ -67,14 +71,15 @@ npm run build:standalone   # 额外产出 dist/<slug>.html（单文件，可直�
 | `lane-stack` | 分层 / 泳道流程（ETL 链路、请求生命周期、系统分层） |
 | `journey` | 一个东西在每一步的**形态快照**（字段怎么变的） |
 | `compare` | 多维对比表，窄屏自动折叠成卡片 |
+| `cards` | 并列概念网格（一堆没有先后关系的东西） |
+| `timeline` | 时间线 / 版本演进 |
 | `callout` | 提示 / 陷阱 / 一句话结论 |
 | `checklist` | 正例 / 反例清单 |
 | `quiz` | 折叠式自测 |
 | `demo` | 可交互模拟 |
 | `summary` / `raw` | 收尾总结卡 / HTML 逃生口 |
 
-完整语法和可运行示例见 **[`notes/blocks-cheatsheet/`](notes/blocks-cheatsheet/note.md)**，
-或新建一篇时生成的模板 `tools/templates/note.md`。
+完整语法和可运行示例见 **[`notes/blocks-cheatsheet/`](notes/blocks-cheatsheet/note.md)**。
 
 ### 为什么是「积木」而不是「模板」
 
@@ -82,6 +87,42 @@ npm run build:standalone   # 额外产出 dist/<slug>.html（单文件，可直�
 取决于你要讲的是**结构**还是**变化** —— 这个选择才是笔记质量的分水岭。
 
 积木只消费 `theme.css` 的 token，不写死色值，所以换肤不用动内容。
+
+---
+
+## 给 AI agent 用
+
+仓库自带一个 skill，它编码的不是「怎么写笔记」，而是
+**「怎么把一段内容变成图、讲透用户卡住的那个环节」**：
+
+```
+.agents/skills/knowledge-html/
+├─ SKILL.md              工作流 + 积木选择表 + 硬约束
+└─ references/
+   ├─ blocks.md          10 个积木的完整 DSL
+   └─ extend.md          积木不够用时怎么加一个
+```
+
+根目录的 [`AGENTS.md`](AGENTS.md) 是给通用 agent 的入口（Codex / Cursor / Claude Code 等会自动读）。
+
+### 装到全局（日常用法）
+
+```bash
+ln -s ~/works/codes/knowledge-html/.agents/skills/knowledge-html \
+      ~/.agents/skills/knowledge-html
+```
+
+符号链接的好处：**改仓库里的就等于改全局的**，不会两份漂移。
+
+之后在任何目录说：
+
+> **【图解】** 粘贴内容 + 说出你卡在哪
+
+agent 会自动找到这个项目、建笔记、选积木、`npm run check`、
+`npm run view` 把浏览器打开。
+
+> Claude Code 读 `.claude/skills/`。要让它也认，在 `.pi/settings.json` 或对应配置里
+> 加上 `.agents/skills` 路径即可。
 
 ---
 
