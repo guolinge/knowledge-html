@@ -186,6 +186,79 @@
     resetBtn.addEventListener('click', reset);
   };
 
+  /* —— 控件：条件组合怎么变成 AND / OR ——
+     演示 Combination.combineSql 的核心机制：
+       UNION ALL 把各条件的 uid 堆在一起 → GROUP BY uid 计数 → HAVING 筛选
+     OR   = 不加 HAVING（任一条命中）
+     AND  = HAVING count = 子查询数（每一条都命中）
+     自定义 = HAVING count >= N（至少 N 个条件命中）
+  ------------------------------------------------ */
+  WIDGETS['combination-count'] = (root) => {
+    const sqlBox = root.querySelector('[data-cc-sql]');
+    const countBox = root.querySelector('[data-cc-count]');
+    const statusEl = root.querySelector('[data-status]');
+    const rows = Array.from(root.querySelectorAll('[data-cc-row]'));
+    const buttons = Array.from(root.querySelectorAll('[data-cc-mode]'));
+
+    const N = 3; // 条件个数
+    const SUB = ['A', 'B', 'C'].map(
+      (k, i) => `SELECT \`uid\` FROM ${['event_add_cart', 'user_portrait', 'crowds'][i]} WHERE ...`,
+    );
+
+    const MODES = {
+      or: {
+        label: 'OR',
+        having: null,
+        hint: '不加 HAVING：任一条子查询命中就保留',
+        desc: '任一条件命中',
+      },
+      and: {
+        label: 'AND',
+        having: `HAVING count(\`uid\`) = ${N}`,
+        hint: `HAVING count(uid) = ${N}：必须在 ${N} 个子查询里都出现`,
+        desc: '全部条件命中',
+      },
+      n2: {
+        label: '至少 2 个',
+        having: 'HAVING count(`uid`) >= 2',
+        hint: 'HAVING count(uid) >= 2：至少 2 个条件命中（unionCount 写法）',
+        desc: '自定义数量',
+      },
+    };
+
+    function render(mode) {
+      const cfg = MODES[mode];
+      buttons.forEach((b) => b.classList.toggle('on', b.getAttribute('data-cc-mode') === mode));
+
+      let hit = 0;
+      rows.forEach((tr) => {
+        const n = Number(tr.getAttribute('data-count'));
+        let keep;
+        if (mode === 'or') keep = n >= 1;
+        else if (mode === 'and') keep = n === N;
+        else keep = n >= 2;
+        tr.classList.toggle('keep', keep);
+        tr.classList.toggle('drop', !keep);
+        if (keep) hit++;
+      });
+
+      countBox.textContent = String(hit);
+      statusEl.textContent = cfg.desc;
+      sqlBox.textContent =
+        'SELECT UID_DECODE(`uid`) as `uid`\nFROM (\n  ' +
+        SUB.join('\n  UNION ALL\n  ') +
+        '\n) ct1\nGROUP BY `uid`' +
+        (cfg.having ? '\n' + cfg.having : '') +
+        '\n\n-- ' +
+        cfg.hint;
+    }
+
+    buttons.forEach((b) =>
+      b.addEventListener('click', () => render(b.getAttribute('data-cc-mode'))),
+    );
+    render('or');
+  };
+
   /* ---------- 挂载 ---------- */
   document.querySelectorAll('[data-widget]').forEach((root) => {
     var name = root.getAttribute('data-widget');

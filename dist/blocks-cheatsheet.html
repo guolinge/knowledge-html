@@ -634,6 +634,73 @@ html[data-theme="dark"] .summary { background: linear-gradient(120deg, #1a2f5c, 
 .titem p { margin: 0; font-size: 13.5px; color: var(--muted); line-height: 1.65; }
 
 /* ============================================================
+   控件样式 · combination-count
+   演示 UNION ALL + GROUP BY + HAVING COUNT 如何实现集合的 AND / OR
+   ============================================================ */
+.demo-body.custom { display: block; }
+.cc { padding: 18px; }
+
+.cc-sets { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+@media (max-width: 700px) { .cc-sets { grid-template-columns: 1fr; } }
+.cc-set {
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--tone, var(--border-strong));
+  border-radius: 10px; padding: 12px 14px;
+  background: var(--surface-2);
+}
+.cc-set b { display: block; font-size: 13.5px; margin-bottom: 3px; }
+.cc-set small { display: block; font-size: 11.5px; color: var(--muted); margin-bottom: 9px; }
+.cc-set .uids {
+  font-family: var(--mono); font-size: 12.5px; font-weight: 600;
+  color: var(--tone, var(--text));
+}
+
+.cc-arrow {
+  text-align: center; font-size: 12px; font-weight: 620;
+  color: var(--muted); padding: 14px 0 12px;
+  font-family: var(--mono);
+}
+
+.cc-table {
+  width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 12.5px;
+  border: 1px solid var(--border); border-radius: 10px; overflow: hidden;
+}
+.cc-table th {
+  text-align: left; padding: 8px 12px; background: var(--surface-2);
+  color: var(--muted); font-size: 11px; font-weight: 650;
+  border-bottom: 1px solid var(--border); white-space: nowrap;
+}
+.cc-table td {
+  padding: 7px 12px; border-bottom: 1px solid var(--border);
+  color: var(--text-2);
+}
+.cc-table tr:last-child td { border-bottom: 0; }
+.cc-table td:first-child { color: var(--text); font-weight: 650; }
+.cc-table .src { letter-spacing: .08em; }
+.cc-table tr { transition: opacity .18s, background .18s; }
+.cc-table tr.drop { opacity: .3; }
+.cc-table tr.keep { background: var(--green-soft); }
+.cc-table tr.keep td:first-child { color: var(--green); }
+
+.cc-modes { display: flex; flex-wrap: wrap; gap: 8px; margin: 18px 0 14px; }
+.cc-modes button {
+  font: 620 12.5px/1 var(--sans); padding: 9px 15px; border-radius: 9px;
+  border: 1px solid var(--border); background: var(--surface);
+  color: var(--text-2); cursor: pointer; transition: .15s;
+}
+.cc-modes button:hover { border-color: var(--border-strong); color: var(--text); }
+.cc-modes button.on {
+  background: var(--blue); border-color: var(--blue); color: #fff;
+}
+
+.cc-out {
+  display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+  font-size: 13.5px; color: var(--text-2); margin-bottom: 12px;
+}
+.cc-out b { font-family: var(--mono); font-size: 20px; color: var(--green); }
+.cc pre { font-size: 12.2px; line-height: 1.7; }
+
+/* ============================================================
    响应式：lane-stack / journey
    ============================================================ */
 @media (max-width: 900px) { .lane { grid-template-columns: 132px minmax(0, 1fr); gap: 12px; } }
@@ -852,8 +919,7 @@ html[data-theme="dark"] .summary { background: linear-gradient(120deg, #1a2f5c, 
         <span class="title">订单表变更流</span>
         <span class="status" data-status>未开始</span>
         <span class="spacer"></span>
-        <button class="btn" data-run>▶ 开始模拟</button>
-        <button class="btn ghost" data-reset>重置</button>
+        <button class="btn" data-run>▶ 开始模拟</button><button class="btn ghost" data-reset>重置</button>
       </div>
       <div class="demo-body"><div class="pane">
         <div class="pane-head">
@@ -1103,6 +1169,79 @@ status=draft 会在页面顶部挂黄条，sources 让半年后的你能查证�
 
     runBtn.addEventListener('click', run);
     resetBtn.addEventListener('click', reset);
+  };
+
+  /* —— 控件：条件组合怎么变成 AND / OR ——
+     演示 Combination.combineSql 的核心机制：
+       UNION ALL 把各条件的 uid 堆在一起 → GROUP BY uid 计数 → HAVING 筛选
+     OR   = 不加 HAVING（任一条命中）
+     AND  = HAVING count = 子查询数（每一条都命中）
+     自定义 = HAVING count >= N（至少 N 个条件命中）
+  ------------------------------------------------ */
+  WIDGETS['combination-count'] = (root) => {
+    const sqlBox = root.querySelector('[data-cc-sql]');
+    const countBox = root.querySelector('[data-cc-count]');
+    const statusEl = root.querySelector('[data-status]');
+    const rows = Array.from(root.querySelectorAll('[data-cc-row]'));
+    const buttons = Array.from(root.querySelectorAll('[data-cc-mode]'));
+
+    const N = 3; // 条件个数
+    const SUB = ['A', 'B', 'C'].map(
+      (k, i) => `SELECT \`uid\` FROM ${['event_add_cart', 'user_portrait', 'crowds'][i]} WHERE ...`,
+    );
+
+    const MODES = {
+      or: {
+        label: 'OR',
+        having: null,
+        hint: '不加 HAVING：任一条子查询命中就保留',
+        desc: '任一条件命中',
+      },
+      and: {
+        label: 'AND',
+        having: `HAVING count(\`uid\`) = ${N}`,
+        hint: `HAVING count(uid) = ${N}：必须在 ${N} 个子查询里都出现`,
+        desc: '全部条件命中',
+      },
+      n2: {
+        label: '至少 2 个',
+        having: 'HAVING count(`uid`) >= 2',
+        hint: 'HAVING count(uid) >= 2：至少 2 个条件命中（unionCount 写法）',
+        desc: '自定义数量',
+      },
+    };
+
+    function render(mode) {
+      const cfg = MODES[mode];
+      buttons.forEach((b) => b.classList.toggle('on', b.getAttribute('data-cc-mode') === mode));
+
+      let hit = 0;
+      rows.forEach((tr) => {
+        const n = Number(tr.getAttribute('data-count'));
+        let keep;
+        if (mode === 'or') keep = n >= 1;
+        else if (mode === 'and') keep = n === N;
+        else keep = n >= 2;
+        tr.classList.toggle('keep', keep);
+        tr.classList.toggle('drop', !keep);
+        if (keep) hit++;
+      });
+
+      countBox.textContent = String(hit);
+      statusEl.textContent = cfg.desc;
+      sqlBox.textContent =
+        'SELECT UID_DECODE(`uid`) as `uid`\nFROM (\n  ' +
+        SUB.join('\n  UNION ALL\n  ') +
+        '\n) ct1\nGROUP BY `uid`' +
+        (cfg.having ? '\n' + cfg.having : '') +
+        '\n\n-- ' +
+        cfg.hint;
+    }
+
+    buttons.forEach((b) =>
+      b.addEventListener('click', () => render(b.getAttribute('data-cc-mode'))),
+    );
+    render('or');
   };
 
   /* ---------- 挂载 ---------- */

@@ -196,9 +196,13 @@ export function blocksPlugin(md) {
       .join('')}</div>`;
   }
 
-  /* ===== 积木 7 · demo ===== */
+  /* ===== 积木 7 · demo =====
+  /* 两种形态：
+     - panes: 双栏日志式（默认），配合 app.js 里的日志型控件
+     - html:  自定义内容，控件自己渲染内部结构 */
   function demo(body) {
     const cfg = YAML.parse(body) || {};
+    const actions = cfg.actions !== false;
     const panes = (cfg.panes || [])
       .map(
         (p) => `<div class="pane">
@@ -218,15 +222,22 @@ export function blocksPlugin(md) {
       </div>`,
       )
       .join('');
+    const bodyHtml = cfg.html
+      ? `<div class="demo-body custom">${cfg.html}</div>`
+      : `<div class="demo-body">${panes}</div>`;
     return `<div class="demo" data-widget="${esc(cfg.widget)}">
       <div class="demo-head">
         <span class="title">${esc(cfg.title || '')}</span>
-        <span class="status" data-status>未开始</span>
+        <span class="status" data-status>${esc(cfg.hint || '未开始')}</span>
         <span class="spacer"></span>
-        <button class="btn" data-run>▶ 开始模拟</button>
-        <button class="btn ghost" data-reset>重置</button>
+        ${
+          actions
+            ? '<button class="btn" data-run>▶ 开始模拟</button>' +
+              '<button class="btn ghost" data-reset>重置</button>'
+            : ''
+        }
       </div>
-      <div class="demo-body">${panes}</div>
+      ${bodyHtml}
     </div>`;
   }
 

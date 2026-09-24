@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>数据仓库 vs 数据库 · CDC vs Flink</title>
-<meta name="description" content="两组最常被混在一起的概念：一个是「业务怎么跑」，一个是「数据怎么分析」；一个是「变化怎么被发现」，一个是「变化怎么被加工」。" />
+<title>sql_builder_v2 架构</title>
+<meta name="description" content="一棵圈人条件树怎么变成 Doris / ByteHouse 的 SQL。核心是 core/crowd 两包分工、六种条件入口的工厂分发，以及最不直觉的那一点：AND / OR 是 UNION ALL + GROUP BY + HAVING COUNT，不是 SQL 的 AND / OR。" />
 <style>
 /* ============================================================
    theme.css — 设计 token 与页面骨架
@@ -728,709 +728,643 @@ html[data-theme="dark"] .summary { background: linear-gradient(120deg, #1a2f5c, 
   <aside class="toc" id="toc">
       <p class="toc-title">目录</p>
       <a href="../../index.html" class="sub">← 全部笔记</a>
-      <a href="#数据库服务在线业务">数据库：服务「在线业务」</a>
-      <a href="#数据仓库服务数据分析和报表">数据仓库：服务「数据分析和报表」</a>
-      <a href="#完整链路从业务库到看板" class="sub">完整链路：从业务库到看板</a>
-      <a href="#细节一行订单数据是怎么被搬走的" class="sub">细节：一行订单数据是怎么被搬走的</a>
-      <a href="#抽取方式怎么选" class="sub">抽取方式怎么选</a>
-      <a href="#最核心的区别">最核心的区别</a>
-      <a href="#数据怎么流动">数据怎么流动</a>
-      <a href="#一个容易混淆的点">一个容易混淆的点</a>
-      <a href="#cdc-是-flink-的一个功能吗">CDC 是 Flink 的一个功能吗？</a>
-      <a href="#flink-和-cdc-的关系" class="sub">Flink 和 CDC 的关系</a>
-      <a href="#那么什么是-flink-cdc">那么什么是 Flink CDC？</a>
-      <a href="#为什么不直接定时查数据库而要-cdc">为什么不直接定时查数据库，而要 CDC？</a>
-      <a href="#前端类比">前端类比</a>
-      <a href="#一句话总结">一句话总结</a>
-      <a href="#记住这条链路" class="sub">记住这条链路</a>
+      <a href="#这个库解决什么问题">这个库解决什么问题</a>
+      <a href="#整体架构一条条件要走-8-层">整体架构：一条条件要走 8 层</a>
+      <a href="#两个包的边界">两个包的边界</a>
+      <a href="#六个核心角色">六个核心角色</a>
+      <a href="#最不直觉的设计and-or-不是-sql-的-and-or">最不直觉的设计：AND / OR 不是 SQL 的 AND / OR</a>
+      <a href="#一条条件是怎么变成-sql-的">一条条件是怎么变成 SQL 的</a>
+      <a href="#六种条件入口">六种条件入口</a>
+      <a href="#方言策略同一套条件两种数据库">方言策略：同一套条件，两种数据库</a>
+      <a href="#组合层还有个压缩步骤">组合层还有个「压缩」步骤</a>
+      <a href="#扩展点">扩展点</a>
       <a href="#自测">自测</a>
   </aside>
 
   <main>
     <div class="hero">
-      <span class="eyebrow">● 数据工程 · 概念速览</span>
-      <h1>数据仓库 vs 数据库 · CDC vs Flink</h1>
-      <p class="lede">两组最常被混在一起的概念：一个是「业务怎么跑」，一个是「数据怎么分析」；一个是「变化怎么被发现」，一个是「变化怎么被加工」。</p>
+      <span class="eyebrow">● 代码架构 · 源码通读</span>
+      <h1>sql_builder_v2 架构</h1>
+      <p class="lede">一棵圈人条件树怎么变成 Doris / ByteHouse 的 SQL。核心是 core/crowd 两包分工、六种条件入口的工厂分发，以及最不直觉的那一点：AND / OR 是 UNION ALL + GROUP BY + HAVING COUNT，不是 SQL 的 AND / OR。</p>
     </div>
 
     <div class="draft-banner">
     <span>⚠</span>
     <span>本页状态为 <b>draft</b>：内容尚未人工核对，引用前请自行验证。</span>
   </div>
-    <div class="provenance"><span><b>生成</b> 2026-09-24</span><span><b>模型</b> deepseek-v4.1-flash</span></div>
-    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">数据仓库</span> <span class="tag tone-muted">CDC</span> <span class="tag tone-muted">Flink</span> <span class="tag tone-muted">ETL</span></span></div>
+    <div class="provenance"><span><b>来源</b> sources/gitlab/sql_builder_v2 @ 2c500b2 · <a href="https://gitlab.futunn.com/big-data-web/sdk/sql_builder_v2" target="_blank" rel="noopener">gitlab.futunn.com/big-data-web/sdk/sql_builder_v</a></span><span><b>生成</b> 2026-09-24</span><span><b>模型</b> deepseek-v4.1-flash</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">架构</span> <span class="tag tone-muted">SQL</span> <span class="tag tone-muted">TypeScript</span> <span class="tag tone-muted">圈人</span></span></div>
 
-<h2 id="数据库服务在线业务"><span class="num">01</span>数据库：服务「在线业务」</h2>
-<p>你平时接触的 MySQL、PostgreSQL、MongoDB 等，通常说的是 <strong>数据库</strong>。</p>
-<p>它主要负责保存并支撑<strong>正在发生</strong>的业务操作：</p>
-<div class="pipe"><div class="lane tone-blue">
-        <div class="lane-meta">
-          
-          <b>数据库在支撑什么</b>
-          <small>每一件都要求「立刻写对、立刻查到」</small>
-        </div>
-        <div class="lane-body"><div class="pnode">
-        <b>用户注册</b>
-        
-        
-      </div><div class="pnode">
-        <b>用户登录</b>
-        
-        
-      </div><div class="pnode">
-        <b>商品查询</b>
-        
-        
-      </div><div class="pnode">
-        <b>提交订单</b>
-        
-        
-      </div><div class="pnode">
-        <b>支付成功</b>
-        
-        
-      </div><div class="pnode">
-        <b>修改收货地址</b>
-        
-        
-      </div></div>
-      </div></div><p>例如电商数据库里有这样的表：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-sql">users
-products
-orders
-order_items
-</code></pre></div>
-<p>当用户下单时，后端会往 <code>orders</code> 表插入一条订单；用户查看订单时，又从这个表查询数据。</p>
+<h2 id="这个库解决什么问题"><span class="num">01</span>这个库解决什么问题</h2>
+<p><strong>输入</strong>：一棵「圈人条件」的 JSON 树。
+<strong>输出</strong>：一段能在 Doris 或 ByteHouse 上跑的 SQL。</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>输入</th><th>说明</th><th>对应类型</th></tr></thead><tbody><tr><th>条件树</th><td data-label="说明">AND( 事件:加购, 画像:VIP )</td><td data-label="对应类型"><code>BuildInfoTree</code></td></tr><tr><th>条件单元</th><td data-label="说明">6 种，每种有自己的字段结构</td><td data-label="对应类型"><code>EntrepotStruct</code></td></tr><tr><th>目标库</th><td data-label="说明">同一个条件树要能出两种方言的 SQL</td><td data-label="对应类型"><code>DbType.Doris</code> / <code>DbType.Bytehouse</code></td></tr></tbody></table></div><p>这个库的全部复杂度都来自一个矛盾：<strong>条件树是业务语义，SQL 是数据库语义，而数据库有两种。</strong></p>
 <div class="callout tone-violet quote">
       <span class="ic">🎯</span>
-      <div><p>数据库的核心目标是：<strong>保证每一笔业务数据正确地写入、修改和查询。</strong></p>
+      <div><p>架构的核心目标：把「业务条件」和「某个具体数据库怎么写 SQL」彻底隔开。</p>
 </div>
-    </div><p>它通常更关注单个用户、单笔订单这类「小范围、高频、低延迟」的读写操作。</p>
-<h2 id="数据仓库服务数据分析和报表"><span class="num">02</span>数据仓库：服务「数据分析和报表」</h2>
-<p><strong>数据仓库（Data Warehouse，简称数仓）</strong>，是把来自多个业务系统的数据收集、清洗、统一后，
-专门用于分析、报表和商业决策的数据系统。</p>
-<p>例如老板或运营会问：</p>
-<div class="pipe"><div class="lane tone-green">
-        <div class="lane-meta">
-          
-          <b>分析类问题</b>
-          <small>共同点：要扫大量历史数据</small>
-        </div>
-        <div class="lane-body"><div class="pnode">
-        <b>今天总销售额多少？</b>
-        
-        
-      </div><div class="pnode">
-        <b>哪个城市订单最多？</b>
-        
-        
-      </div><div class="pnode">
-        <b>各渠道下单转化率？</b>
-        
-        
-      </div><div class="pnode">
-        <b>近 30 天复购率？</b>
-        
-        
-      </div><div class="pnode">
-        <b>哪个商品退款率最高？</b>
-        
-        
-      </div></div>
-      </div></div><p>这类问题需要<strong>扫描、统计大量历史数据</strong>，不适合直接频繁地在业务数据库上执行。</p>
-<h3 id="完整链路从业务库到看板">完整链路：从业务库到看板</h3>
-<p>整条链路可以拆成 <strong>7 层</strong>。左侧是每层的角色，右侧是这一层里真实存在的东西。</p>
+    </div><h2 id="整体架构一条条件要走-8-层"><span class="num">02</span>整体架构：一条条件要走 8 层</h2>
 <div class="pipe"><div class="lane tone-muted">
         <div class="lane-meta">
           <span class="ln">LAYER 01</span>
-          <b>源系统层</b>
-          <small>数据真正产生的地方，也是唯一「权威」的副本</small>
+          <b>调用方</b>
+          <small>业务代码 / 数据网关</small>
         </div>
         <div class="lane-body"><div class="pnode">
-        <b>MySQL 订单库</b>
-        <small>orders / order_items</small>
-        <span class="tag tone-muted">binlog</span>
+        <b>业务服务</b>
+        <small>传入条件树 JSON</small>
+        
       </div><div class="pnode">
-        <b>MySQL 用户库</b>
-        <small>users / user_profile</small>
-        <span class="tag tone-muted">binlog</span>
-      </div><div class="pnode">
-        <b>埋点日志</b>
-        <small>page_view / click</small>
-        <span class="tag tone-muted">Kafka</span>
-      </div><div class="pnode">
-        <b>支付系统</b>
-        <small>payments / refunds</small>
-        <span class="tag tone-muted">API / DB</span>
+        <b>数据网关</b>
+        <small>只接受 UNION ALL，不接受 UNION</small>
+        
       </div></div>
       </div><div class="conn">
       <span class="stem"></span>
-      <span class="pill">抽取 <span class="en">Extract</span><span class="note">把数据从业务库「拿出来」</span></span>
+      <span class="pill">SqlContext.create(dbType, options)<span class="note">全库唯一入口</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="wgroup"><div class="wgroup-label">packages/crowd —— 用户域语义</div><div class="lane tone-blue">
+        <div class="lane-meta">
+          <span class="ln">LAYER 02</span>
+          <b>门面层</b>
+          <small>解析目标库，构造方言与模块</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>SqlContext</b>
+        <small>static create()</small>
+        <span class="tag tone-blue">唯一入口</span>
+      </div><div class="pnode">
+        <b>_resolveDialect</b>
+        <small>Bytehouse | Doris</small>
+        <span class="tag tone-blue">策略选择</span>
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">构造三个模块<span class="note">模块持有 dialect，不持有连接</span></span>
       <span class="stem"></span><span class="head"></span>
     </div><div class="lane tone-blue">
         <div class="lane-meta">
-          <span class="ln">LAYER 02</span>
-          <b>抽取层</b>
-          <small>决定「多久同步一次」和「能不能拿到删除」</small>
-        </div>
-        <div class="lane-body"><div class="pnode">
-        <b>CDC 读 binlog</b>
-        <small>op = INSERT/UPDATE/DELETE</small>
-        <span class="tag tone-blue">准实时</span>
-      </div><div class="pnode">
-        <b>时间戳增量</b>
-        <small>WHERE updated_at &gt; ?</small>
-        <span class="tag tone-blue">T+1 / 小时</span>
-      </div><div class="pnode">
-        <b>全量快照</b>
-        <small>SELECT * 整表拉取</small>
-        <span class="tag tone-blue">每天一次</span>
-      </div><div class="pnode">
-        <b>日志采集</b>
-        <small>Flume / Filebeat</small>
-        <span class="tag tone-blue">实时</span>
-      </div></div>
-      </div><div class="conn">
-      <span class="stem"></span>
-      <span class="pill">落地 <span class="en">Load</span><span class="note">先原样存下来，不做业务翻译</span></span>
-      <span class="stem"></span><span class="head"></span>
-    </div><div class="wgroup"><div class="wgroup-label">◈ 数仓内部：分层建模 ODS → DWD → DWS → ADS</div><div class="lane tone-amber">
-        <div class="lane-meta">
           <span class="ln">LAYER 03</span>
-          <b>ODS 贴源层</b>
-          <small>与业务库表一一对应，只做类型转换 + 按天分区</small>
+          <b>领域模块</b>
+          <small>面向具体业务场景的出口</small>
         </div>
         <div class="lane-body"><div class="pnode">
-        <b>ods_order</b>
-        <small>订单原样落地</small>
+        <b>TagModule</b>
+        <small>list / count</small>
         
       </div><div class="pnode">
-        <b>ods_user</b>
-        <small>用户原样落地</small>
+        <b>CrowdModule</b>
+        <small>list / count / selectRaw</small>
         
-      </div><div class="pnode">
-        <b>ods_page_view</b>
-        <small>埋点原样落地</small>
-        
-      </div><div class="pnode">
-        <b>ods_payment</b>
-        <small>支付原样落地</small>
+      </div><div class="pnode tone-violet">
+        <b>SegmentModule</b>
+        <small>list / count</small>
         
       </div></div>
       </div><div class="conn">
       <span class="stem"></span>
-      <span class="pill">清洗 <span class="en">Clean</span><span class="note">去重 · 补空值 · 剔脏数据 · 统一编码/时区/单位</span></span>
+      <span class="pill">组合与二次加工<span class="note">AND/OR · include/exclude</span></span>
       <span class="stem"></span><span class="head"></span>
     </div><div class="lane tone-violet">
         <div class="lane-meta">
           <span class="ln">LAYER 04</span>
-          <b>DWD 明细层</b>
-          <small>一行 = 一个业务事件，字段已翻译成业务语义</small>
+          <b>组合层</b>
+          <small>把多个条件拼成一个用户集合</small>
         </div>
         <div class="lane-body"><div class="pnode">
-        <b>dwd_order_detail</b>
-        <small>订单事件明细（已 join 用户 / 商品）</small>
-        
+        <b>Combination</b>
+        <small>UNION ALL + GROUP BY + HAVING</small>
+        <span class="tag tone-violet">AND/OR</span>
       </div><div class="pnode">
-        <b>dwd_user_basic</b>
-        <small>用户基础信息</small>
-        
-      </div><div class="pnode">
-        <b>dwd_pay_flow</b>
-        <small>支付流水明细</small>
-        
+        <b>Pkg</b>
+        <small>include: UNION ALL / exclude: NOT IN</small>
+        <span class="tag tone-violet">二次加工</span>
       </div></div>
       </div><div class="conn">
       <span class="stem"></span>
-      <span class="pill">聚合 <span class="en">Aggregate</span><span class="note">按 日期 / 城市 / 渠道 等维度 group by</span></span>
+      <span class="pill">工厂分发<span class="note">按 condition.type 选实现</span></span>
       <span class="stem"></span><span class="head"></span>
     </div><div class="lane tone-violet">
         <div class="lane-meta">
           <span class="ln">LAYER 05</span>
-          <b>DWS 汇总层</b>
-          <small>一行 = 一个统计口径，明细被压缩成指标</small>
+          <b>入口分发</b>
+          <small>六种条件各自的 SQL 生成器</small>
         </div>
         <div class="lane-body"><div class="pnode">
-        <b>dws_order_city_1d</b>
-        <small>日 · 城市 · 渠道 的订单与 GMV</small>
+        <b>initEntrepotListSqlGen</b>
+        <small>返回 (condition, decode) =&gt; string</small>
         
       </div><div class="pnode">
-        <b>dws_user_active_1d</b>
-        <small>日活 / 留存</small>
-        
-      </div><div class="pnode">
-        <b>dws_channel_funnel_1d</b>
-        <small>渠道转化漏斗</small>
+        <b>initEntrepotCountSqlGen</b>
+        <small>返回 (condition) =&gt; string</small>
         
       </div></div>
       </div><div class="conn">
       <span class="stem"></span>
-      <span class="pill">加工 <span class="en">Serve</span><span class="note">面向某张具体报表定制口径</span></span>
+      <span class="pill">switch (condition.type)<span class="note">未知类型直接 throw</span></span>
       <span class="stem"></span><span class="head"></span>
-    </div><div class="lane tone-green">
+    </div><div class="lane tone-violet">
         <div class="lane-meta">
           <span class="ln">LAYER 06</span>
-          <b>ADS 应用层</b>
-          <small>直接给报表用的结果表，查询毫秒级</small>
+          <b>条件实现</b>
+          <small>六种「入口」，每种一个类</small>
         </div>
         <div class="lane-body"><div class="pnode">
-        <b>ads_gmv_report</b>
-        <small>GMV 大盘</small>
+        <b>Portrait</b>
+        <small>user_portrait</small>
         
       </div><div class="pnode">
-        <b>ads_refund_rank</b>
-        <small>退款率排行</small>
+        <b>Event</b>
+        <small>event_v2</small>
+        <span class="tag tone-violet">最复杂</span>
+      </div><div class="pnode">
+        <b>Relation</b>
+        <small>关系条件</small>
         
       </div><div class="pnode">
-        <b>ads_retention</b>
-        <small>复购 / 留存看板</small>
+        <b>Uid</b>
+        <small>直接给 uid 列表</small>
+        
+      </div><div class="pnode">
+        <b>Crowd</b>
+        <small>crowds</small>
+        
+      </div><div class="pnode">
+        <b>RawSql</b>
+        <small>裸 SQL 透传</small>
         
       </div></div>
       </div><div class="conn">
       <span class="stem"></span>
-      <span class="pill">查询 <span class="en">Query</span><span class="note">BI / 看板 / API 只读结果表，不碰业务库</span></span>
+      <span class="pill">DB.buildWhere / DB.raw<span class="note">只在这里才碰 knex</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div></div><div class="wgroup"><div class="wgroup-label">packages/core —— 与 DB 无关的通用层</div><div class="lane tone-green">
+        <div class="lane-meta">
+          <span class="ln">LAYER 07</span>
+          <b>通用 SQL 构造</b>
+          <small>与具体数据库无关的表达式树 → knex builder</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>Expression / Condition / Rule</b>
+        <small>递归 AST</small>
+        <span class="tag tone-green">核心抽象</span>
+      </div><div class="pnode">
+        <b>DB.buildWhere</b>
+        <small>递归展开成 andWhere / orWhere</small>
+        
+      </div><div class="pnode">
+        <b>DB.unionAllRaws</b>
+        <small>只支持 UNION ALL</small>
+        
+      </div><div class="pnode">
+        <b>DB.formatField</b>
+        <small>反引号包裹列名</small>
+        
+      </div><div class="pnode">
+        <b>encodeUid / decodeUid</b>
+        <small>UID_ENCODE / UID_DECODE</small>
+        
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">knex 编译<span class="note">mysql queryBuilder</span></span>
       <span class="stem"></span><span class="head"></span>
     </div></div><div class="lane tone-muted">
         <div class="lane-meta">
-          <span class="ln">LAYER 07</span>
-          <b>应用层</b>
-          <small>谁来消费这些数据</small>
+          <span class="ln">LAYER 08</span>
+          <b>输出</b>
+          <small>一段 SQL 字符串</small>
         </div>
         <div class="lane-body"><div class="pnode">
-        <b>BI 报表</b>
-        <small>固定口径的日报周报</small>
-        
-      </div><div class="pnode">
-        <b>数据看板</b>
-        <small>实时大盘</small>
-        
-      </div><div class="pnode">
-        <b>即席查询</b>
-        <small>分析师临时取数</small>
-        
-      </div><div class="pnode">
-        <b>数据 API</b>
-        <small>反哺业务系统</small>
-        
-      </div><div class="pnode">
-        <b>算法特征</b>
-        <small>喂给推荐 / 风控模型</small>
+        <b>SQL 字符串</b>
+        <small>交给网关执行</small>
         
       </div></div>
-      </div></div><div class="callout tone-amber tinted">
-      <span class="ic">🧱</span>
-      <div><p>为什么要分这么多层？因为<strong>每一层只解决一个问题</strong>：
-ODS 保证「拿全了」、DWD 保证「看懂了」、DWS 保证「算快了」、ADS 保证「用着顺手」。
-中间任何一层算错，都能回到上一层重跑，而不用去动业务库。</p>
+      </div></div><div class="callout tone-green tinted">
+      <span class="ic">↗</span>
+      <div><p><strong>依赖方向是单向的</strong>：<code>crowd</code> 依赖 <code>core</code>，<code>core</code> 不知道 <code>crowd</code> 存在。
+core 里搜不到任何 <code>portrait</code> / <code>crowd</code> / <code>event_v2</code> 这类业务词 —— 这是两个包能拆开的前提。</p>
 </div>
-    </div><h3 id="细节一行订单数据是怎么被搬走的">细节：一行订单数据是怎么被搬走的</h3>
-<p>上面是宏观分层。下面用一条真实订单（<code>id = 1001</code>）走一遍，
-看它在每一层的<strong>数据形态</strong>到底发生了什么变化。</p>
+    </div><h2 id="两个包的边界"><span class="num">03</span>两个包的边界</h2>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>维度</th><th>packages/core</th><th>packages/crowd</th></tr></thead><tbody><tr><th>定位</th><td data-label="packages/core">与数据库无关的通用 SQL 构造</td><td data-label="packages/crowd">用户域的圈人语义</td></tr><tr><th>知道业务吗</th><td data-label="packages/core"><span class="tag tone-green">完全不知道</span></td><td data-label="packages/crowd">知道，且有大量枚举</td></tr><tr><th>核心导出</th><td data-label="packages/core">DB · Expression · SqlDialect · encodeUid</td><td data-label="packages/crowd">SqlContext · 三个 Module · 六种 Entrepot</td></tr><tr><th>依赖</th><td data-label="packages/core">knex</td><td data-label="packages/crowd">core + knex + lodash + murmurhash</td></tr><tr><th>能单独用吗</th><td data-label="packages/core"><span class="tag tone-green">能</span></td><td data-label="packages/crowd"><span class="tag tone-amber">不能，必须带 core</span></td></tr></tbody></table></div><p>core 提供的通用能力：</p>
+<div class="cards" data-cols="3"><div class="ccard tone-green">
+          
+          <h4>Expression 表达式树</h4>
+          <p>Normal / RawValue / RawColumn / Raw 四种形态，可递归嵌套 Condition</p>
+          
+        </div><div class="ccard tone-green">
+          
+          <h4>DB.buildWhere</h4>
+          <p>把表达式树递归展开成 knex 的 andWhere / orWhere 调用</p>
+          
+        </div><div class="ccard tone-green">
+          
+          <h4>SqlDialect 接口</h4>
+          <p>14 个方法，覆盖类型转换、JSON 数组、时间范围、多条件选择</p>
+          
+        </div><div class="ccard tone-green">
+          
+          <h4>UID 编解码</h4>
+          <p>encodeUid / decodeUid 包成网关函数 UID_ENCODE / UID_DECODE</p>
+          
+        </div><div class="ccard tone-green">
+          
+          <h4>treeMinimizer</h4>
+          <p>递归压掉只有一个子节点的组合结构</p>
+          
+        </div><div class="ccard tone-green">
+          
+          <h4>时间表达式</h4>
+          <p>getTimeRules / generateLatestDaysRules 等，把相对时间转成 SQL 条件</p>
+          
+        </div></div><h2 id="六个核心角色"><span class="num">04</span>六个核心角色</h2>
+<div class="cards" data-cols="3"><div class="ccard tone-blue">
+          <span class="tag tone-blue">门面</span>
+          <h4>SqlContext</h4>
+          <p>唯一入口。解析 dbType、选方言、把方言注入三个模块</p>
+          
+        </div><div class="ccard tone-blue">
+          <span class="tag tone-blue">领域层</span>
+          <h4>Module</h4>
+          <p>对外出口，一个业务场景一个。持有 dialect 和组合器</p>
+          
+        </div><div class="ccard tone-violet">
+          <span class="tag tone-violet">组合</span>
+          <h4>Combination</h4>
+          <p>把多个条件的用户集合做 AND / OR / 自定义数量</p>
+          
+        </div><div class="ccard tone-violet">
+          <span class="tag tone-violet">条件</span>
+          <h4>Entrepot</h4>
+          <p>「条件入口」。六种，每种知道自己该查哪张表</p>
+          
+        </div><div class="ccard tone-amber">
+          <span class="tag tone-amber">策略</span>
+          <h4>GroupSqlDialect</h4>
+          <p>SqlDialect + getEventTable。所有数据库差异都在这里</p>
+          
+        </div><div class="ccard tone-green">
+          <span class="tag tone-green">基础设施</span>
+          <h4>DB</h4>
+          <p>core 里的静态工具，唯一直接碰 knex 的地方</p>
+          
+        </div></div><h2 id="最不直觉的设计and-or-不是-sql-的-and-or"><span class="num">05</span>最不直觉的设计：AND / OR 不是 SQL 的 AND / OR</h2>
+<p>看到「条件 A <strong>AND</strong> 条件 B」，直觉会写：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-sql">-- ❌ 直觉写法：对同一个用户，既要命中 A 又要命中 B
+SELECT uid FROM event_add_cart WHERE ... AND uid IN (SELECT uid FROM user_portrait WHERE ...)
+</code></pre></div>
+<p>但这里每个条件查的是<strong>不同的表、不同的时间窗口</strong>，没法拼成一个 WHERE。
+所以实际实现是<strong>集合运算</strong>：</p>
+<div class="callout tone-amber quote">
+      <span class="ic">⚠</span>
+      <div><p>AND / OR 被实现成「对 uid 做集合运算」，而不是 SQL 的 AND / OR。</p>
+</div>
+    </div><div class="demo" data-widget="combination-count">
+      <div class="demo-head">
+        <span class="title">AND / OR 的真实执行过程</span>
+        <span class="status" data-status>点下面的按钮切换</span>
+        <span class="spacer"></span>
+        
+      </div>
+      <div class="demo-body custom"><div class="cc">
+  <div class="cc-sets">
+    <div class="cc-set tone-green"><b>条件 A</b><small>事件：加购</small><span class="uids">1, 2, 3</span></div>
+    <div class="cc-set tone-blue"><b>条件 B</b><small>画像：VIP</small><span class="uids">2, 3, 4</span></div>
+    <div class="cc-set tone-violet"><b>条件 C</b><small>人群包：近30天活跃</small><span class="uids">3, 4, 5</span></div>
+  </div>
+
+  <div class="cc-arrow">↓ UNION ALL &nbsp;·&nbsp; 三个子查询的 uid 堆在一起，同一个 uid 出现多次</div>
+
+  <table class="cc-table">
+    <thead>
+      <tr><th>uid</th><th>命中条件</th><th>COUNT(uid)</th><th>OR</th><th>AND</th><th>≥ 2</th></tr>
+    </thead>
+    <tbody>
+      <tr data-cc-row data-count="1"><td>1</td><td class="src">A</td><td>1</td><td>✓</td><td>✗</td><td>✗</td></tr>
+      <tr data-cc-row data-count="2"><td>2</td><td class="src">A B</td><td>2</td><td>✓</td><td>✗</td><td>✓</td></tr>
+      <tr data-cc-row data-count="3"><td>3</td><td class="src">A B C</td><td>3</td><td>✓</td><td>✓</td><td>✓</td></tr>
+      <tr data-cc-row data-count="2"><td>4</td><td class="src">B C</td><td>2</td><td>✓</td><td>✗</td><td>✓</td></tr>
+      <tr data-cc-row data-count="1"><td>5</td><td class="src">C</td><td>1</td><td>✓</td><td>✗</td><td>✗</td></tr>
+    </tbody>
+  </table>
+
+  <div class="cc-modes">
+    <button data-cc-mode="or">OR</button>
+    <button data-cc-mode="and">AND</button>
+    <button data-cc-mode="n2">至少 2 个</button>
+  </div>
+
+  <div class="cc-out">HAVING 过滤后命中 <b data-cc-count>5</b> 个 uid</div>
+  <pre data-cc-sql></pre>
+</div>
+</div>
+    </div><p>一句话总结这套机制：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>逻辑</th><th>SQL 怎么写</th><th>结果</th></tr></thead><tbody><tr><th>OR</th><td data-label="SQL 怎么写">GROUP BY uid，不加 HAVING</td><td data-label="结果">任一条件命中即保留</td></tr><tr><th>AND</th><td data-label="SQL 怎么写">GROUP BY uid，HAVING count(uid) = N</td><td data-label="结果">N 个子查询里都出现才保留</td></tr><tr><th>自定义数量</th><td data-label="SQL 怎么写">GROUP BY uid，HAVING count(uid) &gt;= 2</td><td data-label="结果">至少 N 个条件命中</td></tr></tbody></table></div><p>对应代码只有一行：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">// packages/crowd/src/combi/combination.ts
+if (trees.logic === Logic.And) {
+    query.having(havingCount(UID), Op.Eq, sqls.length);
+}
+</code></pre></div>
+<div class="callout tone-violet">
+      <span class="ic">💡</span>
+      <div><p>还有一个细节：<code>DB.unionAllRaws</code> 的注释写着 <strong>「网关只支持 union all，不支持 union」</strong>。
+所以这里用 UNION ALL + GROUP BY 去重，而不是 UNION —— 这不只是性能选择，是下游能力约束。</p>
+</div>
+    </div><h2 id="一条条件是怎么变成-sql-的"><span class="num">06</span>一条条件是怎么变成 SQL 的</h2>
 <div class="jcard">
           <div class="jcard-head">
-            <span class="tag tone-muted">① 源系统</span>
-            <span class="name">MySQL · orders</span>
+            <span class="tag tone-muted">① 入参</span>
+            <span class="name">BuildInfoTree</span>
             <span class="spacer"></span>
-            <span class="tag tone-red">只存最终状态</span>
-          </div>
-          <div class="rec"><div class="">
-            <b>id</b><span>1001</span></div><div class="">
-            <b>user_id</b><span>88</span></div><div class="warn">
-            <b>status</b><span>1</span><em>魔法数字</em></div><div class="warn">
-            <b>amount</b><span>9900</span><em>单位：分</em></div><div class="">
-            <b>updated_at</b><span>2024-05-20 10:03:12</span></div></div>
-          
-          <p class="jnote bad">业务库只关心「现在是什么」：<strong>没有城市、渠道、会员等级</strong>，
-历史状态会被覆盖，而且这台库不能随便跑大统计。</p>
-        </div><div class="conn">
-      <span class="stem"></span>
-      <span class="pill">CDC 订阅 binlog<span class="note">只传变化的那一行，不扫全表</span></span>
-      <span class="stem"></span><span class="head"></span>
-    </div><div class="jcard">
-          <div class="jcard-head">
-            <span class="tag tone-blue">② 抽取</span>
-            <span class="name">binlog event</span>
-            <span class="spacer"></span>
-            <span class="tag tone-blue">含 before / after</span>
+            <span class="tag tone-muted">四种形态</span>
           </div>
           
-          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>{&quot;op&quot;: &quot;UPDATE&quot;, &quot;table&quot;: &quot;orders&quot;,
- &quot;before&quot;: {&quot;id&quot;: 1001, &quot;status&quot;: 1},   // 改之前
- &quot;after&quot;:  {&quot;id&quot;: 1001, &quot;status&quot;: 2}}   // 改之后
+          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>{
+  main:     { type: 'event', condition: {...} },   // 主体条件
+  include:  [ { entrepot: {...}, type: 'include' } ],  // 二次包含
+  exclude:  [ { entrepot: {...}, type: 'exclude' } ]   // 二次排除
+}
 </pre></div>
-          <p class="jnote">拿到 <strong>before / after</strong> 意味着：既知道「改成了什么」，也知道「哪一行被删了」
-—— 这正是轮询做不到的。</p>
+          <p class="jnote">也可能是裸的 <code>EntrepotStruct</code>，或者是 <code>{ logic, conditions }</code> 组合树。
+三种形态都要能处理。</p>
         </div><div class="conn">
       <span class="stem"></span>
-      <span class="pill">原样落地<span class="note">不翻译业务语义，先存下来</span></span>
+      <span class="pill">SqlContext.create<span class="note">先定方言</span></span>
       <span class="stem"></span><span class="head"></span>
     </div><div class="jcard">
           <div class="jcard-head">
-            <span class="tag tone-amber">③ ODS</span>
-            <span class="name">ods_order</span>
+            <span class="tag tone-blue">② 门面</span>
+            <span class="name">SqlContext.create(dbType, options)</span>
             <span class="spacer"></span>
-            <span class="tag tone-amber">只加分区字段</span>
+            
           </div>
-          <div class="rec"><div class="">
-            <b>id</b><span>1001</span></div><div class="">
-            <b>user_id</b><span>88</span></div><div class="">
-            <b>status</b><span>2</span></div><div class="">
-            <b>amount</b><span>9900</span></div><div class="">
-            <b>updated_at</b><span>2024-05-20 10:03:12</span></div><div class="ok">
-            <b>dt</b><span>2024-05-20</span><em>新增分区</em></div></div>
           
-          <p class="jnote">只做了<strong>字段类型转换</strong>和<strong>加分区字段 dt</strong>，不做任何业务翻译。
-好处是：上游口径改了、或者下游算错了，都能回到这一层原样重跑。</p>
+          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>Doris     → new DorisGroupDialect(eventTableMap)   // 不传 eventTableMap 直接 throw
+Bytehouse → new BytehouseGroupDialect()
+</pre></div>
+          <p class="jnote">方言在这里被选定，然后注入三个模块。<strong>之后再也不会变</strong>。</p>
         </div><div class="conn">
       <span class="stem"></span>
-      <span class="pill">清洗 + 统一 + 关联<span class="note">枚举翻译 · 单位换算 · 多次 join</span></span>
+      <span class="pill">module.list(tree, decode)<span class="note">按业务场景选模块</span></span>
       <span class="stem"></span><span class="head"></span>
     </div><div class="jcard">
           <div class="jcard-head">
-            <span class="tag tone-violet">④ DWD</span>
-            <span class="name">dwd_order_detail</span>
+            <span class="tag tone-blue">③ 模块</span>
+            <span class="name">CrowdModule.list</span>
             <span class="spacer"></span>
-            <span class="tag tone-violet">业务可读</span>
+            
           </div>
-          <div class="rec"><div class="">
-            <b>order_id</b><span>1001</span></div><div class="ok">
-            <b>order_status</b><span>'已支付'</span><em>枚举翻译</em></div><div class="ok">
-            <b>amount</b><span>99.00 元</span><em>分 → 元</em></div><div class="ok">
-            <b>city</b><span>'杭州'</span><em>join ods_user</em></div><div class="ok">
-            <b>channel</b><span>'APP'</span><em>join 埋点</em></div><div class="ok">
-            <b>user_level</b><span>'VIP'</span><em>join 用户标签</em></div></div>
           
-          <p class="jnote">到这一层，<strong>一行 = 一次订单事件</strong>，字段已经能被业务直接读懂。
-原来要 join 三张表才能回答的问题，现在查一张表就够。</p>
+          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>const _main   = getMainStruct(tree);              // 取主体
+const _ieInfo = checkAndGetIncluOrExcluRule(tree); // 取 include/exclude
+</pre></div>
+          <p class="jnote">把「一棵树」拆成「主体 + 二次加工规则」两部分，分别处理。</p>
         </div><div class="conn">
       <span class="stem"></span>
-      <span class="pill">聚合<span class="note">group by 日期 + 城市 + 渠道</span></span>
+      <span class="pill">initMajorListSqlGen<span class="note">进组合层</span></span>
       <span class="stem"></span><span class="head"></span>
     </div><div class="jcard">
           <div class="jcard-head">
-            <span class="tag tone-violet">⑤ DWS</span>
-            <span class="name">dws_order_city_1d</span>
+            <span class="tag tone-violet">④ 组合</span>
+            <span class="name">Combination.combineSql</span>
             <span class="spacer"></span>
-            <span class="tag tone-violet">明细 → 指标</span>
+            <span class="tag tone-violet">核心</span>
           </div>
-          <div class="rec"><div class="">
-            <b>dt</b><span>2024-05-20</span></div><div class="">
-            <b>city</b><span>'杭州'</span></div><div class="">
-            <b>channel</b><span>'APP'</span></div><div class="ok">
-            <b>order_cnt</b><span>1820</span></div><div class="ok">
-            <b>gmv</b><span>182340.00</span></div></div>
           
-          <p class="jnote">一行 1001 的订单，在这里被「溶解」成杭州当天 1820 单里的一份子。
-数据量通常会下降 <strong>2~3 个数量级</strong>，但已经无法再还原到单笔订单。</p>
+          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>conditions.map(c =&gt; entrepotListGen(c, false))   // 每个条件一段子 SQL
+  → DB.unionAllRaws(sqls)                        // UNION ALL 拼起来
+  → GROUP BY uid                                 // 按用户归并
+  → HAVING count(uid) = sqls.length              // AND 时才有
+</pre></div>
+          <p class="jnote">递归处理嵌套的 <code>{ logic, conditions }</code>，内层不解码，<strong>只有最外层 decode</strong>。</p>
         </div><div class="conn">
       <span class="stem"></span>
-      <span class="pill">面向看板加工<span class="note">只留报表要用的字段和口径</span></span>
+      <span class="pill">Pkg.list<span class="note">二次加工</span></span>
       <span class="stem"></span><span class="head"></span>
     </div><div class="jcard">
           <div class="jcard-head">
-            <span class="tag tone-green">⑥ ADS</span>
-            <span class="name">ads_gmv_report</span>
+            <span class="tag tone-violet">⑤ 二次加工</span>
+            <span class="name">Pkg.list(majorSql, rules, decode)</span>
             <span class="spacer"></span>
-            <span class="tag tone-green">毫秒返回</span>
+            
           </div>
-          <div class="rec"><div class="">
-            <b>指标</b><span>今日 GMV</span></div><div class="">
-            <b>值</b><span>1,284,930</span></div><div class="">
-            <b>环比</b><span>+12.4%</span></div><div class="">
-            <b>城市 Top1</b><span>杭州</span></div></div>
           
-          <p class="jnote">看板查询从「扫几亿行明细」变成「读几千行结果」，所以能秒开。
-代价是这张表<strong>只服务于这一个口径</strong>，换一个问法就要再建一张。</p>
-        </div><h3 id="抽取方式怎么选">抽取方式怎么选</h3>
-<p>「怎么把数据拿出来」是整条链路里最关键的一步。常见有 5 种做法，差别主要在
-<strong>延迟</strong>、<strong>能不能感知删除</strong>、<strong>对业务库的压力</strong>。</p>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>方式</th><th>怎么做</th><th>延迟</th><th>删除</th><th>压力</th><th>适用</th></tr></thead><tbody><tr><th>全量快照</th><td data-label="怎么做">每天 <code>SELECT *</code> 整表拉一遍</td><td data-label="延迟">T+1</td><td data-label="删除"><span class="tag tone-green">能</span></td><td data-label="压力"><span class="tag tone-red">高</span></td><td data-label="适用">小表、维表</td></tr><tr><th>时间戳增量</th><td data-label="怎么做"><code>WHERE updated_at &gt; 上次时间</code></td><td data-label="延迟">分钟 ~ 小时</td><td data-label="删除"><span class="tag tone-red">不能</span></td><td data-label="压力"><span class="tag tone-amber">中</span></td><td data-label="适用">有 <code>update_time</code> 的表</td></tr><tr><th>自增 ID 增量</th><td data-label="怎么做"><code>WHERE id &gt; 上次最大 id</code></td><td data-label="延迟">分钟 ~ 小时</td><td data-label="删除"><span class="tag tone-red">不能（改也漏）</span></td><td data-label="压力"><span class="tag tone-amber">中</span></td><td data-label="适用">只追加的流水表</td></tr><tr><th>触发器</th><td data-label="怎么做">建 trigger 写影子表</td><td data-label="延迟">秒级</td><td data-label="删除"><span class="tag tone-green">能</span></td><td data-label="压力"><span class="tag tone-red">高（写放大）</span></td><td data-label="适用">老系统兜底</td></tr><tr><th>CDC 读 binlog</th><td data-label="怎么做">订阅数据库变更日志，只读不写</td><td data-label="延迟"><span class="tag tone-green">秒级 / 准实时</span></td><td data-label="删除"><span class="tag tone-green">能</span></td><td data-label="压力"><span class="tag tone-green">低</span></td><td data-label="适用">现在的主流方案</td></tr></tbody></table></div><p>数据仓库存储的是经过处理、适合分析的数据；它通常面向报表、仪表盘和商业智能场景。</p>
-<h2 id="最核心的区别"><span class="num">03</span>最核心的区别</h2>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>维度</th><th>数据库</th><th>数据仓库</th></tr></thead><tbody><tr><th>主要目的</th><td data-label="数据库">支撑线上业务</td><td data-label="数据仓库">数据分析、报表、决策</td></tr><tr><th>典型操作</th><td data-label="数据库">下单、支付、修改资料</td><td data-label="数据仓库">统计 GMV、转化率、复购率</td></tr><tr><th>数据来源</th><td data-label="数据库">往往是一个业务系统</td><td data-label="数据仓库">通常汇集多个业务系统</td></tr><tr><th>数据范围</th><td data-label="数据库">当前业务数据为主</td><td data-label="数据仓库">大量历史数据</td></tr><tr><th>数据形态</th><td data-label="数据库">更贴近原始业务表</td><td data-label="数据仓库">清洗、统一、汇总后的分析数据</td></tr><tr><th>查询特点</th><td data-label="数据库">查一位用户、一笔订单</td><td data-label="数据仓库">查全量，按天 / 月 / 地区 / 渠道聚合</td></tr><tr><th>使用者</th><td data-label="数据库">后端服务、业务系统</td><td data-label="数据仓库">数据分析师、运营、管理者、BI 系统</td></tr><tr><th>是否直接承接用户请求</th><td data-label="数据库"><span class="tag tone-green">是</span></td><td data-label="数据仓库"><span class="tag tone-muted">通常不是</span></td></tr></tbody></table></div><h2 id="数据怎么流动"><span class="num">04</span>数据怎么流动</h2>
-<p>同样的订单数据，两条完全不同的路径。</p>
-<div class="pipe"><div class="lane tone-blue">
-        <div class="lane-meta">
+          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>include → UNION ALL(major, minor) + GROUP BY uid   // 并集，顺带去重
+exclude → major WHERE uid NOT IN (minor)           // 差集
+</pre></div>
+          <p class="jnote">多条规则时按 <code>options.order</code> 排序，<strong>order 越小权重越大</strong>，
+然后从 main 开始依次 reduce。</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">decodeUid<span class="note">出口统一包一层</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-green">⑥ 出口</span>
+            <span class="name">decodeUid</span>
+            <span class="spacer"></span>
+            
+          </div>
           
-          <b>写入路径</b>
-          <small>用户下单 —— 这应该直接写业务数据库，而不是直接写数据仓库</small>
-        </div>
-        <div class="lane-body"><div class="pnode">
-        <b>前端</b>
-        
-        
-      </div><div class="pnode">
-        <b>后端服务</b>
-        
-        
-      </div><div class="pnode tone-blue">
-        <b>MySQL orders 表</b>
-        
-        
-      </div></div>
-      </div><div class="lane tone-violet">
-        <div class="lane-meta">
+          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>SELECT UID_DECODE(`uid`) as `uid` FROM ( ... ) ct1
+</pre></div>
+          <p class="jnote">所有模块对外暴露的列名都是 <code>uid</code>，加密与否由 decode 参数决定。
+<code>noDecodedSqlGen()</code> 可以反向把这一层剥掉。</p>
+        </div><h2 id="六种条件入口"><span class="num">07</span>六种条件入口</h2>
+<div class="cards" data-cols="3"><div class="ccard tone-blue">
+          <span class="tag tone-blue">type: portrait</span>
+          <h4>Portrait</h4>
+          <p>查 user_portrait 表，属性过滤。支持树形条件</p>
           
-          <b>分析路径</b>
-          <small>今日成交额实时大盘 —— 走异步链路，不碰业务库</small>
-        </div>
-        <div class="lane-body"><div class="pnode">
-        <b>订单数据</b>
-        
-        
-      </div><div class="pnode">
-        <b>CDC / 消息队列</b>
-        
-        
-      </div><div class="pnode">
-        <b>Flink</b>
-        
-        
-      </div><div class="pnode">
-        <b>数据仓库 / 实时分析库</b>
-        
-        
-      </div><div class="pnode">
-        <b>大盘</b>
-        
-        
-      </div></div>
-      </div></div><h2 id="一个容易混淆的点"><span class="num">05</span>一个容易混淆的点</h2>
+        </div><div class="ccard tone-violet">
+          <span class="tag tone-violet">type: event</span>
+          <h4>Event</h4>
+          <p>查事件表，最复杂的一个（906 行）。含时间范围、属性过滤、公式聚合</p>
+          
+        </div><div class="ccard tone-amber">
+          <span class="tag tone-amber">type: relation</span>
+          <h4>Relation</h4>
+          <p>关系条件，检查是否存在某种排除操作</p>
+          
+        </div><div class="ccard tone-green">
+          <span class="tag tone-green">type: uid</span>
+          <h4>Uid</h4>
+          <p>直接给 uid 列表，最简单。可标记是否已加密</p>
+          
+        </div><div class="ccard tone-green">
+          <span class="tag tone-green">type: crowd</span>
+          <h4>Crowd</h4>
+          <p>查 crowds 表，按 crowdId + crowdVersion 圈人</p>
+          
+        </div><div class="ccard tone-muted">
+          <span class="tag tone-muted">type: rawSql</span>
+          <h4>RawSql</h4>
+          <p>裸 SQL 透传，逃生口</p>
+          
+        </div></div><p>分发方式是工厂 + switch，<strong>未知类型直接抛错</strong>而不是静默返回空：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">// packages/crowd/src/entrepots/factory.ts
+switch (condition.type) {
+    case Entrepots.Portrait: return _portraitInstance.list(condition.condition, decode);
+    ...
+    default:
+        throw new Error('无效的条件结构（未知条件类型）: ' + JSON.stringify(condition));
+}
+</code></pre></div>
 <div class="callout tone-amber">
-      <span class="ic">💡</span>
-      <div><p>数据仓库<strong>不一定是某个固定产品</strong>，而是一类用途 / 架构。</p>
+      <span class="ic">🔍</span>
+      <div><p>注意 <code>factory.ts</code> 里每个 <code>initXxxSqlGen</code> 都<strong>提前 new 好六个实例</strong>，
+只有 <code>Event</code> 因为要传 <code>options</code> 而每次新建。
+这是个刻意的取舍：常用路径零分配，特殊路径牺牲一点性能换正确性。</p>
 </div>
-    </div><p>例如这些产品可能被用作数仓或数仓中的查询引擎：</p>
-<div class="pipe"><div class="lane tone-green">
-        <div class="lane-meta">
+    </div><h2 id="方言策略同一套条件两种数据库"><span class="num">08</span>方言策略：同一套条件，两种数据库</h2>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>维度</th><th>ByteHouse</th><th>Doris</th></tr></thead><tbody><tr><th>事件表怎么定位</th><td data-label="ByteHouse">按事件名 murmurhash 分片</td><td data-label="Doris">调用方传入 eventTableMap</td></tr><tr><th>事件表名</th><td data-label="ByteHouse"><code>dws.event_biz_N</code> / <code>dws.event_monitoring_N</code></td><td data-label="Doris">由调用方决定</td></tr><tr><th>分片规则</th><td data-label="ByteHouse"><code>murmurhash.v3(eventName, 0) % 8 + 1</code> → 8 张表</td><td data-label="Doris"><span class="tag tone-muted">无分片</span></td></tr><tr><th>构造要求</th><td data-label="ByteHouse"><span class="tag tone-green">无参即可</span></td><td data-label="Doris"><span class="tag tone-red">必须传 eventTableMap，否则 throw</span></td></tr><tr><th>默认值</th><td data-label="ByteHouse"><span class="tag tone-green">是（各构造函数 fallback）</span></td><td data-label="Doris"><span class="tag tone-amber">否，必须显式传</span></td></tr></tbody></table></div><p><code>GroupSqlDialect</code> 只比 core 的 <code>SqlDialect</code> 多一个方法：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">// packages/crowd/src/dialect/interface.ts
+export interface GroupSqlDialect extends SqlDialect {
+    getEventTable(params: EventTableParams): string;
+}
+</code></pre></div>
+<p>而 <code>SqlDialect</code> 本身有 14 个方法，全是**「同一种语义在不同库怎么写」**：</p>
+<div class="cards" data-cols="4"><div class="ccard tone-amber">
           
-          <b>常见选择</b>
-          <small>它们不都是「数仓」，但都可以充当数仓或数仓里的查询引擎</small>
-        </div>
-        <div class="lane-body"><div class="pnode">
-        <b>ClickHouse</b>
-        
-        
-      </div><div class="pnode">
-        <b>Apache Doris</b>
-        
-        
-      </div><div class="pnode">
-        <b>StarRocks</b>
-        
-        
-      </div><div class="pnode">
-        <b>Snowflake</b>
-        
-        
-      </div><div class="pnode">
-        <b>BigQuery</b>
-        
-        
-      </div><div class="pnode">
-        <b>Redshift</b>
-        
-        
-      </div><div class="pnode">
-        <b>Hive</b>
-        
-        
-      </div></div>
-      </div></div><p>而 MySQL 既是数据库，也能勉强做少量报表；但当<strong>数据量、查询复杂度、并发分析需求</strong>变大时，
-直接在业务 MySQL 上跑大统计很容易影响线上下单、支付等业务。</p>
-<h2 id="cdc-是-flink-的一个功能吗"><span class="num">06</span>CDC 是 Flink 的一个功能吗？</h2>
-<div class="callout tone-violet quote">
-      <span class="ic">🧩</span>
-      <div><p>严格来说：CDC 不是 Flink 独有、也不是只有 Flink 才有的功能。</p>
+          <h4>mapPropertyAccess</h4>
+          <p>map 取值：mapElement(p,'k') vs p['k']</p>
+          
+        </div><div class="ccard tone-muted">
+          
+          <h4>castToInt / castToFloat</h4>
+          <p>类型转换</p>
+          
+        </div><div class="ccard tone-muted">
+          
+          <h4>regexpMatchExpr</h4>
+          <p>正则匹配表达式</p>
+          
+        </div><div class="ccard tone-muted">
+          
+          <h4>jsonArrayContainsRule</h4>
+          <p>JSON 数组包含 / 相等</p>
+          
+        </div><div class="ccard tone-muted">
+          
+          <h4>getRelativeTimestampRules</h4>
+          <p>相对时间范围</p>
+          
+        </div><div class="ccard tone-muted">
+          
+          <h4>getAbsoluteTimestampRules</h4>
+          <p>绝对时间范围</p>
+          
+        </div><div class="ccard tone-muted">
+          
+          <h4>multiIf</h4>
+          <p>多条件选择</p>
+          
+        </div><div class="ccard tone-muted">
+          
+          <h4>arrayExpandSql</h4>
+          <p>UNION ALL 展开数组</p>
+          
+        </div></div><div class="callout tone-amber tinted">
+      <span class="ic">⚠</span>
+      <div><p><strong>每个条件类都写着 <code>dialect ?? new BytehouseDialect()</code>。</strong>
+这是向后兼容的默认值 —— 意味着<strong>忘了传 dialect 不会报错，会静默按 ByteHouse 生成 SQL</strong>。
+Doris 场景下这会生成语法能跑但结果不对的 SQL，是个真实的坑。</p>
 </div>
-    </div><p>CDC 是一种通用技术 / 思路，完整名称是 <strong>Change Data Capture：变更数据捕获</strong>。</p>
-<p>它用于捕捉数据库中数据的三种变化：</p>
-<div class="pipe"><div class="lane tone-blue">
-        <div class="lane-meta">
+    </div><h2 id="组合层还有个压缩步骤"><span class="num">09</span>组合层还有个「压缩」步骤</h2>
+<div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-muted">输入</span>
+            <span class="name">嵌套组合树</span>
+            <span class="spacer"></span>
+            <span class="tag tone-muted">可能很啰嗦</span>
+          </div>
           
-          <b>CDC 捕获什么</b>
-          <small>对应数据库变更日志里的三种操作</small>
-        </div>
-        <div class="lane-body"><div class="pnode tone-green">
-        <b>INSERT</b>
-        <small>新增</small>
-        
-      </div><div class="pnode tone-blue">
-        <b>UPDATE</b>
-        <small>修改</small>
-        
-      </div><div class="pnode tone-red">
-        <b>DELETE</b>
-        <small>删除</small>
-        
-      </div></div>
-      </div></div><p>例如 MySQL 的订单表发生了变化：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">新增订单 A001
-订单 A001 从“待支付”改为“已支付”
-删除一条测试订单
-</code></pre></div>
-<p>CDC 会把这些变化捕捉出来，作为持续的数据流发给下游。</p>
-<h3 id="flink-和-cdc-的关系">Flink 和 CDC 的关系</h3>
-<div class="pipe"><div class="lane tone-violet">
-        <div class="lane-meta">
+          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>{ logic: 'AND', conditions: [
+    { logic: 'OR', conditions: [ { type: 'portrait', ... } ] }   // 只有一个子节点
+]}
+</pre></div>
+          <p class="jnote">外部系统可能生成这种「只有一个孩子的组合」，直接翻译会多出一层 UNION ALL。</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">Combination.minimize<span class="note">递归压平</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-green">输出</span>
+            <span class="name">压缩后</span>
+            <span class="spacer"></span>
+            
+          </div>
           
-          <b>分工</b>
-          <small>一个负责「发现变化」，一个负责「加工变化」</small>
-        </div>
-        <div class="lane-body"><div class="pnode tone-muted">
-        <b>数据库的变更日志</b>
-        <small>例如 MySQL binlog</small>
-        
-      </div><div class="pnode tone-blue">
-        <b>CDC</b>
-        <small>读取并识别「新增、修改、删除」</small>
-        
-      </div><div class="pnode tone-violet">
-        <b>Flink</b>
-        <small>实时清洗、转换、计算、关联、写入目标系统</small>
-        
-      </div><div class="pnode tone-green">
-        <b>下游</b>
-        <small>数仓 / 湖仓 / ES / Kafka / 风控</small>
-        
-      </div></div>
-      </div></div><ul class="check"><li><strong>CDC</strong>：负责「发现数据库发生了什么变化」</li><li><strong>Flink</strong>：负责「拿到变化后，实时怎么加工和处理」</li></ul><h2 id="那么什么是-flink-cdc"><span class="num">07</span>那么什么是 Flink CDC？</h2>
-<p><strong>Flink CDC</strong> 是 Flink 生态中的一个 CDC 项目 / 连接器方案。</p>
-<p>它可以让 Flink 读取 MySQL、PostgreSQL、Oracle、SQL Server 等数据库的变更，
-并把变更作为 Flink 的流数据来处理。其底层常会使用 <strong>Debezium</strong> 提供的数据库变更捕获连接器。</p>
-<div class="pipe"><div class="lane tone-blue">
-        <div class="lane-meta">
+          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>{ type: 'portrait', ... }
+</pre></div>
+          <p class="jnote"><code>treeMinimizer(tree, 'conditions')</code> 递归下去，
+单节点组合直接塌缩成那个节点本身。</p>
+        </div><h2 id="扩展点"><span class="num">10</span>扩展点</h2>
+<div class="cards" data-cols="2"><div class="ccard tone-green">
           
-          <b>一个典型用法</b>
-          <small>MySQL 表变化 → Flink 加工 → 写进各种下游</small>
-        </div>
-        <div class="lane-body"><div class="pnode tone-muted">
-        <b>MySQL users 表变化</b>
-        
-        
-      </div><div class="pnode tone-blue">
-        <b>Flink CDC 捕获 binlog</b>
-        
-        
-      </div><div class="pnode tone-violet">
-        <b>Flink 清洗或补充字段</b>
-        
-        
-      </div><div class="pnode tone-green">
-        <b>Kafka / ClickHouse / Doris / Iceberg</b>
-        
-        
-      </div></div>
-      </div></div><h2 id="为什么不直接定时查数据库而要-cdc"><span class="num">08</span>为什么不直接定时查数据库，而要 CDC？</h2>
-<p>不用 CDC 的方式可能是这样：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-sql">-- 每隔 10 分钟执行一次
-SELECT * FROM orders WHERE update_time &gt; 上次同步时间
-</code></pre></div>
-<p>这种方式简单，但会有问题：</p>
-<ul class="check cross"><li>延迟高，最快也要等下一次轮询</li><li>不断查询业务数据库，可能增加压力</li><li>更新频繁时，容易漏数据、重复数据</li><li>删除数据不容易准确识别</li><li>很难做到真正接近实时</li></ul><p>CDC 则直接基于数据库的<strong>变更日志</strong>读取变化，只同步新增、更新、删除的部分，
-而不是反复扫描整张表。</p>
-<div class="demo" data-widget="polling-vs-cdc">
-      <div class="demo-head">
-        <span class="title">订单表变更流</span>
-        <span class="status" data-status>未开始</span>
-        <span class="spacer"></span>
-        <button class="btn" data-run>▶ 开始模拟</button><button class="btn ghost" data-reset>重置</button>
-      </div>
-      <div class="demo-body"><div class="pane">
-        <div class="pane-head">
-          <span class="tag tone-amber">轮询</span>
-          定时查表
-          <span class="sub">每 10 分钟一次</span>
-        </div>
-        <div class="log" data-log="poll"></div>
-        <div class="pane-foot"><span class="tag tone-amber">延迟高</span><span class="tag tone-amber">中间状态丢失</span><span class="tag tone-amber">删除难识别</span><span class="tag tone-amber">反复压业务库</span></div>
-      </div><div class="pane">
-        <div class="pane-head">
-          <span class="tag tone-violet">CDC</span>
-          订阅变更日志
-          <span class="sub">每条变化实时推送</span>
-        </div>
-        <div class="log" data-log="cdc"></div>
-        <div class="pane-foot"><span class="tag tone-violet">近实时</span><span class="tag tone-violet">含删除</span><span class="tag tone-violet">只读 binlog</span><span class="tag tone-violet">不反复扫表</span></div>
-      </div></div>
-    </div><h2 id="前端类比"><span class="num">09</span>前端类比</h2>
-<p>把数据库想象成前端的状态：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-js">const user = {
-  name: '小明',
-  vip: false
-}
-</code></pre></div>
-<p>如果你每隔一秒都重新读取整个对象，看看它有没有变化，这有点像<strong>定时轮询查表</strong>。</p>
-<p>CDC 更像是<strong>状态变化时立即收到事件</strong>：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-js">// 用户升级会员时，马上收到变化事件
-{
-  type: 'UPDATE',
-  before: { name: '小明', vip: false },
-  after:  { name: '小明', vip: true }
-}
-</code></pre></div>
-<p>Flink 则相当于订阅这个事件后继续处理：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-js">if (after.vip === true) {
-  // 同步会员系统、更新数据看板、触发营销任务等
-}
-</code></pre></div>
-<h2 id="一句话总结"><span class="num">10</span>一句话总结</h2>
-<div class="summary">
-      <h3 id="记住这条链路">记住这条链路</h3>
-      <p><code>CDC</code> 负责把数据库变化**「实时通知出来」**；</p>
-<p><code>Flink CDC</code> 是让 Flink 能方便读取这些变化的工具；</p>
-<p><code>Flink</code> 再对这些变化做实时处理和同步。</p>
-
-    </div><div class="pipe"><div class="lane tone-blue">
-        <div class="lane-meta">
+          <h4>加一种数据库</h4>
+          <p>实现 SqlDialect + GroupSqlDialect 两个接口，在 SqlContext._resolveDialect 加一个 case。core 完全不用改</p>
           
-          <b>三句话收尾</b>
-          <small>三个层次，各管一件事</small>
-        </div>
-        <div class="lane-body"><div class="pnode tone-blue">
-        <b>数据库</b>
-        <small>面向「正在发生的操作」，要求正确、快、稳</small>
-        
-      </div><div class="pnode tone-violet">
-        <b>数据仓库</b>
-        <small>面向「已经发生的历史」，要求能扫、能聚合</small>
-        
-      </div><div class="pnode tone-green">
-        <b>CDC + Flink</b>
-        <small>一个负责发现变化，一个负责加工变化</small>
-        
-      </div></div>
-      </div></div><h2 id="自测"><span class="num">11</span>自测</h2>
+        </div><div class="ccard tone-blue">
+          
+          <h4>加一种条件入口</h4>
+          <p>在 Entrepots 枚举加值 → 写一个类实现 list/count → 在 factory 的两个 switch 里注册</p>
+          
+        </div><div class="ccard tone-blue">
+          
+          <h4>加一个业务模块</h4>
+          <p>写一个 Module 类持有 dialect，在 SqlContext 构造函数里加一行</p>
+          
+        </div><div class="ccard tone-amber">
+          
+          <h4>加一个通用 SQL 能力</h4>
+          <p>加在 core。注意：<strong>不能出现任何业务词</strong>，否则两个包的边界就烂了</p>
+          
+        </div></div><div class="callout tone-green">
+      <span class="ic">✅</span>
+      <div><p>这套设计的可扩展性来自一个约束：<strong>core 里不许出现业务词汇</strong>。
+只要守住这条，加数据库不用碰 crowd，加业务条件不用碰 core。</p>
+</div>
+    </div><h2 id="自测"><span class="num">11</span>自测</h2>
 <div class="quiz"><details>
-        <summary>数据仓库一定要用某个固定产品吗？</summary>
-        <div class="a"><p>不是。数仓是一类<strong>用途 / 架构</strong>，不是产品。
-ClickHouse、Doris、StarRocks、Snowflake、BigQuery、Hive 都可以充当数仓或数仓里的查询引擎。</p>
+        <summary>为什么 AND 不能直接写成 SQL 的 <code>WHERE A AND B</code>？</summary>
+        <div class="a"><p>因为每个条件查的是<strong>不同的表、不同的时间窗口</strong>，没法拼进同一个 WHERE。
+实际实现是集合运算：<code>UNION ALL</code> 把各条件的 uid 堆在一起，
+<code>GROUP BY uid</code> 计数，<code>HAVING count(uid) = N</code> 表示「N 个条件都命中」。</p>
 </div>
       </details><details>
-        <summary>CDC 是 Flink 的功能吗？</summary>
-        <div class="a"><p>不是。CDC（Change Data Capture）是通用技术。
-Flink CDC 只是 Flink 生态里的一个连接器方案，底层常复用 Debezium。</p>
+        <summary><code>Combination.combineSql</code> 里 OR 和 AND 的差别体现在哪一行？</summary>
+        <div class="a"><p>只差在要不要加 HAVING。
+AND 会执行 <code>query.having(havingCount(UID), Op.Eq, sqls.length)</code>；
+OR 不加 HAVING，<code>GROUP BY uid</code> 后任一子查询命中就保留。</p>
 </div>
       </details><details>
-        <summary>为什么 ODS 层不做业务翻译？</summary>
-        <div class="a"><p>为了保住「可回溯」。ODS 与业务库一一对应，只做类型转换和分区。
-上游口径变了、下游算错了，都能回到这一层原样重跑，而不用重新抽一遍业务库。</p>
+        <summary>为什么用 UNION ALL 而不是 UNION？</summary>
+        <div class="a"><p>两个原因：一是 <code>DB.unionAllRaws</code> 的注释写明<strong>网关只支持 union all</strong>；
+二是这里本来就要 <code>GROUP BY uid</code> 去重，UNION 的去重是多余的。</p>
 </div>
       </details><details>
-        <summary>定时轮询为什么识别不到删除？</summary>
-        <div class="a"><p>增量轮询的写法是 <code>WHERE update_time &gt; 上次时间</code>，被删掉的行不会再出现在结果集里。
-只有整表比对才能发现少了一行，但那等于每次全表扫描。
-CDC 读 binlog 能直接拿到 <code>op=DELETE</code> 事件。</p>
+        <summary>忘传 dialect 会发生什么？</summary>
+        <div class="a"><p><strong>不会报错。</strong> 每个条件类的构造函数都写着 <code>dialect ?? new BytehouseDialect()</code>，
+会静默按 ByteHouse 生成 SQL。Doris 场景下会生成语法能跑但结果不对的 SQL。</p>
 </div>
       </details><details>
-        <summary>DWD 和 DWS 的分界线在哪？</summary>
-        <div class="a"><p>DWD 是<strong>明细</strong>：一行 = 一个业务事件，字段已翻译成业务语义，但还没聚合。
-DWS 是<strong>汇总</strong>：一行 = 一个统计口径（日期 + 城市 + 渠道），明细已被压缩成指标。
-过了 DWS 就回不到单笔订单了。</p>
+        <summary>core 和 crowd 的边界靠什么维持？</summary>
+        <div class="a"><p>靠一条约束：<strong>core 里不出现任何业务词汇</strong>。
+core 不知道 portrait / crowd / event_v2 这些概念，
+所以加数据库不用改 crowd，加业务条件不用改 core。</p>
+</div>
+      </details><details>
+        <summary><code>Pkg</code> 的 include 和 exclude 分别生成什么 SQL？</summary>
+        <div class="a"><p>include → <code>UNION ALL(major, minor)</code> + <code>GROUP BY uid</code>（并集，顺带去重）；
+exclude → <code>major WHERE uid NOT IN (minor)</code>（差集）。
+多条规则按 <code>options.order</code> 排序，order 越小权重越大。</p>
 </div>
       </details></div>
 
     <footer>
-      <span>数据仓库 vs 数据库 · CDC vs Flink</span>
+      <span>sql_builder_v2 架构</span>
       <span>最后更新 2026-09-24 · 单文件可离线打开</span>
     </footer>
   </main>
