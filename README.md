@@ -23,6 +23,10 @@ npm run serve              # → http://localhost:4321 本地预览
 npm run build:standalone   # 额外产出 dist/<slug>.html（单文件，可直接发人）
 ```
 
+`npm install` 会自动装上一个 `pre-push` 钩子：推送前重新构建，
+如果构建产物有变化（改了 `note.md` 但没提交构建结果）就直接**阻止推送**，
+避免线上一直是旧内容。
+
 ---
 
 ## 目录结构
@@ -39,7 +43,8 @@ npm run build:standalone   # 额外产出 dist/<slug>.html（单文件，可直�
 │     ├─ meta.json                # 标题 / 标签 / 来源 / 状态  ← 元数据
 │     ├─ note.md                  # 唯一真相源                   ← 你只改这里
 │     └─ index.html               # 构建产物
-├─ dist/                          # 单文件版本（构建产物，已 gitignore）
+├─ dist/                          # 单文件版本（内联全部资源，可直接发人）
+├─ .githooks/pre-push             # 推送前强制重新构建
 └─ tools/
    ├─ render.mjs                  # 构建入口
    ├─ serve.mjs                   # 零依赖预览服务器
@@ -118,12 +123,19 @@ npm run build:standalone   # 额外产出 dist/<slug>.html（单文件，可直�
 
 ## 部署到 GitHub Pages
 
-```bash
-git push
-```
+已开启，地址：
 
-仓库 Settings → Pages → Source 选 `main` / `root`。
+| 用途 | 地址 |
+|---|---|
+| 首页知识地图 | https://guolinge.github.io/knowledge-html/ |
+| 某篇笔记 | `.../notes/<slug>/` |
+| **单文件版**（发给别人） | `.../dist/<slug>.html` |
+
+构建产物是提交进仓库的，所以**推送即上线**，不依赖 CI。
 根目录的 `.nojekyll` 已经放好了，避免 Jekyll 干扰。
+
+> 如果想在 GitHub 网页上直接改 `note.md` 也能自动构建，
+> 需要加一个 GitHub Actions 工作流。先跑 `gh auth refresh -s workflow` 拿到 `workflow` 权限。
 
 ---
 
