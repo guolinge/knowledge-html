@@ -42,6 +42,8 @@ export function blocksPlugin(md) {
 
   // 行内语义标记：==关键结论== / !!坑!! / ++推荐++
   inlineMarksPlugin(md);
+  // 中文加粗修复：**「术语」** 这类写法不被 CommonMark 的 flanking 规则误杀
+  cjkStrongPlugin(md);
 
   /* ===== 积木 1 · lane-stack ===== */
   function conn(spec) {
@@ -286,6 +288,38 @@ export function blocksPlugin(md) {
       .join('')}</div>`;
   }
 
+  /* ===== 积木 11 · spec =====
+     拆解卡：把一个东西按固定维度拆开。
+     常用维度：输入 / 处理 / 输出 / 怎么调用 / 为什么这么设计 / 业务价值。
+     维度不固定，但**同一个页面里的几张卡要用同一套维度**。 */
+  function spec(body) {
+    const cfg = YAML.parse(body) || {};
+    const tone = cfg.tone || 'muted';
+    const rows = (cfg.rows || [])
+      .map((r) => {
+        const val = r.code
+          ? `<div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>${esc(
+              r.code,
+            )}</pre></div>`
+          : md.render(String(r.v || ''));
+        return `<div class="srow">
+          <div class="sk">${inline(r.k)}</div>
+          <div class="sv">${val}</div>
+        </div>`;
+      })
+      .join('');
+    return `<div class="spec tone-${tone}">
+      ${
+        cfg.title
+          ? `<div class="spec-head"><b>${inline(cfg.title)}</b>${
+              cfg.subtitle ? `<span>${inline(cfg.subtitle)}</span>` : ''
+            }</div>`
+          : ''
+      }
+      <div class="spec-body">${rows}</div>
+    </div>`;
+  }
+
   /* ---------- 注册 ---------- */
   const RENDERERS = {
     'lane-stack': laneStack,
@@ -293,6 +327,7 @@ export function blocksPlugin(md) {
     compare,
     cards,
     timeline,
+    spec,
     callout,
     checklist,
     quiz,
@@ -345,6 +380,7 @@ export function blocksPlugin(md) {
             `  ${raw.split('\n').join('\n  ')}\n` +
             hint +
             `  --- 原始内容 ---\n${body}`,
+          { cause: e },   // 保留原始堆栈，便于定位是渲染器还是 markdown-it 内部出错
         );
       }
     }
@@ -413,8 +449,19 @@ function inlineMarksPlugin(md) {
       if (!silent) {
         const openTok = state.push('mark_open', 'mark', 1);
         openTok.attrSet('class', cls);
-        // 内部再走一遍行内解析 —— 否则 ==含 `代码` 的重点== 里的反引号会原样显示
-        state.md.inline.parse(src.slice(openPos, end), state.md, state.env, state.tokens);
+
+        // 内部再走一遍行内解析 —— 否则 ==含 `代码` 的重点== 里的反引号会原样显示。
+        //
+        // ⚠️ 必须先解析到临时数组再追加。若直接把 state.tokens 传给嵌套解析，
+        // 嵌套 state 的 delimiter 索引会从 0 开始，而它写入的却是外层数组 ——
+        // emphasis 的 postProcess 按下标取值就会拿到 undefined 而崩。
+        const inner = [];
+        state.md.inline.parse(src.slice(openPos, end), state.md, state.env, inner);
+        for (const t of inner) {
+          state.tokens.push(t);
+          if (Array.isArray(state.tokens_meta)) state.tokens_meta.push(null);
+        }
+
         state.push('mark_close', 'mark', -1);
       }
       state.pos = end + 2;
@@ -425,6 +472,105 @@ function inlineMarksPlugin(md) {
 
   // 放在 emphasis 之前，但要在 code 之后 —— 反引号里的 == 不应被解析
   md.inline.ruler.before('emphasis', 'inline_marks', rule);
+}
+
+/* ---------- 中文加粗修复 ----------
+   问题：`**「术语」**` 这种写法在中文里很常见，但 CommonMark 的 flanking 规则
+   把「（等 CJK 标点当作 punctuation，导致：
+
+     它是**「业务条件」和「SQL」之间的一层**。
+
+   中的 `**` 不算合法的开分隔符 —— 于是星号原样显示，**静默失效**。
+
+   做法：只在「标准规则会失败、但把 CJK 标点当普通字符就能成功」时接管，
+   其余情况仍交给 markdown-it 原生的 emphasis，不影响嵌套和 `***` 等用法。
+------------------------------------------------ */
+const CJK_PUNCT = '「」『』（）〈〉《》【】〔〕，。！？；：、“”‘’…—·～';
+
+const isSpaceish = (ch) => ch === undefined || /\s/.test(ch);
+const isAsciiPunct = (ch) =>
+  ch !== undefined && /[!-/:-@[-`{-~]/.test(ch);
+const isCjkPunct = (ch) => ch !== undefined && CJK_PUNCT.includes(ch);
+
+/**
+ * 复现 CommonMark 的 flanking 判定。
+ * treatCjkPunctAsLetter=true 时把 CJK 标点当普通字符（即我们要的宽松版）。
+ */
+function flankBlocked(before, next, isOpening, treatCjkPunctAsLetter) {
+  const isPunct = (ch) =>
+    isAsciiPunct(ch) || (!treatCjkPunctAsLetter && isCjkPunct(ch));
+
+  const beforeSpace = isSpaceish(before);
+  const beforePunct = isPunct(before);
+  const nextSpace = isSpaceish(next);
+  const nextPunct = isPunct(next);
+
+  if (isOpening) {
+    if (nextSpace) return true;
+    if (!nextPunct) return false;
+    return !(beforeSpace || beforePunct);
+  }
+  if (beforeSpace) return true;
+  if (!beforePunct) return false;
+  return !(nextSpace || nextPunct);
+}
+
+function cjkStrongPlugin(md) {
+  function rule(state, silent) {
+    const src = state.src;
+    const start = state.pos;
+
+    if (src.charCodeAt(start) !== 0x2a || src.charCodeAt(start + 1) !== 0x2a) return false;
+    if (src[start - 1] === '*') return false; // 属于更长的星号串，不插手
+
+    const before = start > 0 ? src[start - 1] : undefined;
+    const next = src[start + 2];
+
+    // 先把配对的收尾 ** 找出来（不跨行，且不是更长星号串的一部分）
+    let end = -1;
+    for (let i = start + 3; i < state.posMax - 1; i++) {
+      const c = src.charCodeAt(i);
+      if (c === 0x0a) break;
+      if (c === 0x2a && src.charCodeAt(i + 1) === 0x2a) {
+        if (src[i - 1] !== '*' && src[i + 2] !== '*') { end = i; break; }
+        i++;
+      }
+    }
+    if (end < 0 || end === start + 2) return false;
+
+    // 开分隔符和收分隔符都要查 —— 两边都可能被 CJK 标点卡住
+    const closeBefore = src[end - 1];
+    const closeNext = end + 2 < state.posMax ? src[end + 2] : undefined;
+
+    const pairs = [
+      [before, next, true],
+      [closeBefore, closeNext, false],
+    ];
+
+    let needsHelp = false;
+    for (const [b, n, isOpen] of pairs) {
+      if (!flankBlocked(b, n, isOpen, false)) continue; // 标准能过
+      if (flankBlocked(b, n, isOpen, true)) return false; // 宽松也过不了，不是 CJK 的问题
+      needsHelp = true;
+    }
+    if (!needsHelp) return false; // 两边标准都能过，交给原生 emphasis
+
+    if (!silent) {
+      state.push('strong_open', 'strong', 1);
+      // 先解析到临时数组再追加 —— 否则嵌套 delimiter 索引会错位
+      const inner = [];
+      state.md.inline.parse(src.slice(start + 2, end), state.md, state.env, inner);
+      for (const t of inner) {
+        state.tokens.push(t);
+        if (Array.isArray(state.tokens_meta)) state.tokens_meta.push(null);
+      }
+      state.push('strong_close', 'strong', -1);
+    }
+    state.pos = end + 2;
+    return true;
+  }
+
+  md.inline.ruler.before('emphasis', 'cjk_strong', rule);
 }
 
 /* ---------- 正文后处理：给 h2/h3 加锚点并收集目录 ---------- */

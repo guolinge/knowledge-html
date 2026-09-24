@@ -101,49 +101,187 @@ rows:
 
 ==crowd 是这个仓库的主体==（约 4000 行），core 是它的地基，goods 是另一条平行的线。
 
-### 这些依赖具体干什么
+### 逐个拆解
 
-上面「依赖谁」一栏里全是名字。逐个说清楚它们在这里的作用：
+上面「依赖谁」一栏里全是名字。下面把每个按 **输入 / 处理 / 输出 / 怎么调用 / 为什么这么设计 / 业务价值** 拆开。
 
-```compare
-first: 依赖
-head: [它是什么, 在这个库里干什么, 在哪用到]
-rows:
-  - knex:
-      - SQL 查询构造器（JS 库）
-      - "**整个库的地基**。所有 SQL 字符串都由它生成；core 的 DB 类只是它的包装"
-      - "core/src/db.ts（唯一的入口）"
-  - lodash:
-      - 通用工具库
-      - "**只用了 `cloneDeep` 一个函数** —— 深拷条件对象，避免改到调用方传进来的数据"
-      - "entrepots/factory.ts · modules/segmentation.ts"
-  - murmurhash:
-      - 哈希算法库
-      - "算事件名的哈希，决定落在 `event_biz_1..8` 哪张分片表"
-      - "dialect/bytehouse.ts（**仅此一处**）"
-  - mysql2:
-      - MySQL 驱动
-      - "**src 里没有直接 import**。它是 knex 用 `client: 'mysql'` 时的底层驱动，列在 deps 里是为了保证部署环境有驱动"
-      - 由 knex 间接使用
-  - tslib:
-      - TypeScript 运行时辅助函数
-      - "**src 里也没有直接 import**。`tsconfig.base.json` 里 `importHelpers: true`，编译后的 JS 会 `require('tslib')` 拿 `__spreadArray` 这类辅助函数，所以它必须是 dependency 而不是 devDependency"
-      - 编译产物自动引入
-  - type-fest:
-      - TS 类型工具库
-      - "**只用了 `ValueOf` 一个类型**，而且全是 `import type`（编译后消失，不进运行时）"
-      - "goods 包 3 个文件"
+```callout
+tone: amber
+icon: ⚠
+text: |
+  ==但只有 knex 值得这样拆。==
+
+  另外五个在 `src/` 里只有 1~3 处调用（`mysql2` / `tslib` 甚至一处都没有），
+  硬套六个维度就是凑字数。所以：knex 和 murmurhash 给完整拆解，
+  lodash 给骨架，剩下三个合并成一张表。
 ```
+
+#### knex —— 整个库的地基
+
+```spec
+title: knex
+subtitle: SQL 查询构造器 · 被调用 43 处
+tone: violet
+rows:
+  - k: 输入
+    v: |
+      链式调用累积出来的**查询状态**：表名 + 筛选条件 + 选取列 + 分组。
+
+      在 core 里，输入是一个 `Knex.QueryBuilder` 实例，或者一段 `Knex.Raw` 片段。
+  - k: 处理
+    v: |
+      链式方法（`.select()` / `.from()` / `.where()`）**不立即生成 SQL**，
+      只是往内部状态里追加。直到最后取 SQL 时才真正编译。
+
+      编译时做两件事：给标识符加反引号，把值换成 `?` 占位符。
+  - k: 输出
+    v: |
+      一段**可直接执行的 SQL 字符串**（带反引号、值已转义）。
+
+      这个库对外只交付字符串 —— 下游网关不接受别的形态。
+  - k: 怎么调用
+    code: |
+      // core/src/db.ts 里只有这一处创建实例
+      const mysql = knex({ client: 'mysql' });
+
+      // 两种入口，共享同一个 Builder.prototype
+      DB.getInstance()        → mysql.queryBuilder()   // 空 builder
+      DB.getInstance('name')  → mysql(name)            // 命名连接
+
+      // 实际用法（43 处调用长这样）
+      DB.getInstance()
+        .select('uid')
+        .from('user_portrait')
+        .where('uid', 'in', DB.raw(subSql))
+        .rawQuery();          // ← core 挂上去的，= toString().trim()
+  - k: 为什么这么设计
+    v: |
+      **① 为什么要加一个 `rawQuery()`？**
+
+      knex 原生的取值方式返回值结构不同，而这个库对外只交付**一段字符串**。
+      所以 core 在 `QueryBuilder.prototype` 上挂了一个 `rawQuery()` = `toString().trim()`。
+
+      **② 为什么用挂原型，不用 `knex.QueryBuilder.extend()`？**
+
+      代码注释里写了：==extend 要求方法的返回值必须是 builder 实例==，
+      而 `rawQuery()` 要返回字符串。所以只能挂原型。
+
+      **③ 为什么 `mysql(name)` 和 `mysql.queryBuilder()` 能共用？**
+
+      代码注释：==两者共享同一个 `Builder.prototype`==，
+      所以挂载一次，两种入口都能访问到。
+
+      **④ `toQuery()` 为什么还在用？**
+
+      搜一遍会发现它只出现在 9 处，而且**全是值转义**：
+      `sqlValue` 用 `DB.raw('?', [val]).toQuery()` 把字符串转义成 SQL 字面量，
+      借 knex 的转义能力，不手写。
+
+      所以分工很清楚：==`rawQuery()` 管出口，`toQuery()` 管转义。==
+  - k: 业务价值
+    v: |
+      它是**「业务条件」和「SQL 字符串」之间的最后一层**。
+
+      上游（crowd 的六种条件实现）只管往 builder 上挂 `where`，
+      不用操心反引号、转义、括号这些 SQL 细节 —— 那些全是 knex 的事。
+
+      这个库对 knex 的**唯一改动**就是加了 `rawQuery()`，把出口统一成字符串。
+```
+
+#### murmurhash —— 决定事件去哪个分片
+
+```spec
+title: murmurhash
+subtitle: 哈希算法 · 全库只有 1 处调用
+tone: blue
+rows:
+  - k: 输入
+    v: "事件名（如 `ClickSimStockMatchedEvent`）和事件分类"
+  - k: 处理
+    code: |
+      const num = (murmurhash.v3(eventName, 0) % 8) + 1;   // → 1..8
+
+      switch (eventCategory) {
+        case EventCategory.business:
+          return `dws.event_biz_${num}`;
+        case EventCategory.Develop:
+        case EventCategory.Ftoa:
+          return `dws.event_monitoring_${num}`;
+      }
+  - k: 输出
+    v: "一个**表名**，如 `dws.event_biz_5`"
+  - k: 为什么这么设计
+    v: |
+      ByteHouse 里事件量太大，一张表装不下，所以按事件名哈希**拆成 8 张**。
+
+      用哈希而不是自增 ID，是因为 ==同一个事件名必须永远落在同一张表== ——
+      否则历史数据会分散在多张表里，查询时得全部扫一遍。
+
+      哈希函数固定（`v3`）且种子固定（`0`），保证可重现。
+  - k: 业务价值
+    v: |
+      让「查某个事件」这个动作**只扫 1/8 的数据**。
+
+      代价是：加新事件时表名不可预测，运维得用 `scripts/bh-event-table.mjs` 现算。
+```
+
+#### lodash —— 只为了不改坏调用方的数据
+
+```spec
+title: lodash
+subtitle: 通用工具库 · 全库只用了 cloneDeep 一个函数
+tone: muted
+rows:
+  - k: 输入 / 输出
+    v: 任意对象 → 一份**深拷贝**
+  - k: 怎么调用
+    code: |
+      import { cloneDeep } from 'lodash';
+
+      // entrepots/factory.ts · convertToPkgEntrepot
+      const _entrepot = cloneDeep(entrepot);
+
+      // modules/segmentation.ts
+      const _info = cloneDeep(info);
+  - k: 为什么这么设计
+    v: |
+      调用方传进来的条件对象**不能改** —— 改了会污染上游状态，而调用方可能还在用。
+      但下游处理时又需要往对象上挂 `options` 等字段，所以先拷一份。
+
+      这是一个**隐含契约**：==这个库保证不修改传入的参数。==
+  - k: 业务价值
+    v: 全库只有 2 处用到。为了一个函数引一个工具库，是取舍 —— 深拷贝自己写容易漏边界情况。
+```
+
+#### 剩下三个：mysql2 / tslib / type-fest
 
 ```callout
 tone: violet
 icon: 💡
 text: |
-  **注意 `mysql2` 和 `tslib` 都不是主动依赖**，你在 `src/` 里搜不到它们的 import。
-  它们存在的原因是「别人需要」：knex 要驱动，编译产物要辅助函数。
+  这三个**在 `src/` 里都搜不到 import**。它们没有「输入处理输出」可言，
+  因为根本不是主动依赖：
+```
 
-  看依赖表时先区分这两类：
+```compare
+first: 依赖
+head: [为什么在 deps 里, 它决定了什么]
+rows:
+  - mysql2: ["knex 用 `client: 'mysql'` 时的**底层驱动**，knex 自己把它列为可选依赖", "能不能连上库"]
+  - tslib: ["`tsconfig.base.json` 里 `importHelpers: true`，**编译产物**会 `require('tslib')` 拿 `__spreadArray` 这类辅助函数", "编译后的 JS 能不能跑"]
+  - type-fest: ["只用了 `ValueOf` 一个类型，而且全是 `import type` —— **编译后消失，不进运行时**", "仅类型层，不影响运行"]
+```
+
+```callout
+tone: green
+icon: ✅
+text: |
+  看依赖表时先分这两类：
+
   ==主动依赖决定代码怎么写，被动依赖只决定能不能跑起来。==
+
+  主动的（knex / lodash / murmurhash）在 `src/` 里能搜到 import；
+  被动的（mysql2 / tslib）搜不到，但删了就会挂。
 ```
 
 ### 版本写在哪儿：catalog

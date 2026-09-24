@@ -30,7 +30,7 @@
       <a href="#三个包" class="sub">三个包</a>
       <a href="#每个包的骨架都一样" class="sub">每个包的骨架都一样</a>
       <a href="#三个包分别管什么">三个包分别管什么</a>
-      <a href="#这些依赖具体干什么" class="sub">这些依赖具体干什么</a>
+      <a href="#逐个拆解" class="sub">逐个拆解</a>
       <a href="#版本写在哪儿catalog" class="sub">版本写在哪儿：catalog</a>
       <a href="#packagescore-通用层">packages/core —— 通用层</a>
       <a href="#src-根文件" class="sub">src/ 根文件</a>
@@ -173,14 +173,151 @@
 </div>
     </div><h2 id="三个包分别管什么"><span class="num">02</span>三个包分别管什么</h2>
 <div class="compare-wrap"><table class="compare"><thead><tr><th>维度</th><th>packages/core</th><th>packages/crowd</th><th>packages/goods</th></tr></thead><tbody><tr><th>定位</th><td data-label="packages/core">通用 SQL 构造</td><td data-label="packages/crowd">用户域圈人</td><td data-label="packages/goods">商品域圈选</td></tr><tr><th>知道业务吗</th><td data-label="packages/core"><span class="tag tone-green">完全不知道</span></td><td data-label="packages/crowd">知道，大量业务枚举</td><td data-label="packages/goods">知道商品域概念</td></tr><tr><th>依赖谁</th><td data-label="packages/core">knex</td><td data-label="packages/crowd">core + lodash + murmurhash + mysql2</td><td data-label="packages/goods">core + type-fest</td></tr><tr><th>测试框架</th><td data-label="packages/core">jest</td><td data-label="packages/crowd">jest</td><td data-label="packages/goods"><span class="tag tone-violet">vitest</span></td></tr><tr><th>成熟度</th><td data-label="packages/core"><span class="tag tone-green">稳定</span></td><td data-label="packages/crowd"><span class="tag tone-blue">主力，代码最多</span></td><td data-label="packages/goods"><span class="tag tone-amber">独立演进中</span></td></tr></tbody></table></div><p><mark class="mk-blue">crowd 是这个仓库的主体</mark>（约 4000 行），core 是它的地基，goods 是另一条平行的线。</p>
-<h3 id="这些依赖具体干什么">这些依赖具体干什么</h3>
-<p>上面「依赖谁」一栏里全是名字。逐个说清楚它们在这里的作用：</p>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>依赖</th><th>它是什么</th><th>在这个库里干什么</th><th>在哪用到</th></tr></thead><tbody><tr><th>knex</th><td data-label="它是什么">SQL 查询构造器（JS 库）</td><td data-label="在这个库里干什么"><strong>整个库的地基</strong>。所有 SQL 字符串都由它生成；core 的 DB 类只是它的包装</td><td data-label="在哪用到">core/src/db.ts（唯一的入口）</td></tr><tr><th>lodash</th><td data-label="它是什么">通用工具库</td><td data-label="在这个库里干什么"><strong>只用了 <code>cloneDeep</code> 一个函数</strong> —— 深拷条件对象，避免改到调用方传进来的数据</td><td data-label="在哪用到">entrepots/factory.ts · modules/segmentation.ts</td></tr><tr><th>murmurhash</th><td data-label="它是什么">哈希算法库</td><td data-label="在这个库里干什么">算事件名的哈希，决定落在 <code>event_biz_1..8</code> 哪张分片表</td><td data-label="在哪用到">dialect/bytehouse.ts（<strong>仅此一处</strong>）</td></tr><tr><th>mysql2</th><td data-label="它是什么">MySQL 驱动</td><td data-label="在这个库里干什么"><strong>src 里没有直接 import</strong>。它是 knex 用 <code>client: 'mysql'</code> 时的底层驱动，列在 deps 里是为了保证部署环境有驱动</td><td data-label="在哪用到">由 knex 间接使用</td></tr><tr><th>tslib</th><td data-label="它是什么">TypeScript 运行时辅助函数</td><td data-label="在这个库里干什么"><strong>src 里也没有直接 import</strong>。<code>tsconfig.base.json</code> 里 <code>importHelpers: true</code>，编译后的 JS 会 <code>require('tslib')</code> 拿 <code>__spreadArray</code> 这类辅助函数，所以它必须是 dependency 而不是 devDependency</td><td data-label="在哪用到">编译产物自动引入</td></tr><tr><th>type-fest</th><td data-label="它是什么">TS 类型工具库</td><td data-label="在这个库里干什么"><strong>只用了 <code>ValueOf</code> 一个类型</strong>，而且全是 <code>import type</code>（编译后消失，不进运行时）</td><td data-label="在哪用到">goods 包 3 个文件</td></tr></tbody></table></div><div class="callout tone-violet">
+<h3 id="逐个拆解">逐个拆解</h3>
+<p>上面「依赖谁」一栏里全是名字。下面把每个按 <strong>输入 / 处理 / 输出 / 怎么调用 / 为什么这么设计 / 业务价值</strong> 拆开。</p>
+<div class="callout tone-amber">
+      <span class="ic">⚠</span>
+      <div><p><mark class="mk-blue">但只有 knex 值得这样拆。</mark></p>
+<p>另外五个在 <code>src/</code> 里只有 1~3 处调用（<code>mysql2</code> / <code>tslib</code> 甚至一处都没有），
+硬套六个维度就是凑字数。所以：knex 和 murmurhash 给完整拆解，
+lodash 给骨架，剩下三个合并成一张表。</p>
+</div>
+    </div><h4>knex —— 整个库的地基</h4>
+<div class="spec tone-violet">
+      <div class="spec-head"><b>knex</b><span>SQL 查询构造器 · 被调用 43 处</span></div>
+      <div class="spec-body"><div class="srow">
+          <div class="sk">输入</div>
+          <div class="sv"><p>链式调用累积出来的<strong>查询状态</strong>：表名 + 筛选条件 + 选取列 + 分组。</p>
+<p>在 core 里，输入是一个 <code>Knex.QueryBuilder</code> 实例，或者一段 <code>Knex.Raw</code> 片段。</p>
+</div>
+        </div><div class="srow">
+          <div class="sk">处理</div>
+          <div class="sv"><p>链式方法（<code>.select()</code> / <code>.from()</code> / <code>.where()</code>）<strong>不立即生成 SQL</strong>，
+只是往内部状态里追加。直到最后取 SQL 时才真正编译。</p>
+<p>编译时做两件事：给标识符加反引号，把值换成 <code>?</code> 占位符。</p>
+</div>
+        </div><div class="srow">
+          <div class="sk">输出</div>
+          <div class="sv"><p>一段<strong>可直接执行的 SQL 字符串</strong>（带反引号、值已转义）。</p>
+<p>这个库对外只交付字符串 —— 下游网关不接受别的形态。</p>
+</div>
+        </div><div class="srow">
+          <div class="sk">怎么调用</div>
+          <div class="sv"><div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>// core/src/db.ts 里只有这一处创建实例
+const mysql = knex({ client: 'mysql' });
+
+// 两种入口，共享同一个 Builder.prototype
+DB.getInstance()        → mysql.queryBuilder()   // 空 builder
+DB.getInstance('name')  → mysql(name)            // 命名连接
+
+// 实际用法（43 处调用长这样）
+DB.getInstance()
+  .select('uid')
+  .from('user_portrait')
+  .where('uid', 'in', DB.raw(subSql))
+  .rawQuery();          // ← core 挂上去的，= toString().trim()
+</pre></div></div>
+        </div><div class="srow">
+          <div class="sk">为什么这么设计</div>
+          <div class="sv"><p><strong>① 为什么要加一个 <code>rawQuery()</code>？</strong></p>
+<p>knex 原生的取值方式返回值结构不同，而这个库对外只交付<strong>一段字符串</strong>。
+所以 core 在 <code>QueryBuilder.prototype</code> 上挂了一个 <code>rawQuery()</code> = <code>toString().trim()</code>。</p>
+<p><strong>② 为什么用挂原型，不用 <code>knex.QueryBuilder.extend()</code>？</strong></p>
+<p>代码注释里写了：<mark class="mk-blue">extend 要求方法的返回值必须是 builder 实例</mark>，
+而 <code>rawQuery()</code> 要返回字符串。所以只能挂原型。</p>
+<p><strong>③ 为什么 <code>mysql(name)</code> 和 <code>mysql.queryBuilder()</code> 能共用？</strong></p>
+<p>代码注释：<mark class="mk-blue">两者共享同一个 <code>Builder.prototype</code></mark>，
+所以挂载一次，两种入口都能访问到。</p>
+<p><strong>④ <code>toQuery()</code> 为什么还在用？</strong></p>
+<p>搜一遍会发现它只出现在 9 处，而且<strong>全是值转义</strong>：
+<code>sqlValue</code> 用 <code>DB.raw('?', [val]).toQuery()</code> 把字符串转义成 SQL 字面量，
+借 knex 的转义能力，不手写。</p>
+<p>所以分工很清楚：<mark class="mk-blue"><code>rawQuery()</code> 管出口，<code>toQuery()</code> 管转义。</mark></p>
+</div>
+        </div><div class="srow">
+          <div class="sk">业务价值</div>
+          <div class="sv"><p>它是<strong>「业务条件」和「SQL 字符串」之间的最后一层</strong>。</p>
+<p>上游（crowd 的六种条件实现）只管往 builder 上挂 <code>where</code>，
+不用操心反引号、转义、括号这些 SQL 细节 —— 那些全是 knex 的事。</p>
+<p>这个库对 knex 的<strong>唯一改动</strong>就是加了 <code>rawQuery()</code>，把出口统一成字符串。</p>
+</div>
+        </div></div>
+    </div><h4>murmurhash —— 决定事件去哪个分片</h4>
+<div class="spec tone-blue">
+      <div class="spec-head"><b>murmurhash</b><span>哈希算法 · 全库只有 1 处调用</span></div>
+      <div class="spec-body"><div class="srow">
+          <div class="sk">输入</div>
+          <div class="sv"><p>事件名（如 <code>ClickSimStockMatchedEvent</code>）和事件分类</p>
+</div>
+        </div><div class="srow">
+          <div class="sk">处理</div>
+          <div class="sv"><div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>const num = (murmurhash.v3(eventName, 0) % 8) + 1;   // → 1..8
+
+switch (eventCategory) {
+  case EventCategory.business:
+    return `dws.event_biz_${num}`;
+  case EventCategory.Develop:
+  case EventCategory.Ftoa:
+    return `dws.event_monitoring_${num}`;
+}
+</pre></div></div>
+        </div><div class="srow">
+          <div class="sk">输出</div>
+          <div class="sv"><p>一个<strong>表名</strong>，如 <code>dws.event_biz_5</code></p>
+</div>
+        </div><div class="srow">
+          <div class="sk">为什么这么设计</div>
+          <div class="sv"><p>ByteHouse 里事件量太大，一张表装不下，所以按事件名哈希<strong>拆成 8 张</strong>。</p>
+<p>用哈希而不是自增 ID，是因为 <mark class="mk-blue">同一个事件名必须永远落在同一张表</mark> ——
+否则历史数据会分散在多张表里，查询时得全部扫一遍。</p>
+<p>哈希函数固定（<code>v3</code>）且种子固定（<code>0</code>），保证可重现。</p>
+</div>
+        </div><div class="srow">
+          <div class="sk">业务价值</div>
+          <div class="sv"><p>让「查某个事件」这个动作<strong>只扫 1/8 的数据</strong>。</p>
+<p>代价是：加新事件时表名不可预测，运维得用 <code>scripts/bh-event-table.mjs</code> 现算。</p>
+</div>
+        </div></div>
+    </div><h4>lodash —— 只为了不改坏调用方的数据</h4>
+<div class="spec tone-muted">
+      <div class="spec-head"><b>lodash</b><span>通用工具库 · 全库只用了 cloneDeep 一个函数</span></div>
+      <div class="spec-body"><div class="srow">
+          <div class="sk">输入 / 输出</div>
+          <div class="sv"><p>任意对象 → 一份<strong>深拷贝</strong></p>
+</div>
+        </div><div class="srow">
+          <div class="sk">怎么调用</div>
+          <div class="sv"><div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>import { cloneDeep } from 'lodash';
+
+// entrepots/factory.ts · convertToPkgEntrepot
+const _entrepot = cloneDeep(entrepot);
+
+// modules/segmentation.ts
+const _info = cloneDeep(info);
+</pre></div></div>
+        </div><div class="srow">
+          <div class="sk">为什么这么设计</div>
+          <div class="sv"><p>调用方传进来的条件对象<strong>不能改</strong> —— 改了会污染上游状态，而调用方可能还在用。
+但下游处理时又需要往对象上挂 <code>options</code> 等字段，所以先拷一份。</p>
+<p>这是一个<strong>隐含契约</strong>：<mark class="mk-blue">这个库保证不修改传入的参数。</mark></p>
+</div>
+        </div><div class="srow">
+          <div class="sk">业务价值</div>
+          <div class="sv"><p>全库只有 2 处用到。为了一个函数引一个工具库，是取舍 —— 深拷贝自己写容易漏边界情况。</p>
+</div>
+        </div></div>
+    </div><h4>剩下三个：mysql2 / tslib / type-fest</h4>
+<div class="callout tone-violet">
       <span class="ic">💡</span>
-      <div><p><strong>注意 <code>mysql2</code> 和 <code>tslib</code> 都不是主动依赖</strong>，你在 <code>src/</code> 里搜不到它们的 import。
-它们存在的原因是「别人需要」：knex 要驱动，编译产物要辅助函数。</p>
-<p>看依赖表时先区分这两类：
-<mark class="mk-blue">主动依赖决定代码怎么写，被动依赖只决定能不能跑起来。</mark></p>
+      <div><p>这三个<strong>在 <code>src/</code> 里都搜不到 import</strong>。它们没有「输入处理输出」可言，
+因为根本不是主动依赖：</p>
+</div>
+    </div><div class="compare-wrap"><table class="compare"><thead><tr><th>依赖</th><th>为什么在 deps 里</th><th>它决定了什么</th></tr></thead><tbody><tr><th>mysql2</th><td data-label="为什么在 deps 里">knex 用 <code>client: 'mysql'</code> 时的<strong>底层驱动</strong>，knex 自己把它列为可选依赖</td><td data-label="它决定了什么">能不能连上库</td></tr><tr><th>tslib</th><td data-label="为什么在 deps 里"><code>tsconfig.base.json</code> 里 <code>importHelpers: true</code>，<strong>编译产物</strong>会 <code>require('tslib')</code> 拿 <code>__spreadArray</code> 这类辅助函数</td><td data-label="它决定了什么">编译后的 JS 能不能跑</td></tr><tr><th>type-fest</th><td data-label="为什么在 deps 里">只用了 <code>ValueOf</code> 一个类型，而且全是 <code>import type</code> —— <strong>编译后消失，不进运行时</strong></td><td data-label="它决定了什么">仅类型层，不影响运行</td></tr></tbody></table></div><div class="callout tone-green">
+      <span class="ic">✅</span>
+      <div><p>看依赖表时先分这两类：</p>
+<p><mark class="mk-blue">主动依赖决定代码怎么写，被动依赖只决定能不能跑起来。</mark></p>
+<p>主动的（knex / lodash / murmurhash）在 <code>src/</code> 里能搜到 import；
+被动的（mysql2 / tslib）搜不到，但删了就会挂。</p>
 </div>
     </div><h3 id="版本写在哪儿catalog">版本写在哪儿：catalog</h3>
 <p><code>crowd/package.json</code> 里写的是 <code>&quot;knex&quot;: &quot;catalog:&quot;</code> 而不是具体版本号 ——

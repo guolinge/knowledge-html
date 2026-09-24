@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>sql_builder_v2 架构</title>
-<meta name="description" content="从零开始理解 sql_builder_v2：先讲清圈人、画像、事件这些概念，再讲条件怎么组织成树，最后才是代码架构。核心机制是 AND / OR 被实现成 UNION ALL + GROUP BY + HAVING COUNT，而不是 SQL 的 AND / OR。" />
+<title>SQL JOIN 六种连接：一行数据到底去哪了</title>
+<meta name="description" content="六个 JOIN 的区别只有一句话 —— 配对之后，落单的那一行留还是不留。用同一份数据切换五种 JOIN，看哪些行被丢掉。" />
 <style>
 /* ============================================================
    theme.css — 设计 token 与页面骨架
@@ -986,896 +986,390 @@ mark.mk-green { background: var(--green-soft); color: var(--green); }
   <aside class="toc" id="toc">
       <p class="toc-title">目录</p>
       <a href="../../index.html" class="sub">← 全部笔记</a>
-      <a href="#这个库是给谁用的">这个库是给谁用的</a>
-      <a href="#四个基础概念">四个基础概念</a>
-      <a href="#uid-用户的唯一标识" class="sub">uid —— 用户的唯一标识</a>
-      <a href="#画像-portrait-用户的静态属性" class="sub">画像 Portrait —— 用户的「静态属性」</a>
-      <a href="#事件-event-用户的行为流水" class="sub">事件 Event —— 用户的「行为流水」</a>
-      <a href="#人群包-crowd-预先算好的一批人" class="sub">人群包 Crowd —— 预先算好的一批人</a>
-      <a href="#关系-relation-用户和某个对象的关系" class="sub">关系 Relation —— 用户和某个「对象」的关系</a>
-      <a href="#一张表看清区别" class="sub">一张表看清区别</a>
-      <a href="#一个需求怎么变成条件树">一个需求怎么变成「条件树」</a>
-      <a href="#六种条件单元">六种条件单元</a>
-      <a href="#每种条件的最小例子真实入参-真实-sql" class="sub">每种条件的最小例子（真实入参 → 真实 SQL）</a>
-      <a href="#所以这个库到底在做什么">所以这个库到底在做什么</a>
-      <a href="#组织一棵树-六种叶子-两层组合">组织：一棵树 + 六种叶子 + 两层组合</a>
-      <a href="#架构一条条件要走-8-层">架构：一条条件要走 8 层</a>
-      <a href="#两个包的边界">两个包的边界</a>
-      <a href="#六个核心角色">六个核心角色</a>
-      <a href="#最不直觉的设计and-or-不是-sql-的-and-or">最不直觉的设计：AND / OR 不是 SQL 的 AND / OR</a>
-      <a href="#一条条件是怎么变成-sql-的">一条条件是怎么变成 SQL 的</a>
-      <a href="#为什么二次加工必须单独存在" class="sub">为什么「二次加工」必须单独存在</a>
-      <a href="#方言策略同一套条件两种数据库">方言策略：同一套条件，两种数据库</a>
-      <a href="#扩展点">扩展点</a>
+      <a href="#先把两张表摆出来">先把两张表摆出来</a>
+      <a href="#join-只做三件事">JOIN 只做三件事</a>
+      <a href="#亲手切一遍同一份数据五种-join">亲手切一遍：同一份数据，五种 JOIN</a>
+      <a href="#谁是左表看-sql-里的书写位置" class="sub">谁是「左表」？看 SQL 里的书写位置</a>
+      <a href="#交互之外的三个坑">交互之外的三个坑</a>
+      <a href="#left-join-的招牌用法找从来没有过的行" class="sub">LEFT JOIN 的招牌用法：找「从来没有过」的行</a>
+      <a href="#right-join-为什么基本没人写" class="sub">RIGHT JOIN 为什么基本没人写</a>
+      <a href="#full-outer-join-在-mysql-里得自己拼" class="sub">FULL OUTER JOIN 在 MySQL 里得自己拼</a>
+      <a href="#两个特例cross-join-和-self-join">两个特例：CROSS JOIN 和 SELF JOIN</a>
+      <a href="#cross-join不是关联是乘法" class="sub">CROSS JOIN：不是关联，是乘法</a>
+      <a href="#self-join不是关键字是同一张表看两次" class="sub">SELF JOIN：不是关键字，是同一张表看两次</a>
+      <a href="#最容易踩的坑条件写在-on-还是-where">最容易踩的坑：条件写在 ON 还是 WHERE</a>
+      <a href="#速查表">速查表</a>
+      <a href="#一句话总结" class="sub">一句话总结</a>
       <a href="#自测">自测</a>
   </aside>
 
   <main>
     <div class="hero">
-      <span class="eyebrow">● 代码架构 · 源码通读</span>
-      <h1>sql_builder_v2 架构</h1>
-      <p class="lede">从零开始理解 sql_builder_v2：先讲清圈人、画像、事件这些概念，再讲条件怎么组织成树，最后才是代码架构。核心机制是 AND / OR 被实现成 UNION ALL + GROUP BY + HAVING COUNT，而不是 SQL 的 AND / OR。</p>
+      <span class="eyebrow">● 数据库 · SQL 基础</span>
+      <h1>SQL JOIN 六种连接：一行数据到底去哪了</h1>
+      <p class="lede">六个 JOIN 的区别只有一句话 —— 配对之后，落单的那一行留还是不留。用同一份数据切换五种 JOIN，看哪些行被丢掉。</p>
     </div>
 
     <div class="draft-banner">
     <span>⚠</span>
     <span>本页状态为 <b>draft</b>：内容尚未人工核对，引用前请自行验证。</span>
   </div>
-    <div class="provenance"><span><b>来源</b> sources/gitlab/sql_builder_v2 @ 2c500b2 · <a href="https://gitlab.futunn.com/big-data-web/sdk/sql_builder_v2" target="_blank" rel="noopener">gitlab.futunn.com/big-data-web/sdk/sql_builder_v</a></span><span><b>生成</b> 2026-09-24</span><span><b>模型</b> deepseek-v4.1-flash</span></div>
-    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">架构</span> <span class="tag tone-muted">SQL</span> <span class="tag tone-muted">TypeScript</span> <span class="tag tone-muted">圈人</span></span></div>
+    <div class="provenance"><span><b>来源</b> 用户粘贴的《SQL JOIN 教程》原文（AI 中台问答）</span><span><b>生成</b> 2026-09-24</span><span><b>模型</b> deepseek-v4.1-flash</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">SQL</span> <span class="tag tone-muted">JOIN</span> <span class="tag tone-muted">MySQL</span> <span class="tag tone-muted">查询</span></span></div>
 
-<div class="callout tone-blue">
-      <span class="ic">🧭</span>
-      <div><p>这篇笔记按 <strong>概念 → 组织 → 架构</strong> 三层写。如果你完全没接触过这套代码，
-从第 01 节顺着读；已经懂业务的可以直接跳到第 07 节。</p>
-</div>
-    </div><div class="cards" data-cols="3"><div class="ccard tone-green">
-          <span class="tag tone-green">01 ~ 04</span>
-          <h4>概念</h4>
-          <p>圈人是什么、画像和事件有什么区别、六种条件各是什么东西</p>
-          
-        </div><div class="ccard tone-blue">
-          <span class="tag tone-blue">05 ~ 06</span>
-          <h4>组织</h4>
-          <p>为什么需要这个库、一个需求怎么变成条件树、条件怎么组合</p>
-          
-        </div><div class="ccard tone-violet">
-          <span class="tag tone-violet">07 ~ 13</span>
-          <h4>架构</h4>
-          <p>代码怎么分层、两个包怎么切、AND/OR 到底怎么实现的</p>
-          
-        </div></div><h2 id="这个库是给谁用的"><span class="num">01</span>这个库是给谁用的</h2>
-<p>先忘掉代码。想象一个真实场景。</p>
 <blockquote>
-<p>运营要发一张优惠券，<mark class="mk-blue">只发给「最近 7 天加购过、并且是 VIP」的用户</mark>。</p>
+<p>六个 JOIN 的区别，可以压缩成一句话：<mark class="mk-blue">配对之后，落单的那一行，留还是不留。</mark></p>
 </blockquote>
-<p>这句话要落地，系统必须回答一个问题：<mark class="mk-blue">这批人是谁？</mark></p>
-<p>而数据是长这样的：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">用户 1001 最近 7 天加购过 3 次，VIP 等级 3   →  要发
-用户 1002 最近 7 天没加购，VIP 等级 5        →  不发（没加购）
-用户 1003 最近 7 天加购过 1 次，不是 VIP      →  不发（不是 VIP）
-用户 1004 最近 7 天加购过 8 次，VIP 等级 4   →  要发
+<h2 id="先把两张表摆出来"><span class="num">01</span>先把两张表摆出来</h2>
+<p>电商系统不会把用户和订单塞进一张表。拆开之后，<strong>把两边的信息拼回同一行</strong>就成了每天都要做的事。</p>
+<p><code>users</code> —— 用户表</p>
+<table>
+<thead>
+<tr>
+<th style="text-align:right">id</th>
+<th>name</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:right">1</td>
+<td>小明</td>
+</tr>
+<tr>
+<td style="text-align:right">2</td>
+<td>小红</td>
+</tr>
+<tr>
+<td style="text-align:right">3</td>
+<td>小刚</td>
+</tr>
+</tbody>
+</table>
+<p><code>orders</code> —— 订单表</p>
+<table>
+<thead>
+<tr>
+<th style="text-align:right">id</th>
+<th style="text-align:right">user_id</th>
+<th>product</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:right">101</td>
+<td style="text-align:right">1</td>
+<td>键盘</td>
+</tr>
+<tr>
+<td style="text-align:right">102</td>
+<td style="text-align:right">1</td>
+<td>鼠标</td>
+</tr>
+<tr>
+<td style="text-align:right">103</td>
+<td style="text-align:right">2</td>
+<td>显示器</td>
+</tr>
+<tr>
+<td style="text-align:right">104</td>
+<td style="text-align:right">99</td>
+<td>测试商品</td>
+</tr>
+</tbody>
+</table>
+<p>配对规则只有一条，写在 <code>ON</code> 后面：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-sql">ON users.id = orders.user_id
 </code></pre></div>
-<p>要找出这批人，得去数据库里查。<strong>这就是「圈人」。</strong></p>
-<div class="callout tone-violet quote">
+<p>拿 <code>orders.user_id</code> 去 <code>users.id</code> 里找人。<mark class="mk-blue">能配上的只有 3 对</mark>：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">小明(1) ── 101 键盘
+小明(1) ── 102 鼠标
+小红(2) ── 103 显示器
+</code></pre></div>
+<p>剩下两行谁也配不上，而它们正是全篇的主角：</p>
+<ul>
+<li><strong>小刚(3)</strong> —— 没下过单，左表落单</li>
+<li><strong>订单 104</strong> —— <code>user_id = 99</code> 查无此人，右表落单</li>
+</ul>
+<div class="callout tone-blue tinted">
       <span class="ic">🎯</span>
-      <div><p>圈人 = 按一组条件，从数据里筛出符合条件的用户 ID 列表。</p>
+      <div><p>后面所有 JOIN 的差别，<strong>全都体现在这两行上</strong>。
+能配上的那 3 对，六种 JOIN 的处理完全一样。</p>
 </div>
-    </div><h2 id="四个基础概念"><span class="num">02</span>四个基础概念</h2>
-<p>圈人系统里有几个词天天出现。<strong>先搞懂它们，后面才看得懂。</strong></p>
-<h3 id="uid-用户的唯一标识">uid —— 用户的唯一标识</h3>
-<p>一串代表「一个人」的编号。系统里到处都用它串起来。</p>
-<p>有个细节：uid 在存储时是<strong>加密</strong>的，所以 SQL 里会出现两个函数：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">UID_ENCODE(1001)   -- 查询时把明文 uid 加密，用来跟库里的值比对
-UID_DECODE(`uid`)  -- 取出时把加密的 uid 解密，给业务用
-</code></pre></div>
-<h3 id="画像-portrait-用户的静态属性">画像 Portrait —— 用户的「静态属性」</h3>
-<p>描述用户<mark class="mk-blue">当前是什么样</mark>，存在 <code>user_portrait</code> 表。一行 = 一个人。</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">uid    | futu_hk_account_gender_type | vip_level | city   | ...
--------|-----------------------------|-----------|--------|----
-1001   | 1                           | 3         | 杭州   | ...
-1002   | 2                           | 5         | 深圳   | ...
-</code></pre></div>
-<p><mark class="mk-blue">关键特征：属性会被覆盖，只存当前值。</mark> 用户今天改成 VIP 4，昨天是 VIP 3 这件事就没了。</p>
-<h3 id="事件-event-用户的行为流水">事件 Event —— 用户的「行为流水」</h3>
-<p>描述用户<strong>做过什么</strong>，存在 <code>event_v2</code>（或 ByteHouse 的 <code>event_biz_N</code>）。一行 = 一个人 + 一个时刻 + 一个动作。</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">$user_id | event_type | event_time      | 商品ID | ...
----------|------------|-----------------|--------|----
-1001     | 加购       | 1758... 10:03   | A001   | ...
-1001     | 加购       | 1758... 15:20   | B007   | ...
-1001     | 下单       | 1758... 15:31   | B007   | ...
-1004     | 加购       | 1758... 09:12   | A001   | ...
-</code></pre></div>
-<p><mark class="mk-blue">关键特征：只追加，不覆盖。</mark> 是流水账，所以能回答「最近 7 天加购了<strong>几次</strong>」。</p>
-<div class="callout tone-amber">
-      <span class="ic">⚠</span>
-      <div><p><strong>注意两件事：</strong></p>
-<p><mark class="mk-amber">① 画像表的用户列叫 <code>uid</code>，事件表的叫 <code>$user_id</code>。</mark>
-名字不一样，所以事件查询必须做一次 join 把两边接起来：
-<code>left join ... on t1.uid = t2.$user_id</code>。
-这不是设计失误，是两个系统各自的历史遗留。</p>
-<p><mark class="mk-amber">② 事件表在 ByteHouse 里被拆成 8 张。</mark>
-按事件名哈希（<code>murmurhash(eventName) % 8 + 1</code>）决定去哪张，
-所以同一个查询里不同事件可能落在 <code>event_biz_3</code> 和 <code>event_biz_7</code>。</p>
-</div>
-    </div><h3 id="人群包-crowd-预先算好的一批人">人群包 Crowd —— 预先算好的一批人</h3>
-<p>运营今天圈了一批人，明天还想用同一批。于是把结果<strong>存下来</strong>，给个编号，存在 <code>crowds</code> 表。</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">crowd_id | crowd_version | uid
----------|---------------|------
-C_888    | v3            | 1001
-C_888    | v3            | 1002
-C_888    | v3            | 1004
-</code></pre></div>
-<p><code>crowd_version</code> 是版本号 —— 同一批人重新算一遍，结果可能变，所以要用版本区分「当时那批人」。</p>
-<h3 id="关系-relation-用户和某个对象的关系">关系 Relation —— 用户和某个「对象」的关系</h3>
-<p>比如「领过 coupon001 这张券的人」。存在各种业务明细表里，用 <code>object_id</code> 表示那个对象。</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">uid  | object_id
------|-----------
-1001 | coupon001
-1002 | coupon001
-1003 | coupon007
-</code></pre></div>
-<h3 id="一张表看清区别">一张表看清区别</h3>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>概念</th><th>回答什么问题</th><th>存哪张表</th><th>一行代表</th><th>会变吗</th></tr></thead><tbody><tr><th>uid</th><td data-label="回答什么问题">这是谁</td><td data-label="存哪张表"><span class="tag tone-muted">到处都有</span></td><td data-label="一行代表">一个人</td><td data-label="会变吗"><span class="tag tone-green">不变</span></td></tr><tr><th>画像 Portrait</th><td data-label="回答什么问题">他现在是什么样</td><td data-label="存哪张表"><code>user_portrait</code></td><td data-label="一行代表">一个人的所有属性</td><td data-label="会变吗"><span class="tag tone-amber">会被覆盖</span></td></tr><tr><th>事件 Event</th><td data-label="回答什么问题">他做过什么、几次</td><td data-label="存哪张表"><code>event_v2</code> / <code>event_biz_N</code></td><td data-label="一行代表">一个人某一刻的一个动作</td><td data-label="会变吗"><span class="tag tone-green">只追加</span></td></tr><tr><th>人群包 Crowd</th><td data-label="回答什么问题">预先算好的一批人是谁</td><td data-label="存哪张表"><code>crowds</code></td><td data-label="一行代表">人群包 + 版本 + 一个人</td><td data-label="会变吗"><span class="tag tone-green">只追加</span></td></tr><tr><th>关系 Relation</th><td data-label="回答什么问题">他和某个对象什么关系</td><td data-label="存哪张表">各种业务明细表</td><td data-label="一行代表">一个人 + 一个对象</td><td data-label="会变吗"><span class="tag tone-green">只追加</span></td></tr></tbody></table></div><h2 id="一个需求怎么变成条件树"><span class="num">03</span>一个需求怎么变成「条件树」</h2>
-<p>回到那句话：<strong>「最近 7 天加购过、并且是 VIP」</strong>。</p>
-<p>拆开看，它其实是两件事用 <strong>并且</strong> 连起来：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">        AND  ← 「并且」
-       ╱    ╲
-  事件条件    画像条件
-  「加购」    「VIP」
-  最近 7 天   等级 ≥ 3
-  至少 1 次
-</code></pre></div>
-<ul>
-<li>左边是<strong>事件条件</strong>：查行为流水，算「加购了几次」</li>
-<li>右边是<strong>画像条件</strong>：查属性表，看「VIP 等级是多少」</li>
-<li>中间的 <code>AND</code> 是<strong>逻辑</strong>，说明两边都要满足</li>
-</ul>
-<p>如果运营说「最近 7 天加购过 <strong>或者</strong> 是 VIP」，那中间的 <code>AND</code> 就换成 <code>OR</code>。</p>
-<div class="callout tone-green tinted">
-      <span class="ic">🌳</span>
-      <div><p>这种「用 AND / OR 把条件串起来的树形结构」，就叫<strong>条件树</strong>。</p>
-<p>叶子节点是<strong>具体条件<strong>（加购、VIP），中间节点是</strong>逻辑</strong>（AND / OR）。
-树可以嵌套：AND 里套 OR，OR 里再套 AND。</p>
-</div>
-    </div><p>换成 JSON，大概长这样：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-json">{
-  &quot;logic&quot;: &quot;AND&quot;,
-  &quot;conditions&quot;: [
-    { &quot;type&quot;: &quot;event&quot;,    &quot;condition&quot;: { &quot;事件&quot;: &quot;加购&quot;, &quot;时间&quot;: &quot;最近7天&quot;, &quot;次数&quot;: &quot;&gt;0&quot; } },
-    { &quot;type&quot;: &quot;portrait&quot;, &quot;condition&quot;: { &quot;vip_level&quot;: &quot;&gt;= 3&quot; } }
-  ]
-}
-</code></pre></div>
-<h2 id="六种条件单元"><span class="num">04</span>六种条件单元</h2>
-<p>树的叶子不只有「事件」和「画像」。系统里一共支持 <strong>6 种<strong>，这是这个库的</strong>词汇表</strong>：</p>
-<div class="cards" data-cols="3"><div class="ccard tone-green">
-          <span class="tag tone-green">最常见</span>
-          <h4>画像 portrait</h4>
-          <p>用户的静态属性。查 user_portrait 表</p>
-          
-        </div><div class="ccard tone-violet">
-          <span class="tag tone-violet">功能最多</span>
-          <h4>事件 event</h4>
-          <p>做过什么事、几次。查事件表，最复杂的一个</p>
-          
-        </div><div class="ccard tone-blue">
-          <span class="tag tone-blue">可复用</span>
-          <h4>人群包 crowd</h4>
-          <p>预先算好的一批人。查 crowds 表</p>
-          
-        </div><div class="ccard tone-muted">
-          <span class="tag tone-muted">最简单</span>
-          <h4>uid</h4>
-          <p>直接给一批用户 ID，不查表。常用于「这批人再加上…」</p>
-          
-        </div><div class="ccard tone-amber">
-          <span class="tag tone-amber">按对象</span>
-          <h4>关系 relation</h4>
-          <p>和某个对象的关系。查各种业务明细表</p>
-          
-        </div><div class="ccard tone-red">
-          <span class="tag tone-red">兜底</span>
-          <h4>rawSql</h4>
-          <p>直接塞一段 SQL。逃生口，前五种表达不了时用</p>
-          
-        </div></div><h3 id="每种条件的最小例子真实入参-真实-sql">每种条件的最小例子（真实入参 → 真实 SQL）</h3>
-<p><strong>① 画像：查性别是 1、2、3 的人</strong></p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">入参：{ op: 'IN', name: 'futu_hk_account_gender_type', value: [1, 2, 3] }
-
-SQL ：select `uid` from `user_portrait`
-      where (`futu_hk_account_gender_type` in (1, 2, 3))
-</code></pre></div>
-<p><strong>② uid：直接给三个人</strong></p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">入参：['111', '222', '333']
-
-SQL ：select `uid` from (
-        select arrayJoin(array(UID_ENCODE('111'), UID_ENCODE('222'), UID_ENCODE('333'))) as `uid`
-      ) uidt group by `uid`
-</code></pre></div>
-<p><strong>③ 关系：领过 coupon001 或 coupon002 的人</strong></p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">入参：{ op: 'IN', table: 'niuniu_user_coupon_receive_last', objectIds: ['coupon001', 'coupon002'] }
-
-SQL ：select `uid` from `niuniu_user_coupon_receive_last`
-      where `object_id` in ('coupon001', 'coupon002')
-      group by `uid`          -- 一个人领两张券会出现两次，要去重
-</code></pre></div>
-<p><strong>④ 人群包：C_888 这个包的 v3 版本</strong></p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">入参：{ crowdId: 'C_888', crowdVersion: 'v3' }
-
-SQL ：select `uid` from `crowds`
-      where `crowd_id` = 'C_888' and `crowd_version` = 'v3'
-      group by `uid`
-</code></pre></div>
-<p><strong>⑤ 事件：最近 3 天点过某事件、且 fdid 为空、超过 3 次的人</strong></p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">入参：{ 事件: 'ClickSimStockMatchedEvent', 时间: '最近3天', 过滤: 'fdid is null', 次数: '&gt; 3' }
-
-SQL ：select `uid` as `uid`
-      from `user_portrait` as `t1`
-      left join (
-        select `$user_id`, count(1) as `cnt`
-        from `dws`.`event_biz_5`                    -- ← 哈希分片后的表名
-        where (`event_type` = 'ClickSimStockMatchedEvent'
-          and `event_time` &gt;= UNIX_TIMESTAMP(DS_DATETIME_ADD('day', -3, ...)) * 1000
-          and `event_time` &lt;  UNIX_TIMESTAMP(...) * 1000
-          and ((isNull(`fdid`))))
-        group by `$user_id`                          -- ← 按人算次数
-      ) as `t2` on `t1`.`uid` = `t2`.`$user_id`      -- ← 画像表 join 事件表
-      where ifNull(`t2`.`cnt`, 0) &gt; 3                -- ← 没做过的人 cnt 是 NULL，当 0 处理
-</code></pre></div>
-<div class="callout tone-violet">
-      <span class="ic">💡</span>
-      <div><p>事件条件的 SQL 明显比其他五种复杂，因为它要同时处理四件事：
-<strong>事件名 + 时间范围 + 属性过滤 + 次数阈值</strong>。
-这也解释了为什么 <code>entrepots/event.ts</code> 有 906 行，是第二名的两倍多。</p>
-</div>
-    </div><p><strong>⑥ rawSql：直接透传一段 SQL。</strong> 没有结构，原样拼进去。</p>
-<h2 id="所以这个库到底在做什么"><span class="num">05</span>所以这个库到底在做什么</h2>
-<p>到这里可以一句话说清了：</p>
-<div class="callout tone-blue quote">
-      <span class="ic">⚙</span>
-      <div><p>输入一棵<strong>条件树</strong>（业务语言），输出一段 <strong>SQL</strong>（数据库语言）。</p>
-</div>
-    </div><p>最小的例子只需要一行映射：</p>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>输入（业务语言）</th><th>输出（SQL）</th></tr></thead><tbody><tr><th>{ op: 'IN', name: 'gender_type', value: [1,2,3] }</th><td data-label="输出（SQL）"><code>select uid from user_portrait where gender_type in (1,2,3)</code></td></tr></tbody></table></div><p><strong>那为什么需要一个库？</strong> 因为真实的输入输出不是一对一，有三个矛盾：</p>
-<div class="cards" data-cols="3"><div class="ccard tone-blue">
-          <span class="tag tone-blue">翻译</span>
-          <h4>矛盾一 · 语义不同</h4>
-          <p>条件树是业务概念（加购、VIP），SQL 是数据库概念（表、列、join）。中间要有一层翻译</p>
-          
-        </div><div class="ccard tone-violet">
-          <span class="tag tone-violet">方言</span>
-          <h4>矛盾二 · 库有两种</h4>
-          <p>同一棵条件树，要能在 Doris 和 ByteHouse 上跑。两个库的函数名、表结构都不一样</p>
-          
-        </div><div class="ccard tone-amber">
-          <span class="tag tone-amber">组合</span>
-          <h4>矛盾三 · 条件要能任意组合</h4>
-          <p>AND / OR 要能无限嵌套。而每个条件查的是不同的表，没法拼进一个 WHERE</p>
-          
-        </div></div><p>矛盾一和二在后面的架构里很好认。<mark class="mk-blue">矛盾三最难，它导致了一个反直觉的设计</mark> —— 第 10 节专门讲。</p>
-<h2 id="组织一棵树-六种叶子-两层组合"><span class="num">06</span>组织：一棵树 + 六种叶子 + 两层组合</h2>
-<p>把概念层的东西组织起来看，整个系统就三个部分：</p>
-<div class="pipe"><div class="lane tone-blue">
-        <div class="lane-meta">
-          
-          <b>一棵树</b>
-          <small>用户提交进来的东西</small>
-        </div>
-        <div class="lane-body"><div class="pnode">
-        <b>条件树</b>
-        <small>logic + conditions</small>
-        <span class="tag tone-blue">可嵌套</span>
-      </div><div class="pnode">
-        <b>叶子 = 六种条件</b>
-        <small>portrait / event / crowd / uid / relation / rawSql</small>
-        
-      </div></div>
-      </div><div class="conn">
-      <span class="stem"></span>
-      <span class="pill">拆开<span class="note">树归树，叶子归叶子</span></span>
-      <span class="stem"></span><span class="head"></span>
-    </div><div class="lane tone-violet">
-        <div class="lane-meta">
-          
-          <b>两层组合</b>
-          <small>「组合」有两种，很容易混</small>
-        </div>
-        <div class="lane-body"><div class="pnode">
-        <b>第一层：条件之间</b>
-        <small>AND / OR，用 UNION ALL + GROUP BY + HAVING 实现</small>
-        <span class="tag tone-violet">集合运算</span>
-      </div><div class="pnode">
-        <b>第二层：二次加工</b>
-        <small>include 加一批人 / exclude 减一批人</small>
-        <span class="tag tone-violet">增删</span>
-      </div></div>
-      </div><div class="conn">
-      <span class="stem"></span>
-      <span class="pill">翻译<span class="note">交给具体的条件实现</span></span>
-      <span class="stem"></span><span class="head"></span>
-    </div><div class="lane tone-green">
-        <div class="lane-meta">
-          
-          <b>六种叶子各自的翻译器</b>
-          <small>每种条件知道自己该查哪张表、怎么写 WHERE</small>
-        </div>
-        <div class="lane-body"><div class="pnode">
-        <b>Portrait / Event / Relation</b>
-        
-        
-      </div><div class="pnode">
-        <b>Uid / Crowd / RawSql</b>
-        
-        
-      </div></div>
-      </div></div><div class="callout tone-amber">
-      <span class="ic">⚠</span>
-      <div><p><mark class="mk-blue">「两层组合」是最容易混的地方。</mark></p>
-<ul>
-<li><strong>第一层</strong>是「条件之间怎么连」：<code>加购 AND VIP</code> —— 这是<strong>集合运算</strong></li>
-<li><strong>第二层</strong>是「算完一批人之后再增删」：先算出「加购的人」，再 <code>include</code> 一批白名单、<code>exclude</code> 一批黑名单</li>
-</ul>
-<p>第 09 节会讲第二层为什么必须单独存在。</p>
-</div>
-    </div><hr>
-<h2 id="架构一条条件要走-8-层"><span class="num">07</span>架构：一条条件要走 8 层</h2>
-<p>概念讲完了。下面是代码怎么实现这套东西。</p>
+    </div><h2 id="join-只做三件事"><span class="num">02</span>JOIN 只做三件事</h2>
+<p>不管写哪种 JOIN，数据库干的都是同一套动作：</p>
 <div class="pipe"><div class="lane tone-muted">
         <div class="lane-meta">
-          <span class="ln">LAYER 01</span>
-          <b>调用方</b>
-          <small>业务代码 / 数据网关</small>
+          <span class="ln">STEP 01</span>
+          <b>配对</b>
+          <small>拿 ON 的条件去比对</small>
         </div>
         <div class="lane-body"><div class="pnode">
-        <b>业务服务</b>
-        <small>传入条件树 JSON</small>
-        
-      </div><div class="pnode">
-        <b>数据网关</b>
-        <small>只接受 UNION ALL，不接受 UNION</small>
-        
+        <b>逐行比对</b>
+        <small>users.id = orders.user_id</small>
+        <span class="tag tone-muted">ON</span>
       </div></div>
       </div><div class="conn">
       <span class="stem"></span>
-      <span class="pill">SqlContext.create(dbType, options)<span class="note">全库唯一入口</span></span>
-      <span class="stem"></span><span class="head"></span>
-    </div><div class="wgroup"><div class="wgroup-label">packages/crowd —— 用户域语义</div><div class="lane tone-blue">
-        <div class="lane-meta">
-          <span class="ln">LAYER 02</span>
-          <b>门面层</b>
-          <small>解析目标库，构造方言与模块</small>
-        </div>
-        <div class="lane-body"><div class="pnode">
-        <b>SqlContext</b>
-        <small>static create()</small>
-        <span class="tag tone-blue">唯一入口</span>
-      </div><div class="pnode">
-        <b>_resolveDialect</b>
-        <small>Bytehouse | Doris</small>
-        <span class="tag tone-blue">策略选择</span>
-      </div></div>
-      </div><div class="conn">
-      <span class="stem"></span>
-      <span class="pill">构造三个模块<span class="note">模块持有 dialect，不持有连接</span></span>
+      <span class="pill">配不上的行怎么办<span class="note">分歧从这里开始</span></span>
       <span class="stem"></span><span class="head"></span>
     </div><div class="lane tone-blue">
         <div class="lane-meta">
-          <span class="ln">LAYER 03</span>
-          <b>领域模块</b>
-          <small>面向具体业务场景的出口</small>
+          <span class="ln">STEP 02</span>
+          <b>留谁</b>
+          <small>由 JOIN 关键字决定</small>
         </div>
         <div class="lane-body"><div class="pnode">
-        <b>TagModule</b>
-        <small>list / count</small>
-        
-      </div><div class="pnode">
-        <b>CrowdModule</b>
-        <small>list / count / selectRaw</small>
-        
+        <b>INNER</b>
+        <small>两边都要有</small>
+        <span class="tag tone-blue">都丢</span>
+      </div><div class="pnode tone-green">
+        <b>LEFT</b>
+        <small>左表全留</small>
+        <span class="tag tone-green">保左</span>
       </div><div class="pnode tone-violet">
-        <b>SegmentModule</b>
-        <small>list / count</small>
-        
+        <b>RIGHT</b>
+        <small>右表全留</small>
+        <span class="tag tone-violet">保右</span>
+      </div><div class="pnode tone-amber">
+        <b>FULL</b>
+        <small>两边全留</small>
+        <span class="tag tone-amber">都留</span>
       </div></div>
       </div><div class="conn">
       <span class="stem"></span>
-      <span class="pill">组合与二次加工<span class="note">AND/OR · include/exclude</span></span>
+      <span class="pill">留下来的行拼成一行<span class="note">缺的那一侧补 NULL</span></span>
       <span class="stem"></span><span class="head"></span>
-    </div><div class="lane tone-violet">
+    </div><div class="lane tone-green">
         <div class="lane-meta">
-          <span class="ln">LAYER 04</span>
-          <b>组合层</b>
-          <small>把多个条件拼成一个用户集合</small>
+          <span class="ln">STEP 03</span>
+          <b>拼行</b>
+          <small>SELECT 取哪些字段</small>
         </div>
         <div class="lane-body"><div class="pnode">
-        <b>Combination</b>
-        <small>UNION ALL + GROUP BY + HAVING</small>
-        <span class="tag tone-violet">第一层</span>
-      </div><div class="pnode">
-        <b>Pkg</b>
-        <small>include: UNION ALL / exclude: NOT IN</small>
-        <span class="tag tone-violet">第二层</span>
+        <b>缺的一侧填 NULL</b>
+        <small>o.product → NULL</small>
+        <span class="tag tone-green">补空</span>
       </div></div>
-      </div><div class="conn">
-      <span class="stem"></span>
-      <span class="pill">工厂分发<span class="note">按 condition.type 选实现</span></span>
-      <span class="stem"></span><span class="head"></span>
-    </div><div class="lane tone-violet">
-        <div class="lane-meta">
-          <span class="ln">LAYER 05</span>
-          <b>入口分发</b>
-          <small>六种条件各自的 SQL 生成器</small>
-        </div>
-        <div class="lane-body"><div class="pnode">
-        <b>initEntrepotListSqlGen</b>
-        <small>返回 (condition, decode) =&gt; string</small>
-        
-      </div><div class="pnode">
-        <b>initEntrepotCountSqlGen</b>
-        <small>返回 (condition) =&gt; string</small>
-        
-      </div></div>
-      </div><div class="conn">
-      <span class="stem"></span>
-      <span class="pill">switch (condition.type)<span class="note">未知类型直接 throw</span></span>
-      <span class="stem"></span><span class="head"></span>
-    </div><div class="lane tone-violet">
-        <div class="lane-meta">
-          <span class="ln">LAYER 06</span>
-          <b>条件实现</b>
-          <small>六种「入口」，每种一个类</small>
-        </div>
-        <div class="lane-body"><div class="pnode">
-        <b>Portrait</b>
-        <small>user_portrait</small>
-        
-      </div><div class="pnode">
-        <b>Event</b>
-        <small>event_v2</small>
-        <span class="tag tone-violet">最复杂</span>
-      </div><div class="pnode">
-        <b>Relation</b>
-        <small>关系条件</small>
-        
-      </div><div class="pnode">
-        <b>Uid</b>
-        <small>直接给 uid 列表</small>
-        
-      </div><div class="pnode">
-        <b>Crowd</b>
-        <small>crowds</small>
-        
-      </div><div class="pnode">
-        <b>RawSql</b>
-        <small>裸 SQL 透传</small>
-        
-      </div></div>
-      </div><div class="conn">
-      <span class="stem"></span>
-      <span class="pill">DB.buildWhere / DB.raw<span class="note">只在这里才碰 knex</span></span>
-      <span class="stem"></span><span class="head"></span>
-    </div></div><div class="wgroup"><div class="wgroup-label">packages/core —— 与 DB 无关的通用层</div><div class="lane tone-green">
-        <div class="lane-meta">
-          <span class="ln">LAYER 07</span>
-          <b>通用 SQL 构造</b>
-          <small>与具体数据库无关的表达式树 → knex builder</small>
-        </div>
-        <div class="lane-body"><div class="pnode">
-        <b>Expression / Condition / Rule</b>
-        <small>递归 AST</small>
-        <span class="tag tone-green">核心抽象</span>
-      </div><div class="pnode">
-        <b>DB.buildWhere</b>
-        <small>递归展开成 andWhere / orWhere</small>
-        
-      </div><div class="pnode">
-        <b>DB.unionAllRaws</b>
-        <small>只支持 UNION ALL</small>
-        
-      </div><div class="pnode">
-        <b>DB.formatField</b>
-        <small>反引号包裹列名</small>
-        
-      </div><div class="pnode">
-        <b>encodeUid / decodeUid</b>
-        <small>UID_ENCODE / UID_DECODE</small>
-        
-      </div></div>
-      </div><div class="conn">
-      <span class="stem"></span>
-      <span class="pill">knex 编译<span class="note">mysql queryBuilder</span></span>
-      <span class="stem"></span><span class="head"></span>
-    </div></div><div class="lane tone-muted">
-        <div class="lane-meta">
-          <span class="ln">LAYER 08</span>
-          <b>输出</b>
-          <small>一段 SQL 字符串</small>
-        </div>
-        <div class="lane-body"><div class="pnode">
-        <b>SQL 字符串</b>
-        <small>交给网关执行</small>
-        
-      </div></div>
-      </div></div><div class="callout tone-green tinted">
-      <span class="ic">↗</span>
-      <div><p><strong>依赖方向是单向的</strong>：<code>crowd</code> 依赖 <code>core</code>，<code>core</code> 不知道 <code>crowd</code> 存在。
-core 里搜不到任何 <code>portrait</code> / <code>crowd</code> / <code>event_v2</code> 这类业务词 —— 这是两个包能拆开的前提。</p>
+      </div></div><p><mark class="mk-blue">第 1 步和第 3 步，六种 JOIN 完全相同。</mark> 你真正在选的只有第 2 步：配不上的行，丢还是留。</p>
+<div class="callout tone-amber">
+      <span class="ic">🔑</span>
+      <div><p>所以遇到一个没见过的 JOIN 名字，只问一句：<strong>「配不上的行留不留？」</strong>
+答案出来，行为就定了，不用背。</p>
 </div>
-    </div><h2 id="两个包的边界"><span class="num">08</span>两个包的边界</h2>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>维度</th><th>packages/core</th><th>packages/crowd</th></tr></thead><tbody><tr><th>定位</th><td data-label="packages/core">与数据库无关的通用 SQL 构造</td><td data-label="packages/crowd">用户域的圈人语义</td></tr><tr><th>知道业务吗</th><td data-label="packages/core"><span class="tag tone-green">完全不知道</span></td><td data-label="packages/crowd">知道，且有大量枚举</td></tr><tr><th>核心导出</th><td data-label="packages/core">DB · Expression · SqlDialect · encodeUid</td><td data-label="packages/crowd">SqlContext · 三个 Module · 六种 Entrepot</td></tr><tr><th>依赖</th><td data-label="packages/core">knex</td><td data-label="packages/crowd">core + knex + lodash + murmurhash</td></tr><tr><th>能单独用吗</th><td data-label="packages/core"><span class="tag tone-green">能</span></td><td data-label="packages/crowd"><span class="tag tone-amber">不能，必须带 core</span></td></tr></tbody></table></div><p>core 提供的通用能力：</p>
-<div class="cards" data-cols="3"><div class="ccard tone-green">
-          
-          <h4>Expression 表达式树</h4>
-          <p>Normal / RawValue / RawColumn / Raw 四种形态，可递归嵌套 Condition</p>
-          
-        </div><div class="ccard tone-green">
-          
-          <h4>DB.buildWhere</h4>
-          <p>把表达式树递归展开成 knex 的 andWhere / orWhere 调用</p>
-          
-        </div><div class="ccard tone-green">
-          
-          <h4>SqlDialect 接口</h4>
-          <p>14 个方法，覆盖类型转换、JSON 数组、时间范围、多条件选择</p>
-          
-        </div><div class="ccard tone-green">
-          
-          <h4>UID 编解码</h4>
-          <p>encodeUid / decodeUid 包成网关函数 UID_ENCODE / UID_DECODE</p>
-          
-        </div><div class="ccard tone-green">
-          
-          <h4>treeMinimizer</h4>
-          <p>递归压掉只有一个子节点的组合结构</p>
-          
-        </div><div class="ccard tone-green">
-          
-          <h4>时间表达式</h4>
-          <p>getTimeRules / generateLatestDaysRules 等，把「最近 7 天」转成 SQL 条件</p>
-          
-        </div></div><h2 id="六个核心角色"><span class="num">09</span>六个核心角色</h2>
-<div class="cards" data-cols="3"><div class="ccard tone-blue">
-          <span class="tag tone-blue">门面</span>
-          <h4>SqlContext</h4>
-          <p>唯一入口。解析 dbType、选方言、把方言注入三个模块</p>
-          
-        </div><div class="ccard tone-blue">
-          <span class="tag tone-blue">领域层</span>
-          <h4>Module</h4>
-          <p>对外出口，一个业务场景一个。持有 dialect 和组合器</p>
-          
-        </div><div class="ccard tone-violet">
-          <span class="tag tone-violet">组合</span>
-          <h4>Combination</h4>
-          <p>把多个条件的用户集合做 AND / OR / 自定义数量</p>
-          
-        </div><div class="ccard tone-violet">
-          <span class="tag tone-violet">条件</span>
-          <h4>Entrepot</h4>
-          <p>「条件入口」。六种，每种知道自己该查哪张表</p>
-          
-        </div><div class="ccard tone-amber">
-          <span class="tag tone-amber">策略</span>
-          <h4>GroupSqlDialect</h4>
-          <p>SqlDialect + getEventTable。所有数据库差异都在这里</p>
-          
-        </div><div class="ccard tone-green">
-          <span class="tag tone-green">基础设施</span>
-          <h4>DB</h4>
-          <p>core 里的静态工具，唯一直接碰 knex 的地方</p>
-          
-        </div></div><h2 id="最不直觉的设计and-or-不是-sql-的-and-or"><span class="num">10</span>最不直觉的设计：AND / OR 不是 SQL 的 AND / OR</h2>
-<p>看到「条件 A <strong>AND</strong> 条件 B」，直觉会写：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-sql">-- ❌ 直觉写法：对同一个用户，既要命中 A 又要命中 B
-SELECT uid FROM event_add_cart WHERE ... AND uid IN (SELECT uid FROM user_portrait WHERE ...)
-</code></pre></div>
-<p>但这里每个条件查的是<strong>不同的表、不同的时间窗口</strong>，没法拼成一个 WHERE。
-所以实际实现是<strong>集合运算</strong>：</p>
-<div class="callout tone-amber quote">
-      <span class="ic">⚠</span>
-      <div><p>AND / OR 被实现成「对 uid 做集合运算」，而不是 SQL 的 AND / OR。</p>
-</div>
-    </div><div class="demo" data-widget="combination-count">
+    </div><h2 id="亲手切一遍同一份数据五种-join"><span class="num">03</span>亲手切一遍：同一份数据，五种 JOIN</h2>
+<p>下面就是上面那两张表。点按钮换 JOIN 类型，盯着两个地方看：<strong>左边哪些行变灰，右边结果表多了或少了一行。</strong></p>
+<div class="demo" data-widget="join-lab">
       <div class="demo-head">
-        <span class="title">AND / OR 的真实执行过程</span>
-        <span class="status" data-status>点下面的按钮切换</span>
+        <span class="title">同一份数据，切五种 JOIN</span>
+        <span class="status" data-status>点上面的按钮切换</span>
         <span class="spacer"></span>
         
       </div>
-      <div class="demo-body custom"><div class="cc">
-  <div class="cc-sets">
-    <div class="cc-set tone-green"><b>条件 A</b><small>事件：加购</small><span class="uids">1, 2, 3</span></div>
-    <div class="cc-set tone-blue"><b>条件 B</b><small>画像：VIP</small><span class="uids">2, 3, 4</span></div>
-    <div class="cc-set tone-violet"><b>条件 C</b><small>人群包：近30天活跃</small><span class="uids">3, 4, 5</span></div>
+      <div class="demo-body custom"><div class="jl" data-jl>
+  <div class="jl-top">
+    <div class="seg" data-jl-modes></div>
   </div>
-
-  <div class="cc-arrow">↓ UNION ALL &nbsp;·&nbsp; 三个子查询的 uid 堆在一起，同一个 uid 出现多次</div>
-
-  <table class="cc-table">
-    <thead>
-      <tr><th>uid</th><th>命中条件</th><th>COUNT(uid)</th><th>OR</th><th>AND</th><th>≥ 2</th></tr>
-    </thead>
-    <tbody>
-      <tr data-cc-row data-count="1"><td>1</td><td class="src">A</td><td>1</td><td>✓</td><td>✗</td><td>✗</td></tr>
-      <tr data-cc-row data-count="2"><td>2</td><td class="src">A B</td><td>2</td><td>✓</td><td>✗</td><td>✓</td></tr>
-      <tr data-cc-row data-count="3"><td>3</td><td class="src">A B C</td><td>3</td><td>✓</td><td>✓</td><td>✓</td></tr>
-      <tr data-cc-row data-count="2"><td>4</td><td class="src">B C</td><td>2</td><td>✓</td><td>✗</td><td>✓</td></tr>
-      <tr data-cc-row data-count="1"><td>5</td><td class="src">C</td><td>1</td><td>✓</td><td>✗</td><td>✗</td></tr>
-    </tbody>
-  </table>
-
-  <div class="cc-modes">
-    <button data-cc-mode="or">OR</button>
-    <button data-cc-mode="and">AND</button>
-    <button data-cc-mode="n2">至少 2 个</button>
+  <p class="seg-rule tone-blue" data-jl-rule></p>
+  <div class="jl-cols">
+    <div>
+      <div class="jl-out-head">① 配对 · ON users.id = orders.user_id</div>
+      <div class="jl-stage" data-jl-stage>
+        <svg class="jl-lines" data-jl-lines aria-hidden="true"></svg>
+        <div class="jl-col" data-jl-col="users"></div>
+        <div class="jl-gap"></div>
+        <div class="jl-col" data-jl-col="orders"></div>
+      </div>
+    </div>
+    <div class="jl-out">
+      <div class="jl-out-head" data-jl-outhead>② 结果表</div>
+      <div data-jl-table></div>
+    </div>
   </div>
+  <pre class="seg-sql" data-jl-sql></pre>
+</div></div>
+    </div><p><mark class="mk-amber">整张页面里真正在动的只有两条记录：小刚（左表落单）和订单 104（右表落单）。</mark></p>
+<h3 id="谁是左表看-sql-里的书写位置">谁是「左表」？看 SQL 里的书写位置</h3>
+<p><code>LEFT JOIN</code> 保的是<strong>写在 <code>FROM</code> 后面那张表</strong>：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-sql">FROM users            -- 左表：它的行全部保留
+LEFT JOIN orders      -- 右表：配不上就补 NULL
+  ON users.id = orders.user_id
+</code></pre></div>
+<p><mark class="mk-amber">不是看表名，不是看关联字段，只看它写在 <code>JOIN</code> 关键字的哪一边。</mark></p>
+<p>换个写法就换了主角 —— 下面两句等价，但一句保用户、一句保订单：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-sql">FROM users  RIGHT JOIN orders ON users.id = orders.user_id;
+FROM orders LEFT  JOIN users  ON orders.user_id = users.id;
+</code></pre></div>
+<h2 id="交互之外的三个坑"><span class="num">04</span>交互之外的三个坑</h2>
+<h3 id="left-join-的招牌用法找从来没有过的行">LEFT JOIN 的招牌用法：找「从来没有过」的行</h3>
+<p>「哪些用户从没下过单？」答案不在订单表里，在 <mark class="mk-blue">LEFT JOIN 补出来的那个 NULL 里</mark>：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-sql">SELECT users.id, users.name
+FROM users
+LEFT JOIN orders ON users.id = orders.user_id
+WHERE orders.id IS NULL;
+</code></pre></div>
+<p>结果只有小刚一行。注意 <code>WHERE</code> 里判的是 <code>orders.id IS NULL</code> —— 意思是「这次 JOIN 没给它配上任何订单」。</p>
+<h3 id="right-join-为什么基本没人写">RIGHT JOIN 为什么基本没人写</h3>
+<p>因为它总能翻个面写成 <code>LEFT JOIN</code>。而同一个团队里两种方向混着用，读代码的人每次都要重新确认「保的到底是哪边」。</p>
+<h3 id="full-outer-join-在-mysql-里得自己拼">FULL OUTER JOIN 在 MySQL 里得自己拼</h3>
+<p>MySQL 直接报语法错误。<mark class="mk-blue">用 LEFT JOIN 和 RIGHT JOIN 的结果做 UNION</mark>：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-sql">SELECT users.name, orders.product
+FROM users LEFT JOIN orders ON users.id = orders.user_id
 
-  <div class="cc-out">HAVING 过滤后命中 <b data-cc-count>5</b> 个 uid</div>
-  <pre data-cc-sql></pre>
-</div>
-</div>
-    </div><p>一句话总结这套机制：</p>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>逻辑</th><th>SQL 怎么写</th><th>结果</th></tr></thead><tbody><tr><th>OR</th><td data-label="SQL 怎么写">GROUP BY uid，不加 HAVING</td><td data-label="结果">任一条件命中即保留</td></tr><tr><th>AND</th><td data-label="SQL 怎么写">GROUP BY uid，HAVING count(uid) = N</td><td data-label="结果">N 个子查询里都出现才保留</td></tr><tr><th>自定义数量</th><td data-label="SQL 怎么写">GROUP BY uid，HAVING count(uid) &gt;= 2</td><td data-label="结果">至少 N 个条件命中</td></tr></tbody></table></div><p>对应代码只有一行：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">// packages/crowd/src/combi/combination.ts
-if (trees.logic === Logic.And) {
-    query.having(havingCount(UID), Op.Eq, sqls.length);
-}
+UNION
+
+SELECT users.name, orders.product
+FROM users RIGHT JOIN orders ON users.id = orders.user_id;
 </code></pre></div>
-<div class="callout tone-violet">
-      <span class="ic">💡</span>
-      <div><p>还有一个细节：<code>DB.unionAllRaws</code> 的注释写着 <strong>「网关只支持 union all，不支持 union」</strong>。
-所以这里用 UNION ALL + GROUP BY 去重，而不是 UNION —— 这不只是性能选择，是下游能力约束。</p>
-</div>
-    </div><h2 id="一条条件是怎么变成-sql-的"><span class="num">11</span>一条条件是怎么变成 SQL 的</h2>
-<div class="jcard">
-          <div class="jcard-head">
-            <span class="tag tone-muted">① 入参</span>
-            <span class="name">BuildInfoTree</span>
-            <span class="spacer"></span>
-            <span class="tag tone-muted">四种形态</span>
-          </div>
-          
-          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>{
-  main:     { type: 'event', condition: {...} },        // 主体条件
-  include:  [ { entrepot: {...}, type: 'include' } ],   // 二次包含
-  exclude:  [ { entrepot: {...}, type: 'exclude' } ]    // 二次排除
-}
-</pre></div>
-          <p class="jnote">也可能是裸的 <code>EntrepotStruct</code>，或者是 <code>{ logic, conditions }</code> 组合树。
-三种形态都要能处理。</p>
-        </div><div class="conn">
-      <span class="stem"></span>
-      <span class="pill">SqlContext.create<span class="note">先定方言</span></span>
-      <span class="stem"></span><span class="head"></span>
-    </div><div class="jcard">
-          <div class="jcard-head">
-            <span class="tag tone-blue">② 门面</span>
-            <span class="name">SqlContext.create(dbType, options)</span>
-            <span class="spacer"></span>
-            
-          </div>
-          
-          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>Doris     → new DorisGroupDialect(eventTableMap)   // 不传 eventTableMap 直接 throw
-Bytehouse → new BytehouseGroupDialect()
-</pre></div>
-          <p class="jnote">方言在这里被选定，然后注入三个模块。<strong>之后再也不会变</strong>。</p>
-        </div><div class="conn">
-      <span class="stem"></span>
-      <span class="pill">module.list(tree, decode)<span class="note">按业务场景选模块</span></span>
-      <span class="stem"></span><span class="head"></span>
-    </div><div class="jcard">
-          <div class="jcard-head">
-            <span class="tag tone-blue">③ 模块</span>
-            <span class="name">CrowdModule.list</span>
-            <span class="spacer"></span>
-            
-          </div>
-          
-          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>const _main   = getMainStruct(tree);               // 取主体
-const _ieInfo = checkAndGetIncluOrExcluRule(tree); // 取 include/exclude
-</pre></div>
-          <p class="jnote">把「一棵树」拆成「主体 + 二次加工规则」两部分，分别处理。</p>
-        </div><div class="conn">
-      <span class="stem"></span>
-      <span class="pill">initMajorListSqlGen<span class="note">进组合层</span></span>
-      <span class="stem"></span><span class="head"></span>
-    </div><div class="jcard">
-          <div class="jcard-head">
-            <span class="tag tone-violet">④ 组合</span>
-            <span class="name">Combination.combineSql</span>
-            <span class="spacer"></span>
-            <span class="tag tone-violet">核心</span>
-          </div>
-          
-          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>conditions.map(c =&gt; entrepotListGen(c, false))   // 每个条件一段子 SQL
-  → DB.unionAllRaws(sqls)                        // UNION ALL 拼起来
-  → GROUP BY uid                                 // 按用户归并
-  → HAVING count(uid) = sqls.length              // AND 时才有
-</pre></div>
-          <p class="jnote">递归处理嵌套的 <code>{ logic, conditions }</code>，内层不解码，<strong>只有最外层 decode</strong>。</p>
-        </div><div class="conn">
-      <span class="stem"></span>
-      <span class="pill">Pkg.list<span class="note">二次加工</span></span>
-      <span class="stem"></span><span class="head"></span>
-    </div><div class="jcard">
-          <div class="jcard-head">
-            <span class="tag tone-violet">⑤ 二次加工</span>
-            <span class="name">Pkg.list(majorSql, rules, decode)</span>
-            <span class="spacer"></span>
-            
-          </div>
-          
-          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>include → UNION ALL(major, minor) + GROUP BY uid   // 并集，顺带去重
-exclude → major WHERE uid NOT IN (minor)           // 差集
-</pre></div>
-          <p class="jnote">多条规则时按 <code>options.order</code> 排序，<strong>order 越小权重越大</strong>，
-然后从 main 开始依次 reduce。</p>
-        </div><div class="conn">
-      <span class="stem"></span>
-      <span class="pill">decodeUid<span class="note">出口统一包一层</span></span>
-      <span class="stem"></span><span class="head"></span>
-    </div><div class="jcard">
-          <div class="jcard-head">
-            <span class="tag tone-green">⑥ 出口</span>
-            <span class="name">decodeUid</span>
-            <span class="spacer"></span>
-            
-          </div>
-          
-          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>SELECT UID_DECODE(`uid`) as `uid` FROM ( ... ) ct1
-</pre></div>
-          <p class="jnote">所有模块对外暴露的列名都是 <code>uid</code>，加密与否由 decode 参数决定。
-<code>noDecodedSqlGen()</code> 可以反向把这一层剥掉。</p>
-        </div><h3 id="为什么二次加工必须单独存在">为什么「二次加工」必须单独存在</h3>
-<p>第 06 节提到的第二层组合。举一个具体场景：</p>
-<blockquote>
-<p>「先圈出最近 7 天加购的人，<strong>但要把内部测试账号剔掉<strong>，</strong>再加上运营给的白名单</strong>。」</p>
-</blockquote>
-<p>这是三步，不是一步：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">① 主体条件 → 算出「最近 7 天加购的人」
-② include  → 并上白名单（UNION ALL + GROUP BY 去重）
-③ exclude  → 减掉测试账号（NOT IN）
-</code></pre></div>
-<p><code>exclude</code> 之所以能写成 <code>NOT IN</code>，是因为它只需要<strong>排除</strong>，不需要保留谁出现过几次 —— 这和第一层的 AND（必须计数）是不同的运算。</p>
-<div class="callout tone-amber tinted">
-      <span class="ic">⚠</span>
-      <div><p>这就是为什么 <code>Combination</code> 和 <code>Pkg</code> 是两个类而不是一个：
-<strong>第一层做集合运算（要计数），第二层做集合增删（不计数）。</strong></p>
-</div>
-    </div><h2 id="方言策略同一套条件两种数据库"><span class="num">12</span>方言策略：同一套条件，两种数据库</h2>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>维度</th><th>ByteHouse</th><th>Doris</th></tr></thead><tbody><tr><th>事件表怎么定位</th><td data-label="ByteHouse">按事件名 murmurhash 分片</td><td data-label="Doris">调用方传入 eventTableMap</td></tr><tr><th>事件表名</th><td data-label="ByteHouse"><code>dws.event_biz_N</code> / <code>dws.event_monitoring_N</code></td><td data-label="Doris">由调用方决定</td></tr><tr><th>分片规则</th><td data-label="ByteHouse"><code>murmurhash.v3(eventName, 0) % 8 + 1</code> → 8 张表</td><td data-label="Doris"><span class="tag tone-muted">无分片</span></td></tr><tr><th>构造要求</th><td data-label="ByteHouse"><span class="tag tone-green">无参即可</span></td><td data-label="Doris"><span class="tag tone-red">必须传 eventTableMap，否则 throw</span></td></tr><tr><th>默认值</th><td data-label="ByteHouse"><span class="tag tone-green">是（各构造函数 fallback）</span></td><td data-label="Doris"><span class="tag tone-amber">否，必须显式传</span></td></tr></tbody></table></div><p><code>GroupSqlDialect</code> 只比 core 的 <code>SqlDialect</code> 多一个方法：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">// packages/crowd/src/dialect/interface.ts
-export interface GroupSqlDialect extends SqlDialect {
-    getEventTable(params: EventTableParams): string;
-}
-</code></pre></div>
-<p>而 <code>SqlDialect</code> 本身有 14 个方法，全是<strong>「同一种语义在不同库怎么写」</strong>：</p>
-<div class="cards" data-cols="4"><div class="ccard tone-amber">
-          
-          <h4>mapPropertyAccess</h4>
-          <p>map 取值：mapElement(p,'k') vs p['k']</p>
-          
-        </div><div class="ccard tone-muted">
-          
-          <h4>castToInt / castToFloat</h4>
-          <p>类型转换</p>
-          
-        </div><div class="ccard tone-muted">
-          
-          <h4>regexpMatchExpr</h4>
-          <p>正则匹配表达式</p>
-          
-        </div><div class="ccard tone-muted">
-          
-          <h4>jsonArrayContainsRule</h4>
-          <p>JSON 数组包含 / 相等</p>
-          
-        </div><div class="ccard tone-muted">
-          
-          <h4>getRelativeTimestampRules</h4>
-          <p>把「最近 7 天」转成 SQL</p>
-          
-        </div><div class="ccard tone-muted">
-          
-          <h4>getAbsoluteTimestampRules</h4>
-          <p>绝对时间范围</p>
-          
-        </div><div class="ccard tone-muted">
-          
-          <h4>multiIf</h4>
-          <p>多条件选择</p>
-          
-        </div><div class="ccard tone-muted">
-          
-          <h4>arrayExpandSql</h4>
-          <p>UNION ALL 展开数组</p>
-          
-        </div></div><div class="callout tone-amber tinted">
-      <span class="ic">⚠</span>
-      <div><p><strong>每个条件类都写着 <code>dialect ?? new BytehouseDialect()</code>。</strong>
-这是向后兼容的默认值 —— 意味着<mark class="mk-amber">忘了传 dialect 不会报错，会静默按 ByteHouse 生成 SQL</mark>。
-Doris 场景下这会生成语法能跑但结果不对的 SQL，是个真实的坑。</p>
-</div>
-    </div><h2 id="扩展点"><span class="num">13</span>扩展点</h2>
-<div class="cards" data-cols="2"><div class="ccard tone-green">
-          
-          <h4>加一种数据库</h4>
-          <p>实现 SqlDialect + GroupSqlDialect 两个接口，在 SqlContext._resolveDialect 加一个 case。core 完全不用改</p>
-          
-        </div><div class="ccard tone-blue">
-          
-          <h4>加一种条件入口</h4>
-          <p>在 Entrepots 枚举加值 → 写一个类实现 list/count → 在 factory 的两个 switch 里注册</p>
-          
-        </div><div class="ccard tone-blue">
-          
-          <h4>加一个业务模块</h4>
-          <p>写一个 Module 类持有 dialect，在 SqlContext 构造函数里加一行</p>
-          
-        </div><div class="ccard tone-amber">
-          
-          <h4>加一个通用 SQL 能力</h4>
-          <p>加在 core。注意：<strong>不能出现任何业务词</strong>，否则两个包的边界就烂了</p>
-          
-        </div></div><div class="callout tone-green">
+<p>PostgreSQL / SQL Server / Oracle 一般直接支持 <code>FULL OUTER JOIN</code>，不用这么绕。</p>
+<div class="callout tone-green">
       <span class="ic">✅</span>
-      <div><p>这套设计的可扩展性来自一个约束：<mark class="mk-blue">core 里不许出现业务词汇</mark>。
-只要守住这条，加数据库不用碰 crowd，加业务条件不用碰 core。</p>
+      <div><p>这里必须用 <code>UNION</code> 而不是 <code>UNION ALL</code> —— 能配上的 3 行在两半里都会出现，
+<code>UNION</code> 会去重，<code>UNION ALL</code> 会让它们重复一遍。</p>
 </div>
-    </div><h2 id="自测"><span class="num">14</span>自测</h2>
+    </div><h2 id="两个特例cross-join-和-self-join"><span class="num">05</span>两个特例：CROSS JOIN 和 SELF JOIN</h2>
+<h3 id="cross-join不是关联是乘法">CROSS JOIN：不是关联，是乘法</h3>
+<p><code>CROSS JOIN</code> 没有 <code>ON</code>，<mark class="mk-blue">它把「配对」这件事直接取消了</mark> —— 左表每一行和右表每一行各组合一次：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">3 个用户  ×  4 个订单  =  12 行
+</code></pre></div>
+<p>在上面的交互里点一下 <code>CROSS JOIN</code>，连线会炸成一张网。那不是「关联变多了」，而是<strong>根本不再判断谁配得上谁</strong>。</p>
+<p><mark class="mk-amber">两张大表一交叉就是灾难：10 万 × 10 万 = 100 亿行。</mark></p>
+<p>它真正有用的场景是<strong>造组合骨架</strong>：日期 × 商品 × 地区先铺满，再把实际数据挂上去。</p>
+<h3 id="self-join不是关键字是同一张表看两次">SELF JOIN：不是关键字，是同一张表看两次</h3>
+<p><code>SELF JOIN</code> 不是 SQL 关键字，而是「一张表和它自己 JOIN」这个套路。</p>
+<p>员工表里，<code>manager_id</code> 指向的也是员工表的 <code>id</code>：</p>
+<table>
+<thead>
+<tr>
+<th style="text-align:right">id</th>
+<th>name</th>
+<th style="text-align:right">manager_id</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:right">1</td>
+<td>张总</td>
+<td style="text-align:right"><code>NULL</code></td>
+</tr>
+<tr>
+<td style="text-align:right">2</td>
+<td>小李</td>
+<td style="text-align:right">1</td>
+</tr>
+<tr>
+<td style="text-align:right">3</td>
+<td>小王</td>
+<td style="text-align:right">1</td>
+</tr>
+<tr>
+<td style="text-align:right">4</td>
+<td>小赵</td>
+<td style="text-align:right">2</td>
+</tr>
+</tbody>
+</table>
+<p>查「员工 + 他的直属领导」，要让同一张表 <mark class="mk-blue">当成两个角色各出现一次</mark>：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-sql">SELECT e.name AS employee_name, m.name AS manager_name
+FROM employees AS e
+LEFT JOIN employees AS m
+  ON e.manager_id = m.id;
+</code></pre></div>
+<table>
+<thead>
+<tr>
+<th>employee_name</th>
+<th>manager_name</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>张总</td>
+<td><code>NULL</code></td>
+</tr>
+<tr>
+<td>小李</td>
+<td>张总</td>
+</tr>
+<tr>
+<td>小王</td>
+<td>张总</td>
+</tr>
+<tr>
+<td>小赵</td>
+<td>小李</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li><code>e</code> 是<strong>员工视角</strong>：拿自己的 <code>manager_id</code> 去找人</li>
+<li><code>m</code> 是<strong>领导视角</strong>：拿自己的 <code>id</code> 去被找</li>
+</ul>
+<p><mark class="mk-amber">不加别名，<code>employees</code> 出现两次时数据库不知道你在说哪一个。</mark></p>
+<p>张总没有领导，所以这里用 <code>LEFT JOIN</code> 而不是 <code>INNER JOIN</code> —— 用 <code>INNER JOIN</code> 张总会从结果里消失。</p>
+<p>分类树、评论回复、组织架构，都是同一个套路。</p>
+<h2 id="最容易踩的坑条件写在-on-还是-where"><span class="num">06</span>最容易踩的坑：条件写在 ON 还是 WHERE</h2>
+<p>需求：<strong>列出所有用户，以及他们已支付的订单。</strong></p>
+<p>同一个 <code>o.status = 'PAID'</code>，写在 <code>ON</code> 里和写在 <code>WHERE</code> 里，结果不一样。切一下看：</p>
+<div class="demo" data-widget="on-vs-where">
+      <div class="demo-head">
+        <span class="title">过滤条件写在 ON 还是 WHERE</span>
+        <span class="status" data-status>点按钮切换</span>
+        <span class="spacer"></span>
+        
+      </div>
+      <div class="demo-body custom"><div class="ow" data-ow>
+  <div class="ow-top">
+    <div class="seg" data-ow-modes></div>
+  </div>
+  <p class="seg-rule tone-green" data-ow-rule></p>
+  <div data-ow-matrix></div>
+  <pre class="seg-sql" data-ow-sql></pre>
+</div></div>
+    </div><p>原因只有一句话：</p>
+<ul>
+<li><code>ON</code> 决定<strong>两张表怎么配对</strong> —— 条件不满足只是「配不上」，<code>LEFT JOIN</code> 照样保留左表的行</li>
+<li><code>WHERE</code> 在<strong>JOIN 完成之后</strong>才执行 —— 补出来的 <code>NULL</code> 不满足 <code>= 'PAID'</code>，整行被删掉</li>
+</ul>
+<p>所以 <code>WHERE o.status = 'PAID'</code> 等于 <mark class="mk-blue">悄悄把 <code>LEFT JOIN</code> 退化成了 <code>INNER JOIN</code></mark>。</p>
+<div class="callout tone-amber tinted">
+      <span class="ic">🕳️</span>
+      <div><p>判断标准很简单：这个条件是在<strong>挑配对对象<strong>，还是在</strong>挑结果行</strong>？
+挑配对对象 → 写 <code>ON</code>；挑结果行 → 写 <code>WHERE</code>。
+过滤主表自己的字段时两者都行（主表字段永远不会是 NULL），过滤关联表字段时只有 <code>ON</code> 安全。</p>
+</div>
+    </div><ul class="check warn"><li>写了 LEFT JOIN，又在对关联表的字段加条件 —— 先问一句「这会不会把没关联上的行也筛掉」</li><li>用 LEFT JOIN + WHERE 关联表字段 来「过滤」，实际得到的是 INNER JOIN 的结果</li><li>需要保留主表全部数据时，把关联表条件挪进 ON</li></ul><h2 id="速查表"><span class="num">07</span>速查表</h2>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>JOIN 类型</th><th>保留什么</th><th>上面的数据会得到几行</th><th>常见用途</th></tr></thead><tbody><tr><th>INNER JOIN</th><td data-label="保留什么">只保留两边都配得上的行</td><td data-label="上面的数据会得到几行"><span class="tag tone-blue">3 行</span></td><td data-label="常见用途">查「有订单的用户」</td></tr><tr><th>LEFT JOIN</th><td data-label="保留什么">左表全留，右表配不上补 NULL</td><td data-label="上面的数据会得到几行"><span class="tag tone-green">4 行</span></td><td data-label="常见用途">查全部用户及其订单；找没有订单的用户</td></tr><tr><th>RIGHT JOIN</th><td data-label="保留什么">右表全留，左表配不上补 NULL</td><td data-label="上面的数据会得到几行"><span class="tag tone-violet">4 行</span></td><td data-label="常见用途">少见，通常翻面改写成 LEFT JOIN</td></tr><tr><th>FULL OUTER JOIN</th><td data-label="保留什么">两边都全留；MySQL 需用 UNION 拼</td><td data-label="上面的数据会得到几行"><span class="tag tone-amber">5 行</span></td><td data-label="常见用途">对账、找两边对不上的数据</td></tr><tr><th>CROSS JOIN</th><td data-label="保留什么">不做配对，左表每行 × 右表每行</td><td data-label="上面的数据会得到几行"><span class="tag tone-red">12 行</span></td><td data-label="常见用途">生成「日期 × 商品 × 地区」这类组合骨架</td></tr><tr><th>SELF JOIN</th><td data-label="保留什么">同一张表当成两个角色各出现一次</td><td data-label="上面的数据会得到几行">看数据</td><td data-label="常见用途">员工—领导、分类树、评论回复</td></tr></tbody></table></div><div class="summary">
+      <h3 id="一句话总结">一句话总结</h3>
+      <p><code>JOIN</code> 永远是「先配对、再决定留谁、最后缺的补 NULL」三步，
+六种 JOIN 只在第二步不同：<mark class="mk-blue">配不上的行，丢还是留</mark>。
+而 <code>ON</code> 是配对规则、<code>WHERE</code> 是结果过滤 —— 这一条比记住六个名字重要得多。</p>
+
+    </div><h2 id="自测">自测</h2>
 <div class="quiz"><details>
-        <summary>画像和事件最本质的区别是什么？</summary>
-        <div class="a"><p>画像存的是<strong>当前状态</strong>，会被覆盖 —— 只回答「他现在是什么样」。
-事件存的是<strong>行为流水</strong>，只追加 —— 能回答「他做过什么、几次」。
-所以「最近 7 天加购了 3 次」只能查事件表，画像表里没有这个信息。</p>
+        <summary>「LEFT JOIN 和 RIGHT JOIN 的区别」能不能不看 SQL 就回答？</summary>
+        <div class="a"><p>不能。<mark class="mk-blue">左和右指的是 SQL 里 <code>JOIN</code> 关键字两边的书写位置</mark>，不是表名，也不是关联字段。
+所以 <code>FROM users RIGHT JOIN orders</code> 和 <code>FROM orders LEFT JOIN users</code> 是同一个结果。</p>
 </div>
       </details><details>
-        <summary>为什么事件条件的 SQL 里要 <code>left join</code> 画像表？</summary>
-        <div class="a"><p>因为两边用户列的名字不一样：画像表叫 <code>uid</code>，事件表叫 <code>$user_id</code>。
-而且事件条件是「按人算次数」——子查询里 <code>group by $user_id</code> 得到每个人的次数，
-再 join 回画像表才能输出统一的 <code>uid</code> 列。
-用 <code>left join</code> + <code>ifNull(cnt, 0)</code> 是为了让「一次都没做过」的人也能被算成 0 次。</p>
+        <summary>为什么 <code>LEFT JOIN ... WHERE o.status = 'PAID'</code> 会丢掉从没下单的用户？</summary>
+        <div class="a"><p>因为 <code>WHERE</code> 在 JOIN 完成之后才执行。没下单的用户在 <code>o.status</code> 上是 <code>NULL</code>，
+<code>NULL = 'PAID'</code> 不成立，整行被过滤掉 —— 效果上退化成 <code>INNER JOIN</code>。
+要让这些用户留下，条件得写进 <code>ON</code>。</p>
 </div>
       </details><details>
-        <summary>条件树里的 AND，为什么不能直接写成 SQL 的 <code>WHERE A AND B</code>？</summary>
-        <div class="a"><p>因为每个条件查的是<strong>不同的表、不同的时间窗口</strong>，没法拼进同一个 WHERE。
-实际实现是集合运算：<code>UNION ALL</code> 把各条件的 uid 堆在一起，
-<code>GROUP BY uid</code> 计数，<code>HAVING count(uid) = N</code> 表示「N 个条件都命中」。</p>
+        <summary>MySQL 里怎么做出 FULL OUTER JOIN 的效果？为什么用 UNION 而不是 UNION ALL？</summary>
+        <div class="a"><p>把 <code>LEFT JOIN</code> 和 <code>RIGHT JOIN</code> 的结果 <code>UNION</code> 起来。
+能配上的行在两半里都会出现，<code>UNION</code> 会去重，<code>UNION ALL</code> 会让它们重复一遍。</p>
 </div>
       </details><details>
-        <summary><code>Combination.combineSql</code> 里 OR 和 AND 的差别体现在哪一行？</summary>
-        <div class="a"><p>只差在要不要加 HAVING。
-AND 会执行 <code>query.having(havingCount(UID), Op.Eq, sqls.length)</code>；
-OR 不加 HAVING，<code>GROUP BY uid</code> 后任一子查询命中就保留。</p>
-</div>
-      </details><details>
-        <summary>为什么 <code>Combination</code> 和 <code>Pkg</code> 是两个类？</summary>
-        <div class="a"><p>因为它们做的是两种运算：
-<code>Combination</code> 做<strong>集合运算</strong>（AND 要数 count，靠 HAVING）；
-<code>Pkg</code> 做<strong>集合增删</strong>（include 是并集，exclude 是 NOT IN，不需要计数）。
-混在一起会让「计数」这个语义变得含糊。</p>
-</div>
-      </details><details>
-        <summary>为什么用 UNION ALL 而不是 UNION？</summary>
-        <div class="a"><p>两个原因：一是 <code>DB.unionAllRaws</code> 的注释写明<strong>网关只支持 union all</strong>；
-二是这里本来就要 <code>GROUP BY uid</code> 去重，UNION 的去重是多余的。</p>
-</div>
-      </details><details>
-        <summary>忘传 dialect 会发生什么？</summary>
-        <div class="a"><p><strong>不会报错。</strong> 每个条件类的构造函数都写着 <code>dialect ?? new BytehouseDialect()</code>，
-会静默按 ByteHouse 生成 SQL。Doris 场景下会生成语法能跑但结果不对的 SQL。</p>
-</div>
-      </details><details>
-        <summary>core 和 crowd 的边界靠什么维持？</summary>
-        <div class="a"><p>靠一条约束：<strong>core 里不出现任何业务词汇</strong>。
-core 不知道 portrait / crowd / event_v2 这些概念，
-所以加数据库不用改 crowd，加业务条件不用改 core。</p>
+        <summary>什么情况下 CROSS JOIN 才是有用的？</summary>
+        <div class="a"><p>需要「全组合骨架」的时候，比如日期 × 商品 × 地区先铺满，再把实际销量挂上去。
+它不是关联查询，是笛卡尔积；两张大表交叉会直接把结果集炸掉。</p>
 </div>
       </details></div>
 
     <footer>
-      <span>sql_builder_v2 架构</span>
+      <span>SQL JOIN 六种连接：一行数据到底去哪了</span>
       <span>最后更新 2026-09-24 · 单文件可离线打开</span>
     </footer>
   </main>
