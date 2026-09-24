@@ -40,6 +40,9 @@ export function blocksPlugin(md) {
   const esc = (s) => md.utils.escapeHtml(String(s ?? ''));
   const inline = (s) => md.renderInline(String(s ?? '').trim());
 
+  // 行内语义标记：==关键结论== / !!坑!! / ++推荐++
+  inlineMarksPlugin(md);
+
   /* ===== 积木 1 · lane-stack ===== */
   function conn(spec) {
     if (!spec) return '';
@@ -327,9 +330,20 @@ export function blocksPlugin(md) {
           .split('\n')
           .map((l) => `  | ${l}`)
           .join('\n');
+
+        // 最高频的坑单独给解法，不要只丢 YAML 的原始报错
+        const raw = String(e.message);
+        let hint = '';
+        if (/reserved character|Plain value cannot start/i.test(raw)) {
+          hint =
+            '\n  💡 裸标量不能以反引号等特殊字符开头。给这个值加双引号：\n' +
+            '     - q: "`xxx` 是什么？"   ← 外面包一层 " " 就行\n';
+        }
+
         throw new Error(
           `${at} 积木 \`${lang}\` 解析失败\n` +
-            `  ${String(e.message).split('\n').join('\n  ')}\n` +
+            `  ${raw.split('\n').join('\n  ')}\n` +
+            hint +
             `  --- 原始内容 ---\n${body}`,
         );
       }
@@ -358,6 +372,59 @@ export function blocksPlugin(md) {
   /** 供校验脚本使用的元信息 */
   md.blockNames = Object.keys(RENDERERS);
   md.codeLangs = CODE_LANGS;
+}
+
+/* ---------- 行内强调标记 ----------
+   问题：全文都是 `**加粗**` 时，等于没有重点 —— 术语、结论、坑长得一模一样。
+
+   所以给三个语义各一个颜色，对应已有的 tone 系统：
+     ==文字==  关键结论 / 最该记住的一句   → 蓝
+     !!文字!!  坑 / 反直觉 / 注意           → 橙
+     ++文字++  正确做法 / 推荐              → 绿
+
+   `**加粗**` 降级为「句子内的重音」，不再承担强调职责。
+------------------------------------------------ */
+const INLINE_MARKS = [
+  { marker: '==', cls: 'mk-blue' },
+  { marker: '!!', cls: 'mk-amber' },
+  { marker: '++', cls: 'mk-green' },
+];
+
+function inlineMarksPlugin(md) {
+  const isSpace = (ch) => ch === undefined || /\s/.test(ch);
+
+  function rule(state, silent) {
+    const src = state.src;
+    const start = state.pos;
+
+    for (const { marker, cls } of INLINE_MARKS) {
+      if (src.slice(start, start + 2) !== marker) continue;
+
+      const openPos = start + 2;
+      const end = src.indexOf(marker, openPos);
+
+      // 内容非空、不以空白开头/结尾 —— 否则会把 `a == b` 误判成标记
+      if (end < 0 || end >= state.posMax) continue;
+      if (end === openPos) continue; // `====` 这种空内容
+      if (isSpace(src[openPos]) || isSpace(src[end - 1])) continue;
+      // 前面紧贴同类字符（如 ====）不算
+      if (src[start - 1] === marker[0]) continue;
+
+      if (!silent) {
+        const openTok = state.push('mark_open', 'mark', 1);
+        openTok.attrSet('class', cls);
+        // 内部再走一遍行内解析 —— 否则 ==含 `代码` 的重点== 里的反引号会原样显示
+        state.md.inline.parse(src.slice(openPos, end), state.md, state.env, state.tokens);
+        state.push('mark_close', 'mark', -1);
+      }
+      state.pos = end + 2;
+      return true;
+    }
+    return false;
+  }
+
+  // 放在 emphasis 之前，但要在 code 之后 —— 反引号里的 == 不应被解析
+  md.inline.ruler.before('emphasis', 'inline_marks', rule);
 }
 
 /* ---------- 正文后处理：给 h2/h3 加锚点并收集目录 ---------- */
