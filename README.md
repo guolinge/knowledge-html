@@ -103,6 +103,13 @@ npm run build:standalone   # 额外产出 dist/<slug>.html（单文件，可直�
    └─ extend.md          积木不够用时怎么加一个
 ```
 
+两条最容易被忽略的原则，写在 SKILL.md 开头：
+
+> **积木是词汇，不是语法。** 画图是为了让用户理解内容、思想、设计意图，
+> 怎么好呈现就怎么来。表达不顺手时：组合 → 给积木加字段 → 新建积木 →
+> **`raw` 直接写 HTML**（这条合法，不是投降）。
+> **「合规但没讲清楚」比不画图更糟。**
+
 根目录的 [`AGENTS.md`](AGENTS.md) 是给通用 agent 的入口（Codex / Cursor / Claude Code 等会自动读）。
 
 ### 装到全局（日常用法）
@@ -118,8 +125,15 @@ ln -s ~/works/codes/knowledge-html/.agents/skills/knowledge-html \
 
 > **【图解】** 粘贴内容 + 说出你卡在哪
 
-agent 会自动找到这个项目、建笔记、选积木、`npm run check`、
+agent 会自动找到这个项目、建笔记、选表达方式、`npm run check`、
 `npm run view` 把浏览器打开。
+
+看完想改就直接说，改完推送即可：
+
+```bash
+cd ~/works/codes/knowledge-html
+git add -A && git commit -m "..." && git push
+```
 
 > Claude Code 读 `.claude/skills/`。要让它也认，在 `.pi/settings.json` 或对应配置里
 > 加上 `.agents/skills` 路径即可。
