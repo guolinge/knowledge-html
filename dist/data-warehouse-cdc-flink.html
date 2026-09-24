@@ -1,0 +1,1523 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>数据仓库 vs 数据库 · CDC vs Flink</title>
+<meta name="description" content="两组最常被混在一起的概念：一个是「业务怎么跑」，一个是「数据怎么分析」；一个是「变化怎么被发现」，一个是「变化怎么被加工」。" />
+<style>
+/* ============================================================
+   theme.css — 设计 token 与页面骨架
+   ------------------------------------------------------------
+   规则：所有颜色 / 间距 / 字体只在这里定义。
+   积木（blocks.css）不允许写死色值，只能引用 var(--*)。
+   换主题 = 改这个文件，全站跟着变。
+   ============================================================ */
+
+:root {
+  /* —— 表面 —— */
+  --bg: #f7f8fa;
+  --surface: #ffffff;
+  --surface-2: #f2f4f7;
+
+  /* —— 文字 —— */
+  --text: #171a1f;
+  --text-2: #4a5260;
+  --muted: #737d8c;
+
+  /* —— 线条 —— */
+  --border: #e3e6eb;
+  --border-strong: #d2d7de;
+
+  /* —— 语义色 —— */
+  --blue: #2563eb;    --blue-soft: #eaf1ff;
+  --violet: #7c3aed;  --violet-soft: #f3ecff;
+  --green: #0f9d63;   --green-soft: #e6f7ef;
+  --amber: #b45309;   --amber-soft: #fdf1e0;
+  --red: #d13b3b;     --red-soft: #fdecec;
+
+  /* —— 形状 —— */
+  --shadow: 0 1px 2px rgba(16,24,40,.05), 0 8px 24px -12px rgba(16,24,40,.18);
+  --radius: 14px;
+
+  /* —— 字体 —— */
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+          "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+          "Liberation Mono", monospace;
+
+  /* —— 版心 —— */
+  --shell: 1240px;
+  --toc-w: 218px;
+  --gutter: 24px;
+}
+
+html[data-theme="dark"] {
+  --bg: #0d1017;
+  --surface: #151a22;
+  --surface-2: #1b2129;
+  --text: #e7edf4;
+  --text-2: #b6c0cd;
+  --muted: #8b95a3;
+  --border: #242c37;
+  --border-strong: #313b48;
+  --blue: #6ba4ff;    --blue-soft: #16233a;
+  --violet: #b28cff;  --violet-soft: #241b3a;
+  --green: #4ecf96;   --green-soft: #12291f;
+  --amber: #e8b061;   --amber-soft: #2e2415;
+  --red: #f08a8a;     --red-soft: #2e1a1a;
+  --shadow: 0 1px 2px rgba(0,0,0,.4), 0 10px 30px -16px rgba(0,0,0,.7);
+}
+
+/* ---------- reset ---------- */
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; scroll-padding-top: 84px; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.75 var(--sans);
+  -webkit-font-smoothing: antialiased;
+  transition: background .25s, color .25s;
+}
+img { max-width: 100%; }
+
+/* ---------- 阅读进度 ---------- */
+#progress {
+  position: fixed; top: 0; left: 0; height: 2px; width: 0%;
+  background: linear-gradient(90deg, var(--blue), var(--violet));
+  z-index: 60; transition: width .1s linear;
+}
+
+/* ---------- 顶栏 ---------- */
+.topbar {
+  position: sticky; top: 0; z-index: 50;
+  backdrop-filter: saturate(180%) blur(12px);
+  background: color-mix(in srgb, var(--bg) 82%, transparent);
+  border-bottom: 1px solid var(--border);
+}
+.topbar-inner {
+  max-width: var(--shell); margin: 0 auto; padding: 12px var(--gutter);
+  display: flex; align-items: center; gap: 14px;
+}
+.brand {
+  display: flex; align-items: center; gap: 9px;
+  font-weight: 650; letter-spacing: -.01em;
+  color: var(--text); text-decoration: none;
+}
+.brand .dot {
+  width: 20px; height: 20px; border-radius: 6px; flex: none;
+  background: linear-gradient(135deg, var(--blue), var(--violet));
+}
+.topbar .spacer { flex: 1; }
+.topbar nav { display: flex; gap: 4px; }
+.topbar nav a {
+  color: var(--text-2); text-decoration: none; font-size: 13.5px;
+  padding: 6px 11px; border-radius: 8px;
+}
+.topbar nav a:hover { background: var(--surface-2); color: var(--text); }
+.icon-btn {
+  width: 34px; height: 34px; display: grid; place-items: center;
+  border: 1px solid var(--border); background: var(--surface);
+  border-radius: 9px; cursor: pointer; color: var(--text-2);
+}
+.icon-btn:hover { border-color: var(--border-strong); color: var(--text); }
+@media (max-width: 860px) { .topbar nav { display: none; } }
+
+/* ---------- 版式 ---------- */
+.shell {
+  max-width: var(--shell); margin: 0 auto;
+  padding: 40px var(--gutter) 100px;
+  display: grid; grid-template-columns: var(--toc-w) minmax(0, 1fr);
+  gap: 44px; align-items: start;
+}
+@media (max-width: 1000px) {
+  .shell { grid-template-columns: 1fr; gap: 24px; }
+  .toc { display: none; }
+}
+
+.toc { position: sticky; top: 76px; font-size: 13.5px; }
+.toc-title {
+  font-size: 11px; letter-spacing: .1em; text-transform: uppercase;
+  color: var(--muted); font-weight: 650; margin: 0 0 10px 12px;
+}
+.toc a {
+  display: block; color: var(--muted); text-decoration: none;
+  padding: 6px 12px; border-left: 2px solid transparent;
+  border-radius: 0 7px 7px 0; transition: .15s;
+}
+.toc a:hover { color: var(--text); background: var(--surface-2); }
+.toc a.active {
+  color: var(--blue); border-left-color: var(--blue);
+  background: var(--blue-soft); font-weight: 550;
+}
+.toc a.sub { padding-left: 24px; font-size: 12.5px; }
+
+/* ---------- hero ---------- */
+.hero { margin-bottom: 46px; }
+.eyebrow {
+  display: inline-flex; align-items: center; gap: 7px;
+  font-size: 12px; font-weight: 600;
+  color: var(--violet); background: var(--violet-soft);
+  padding: 5px 12px; border-radius: 100px; margin-bottom: 16px;
+}
+h1 {
+  font-size: clamp(28px, 4vw, 40px); line-height: 1.25;
+  letter-spacing: -.025em; margin: 0 0 16px; font-weight: 700;
+}
+h1 .grad {
+  background: linear-gradient(100deg, var(--blue), var(--violet));
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+}
+.lede { font-size: 17px; color: var(--text-2); max-width: 66ch; margin: 0 0 26px; }
+
+/* ---------- 正文 ---------- */
+section { margin-bottom: 62px; scroll-margin-top: 84px; }
+h2 {
+  font-size: 25px; letter-spacing: -.02em; font-weight: 680;
+  margin: 0 0 8px; display: flex; align-items: baseline; gap: 12px;
+}
+h2 .num {
+  font: 600 13px/1 var(--mono); color: var(--blue);
+  background: var(--blue-soft); border-radius: 7px; padding: 5px 9px;
+  flex: none; position: relative; top: -2px;
+}
+h3 {
+  font-size: 17.5px; font-weight: 650; letter-spacing: -.01em;
+  margin: 34px 0 12px; scroll-margin-top: 84px;
+}
+h4 { font-size: 14.5px; font-weight: 650; margin: 22px 0 8px; }
+p { margin: 0 0 14px; color: var(--text-2); }
+strong, b { color: var(--text); font-weight: 640; }
+a { color: var(--blue); }
+code:not(pre code) {
+  font-family: var(--mono); font-size: .87em; padding: .15em .42em;
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: 5px; color: var(--text); white-space: nowrap;
+}
+ul.plain, ol.plain { margin: 0 0 16px; padding-left: 20px; color: var(--text-2); }
+ul.plain li, ol.plain li { margin-bottom: 6px; }
+
+/* ---------- 通用卡片 / 栅格 ---------- */
+.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+.grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+@media (max-width: 780px) { .grid-2, .grid-3 { grid-template-columns: 1fr; } }
+.card {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 22px; box-shadow: var(--shadow);
+}
+.card h4 { margin-top: 0; display: flex; align-items: center; gap: 9px; font-size: 15.5px; }
+
+/* ---------- 代码 ---------- */
+.code-wrap { position: relative; margin: 0 0 18px; }
+pre {
+  margin: 0; background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: 11px; padding: 16px 18px; overflow-x: auto;
+  font-family: var(--mono); font-size: 13px; line-height: 1.65;
+  color: var(--text); tab-size: 2;
+}
+pre .c { color: var(--muted); font-style: italic; }
+pre .k { color: var(--violet); }
+pre .s { color: var(--green); }
+pre .n { color: var(--blue); }
+.copy {
+  position: absolute; top: 9px; right: 9px;
+  font: 600 11px/1 var(--sans); padding: 6px 9px; border-radius: 7px;
+  background: var(--surface); border: 1px solid var(--border);
+  color: var(--muted); cursor: pointer; opacity: 0; transition: .15s;
+}
+.code-wrap:hover .copy, .copy:focus-visible { opacity: 1; }
+.copy:hover { color: var(--text); border-color: var(--border-strong); }
+
+/* ---------- 页脚 ---------- */
+footer {
+  border-top: 1px solid var(--border); padding: 26px 0 0;
+  color: var(--muted); font-size: 13px;
+  display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+}
+
+/* ---------- 溯源头（每页必带） ---------- */
+.provenance {
+  display: flex; flex-wrap: wrap; gap: 8px 18px;
+  border: 1px solid var(--border); border-radius: 12px;
+  background: var(--surface); padding: 12px 16px; margin: 0 0 30px;
+  font-size: 12.5px; color: var(--muted);
+}
+.provenance b { color: var(--text-2); font-weight: 600; }
+.provenance a { color: var(--blue); }
+.draft-banner {
+  display: flex; align-items: center; gap: 10px;
+  border: 1px solid color-mix(in srgb, var(--amber) 45%, var(--border));
+  background: var(--amber-soft); color: var(--amber);
+  border-radius: 10px; padding: 10px 16px; margin: 0 0 26px;
+  font-size: 13px; font-weight: 550;
+}
+
+/* ---------- 打印 ---------- */
+@media print {
+  .topbar, .toc, #progress, .copy, .demo-head .btn { display: none !important; }
+  body { background: #fff; }
+  .shell { grid-template-columns: 1fr; padding: 0; }
+  section { break-inside: avoid; }
+  .provenance, .draft-banner { break-inside: avoid; }
+}
+
+</style>
+  <style>
+/* ============================================================
+   blocks.css — 积木原语
+   ------------------------------------------------------------
+   每个积木只消费 theme.css 的 token，不写死色值。
+   统一用 tone 系统着色：<div class="tone-blue"> → --tone / --tone-soft
+   ============================================================ */
+
+/* ---------- tone 系统 ---------- */
+.tone-muted  { --tone: var(--muted);  --tone-soft: var(--surface-2); }
+.tone-blue   { --tone: var(--blue);   --tone-soft: var(--blue-soft); }
+.tone-violet { --tone: var(--violet); --tone-soft: var(--violet-soft); }
+.tone-green  { --tone: var(--green);  --tone-soft: var(--green-soft); }
+.tone-amber  { --tone: var(--amber);  --tone-soft: var(--amber-soft); }
+.tone-red    { --tone: var(--red);    --tone-soft: var(--red-soft); }
+
+.tag {
+  font: 600 11px/1 var(--mono); padding: 4px 8px; border-radius: 6px;
+  letter-spacing: .02em; white-space: nowrap;
+  background: var(--tone-soft, var(--surface-2));
+  color: var(--tone, var(--muted));
+}
+.pnode .tag, .jcard-head .tag { align-self: flex-start; }
+
+/* ============================================================
+   积木 1 · lane-stack —— 分层 / 泳道流程
+   ============================================================ */
+.pipe {
+  border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--surface); box-shadow: var(--shadow);
+  padding: 16px; margin: 0 0 20px;
+}
+.lane {
+  display: grid; grid-template-columns: 164px minmax(0, 1fr); gap: 16px;
+  align-items: start;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--tone, var(--border-strong));
+  border-radius: 12px; background: var(--surface-2); padding: 13px 15px;
+  transition: border-color .2s;
+}
+.lane:hover { border-color: color-mix(in srgb, var(--tone, var(--border-strong)) 50%, var(--border)); }
+.lane-meta { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.lane-meta .ln {
+  font: 700 10.5px/1.4 var(--mono); letter-spacing: .08em;
+  color: var(--tone, var(--muted));
+}
+.lane-meta b { font-size: 13.5px; font-weight: 640; line-height: 1.4; }
+.lane-meta small { font-size: 11.5px; color: var(--muted); line-height: 1.55; }
+.lane-body { display: flex; flex-wrap: wrap; gap: 9px; align-items: stretch; }
+
+.pnode {
+  flex: 1 1 128px; min-width: 110px;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 10px; padding: 9px 11px;
+  display: flex; flex-direction: column; gap: 2px;
+  transition: transform .18s, border-color .18s, box-shadow .18s;
+}
+.pnode:hover {
+  transform: translateY(-1px);
+  border-color: var(--border-strong); box-shadow: var(--shadow);
+}
+.pnode b { font-size: 12.8px; font-weight: 620; line-height: 1.4; }
+.pnode small {
+  font-family: var(--mono); font-size: 10.8px; color: var(--muted);
+  line-height: 1.5; word-break: break-word;
+}
+.pnode .tag { margin-top: 4px; }
+/* 节点自带 tone 时给一道彩色左缘，用来在层内区分状态 */
+.pnode.tone-muted,
+.pnode.tone-blue,
+.pnode.tone-violet,
+.pnode.tone-green,
+.pnode.tone-amber,
+.pnode.tone-red { border-left: 3px solid var(--tone); }
+
+/* 连接条 */
+.conn {
+  --conn: color-mix(in srgb, var(--blue) 52%, var(--border-strong));
+  display: flex; flex-direction: column; align-items: center;
+  justify-content: center; padding: 4px 0; position: relative;
+}
+.conn::before {
+  content: ""; position: absolute; top: 0; bottom: 0; left: 50%; width: 2px;
+  transform: translateX(-50%); border-radius: 2px; opacity: .55;
+  background: repeating-linear-gradient(to bottom, var(--conn) 0 4px, transparent 4px 8px);
+}
+.conn .stem { width: 2px; height: 12px; background: var(--conn); border-radius: 2px; flex: none; position: relative; }
+.conn .head {
+  width: 0; height: 0; flex: none; position: relative;
+  border-left: 5px solid transparent; border-right: 5px solid transparent;
+  border-top: 8px solid var(--conn);
+}
+.conn .pill {
+  position: relative; display: inline-flex; align-items: baseline;
+  gap: 8px; flex-wrap: wrap; justify-content: center;
+  max-width: min(100%, 620px); margin: 3px 0;
+  font-size: 12px; font-weight: 620; color: var(--text); text-align: center;
+  background: var(--surface);
+  border: 1px solid color-mix(in srgb, var(--blue) 30%, var(--border));
+  border-radius: 100px; padding: 5px 14px;
+  box-shadow: 0 0 0 4px var(--surface);
+}
+.conn .pill .en { font-family: var(--mono); font-size: 10.5px; color: var(--blue); letter-spacing: .02em; }
+.conn .pill .note { font-weight: 400; font-size: 11.5px; color: var(--muted); }
+
+/* 数仓内部分组 */
+.wgroup {
+  border: 1px dashed color-mix(in srgb, var(--violet) 45%, var(--border));
+  border-radius: 14px; padding: 12px;
+  background: color-mix(in srgb, var(--violet-soft) 50%, transparent);
+}
+.wgroup .lane { background: var(--surface); }
+.wgroup .conn .pill { box-shadow: 0 0 0 4px var(--violet-soft); }
+.wgroup-label {
+  font-size: 11.5px; font-weight: 650; letter-spacing: .04em;
+  color: var(--violet); margin: 0 0 10px 5px;
+}
+
+/* ============================================================
+   积木 2 · journey —— 每一步的形态快照
+   ============================================================ */
+.jcard {
+  border: 1px solid var(--border); border-radius: 12px;
+  background: var(--surface); padding: 14px 16px; box-shadow: var(--shadow);
+}
+.jcard pre { margin: 0; }
+.jcard-head { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; margin-bottom: 11px; }
+.jcard-head .name { font-family: var(--mono); font-size: 12.8px; font-weight: 650; color: var(--text); }
+.jcard-head .spacer { flex: 1; }
+.rec { display: flex; flex-wrap: wrap; gap: 6px; }
+.rec > div {
+  display: inline-flex; align-items: baseline; gap: 6px;
+  border: 1px solid var(--border); background: var(--surface-2);
+  border-radius: 8px; padding: 5px 9px;
+  font-family: var(--mono); font-size: 11.6px; line-height: 1.5;
+}
+.rec b { color: var(--muted); font-weight: 600; }
+.rec span { color: var(--text); }
+.rec em { font-style: normal; font-weight: 400; font-size: 10.8px; color: var(--tone, var(--amber)); }
+.rec > div.warn { border-color: color-mix(in srgb, var(--amber) 40%, var(--border)); background: var(--amber-soft); }
+.rec > div.ok   { border-color: color-mix(in srgb, var(--green) 35%, var(--border)); background: var(--green-soft); }
+.jnote {
+  margin: 11px 0 0; font-size: 12.8px; color: var(--text-2);
+  padding-left: 22px; position: relative; line-height: 1.65;
+}
+.jnote::before { content: "→"; position: absolute; left: 4px; top: 0; color: var(--blue); font-weight: 700; }
+.jnote.bad::before { content: "!"; color: var(--amber); }
+.jnote strong { color: var(--text); }
+
+/* ============================================================
+   积木 3 · compare —— 多维对比表
+   ============================================================ */
+.compare-wrap {
+  border: 1px solid var(--border); border-radius: var(--radius);
+  overflow: hidden; box-shadow: var(--shadow); background: var(--surface);
+  margin: 0 0 20px;
+}
+.compare { width: 100%; border-collapse: collapse; font-size: 14.5px; }
+.compare thead th {
+  text-align: left; font-size: 12px; letter-spacing: .04em; text-transform: uppercase;
+  color: var(--muted); font-weight: 650; padding: 13px 18px;
+  background: var(--surface-2); border-bottom: 1px solid var(--border);
+}
+.compare tbody th {
+  text-align: left; font-weight: 600; color: var(--text); white-space: nowrap;
+  padding: 13px 18px; vertical-align: top;
+}
+.compare tbody td { padding: 13px 18px; color: var(--text-2); vertical-align: top; }
+.compare tbody tr + tr th, .compare tbody tr + tr td { border-top: 1px solid var(--border); }
+.compare tbody tr:hover td, .compare tbody tr:hover th {
+  background: color-mix(in srgb, var(--blue-soft) 45%, transparent);
+}
+@media (max-width: 700px) {
+  .compare thead { display: none; }
+  .compare tbody tr { display: block; padding: 6px 0; border-top: 1px solid var(--border); }
+  .compare tbody tr:first-child { border-top: 0; }
+  .compare tbody th {
+    display: block; padding: 12px 16px 4px; font-size: 12px;
+    letter-spacing: .04em; text-transform: uppercase; color: var(--muted);
+  }
+  .compare tbody td {
+    display: grid; grid-template-columns: 74px 1fr; gap: 12px;
+    padding: 7px 16px; border-top: 0 !important;
+  }
+  .compare tbody td::before {
+    content: attr(data-label); font-size: 12px; font-weight: 650; color: var(--text);
+  }
+}
+
+/* ============================================================
+   积木 4 · callout —— 提示 / 陷阱 / 引用
+   ============================================================ */
+.callout {
+  display: flex; gap: 14px; padding: 16px 18px; border-radius: 12px;
+  border: 1px solid var(--border); border-left: 3px solid var(--tone, var(--blue));
+  background: var(--surface); margin: 0 0 18px; font-size: 14.5px;
+}
+.callout.tinted { background: color-mix(in srgb, var(--tone-soft, var(--blue-soft)) 55%, var(--surface)); }
+.callout .ic { flex: none; font-size: 15px; line-height: 1.6; }
+.callout p:last-child { margin-bottom: 0; }
+.callout.quote { font-size: 15.5px; font-weight: 550; color: var(--text); }
+
+/* ============================================================
+   积木 5 · checklist —— 正例 / 反例 / 警告
+   ============================================================ */
+ul.check { list-style: none; margin: 0 0 16px; padding: 0; }
+ul.check li { position: relative; padding-left: 26px; margin-bottom: 8px; color: var(--text-2); }
+ul.check li::before {
+  content: "✓"; position: absolute; left: 0; top: 4px; width: 18px; height: 18px;
+  display: grid; place-items: center; font-size: 11px; font-weight: 700;
+  border-radius: 50%; background: var(--green-soft); color: var(--green);
+}
+ul.check.cross li::before { content: "✕"; background: var(--red-soft); color: var(--red); }
+ul.check.warn  li::before { content: "!"; background: var(--amber-soft); color: var(--amber); }
+
+/* ============================================================
+   积木 6 · quiz —— 自测（防「收藏代替理解」）
+   ============================================================ */
+.quiz { display: flex; flex-direction: column; gap: 10px; margin: 0 0 20px; }
+.quiz details {
+  border: 1px solid var(--border); border-radius: 12px;
+  background: var(--surface); box-shadow: var(--shadow); overflow: hidden;
+}
+.quiz summary {
+  cursor: pointer; padding: 14px 18px 14px 44px; position: relative;
+  font-weight: 600; font-size: 14.5px; color: var(--text); list-style: none;
+}
+.quiz summary::-webkit-details-marker { display: none; }
+.quiz summary::before {
+  content: "?"; position: absolute; left: 16px; top: 50%; transform: translateY(-50%);
+  width: 20px; height: 20px; display: grid; place-items: center;
+  font: 700 11px/1 var(--mono); border-radius: 50%;
+  background: var(--violet-soft); color: var(--violet);
+}
+.quiz summary:hover { background: var(--surface-2); }
+.quiz details[open] summary { border-bottom: 1px solid var(--border); }
+.quiz details[open] summary::before { content: "!"; background: var(--green-soft); color: var(--green); }
+.quiz .a { padding: 14px 18px; font-size: 14.5px; color: var(--text-2); }
+.quiz .a p:last-child { margin-bottom: 0; }
+
+/* ============================================================
+   积木 7 · demo —— 可交互模拟的宿主
+   ============================================================ */
+.demo {
+  border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--surface); box-shadow: var(--shadow);
+  overflow: hidden; margin: 0 0 20px;
+}
+.demo-head {
+  display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+  padding: 14px 18px; border-bottom: 1px solid var(--border);
+  background: var(--surface-2);
+}
+.demo-head .title { font-weight: 640; font-size: 14.5px; }
+.demo-head .status { font-size: 12.5px; color: var(--muted); font-family: var(--mono); }
+.demo-head .spacer { flex: 1; }
+.btn {
+  font: 600 13px/1 var(--sans); padding: 9px 15px; border-radius: 9px; cursor: pointer;
+  border: 1px solid var(--blue); background: var(--blue); color: #fff; transition: .15s;
+}
+.btn:hover { filter: brightness(1.08); }
+.btn.ghost { background: transparent; border-color: var(--border-strong); color: var(--text-2); }
+.btn.ghost:hover { background: var(--surface); color: var(--text); filter: none; }
+.btn:disabled { opacity: .5; cursor: not-allowed; }
+
+.demo-body { display: grid; grid-template-columns: 1fr 1fr; }
+@media (max-width: 780px) { .demo-body { grid-template-columns: 1fr; } }
+.pane { padding: 16px 18px; min-width: 0; }
+.pane + .pane { border-left: 1px solid var(--border); }
+@media (max-width: 780px) { .pane + .pane { border-left: 0; border-top: 1px solid var(--border); } }
+.pane-head {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin-bottom: 12px; font-size: 13.5px; font-weight: 640;
+}
+.pane-head .sub { font-weight: 400; font-size: 12px; color: var(--muted); }
+.log {
+  min-height: 236px; max-height: 300px; overflow-y: auto;
+  font-family: var(--mono); font-size: 12.2px; line-height: 1.6;
+  border: 1px solid var(--border); border-radius: 10px;
+  background: var(--surface-2); padding: 10px;
+  display: flex; flex-direction: column; gap: 6px;
+}
+.log:empty::after {
+  content: "点击「开始模拟」查看效果"; color: var(--muted);
+  font-family: var(--sans); font-size: 12.5px; margin: auto;
+}
+.line {
+  display: flex; gap: 8px; align-items: baseline;
+  padding: 6px 8px; border-radius: 7px; background: var(--surface);
+  border: 1px solid var(--border); animation: slide .28s ease-out both;
+}
+@keyframes slide { from { opacity: 0; transform: translateY(-5px); } }
+.line .badge {
+  flex: none; font-size: 10px; font-weight: 700;
+  padding: 2px 6px; border-radius: 5px; letter-spacing: .03em;
+  background: var(--tone-soft, var(--surface-2)); color: var(--tone, var(--muted));
+}
+.line .time { flex: none; color: var(--muted); font-size: 11px; }
+.line .txt { flex: 1; min-width: 0; color: var(--text-2); }
+.line.warn { border-color: color-mix(in srgb, var(--amber) 40%, var(--border)); }
+.line.warn .txt { color: var(--amber); }
+.pane-foot { margin-top: 12px; font-size: 12.5px; display: flex; flex-wrap: wrap; gap: 6px; }
+.pane-foot .tag { font-family: var(--sans); font-weight: 600; }
+
+/* ============================================================
+   积木 8 · summary —— 收尾总结卡
+   ============================================================ */
+.summary {
+  border-radius: var(--radius); padding: 26px 28px; color: #fff;
+  background: linear-gradient(120deg, #1e40af, #6d28d9);
+  box-shadow: var(--shadow); margin: 0 0 20px;
+}
+html[data-theme="dark"] .summary { background: linear-gradient(120deg, #1a2f5c, #3d1f70); }
+.summary h3 { margin: 0 0 14px; color: #fff; font-size: 16px; }
+.summary p { color: rgba(255,255,255,.9); margin: 0 0 12px; font-size: 15.5px; }
+.summary p:last-child { margin-bottom: 0; }
+.summary code {
+  background: rgba(255,255,255,.16); border-color: rgba(255,255,255,.22); color: #fff;
+}
+
+/* ============================================================
+   响应式：lane-stack / journey
+   ============================================================ */
+@media (max-width: 900px) { .lane { grid-template-columns: 132px minmax(0, 1fr); gap: 12px; } }
+@media (max-width: 720px) {
+  .pipe { padding: 11px; }
+  .lane { grid-template-columns: 1fr; gap: 9px; }
+  .lane-meta { flex-direction: row; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+  .lane-meta small { flex: 1 1 100%; }
+}
+
+</style>
+</head>
+<body>
+<div id="progress"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <a class="brand" href="../../index.html"><span class="dot"></span>知识笔记</a>
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="toc" id="toc">
+      <p class="toc-title">目录</p>
+      <a href="../../index.html" class="sub">← 全部笔记</a>
+      <a href="#数据库服务在线业务">数据库：服务「在线业务」</a>
+      <a href="#数据仓库服务数据分析和报表">数据仓库：服务「数据分析和报表」</a>
+      <a href="#完整链路从业务库到看板" class="sub">完整链路：从业务库到看板</a>
+      <a href="#细节一行订单数据是怎么被搬走的" class="sub">细节：一行订单数据是怎么被搬走的</a>
+      <a href="#抽取方式怎么选" class="sub">抽取方式怎么选</a>
+      <a href="#最核心的区别">最核心的区别</a>
+      <a href="#数据怎么流动">数据怎么流动</a>
+      <a href="#一个容易混淆的点">一个容易混淆的点</a>
+      <a href="#cdc-是-flink-的一个功能吗">CDC 是 Flink 的一个功能吗？</a>
+      <a href="#flink-和-cdc-的关系" class="sub">Flink 和 CDC 的关系</a>
+      <a href="#那么什么是-flink-cdc">那么什么是 Flink CDC？</a>
+      <a href="#为什么不直接定时查数据库而要-cdc">为什么不直接定时查数据库，而要 CDC？</a>
+      <a href="#前端类比">前端类比</a>
+      <a href="#一句话总结">一句话总结</a>
+      <a href="#记住这条链路" class="sub">记住这条链路</a>
+      <a href="#自测">自测</a>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow">● 数据工程 · 概念速览</span>
+      <h1>数据仓库 vs 数据库 · CDC vs Flink</h1>
+      <p class="lede">两组最常被混在一起的概念：一个是「业务怎么跑」，一个是「数据怎么分析」；一个是「变化怎么被发现」，一个是「变化怎么被加工」。</p>
+    </div>
+
+    <div class="draft-banner">
+    <span>⚠</span>
+    <span>本页状态为 <b>draft</b>：内容尚未人工核对，引用前请自行验证。</span>
+  </div>
+    <div class="provenance"><span><b>生成</b> 2026-09-24</span><span><b>模型</b> deepseek-v4.1-flash</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">数据仓库</span> <span class="tag tone-muted">CDC</span> <span class="tag tone-muted">Flink</span> <span class="tag tone-muted">ETL</span></span></div>
+
+<h2 id="数据库服务在线业务"><span class="num">01</span>数据库：服务「在线业务」</h2>
+<p>你平时接触的 MySQL、PostgreSQL、MongoDB 等，通常说的是 <strong>数据库</strong>。</p>
+<p>它主要负责保存并支撑<strong>正在发生</strong>的业务操作：</p>
+<div class="pipe"><div class="lane tone-blue">
+        <div class="lane-meta">
+          
+          <b>数据库在支撑什么</b>
+          <small>每一件都要求「立刻写对、立刻查到」</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>用户注册</b>
+        
+        
+      </div><div class="pnode">
+        <b>用户登录</b>
+        
+        
+      </div><div class="pnode">
+        <b>商品查询</b>
+        
+        
+      </div><div class="pnode">
+        <b>提交订单</b>
+        
+        
+      </div><div class="pnode">
+        <b>支付成功</b>
+        
+        
+      </div><div class="pnode">
+        <b>修改收货地址</b>
+        
+        
+      </div></div>
+      </div></div><p>例如电商数据库里有这样的表：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-sql">users
+products
+orders
+order_items
+</code></pre></div>
+<p>当用户下单时，后端会往 <code>orders</code> 表插入一条订单；用户查看订单时，又从这个表查询数据。</p>
+<div class="callout tone-violet quote">
+      <span class="ic">🎯</span>
+      <div><p>数据库的核心目标是：<strong>保证每一笔业务数据正确地写入、修改和查询。</strong></p>
+</div>
+    </div><p>它通常更关注单个用户、单笔订单这类「小范围、高频、低延迟」的读写操作。</p>
+<h2 id="数据仓库服务数据分析和报表"><span class="num">02</span>数据仓库：服务「数据分析和报表」</h2>
+<p><strong>数据仓库（Data Warehouse，简称数仓）</strong>，是把来自多个业务系统的数据收集、清洗、统一后，
+专门用于分析、报表和商业决策的数据系统。</p>
+<p>例如老板或运营会问：</p>
+<div class="pipe"><div class="lane tone-green">
+        <div class="lane-meta">
+          
+          <b>分析类问题</b>
+          <small>共同点：要扫大量历史数据</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>今天总销售额多少？</b>
+        
+        
+      </div><div class="pnode">
+        <b>哪个城市订单最多？</b>
+        
+        
+      </div><div class="pnode">
+        <b>各渠道下单转化率？</b>
+        
+        
+      </div><div class="pnode">
+        <b>近 30 天复购率？</b>
+        
+        
+      </div><div class="pnode">
+        <b>哪个商品退款率最高？</b>
+        
+        
+      </div></div>
+      </div></div><p>这类问题需要<strong>扫描、统计大量历史数据</strong>，不适合直接频繁地在业务数据库上执行。</p>
+<h3 id="完整链路从业务库到看板">完整链路：从业务库到看板</h3>
+<p>整条链路可以拆成 <strong>7 层</strong>。左侧是每层的角色，右侧是这一层里真实存在的东西。</p>
+<div class="pipe"><div class="lane tone-muted">
+        <div class="lane-meta">
+          <span class="ln">LAYER 01</span>
+          <b>源系统层</b>
+          <small>数据真正产生的地方，也是唯一「权威」的副本</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>MySQL 订单库</b>
+        <small>orders / order_items</small>
+        <span class="tag tone-muted">binlog</span>
+      </div><div class="pnode">
+        <b>MySQL 用户库</b>
+        <small>users / user_profile</small>
+        <span class="tag tone-muted">binlog</span>
+      </div><div class="pnode">
+        <b>埋点日志</b>
+        <small>page_view / click</small>
+        <span class="tag tone-muted">Kafka</span>
+      </div><div class="pnode">
+        <b>支付系统</b>
+        <small>payments / refunds</small>
+        <span class="tag tone-muted">API / DB</span>
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">抽取 <span class="en">Extract</span><span class="note">把数据从业务库「拿出来」</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-blue">
+        <div class="lane-meta">
+          <span class="ln">LAYER 02</span>
+          <b>抽取层</b>
+          <small>决定「多久同步一次」和「能不能拿到删除」</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>CDC 读 binlog</b>
+        <small>op = INSERT/UPDATE/DELETE</small>
+        <span class="tag tone-blue">准实时</span>
+      </div><div class="pnode">
+        <b>时间戳增量</b>
+        <small>WHERE updated_at &gt; ?</small>
+        <span class="tag tone-blue">T+1 / 小时</span>
+      </div><div class="pnode">
+        <b>全量快照</b>
+        <small>SELECT * 整表拉取</small>
+        <span class="tag tone-blue">每天一次</span>
+      </div><div class="pnode">
+        <b>日志采集</b>
+        <small>Flume / Filebeat</small>
+        <span class="tag tone-blue">实时</span>
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">落地 <span class="en">Load</span><span class="note">先原样存下来，不做业务翻译</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="wgroup"><div class="wgroup-label">◈ 数仓内部：分层建模 ODS → DWD → DWS → ADS</div><div class="lane tone-amber">
+        <div class="lane-meta">
+          <span class="ln">LAYER 03</span>
+          <b>ODS 贴源层</b>
+          <small>与业务库表一一对应，只做类型转换 + 按天分区</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>ods_order</b>
+        <small>订单原样落地</small>
+        
+      </div><div class="pnode">
+        <b>ods_user</b>
+        <small>用户原样落地</small>
+        
+      </div><div class="pnode">
+        <b>ods_page_view</b>
+        <small>埋点原样落地</small>
+        
+      </div><div class="pnode">
+        <b>ods_payment</b>
+        <small>支付原样落地</small>
+        
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">清洗 <span class="en">Clean</span><span class="note">去重 · 补空值 · 剔脏数据 · 统一编码/时区/单位</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-violet">
+        <div class="lane-meta">
+          <span class="ln">LAYER 04</span>
+          <b>DWD 明细层</b>
+          <small>一行 = 一个业务事件，字段已翻译成业务语义</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>dwd_order_detail</b>
+        <small>订单事件明细（已 join 用户 / 商品）</small>
+        
+      </div><div class="pnode">
+        <b>dwd_user_basic</b>
+        <small>用户基础信息</small>
+        
+      </div><div class="pnode">
+        <b>dwd_pay_flow</b>
+        <small>支付流水明细</small>
+        
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">聚合 <span class="en">Aggregate</span><span class="note">按 日期 / 城市 / 渠道 等维度 group by</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-violet">
+        <div class="lane-meta">
+          <span class="ln">LAYER 05</span>
+          <b>DWS 汇总层</b>
+          <small>一行 = 一个统计口径，明细被压缩成指标</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>dws_order_city_1d</b>
+        <small>日 · 城市 · 渠道 的订单与 GMV</small>
+        
+      </div><div class="pnode">
+        <b>dws_user_active_1d</b>
+        <small>日活 / 留存</small>
+        
+      </div><div class="pnode">
+        <b>dws_channel_funnel_1d</b>
+        <small>渠道转化漏斗</small>
+        
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">加工 <span class="en">Serve</span><span class="note">面向某张具体报表定制口径</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-green">
+        <div class="lane-meta">
+          <span class="ln">LAYER 06</span>
+          <b>ADS 应用层</b>
+          <small>直接给报表用的结果表，查询毫秒级</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>ads_gmv_report</b>
+        <small>GMV 大盘</small>
+        
+      </div><div class="pnode">
+        <b>ads_refund_rank</b>
+        <small>退款率排行</small>
+        
+      </div><div class="pnode">
+        <b>ads_retention</b>
+        <small>复购 / 留存看板</small>
+        
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">查询 <span class="en">Query</span><span class="note">BI / 看板 / API 只读结果表，不碰业务库</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div></div><div class="lane tone-muted">
+        <div class="lane-meta">
+          <span class="ln">LAYER 07</span>
+          <b>应用层</b>
+          <small>谁来消费这些数据</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>BI 报表</b>
+        <small>固定口径的日报周报</small>
+        
+      </div><div class="pnode">
+        <b>数据看板</b>
+        <small>实时大盘</small>
+        
+      </div><div class="pnode">
+        <b>即席查询</b>
+        <small>分析师临时取数</small>
+        
+      </div><div class="pnode">
+        <b>数据 API</b>
+        <small>反哺业务系统</small>
+        
+      </div><div class="pnode">
+        <b>算法特征</b>
+        <small>喂给推荐 / 风控模型</small>
+        
+      </div></div>
+      </div></div><div class="callout tone-amber tinted">
+      <span class="ic">🧱</span>
+      <div><p>为什么要分这么多层？因为<strong>每一层只解决一个问题</strong>：
+ODS 保证「拿全了」、DWD 保证「看懂了」、DWS 保证「算快了」、ADS 保证「用着顺手」。
+中间任何一层算错，都能回到上一层重跑，而不用去动业务库。</p>
+</div>
+    </div><h3 id="细节一行订单数据是怎么被搬走的">细节：一行订单数据是怎么被搬走的</h3>
+<p>上面是宏观分层。下面用一条真实订单（<code>id = 1001</code>）走一遍，
+看它在每一层的<strong>数据形态</strong>到底发生了什么变化。</p>
+<div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-muted">① 源系统</span>
+            <span class="name">MySQL · orders</span>
+            <span class="spacer"></span>
+            <span class="tag tone-red">只存最终状态</span>
+          </div>
+          <div class="rec"><div class="">
+            <b>id</b><span>1001</span></div><div class="">
+            <b>user_id</b><span>88</span></div><div class="warn">
+            <b>status</b><span>1</span><em>魔法数字</em></div><div class="warn">
+            <b>amount</b><span>9900</span><em>单位：分</em></div><div class="">
+            <b>updated_at</b><span>2024-05-20 10:03:12</span></div></div>
+          
+          <p class="jnote bad">业务库只关心「现在是什么」：<strong>没有城市、渠道、会员等级</strong>，
+历史状态会被覆盖，而且这台库不能随便跑大统计。</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">CDC 订阅 binlog<span class="note">只传变化的那一行，不扫全表</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-blue">② 抽取</span>
+            <span class="name">binlog event</span>
+            <span class="spacer"></span>
+            <span class="tag tone-blue">含 before / after</span>
+          </div>
+          
+          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>{&quot;op&quot;: &quot;UPDATE&quot;, &quot;table&quot;: &quot;orders&quot;,
+ &quot;before&quot;: {&quot;id&quot;: 1001, &quot;status&quot;: 1},   // 改之前
+ &quot;after&quot;:  {&quot;id&quot;: 1001, &quot;status&quot;: 2}}   // 改之后
+</pre></div>
+          <p class="jnote">拿到 <strong>before / after</strong> 意味着：既知道「改成了什么」，也知道「哪一行被删了」
+—— 这正是轮询做不到的。</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">原样落地<span class="note">不翻译业务语义，先存下来</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-amber">③ ODS</span>
+            <span class="name">ods_order</span>
+            <span class="spacer"></span>
+            <span class="tag tone-amber">只加分区字段</span>
+          </div>
+          <div class="rec"><div class="">
+            <b>id</b><span>1001</span></div><div class="">
+            <b>user_id</b><span>88</span></div><div class="">
+            <b>status</b><span>2</span></div><div class="">
+            <b>amount</b><span>9900</span></div><div class="">
+            <b>updated_at</b><span>2024-05-20 10:03:12</span></div><div class="ok">
+            <b>dt</b><span>2024-05-20</span><em>新增分区</em></div></div>
+          
+          <p class="jnote">只做了<strong>字段类型转换</strong>和<strong>加分区字段 dt</strong>，不做任何业务翻译。
+好处是：上游口径改了、或者下游算错了，都能回到这一层原样重跑。</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">清洗 + 统一 + 关联<span class="note">枚举翻译 · 单位换算 · 多次 join</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-violet">④ DWD</span>
+            <span class="name">dwd_order_detail</span>
+            <span class="spacer"></span>
+            <span class="tag tone-violet">业务可读</span>
+          </div>
+          <div class="rec"><div class="">
+            <b>order_id</b><span>1001</span></div><div class="ok">
+            <b>order_status</b><span>'已支付'</span><em>枚举翻译</em></div><div class="ok">
+            <b>amount</b><span>99.00 元</span><em>分 → 元</em></div><div class="ok">
+            <b>city</b><span>'杭州'</span><em>join ods_user</em></div><div class="ok">
+            <b>channel</b><span>'APP'</span><em>join 埋点</em></div><div class="ok">
+            <b>user_level</b><span>'VIP'</span><em>join 用户标签</em></div></div>
+          
+          <p class="jnote">到这一层，<strong>一行 = 一次订单事件</strong>，字段已经能被业务直接读懂。
+原来要 join 三张表才能回答的问题，现在查一张表就够。</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">聚合<span class="note">group by 日期 + 城市 + 渠道</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-violet">⑤ DWS</span>
+            <span class="name">dws_order_city_1d</span>
+            <span class="spacer"></span>
+            <span class="tag tone-violet">明细 → 指标</span>
+          </div>
+          <div class="rec"><div class="">
+            <b>dt</b><span>2024-05-20</span></div><div class="">
+            <b>city</b><span>'杭州'</span></div><div class="">
+            <b>channel</b><span>'APP'</span></div><div class="ok">
+            <b>order_cnt</b><span>1820</span></div><div class="ok">
+            <b>gmv</b><span>182340.00</span></div></div>
+          
+          <p class="jnote">一行 1001 的订单，在这里被「溶解」成杭州当天 1820 单里的一份子。
+数据量通常会下降 <strong>2~3 个数量级</strong>，但已经无法再还原到单笔订单。</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">面向看板加工<span class="note">只留报表要用的字段和口径</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-green">⑥ ADS</span>
+            <span class="name">ads_gmv_report</span>
+            <span class="spacer"></span>
+            <span class="tag tone-green">毫秒返回</span>
+          </div>
+          <div class="rec"><div class="">
+            <b>指标</b><span>今日 GMV</span></div><div class="">
+            <b>值</b><span>1,284,930</span></div><div class="">
+            <b>环比</b><span>+12.4%</span></div><div class="">
+            <b>城市 Top1</b><span>杭州</span></div></div>
+          
+          <p class="jnote">看板查询从「扫几亿行明细」变成「读几千行结果」，所以能秒开。
+代价是这张表<strong>只服务于这一个口径</strong>，换一个问法就要再建一张。</p>
+        </div><h3 id="抽取方式怎么选">抽取方式怎么选</h3>
+<p>「怎么把数据拿出来」是整条链路里最关键的一步。常见有 5 种做法，差别主要在
+<strong>延迟</strong>、<strong>能不能感知删除</strong>、<strong>对业务库的压力</strong>。</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>方式</th><th>怎么做</th><th>延迟</th><th>删除</th><th>压力</th><th>适用</th></tr></thead><tbody><tr><th>全量快照</th><td data-label="怎么做">每天 <code>SELECT *</code> 整表拉一遍</td><td data-label="延迟">T+1</td><td data-label="删除"><span class="tag tone-green">能</span></td><td data-label="压力"><span class="tag tone-red">高</span></td><td data-label="适用">小表、维表</td></tr><tr><th>时间戳增量</th><td data-label="怎么做"><code>WHERE updated_at &gt; 上次时间</code></td><td data-label="延迟">分钟 ~ 小时</td><td data-label="删除"><span class="tag tone-red">不能</span></td><td data-label="压力"><span class="tag tone-amber">中</span></td><td data-label="适用">有 <code>update_time</code> 的表</td></tr><tr><th>自增 ID 增量</th><td data-label="怎么做"><code>WHERE id &gt; 上次最大 id</code></td><td data-label="延迟">分钟 ~ 小时</td><td data-label="删除"><span class="tag tone-red">不能（改也漏）</span></td><td data-label="压力"><span class="tag tone-amber">中</span></td><td data-label="适用">只追加的流水表</td></tr><tr><th>触发器</th><td data-label="怎么做">建 trigger 写影子表</td><td data-label="延迟">秒级</td><td data-label="删除"><span class="tag tone-green">能</span></td><td data-label="压力"><span class="tag tone-red">高（写放大）</span></td><td data-label="适用">老系统兜底</td></tr><tr><th>CDC 读 binlog</th><td data-label="怎么做">订阅数据库变更日志，只读不写</td><td data-label="延迟"><span class="tag tone-green">秒级 / 准实时</span></td><td data-label="删除"><span class="tag tone-green">能</span></td><td data-label="压力"><span class="tag tone-green">低</span></td><td data-label="适用">现在的主流方案</td></tr></tbody></table></div><p>数据仓库存储的是经过处理、适合分析的数据；它通常面向报表、仪表盘和商业智能场景。</p>
+<h2 id="最核心的区别"><span class="num">03</span>最核心的区别</h2>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>维度</th><th>数据库</th><th>数据仓库</th></tr></thead><tbody><tr><th>主要目的</th><td data-label="数据库">支撑线上业务</td><td data-label="数据仓库">数据分析、报表、决策</td></tr><tr><th>典型操作</th><td data-label="数据库">下单、支付、修改资料</td><td data-label="数据仓库">统计 GMV、转化率、复购率</td></tr><tr><th>数据来源</th><td data-label="数据库">往往是一个业务系统</td><td data-label="数据仓库">通常汇集多个业务系统</td></tr><tr><th>数据范围</th><td data-label="数据库">当前业务数据为主</td><td data-label="数据仓库">大量历史数据</td></tr><tr><th>数据形态</th><td data-label="数据库">更贴近原始业务表</td><td data-label="数据仓库">清洗、统一、汇总后的分析数据</td></tr><tr><th>查询特点</th><td data-label="数据库">查一位用户、一笔订单</td><td data-label="数据仓库">查全量，按天 / 月 / 地区 / 渠道聚合</td></tr><tr><th>使用者</th><td data-label="数据库">后端服务、业务系统</td><td data-label="数据仓库">数据分析师、运营、管理者、BI 系统</td></tr><tr><th>是否直接承接用户请求</th><td data-label="数据库"><span class="tag tone-green">是</span></td><td data-label="数据仓库"><span class="tag tone-muted">通常不是</span></td></tr></tbody></table></div><h2 id="数据怎么流动"><span class="num">04</span>数据怎么流动</h2>
+<p>同样的订单数据，两条完全不同的路径。</p>
+<div class="pipe"><div class="lane tone-blue">
+        <div class="lane-meta">
+          
+          <b>写入路径</b>
+          <small>用户下单 —— 这应该直接写业务数据库，而不是直接写数据仓库</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>前端</b>
+        
+        
+      </div><div class="pnode">
+        <b>后端服务</b>
+        
+        
+      </div><div class="pnode tone-blue">
+        <b>MySQL orders 表</b>
+        
+        
+      </div></div>
+      </div><div class="lane tone-violet">
+        <div class="lane-meta">
+          
+          <b>分析路径</b>
+          <small>今日成交额实时大盘 —— 走异步链路，不碰业务库</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>订单数据</b>
+        
+        
+      </div><div class="pnode">
+        <b>CDC / 消息队列</b>
+        
+        
+      </div><div class="pnode">
+        <b>Flink</b>
+        
+        
+      </div><div class="pnode">
+        <b>数据仓库 / 实时分析库</b>
+        
+        
+      </div><div class="pnode">
+        <b>大盘</b>
+        
+        
+      </div></div>
+      </div></div><h2 id="一个容易混淆的点"><span class="num">05</span>一个容易混淆的点</h2>
+<div class="callout tone-amber">
+      <span class="ic">💡</span>
+      <div><p>数据仓库<strong>不一定是某个固定产品</strong>，而是一类用途 / 架构。</p>
+</div>
+    </div><p>例如这些产品可能被用作数仓或数仓中的查询引擎：</p>
+<div class="pipe"><div class="lane tone-green">
+        <div class="lane-meta">
+          
+          <b>常见选择</b>
+          <small>它们不都是「数仓」，但都可以充当数仓或数仓里的查询引擎</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>ClickHouse</b>
+        
+        
+      </div><div class="pnode">
+        <b>Apache Doris</b>
+        
+        
+      </div><div class="pnode">
+        <b>StarRocks</b>
+        
+        
+      </div><div class="pnode">
+        <b>Snowflake</b>
+        
+        
+      </div><div class="pnode">
+        <b>BigQuery</b>
+        
+        
+      </div><div class="pnode">
+        <b>Redshift</b>
+        
+        
+      </div><div class="pnode">
+        <b>Hive</b>
+        
+        
+      </div></div>
+      </div></div><p>而 MySQL 既是数据库，也能勉强做少量报表；但当<strong>数据量、查询复杂度、并发分析需求</strong>变大时，
+直接在业务 MySQL 上跑大统计很容易影响线上下单、支付等业务。</p>
+<h2 id="cdc-是-flink-的一个功能吗"><span class="num">06</span>CDC 是 Flink 的一个功能吗？</h2>
+<div class="callout tone-violet quote">
+      <span class="ic">🧩</span>
+      <div><p>严格来说：CDC 不是 Flink 独有、也不是只有 Flink 才有的功能。</p>
+</div>
+    </div><p>CDC 是一种通用技术 / 思路，完整名称是 <strong>Change Data Capture：变更数据捕获</strong>。</p>
+<p>它用于捕捉数据库中数据的三种变化：</p>
+<div class="pipe"><div class="lane tone-blue">
+        <div class="lane-meta">
+          
+          <b>CDC 捕获什么</b>
+          <small>对应数据库变更日志里的三种操作</small>
+        </div>
+        <div class="lane-body"><div class="pnode tone-green">
+        <b>INSERT</b>
+        <small>新增</small>
+        
+      </div><div class="pnode tone-blue">
+        <b>UPDATE</b>
+        <small>修改</small>
+        
+      </div><div class="pnode tone-red">
+        <b>DELETE</b>
+        <small>删除</small>
+        
+      </div></div>
+      </div></div><p>例如 MySQL 的订单表发生了变化：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">新增订单 A001
+订单 A001 从“待支付”改为“已支付”
+删除一条测试订单
+</code></pre></div>
+<p>CDC 会把这些变化捕捉出来，作为持续的数据流发给下游。</p>
+<h3 id="flink-和-cdc-的关系">Flink 和 CDC 的关系</h3>
+<div class="pipe"><div class="lane tone-violet">
+        <div class="lane-meta">
+          
+          <b>分工</b>
+          <small>一个负责「发现变化」，一个负责「加工变化」</small>
+        </div>
+        <div class="lane-body"><div class="pnode tone-muted">
+        <b>数据库的变更日志</b>
+        <small>例如 MySQL binlog</small>
+        
+      </div><div class="pnode tone-blue">
+        <b>CDC</b>
+        <small>读取并识别「新增、修改、删除」</small>
+        
+      </div><div class="pnode tone-violet">
+        <b>Flink</b>
+        <small>实时清洗、转换、计算、关联、写入目标系统</small>
+        
+      </div><div class="pnode tone-green">
+        <b>下游</b>
+        <small>数仓 / 湖仓 / ES / Kafka / 风控</small>
+        
+      </div></div>
+      </div></div><ul class="check"><li><strong>CDC</strong>：负责「发现数据库发生了什么变化」</li><li><strong>Flink</strong>：负责「拿到变化后，实时怎么加工和处理」</li></ul><h2 id="那么什么是-flink-cdc"><span class="num">07</span>那么什么是 Flink CDC？</h2>
+<p><strong>Flink CDC</strong> 是 Flink 生态中的一个 CDC 项目 / 连接器方案。</p>
+<p>它可以让 Flink 读取 MySQL、PostgreSQL、Oracle、SQL Server 等数据库的变更，
+并把变更作为 Flink 的流数据来处理。其底层常会使用 <strong>Debezium</strong> 提供的数据库变更捕获连接器。</p>
+<div class="pipe"><div class="lane tone-blue">
+        <div class="lane-meta">
+          
+          <b>一个典型用法</b>
+          <small>MySQL 表变化 → Flink 加工 → 写进各种下游</small>
+        </div>
+        <div class="lane-body"><div class="pnode tone-muted">
+        <b>MySQL users 表变化</b>
+        
+        
+      </div><div class="pnode tone-blue">
+        <b>Flink CDC 捕获 binlog</b>
+        
+        
+      </div><div class="pnode tone-violet">
+        <b>Flink 清洗或补充字段</b>
+        
+        
+      </div><div class="pnode tone-green">
+        <b>Kafka / ClickHouse / Doris / Iceberg</b>
+        
+        
+      </div></div>
+      </div></div><h2 id="为什么不直接定时查数据库而要-cdc"><span class="num">08</span>为什么不直接定时查数据库，而要 CDC？</h2>
+<p>不用 CDC 的方式可能是这样：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-sql">-- 每隔 10 分钟执行一次
+SELECT * FROM orders WHERE update_time &gt; 上次同步时间
+</code></pre></div>
+<p>这种方式简单，但会有问题：</p>
+<ul class="check cross"><li>延迟高，最快也要等下一次轮询</li><li>不断查询业务数据库，可能增加压力</li><li>更新频繁时，容易漏数据、重复数据</li><li>删除数据不容易准确识别</li><li>很难做到真正接近实时</li></ul><p>CDC 则直接基于数据库的<strong>变更日志</strong>读取变化，只同步新增、更新、删除的部分，
+而不是反复扫描整张表。</p>
+<div class="demo" data-widget="polling-vs-cdc">
+      <div class="demo-head">
+        <span class="title">订单表变更流</span>
+        <span class="status" data-status>未开始</span>
+        <span class="spacer"></span>
+        <button class="btn" data-run>▶ 开始模拟</button>
+        <button class="btn ghost" data-reset>重置</button>
+      </div>
+      <div class="demo-body"><div class="pane">
+        <div class="pane-head">
+          <span class="tag tone-amber">轮询</span>
+          定时查表
+          <span class="sub">每 10 分钟一次</span>
+        </div>
+        <div class="log" data-log="poll"></div>
+        <div class="pane-foot"><span class="tag tone-amber">延迟高</span><span class="tag tone-amber">中间状态丢失</span><span class="tag tone-amber">删除难识别</span><span class="tag tone-amber">反复压业务库</span></div>
+      </div><div class="pane">
+        <div class="pane-head">
+          <span class="tag tone-violet">CDC</span>
+          订阅变更日志
+          <span class="sub">每条变化实时推送</span>
+        </div>
+        <div class="log" data-log="cdc"></div>
+        <div class="pane-foot"><span class="tag tone-violet">近实时</span><span class="tag tone-violet">含删除</span><span class="tag tone-violet">只读 binlog</span><span class="tag tone-violet">不反复扫表</span></div>
+      </div></div>
+    </div><h2 id="前端类比"><span class="num">09</span>前端类比</h2>
+<p>把数据库想象成前端的状态：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-js">const user = {
+  name: '小明',
+  vip: false
+}
+</code></pre></div>
+<p>如果你每隔一秒都重新读取整个对象，看看它有没有变化，这有点像<strong>定时轮询查表</strong>。</p>
+<p>CDC 更像是<strong>状态变化时立即收到事件</strong>：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-js">// 用户升级会员时，马上收到变化事件
+{
+  type: 'UPDATE',
+  before: { name: '小明', vip: false },
+  after:  { name: '小明', vip: true }
+}
+</code></pre></div>
+<p>Flink 则相当于订阅这个事件后继续处理：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-js">if (after.vip === true) {
+  // 同步会员系统、更新数据看板、触发营销任务等
+}
+</code></pre></div>
+<h2 id="一句话总结"><span class="num">10</span>一句话总结</h2>
+<div class="summary">
+      <h3 id="记住这条链路">记住这条链路</h3>
+      <p><code>CDC</code> 负责把数据库变化**「实时通知出来」**；</p>
+<p><code>Flink CDC</code> 是让 Flink 能方便读取这些变化的工具；</p>
+<p><code>Flink</code> 再对这些变化做实时处理和同步。</p>
+
+    </div><div class="pipe"><div class="lane tone-blue">
+        <div class="lane-meta">
+          
+          <b>三句话收尾</b>
+          <small>三个层次，各管一件事</small>
+        </div>
+        <div class="lane-body"><div class="pnode tone-blue">
+        <b>数据库</b>
+        <small>面向「正在发生的操作」，要求正确、快、稳</small>
+        
+      </div><div class="pnode tone-violet">
+        <b>数据仓库</b>
+        <small>面向「已经发生的历史」，要求能扫、能聚合</small>
+        
+      </div><div class="pnode tone-green">
+        <b>CDC + Flink</b>
+        <small>一个负责发现变化，一个负责加工变化</small>
+        
+      </div></div>
+      </div></div><h2 id="自测"><span class="num">11</span>自测</h2>
+<div class="quiz"><details>
+        <summary>数据仓库一定要用某个固定产品吗？</summary>
+        <div class="a"><p>不是。数仓是一类<strong>用途 / 架构</strong>，不是产品。
+ClickHouse、Doris、StarRocks、Snowflake、BigQuery、Hive 都可以充当数仓或数仓里的查询引擎。</p>
+</div>
+      </details><details>
+        <summary>CDC 是 Flink 的功能吗？</summary>
+        <div class="a"><p>不是。CDC（Change Data Capture）是通用技术。
+Flink CDC 只是 Flink 生态里的一个连接器方案，底层常复用 Debezium。</p>
+</div>
+      </details><details>
+        <summary>为什么 ODS 层不做业务翻译？</summary>
+        <div class="a"><p>为了保住「可回溯」。ODS 与业务库一一对应，只做类型转换和分区。
+上游口径变了、下游算错了，都能回到这一层原样重跑，而不用重新抽一遍业务库。</p>
+</div>
+      </details><details>
+        <summary>定时轮询为什么识别不到删除？</summary>
+        <div class="a"><p>增量轮询的写法是 <code>WHERE update_time &gt; 上次时间</code>，被删掉的行不会再出现在结果集里。
+只有整表比对才能发现少了一行，但那等于每次全表扫描。
+CDC 读 binlog 能直接拿到 <code>op=DELETE</code> 事件。</p>
+</div>
+      </details><details>
+        <summary>DWD 和 DWS 的分界线在哪？</summary>
+        <div class="a"><p>DWD 是<strong>明细</strong>：一行 = 一个业务事件，字段已翻译成业务语义，但还没聚合。
+DWS 是<strong>汇总</strong>：一行 = 一个统计口径（日期 + 城市 + 渠道），明细已被压缩成指标。
+过了 DWS 就回不到单笔订单了。</p>
+</div>
+      </details></div>
+
+    <footer>
+      <span>数据仓库 vs 数据库 · CDC vs Flink</span>
+      <span>最后更新 2026-09-24 · 单文件可离线打开</span>
+    </footer>
+  </main>
+</div>
+
+<script>
+/* ============================================================
+   app.js — 全站交互
+   ------------------------------------------------------------
+   1. 主题切换（跟随系统 + localStorage）
+   2. 阅读进度条
+   3. 目录滚动高亮
+   4. 代码块复制
+   5. 自测题（原生 <details>，这里只做增强）
+   6. 交互演示控件注册表 WIDGETS
+   ============================================================ */
+(() => {
+  
+
+  /* ---------- 1. 主题 ---------- */
+  (function theme() {
+    var root = document.documentElement;
+    var saved = null;
+    try { saved = localStorage.getItem('kh-theme'); } catch (e) {}
+    var prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+    root.setAttribute('data-theme', saved || (prefersDark ? 'dark' : 'light'));
+
+    var btn = document.getElementById('themeBtn');
+    if (btn) btn.addEventListener('click', () => {
+      var next = root.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+      root.setAttribute('data-theme', next);
+      try { localStorage.setItem('kh-theme', next); } catch (e) {}
+    });
+  })();
+
+  /* ---------- 2. 阅读进度 ---------- */
+  (function progress() {
+    var bar = document.getElementById('progress');
+    if (!bar) return;
+    function update() {
+      var h = document.documentElement.scrollHeight - window.innerHeight;
+      bar.style.width = (h > 0 ? (window.scrollY / h) * 100 : 0) + '%';
+    }
+    window.addEventListener('scroll', update, { passive: true });
+    window.addEventListener('resize', update);
+    update();
+  })();
+
+  /* ---------- 3. 目录滚动高亮 ---------- */
+  (function scrollspy() {
+    var links = Array.prototype.slice.call(document.querySelectorAll('#toc a'));
+    if (!links.length) return;
+    var targets = links
+      .map((a) => document.querySelector(a.getAttribute('href')))
+      .filter(Boolean);
+
+    function update() {
+      var y = window.scrollY + 110;
+      var current = targets[0];
+      targets.forEach((t) => { if (t.offsetTop <= y) current = t; });
+      links.forEach((a) => {
+        a.classList.toggle('active', !!current && a.getAttribute('href') === '#' + current.id);
+      });
+    }
+    window.addEventListener('scroll', update, { passive: true });
+    window.addEventListener('resize', update);
+    update();
+  })();
+
+  /* ---------- 4. 复制 ---------- */
+  (function copy() {
+    document.querySelectorAll('[data-copy]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        var pre = btn.parentElement.querySelector('pre');
+        var text = pre ? pre.innerText : '';
+        function done() {
+          btn.textContent = '已复制';
+          setTimeout(() => { btn.textContent = '复制'; }, 1400);
+        }
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(text).then(done, done);
+        } else {
+          var ta = document.createElement('textarea');
+          ta.value = text; document.body.appendChild(ta); ta.select();
+          try { document.execCommand('copy'); } catch (e) {}
+          document.body.removeChild(ta); done();
+        }
+      });
+    });
+  })();
+
+  /* ---------- 5. 自测题：只允许同时展开一题，避免一口气看答案 ---------- */
+  (function quiz() {
+    document.querySelectorAll('.quiz').forEach((box) => {
+      var items = box.querySelectorAll('details');
+      items.forEach((d) => {
+        d.addEventListener('toggle', () => {
+          if (!d.open) return;
+          items.forEach((o) => { if (o !== d) o.open = false; });
+        });
+      });
+    });
+  })();
+
+  /* ---------- 6. 交互演示控件注册表 ----------
+     新增控件：WIDGETS['名字'] = function (root, opts) { ... }
+     在 note.md 里用：
+       ```demo
+       widget: 名字
+       title: 标题
+       ```
+  ------------------------------------------------ */
+  var WIDGETS = {};
+
+  /* —— 控件：轮询 vs CDC —— */
+  WIDGETS['polling-vs-cdc'] = (root) => {
+    var STEP = 620;
+    var EVENTS = [
+      { t: 0,  type: 'INSERT', text: '新增订单 A001（待支付）' },
+      { t: 3,  type: 'UPDATE', text: 'A001：待支付 → 已支付' },
+      { t: 6,  type: 'UPDATE', text: 'A001：已支付 → 已发货' },
+      { t: 9,  type: 'DELETE', text: '删除测试订单 A002' },
+      { t: 12, type: 'UPDATE', text: 'A001：已发货 → 已完成' },
+      { t: 15, type: 'INSERT', text: '新增订单 A003（待支付）' }
+    ];
+    var POLLS = [
+      { t: 0,  warn: false, text: '查到 A001 = 待支付' },
+      { t: 10, warn: true,  text: '查到 A001 = 已发货。中间「已支付」状态从未被同步；A002 的删除在增量查询下不可见' },
+      { t: 20, warn: false, text: '查到 A001 = 已完成、A003 = 待支付，但已经晚了最多 10 分钟' }
+    ];
+
+    var pollLog = root.querySelector('[data-log="poll"]');
+    var cdcLog  = root.querySelector('[data-log="cdc"]');
+    var statusEl = root.querySelector('[data-status]');
+    var runBtn  = root.querySelector('[data-run]');
+    var resetBtn = root.querySelector('[data-reset]');
+    var timers = [];
+
+    function addLine(box, badge, tone, time, text, warn) {
+      var el = document.createElement('div');
+      el.className = 'line' + (warn ? ' warn' : '');
+
+      var b = document.createElement('span');
+      b.className = 'badge tone-' + tone;
+      b.textContent = badge;
+
+      var tm = document.createElement('span');
+      tm.className = 'time';
+      tm.textContent = time;
+
+      var tx = document.createElement('span');
+      tx.className = 'txt';
+      tx.textContent = text;
+
+      el.append(b, tm, tx);
+      box.appendChild(el);
+      box.scrollTop = box.scrollHeight;
+    }
+    function clearTimers() { timers.forEach(clearTimeout); timers = []; }
+
+    function reset() {
+      clearTimers();
+      pollLog.innerHTML = ''; cdcLog.innerHTML = '';
+      statusEl.textContent = '未开始';
+      runBtn.disabled = false; runBtn.textContent = '▶ 开始模拟';
+    }
+
+    function run() {
+      reset();
+      runBtn.disabled = true; runBtn.textContent = '模拟中…';
+      statusEl.textContent = 't = 0 分钟';
+
+      EVENTS.forEach((e) => {
+        timers.push(setTimeout(() => {
+          addLine(cdcLog, e.type, e.type.toLowerCase() === 'delete' ? 'red'
+                 : e.type === 'insert' ? 'green' : 'blue', 't=' + e.t + 'min', e.text, false);
+          statusEl.textContent = 't = ' + e.t + ' 分钟';
+        }, e.t * STEP + 40));
+      });
+      POLLS.forEach((p) => {
+        timers.push(setTimeout(() => {
+          addLine(pollLog, 'POLL', 'amber', 't=' + p.t + 'min', p.text, p.warn);
+        }, p.t * STEP + 200));
+      });
+      timers.push(setTimeout(() => {
+        statusEl.textContent = '模拟结束 · 共 6 次真实变更，轮询只看到 3 个时间点';
+        runBtn.disabled = false; runBtn.textContent = '▶ 再跑一次';
+      }, 22 * STEP));
+    }
+
+    runBtn.addEventListener('click', run);
+    resetBtn.addEventListener('click', reset);
+  };
+
+  /* ---------- 挂载 ---------- */
+  document.querySelectorAll('[data-widget]').forEach((root) => {
+    var name = root.getAttribute('data-widget');
+    var fn = WIDGETS[name];
+    if (fn) { try { fn(root); } catch (e) { console.error('[widget:' + name + ']', e); } }
+    else { console.warn('[widget] 未注册：' + name); }
+  });
+})();
+
+</script>
+</body>
+</html>
