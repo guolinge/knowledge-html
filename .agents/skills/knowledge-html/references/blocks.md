@@ -174,7 +174,48 @@ items:
 
 ---
 
-## 6. `spec` —— 拆解卡
+## 6. `flow` —— 带分支的流程图
+
+**什么时候用**：流程有**分支或汇合**，一条直线讲不了。
+
+> `lane-stack` 只能画直线。需要「分两路再合起来」「中途有判断」时用这个。
+
+```flow
+nodes:
+  - { id: in,   label: 内部状态, sub: "{ table: 'user_portrait' }", row: 0, tone: violet }
+  - { id: id1,  label: 标识符加反引号, sub: "表名 → `表名`", row: 1, tone: amber }
+  - { id: id2,  label: 值变占位符, sub: "[1,2,3] → ?", row: 1, tone: amber }
+  - { id: out,  label: 一段 SQL, sub: "带反引号、值待填", row: 2, tone: green }
+edges:
+  - { from: in, to: id1 }
+  - { from: in, to: id2 }
+  - { from: id1, to: out }
+  - { from: id2, to: out, anim: true }
+  - { from: id2, to: id1, dashed: true, label: 备选 }
+```
+
+| 键 | 说明 |
+|---|---|
+| `nodes[].id` | 唯一标识，连线靠它引用 |
+| `nodes[].row` | 第几行。不写就按数组顺序。**同一 row 的节点并排** |
+| `nodes[].label` / `sub` | 主文字 / 等宽小字 |
+| `nodes[].tone` | 节点配色 |
+| `edges[].from` / `to` | 两端节点的 id |
+| `edges[].label` | 连线上的小字 |
+| `edges[].dashed` | 虚线（表示「可选」「备选」「弱关系」） |
+| `edges[].anim` | 流动虚线动画（表示「这一步在动」「强调」） |
+| `edges[].tone` | 连线配色 |
+
+**要点**：
+
+- **不用写坐标。** 节点用 flex 排版，连线由 `app.js` 测量后画成 SVG 路径 ——
+  文字多长、屏幕多窄都会自动重算。
+- **连线走节点背后**，所以看起来是「从盒子到盒子」，不用手动算边框交点。
+- 同排节点之间的连线会自动画成左右方向的曲线。
+
+---
+
+## 7. `spec` —— 拆解卡
 
 **什么时候用**：要把一个东西按固定维度拆开讲透。
 
@@ -209,12 +250,16 @@ rows:
 | `rows[].v` | 内容，走完整 Markdown（可多段、列表、`==` 标记） |
 | `rows[].code` | 要放代码块时用这个替代 `v`（会转义） |
 
+> ⚠️ **`spec` 看起来像图，本质还是两栏文字。**
+> 它适合**速查**（10 个文件各是什么），**不适合讲机制**（这个东西怎么工作）。
+> 讲机制请用 `flow` / `lane-stack` / `journey`。
+>
 > **别滥用。** 只有当「一个东西值得按 6 个维度拆」时才用。
 > 一个只有 2 处调用的小工具，写 6 行就是凑字数 —— 那种用 `compare` 一行说清就行。
 
 ---
 
-## 7. `callout` — 提示 / 陷阱 / 引用
+## 8. `callout` — 提示 / 陷阱 / 引用
 
 ```callout
 tone: amber
@@ -231,7 +276,7 @@ text: |
 
 ---
 
-## 8. `checklist` — 正例 / 反例
+## 9. `checklist` — 正例 / 反例
 
 ```checklist
 tone: cross
@@ -244,7 +289,7 @@ items:
 
 ---
 
-## 9. `quiz` — 自测
+## 10. `quiz` — 自测
 
 **每篇必带。**
 
@@ -260,7 +305,7 @@ items:
 
 ---
 
-## 10. `demo` — 可交互模拟
+## 11. `demo` — 可交互模拟
 
 **只在「静态图讲不清」时用。** 需要两步：
 
@@ -300,7 +345,7 @@ panes:
 
 ---
 
-## 11. `summary` / `raw`
+## 12. `summary` / `raw`
 
 ```summary
 title: 一句话总结

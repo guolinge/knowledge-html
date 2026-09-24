@@ -320,6 +320,48 @@ export function blocksPlugin(md) {
     </div>`;
   }
 
+  /* ===== 积木 12 · flow =====
+     带分支/汇合的流程图。lane-stack 只能画直线，这个能画图。
+     节点按 row 分行，列位置自动均分；连线由 app.js 测量后画成 SVG 路径。 */
+  function flow(body) {
+    const cfg = YAML.parse(body) || {};
+    const nodes = cfg.nodes || [];
+    const edges = cfg.edges || [];
+
+    // 按 row 分行，row 不写就按数组顺序
+    const rows = [];
+    nodes.forEach((n, i) => {
+      const r = n.row ?? i;
+      (rows[r] = rows[r] || []).push(n);
+    });
+
+    const grid = rows
+      .map(
+        (row) => `<div class="flowd-row">${(row || [])
+          .map(
+            (n) => `<div class="fnode tone-${n.tone || 'muted'}" data-id="${esc(n.id)}">
+              <b>${inline(n.label)}</b>
+              ${n.sub ? `<small>${inline(n.sub)}</small>` : ''}
+            </div>`,
+          )
+          .join('')}</div>`,
+      )
+      .join('');
+
+    const edgeData = esc(JSON.stringify(edges));
+    return `<div class="flowd" data-flow data-edges="${edgeData}">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-grid">${grid}</div>
+    </div>`;
+  }
+
   /* ---------- 注册 ---------- */
   const RENDERERS = {
     'lane-stack': laneStack,
@@ -327,6 +369,7 @@ export function blocksPlugin(md) {
     compare,
     cards,
     timeline,
+    flow,
     spec,
     callout,
     checklist,

@@ -65,7 +65,30 @@
 - **相邻且 `group` 相同的层会被自动包进虚线分组框**，用来表示「这几个是一伙的」。
 - `nodes[].tag` / `tone` 覆盖单个节点的标签和配色。
 
-## 03 · journey —— 每一步的形态快照
+## 03 · flow —— 带分支的流程图
+
+适合：流程有**分支或汇合**。`lane-stack` 只能画直线，这个能画图。
+
+```flow
+nodes:
+  - { id: in,  label: 内部状态, sub: "{ table: 'user_portrait' }", row: 0, tone: violet }
+  - { id: id1, label: 标识符加反引号, sub: "表名 → `表名`", row: 1, tone: amber }
+  - { id: id2, label: 值变占位符, sub: "[1,2,3] → ?", row: 1, tone: amber }
+  - { id: out, label: 一段 SQL, sub: "带反引号、值待填", row: 2, tone: green }
+edges:
+  - { from: in, to: id1 }
+  - { from: in, to: id2 }
+  - { from: id1, to: out }
+  - { from: id2, to: out, anim: true }
+```
+
+要点：
+
+- **不用写坐标。** 节点 flex 排版，连线由 `app.js` 测量后画成 SVG，换行/窄屏自动重算。
+- `row` 相同的节点并排；`edges[].dashed` 表示弱关系，`anim` 让线流动起来。
+- 连线走节点背后，不用手动算边框交点。
+
+## 04 · journey —— 每一步的形态快照
 
 适合：一个东西（一行数据、一个请求、一次支付）在流转过程中**长什么样**的变化。
 
@@ -98,7 +121,7 @@
 - `noteTone: bad` 把行首的 `→` 换成 `!`。
 - `code` 会转义显示；想上色就改用 `codeHtml`（内容按原始 HTML 输出）。
 
-## 04 · compare —— 多维对比
+## 05 · compare —— 多维对比
 
 适合：两个及以上方案的横向对比。
 
@@ -114,7 +137,7 @@ rows:
 
 要点：单元格写字符串就是普通文本，写 `{text, tone}` 就渲染成彩色标签。窄屏会自动折叠成卡片。
 
-## 05 · cards —— 并列概念网格
+## 06 · cards —— 并列概念网格
 
 适合：一堆**没有先后关系**的并列概念。用文字排会很平，卡片能一眼扫完。
 
@@ -128,7 +151,7 @@ items:
 
 要点：`cols` 可选 `2` / `3` / `4`，不写则按宽度自动排。卡片还可带 `code` 字段放一小段代码。
 
-## 06 · timeline —— 时间线 / 版本演进
+## 07 · timeline —— 时间线 / 版本演进
 
 适合：按时间顺序发生的事件、技术选型的演进、事故时间线。
 
@@ -149,7 +172,7 @@ items:
 
 要点：`when` 会渲染成等宽小字并着色，`tone` 同时决定时间轴圆点的颜色。
 
-## 07 · callout —— 提示 / 陷阱 / 引用
+## 08 · callout —— 提示 / 陷阱 / 引用
 
 ```callout
 tone: amber
@@ -162,7 +185,7 @@ text: |
 
 要点：`quote: true` 会把正文放大加粗，用于一句话结论。`text` 里可以写多行 Markdown。
 
-## 08 · checklist —— 正例 / 反例
+## 09 · checklist —— 正例 / 反例
 
 ```checklist
 tone: cross
@@ -173,7 +196,7 @@ items:
 
 要点：`tone` 可选 `cross`（红叉）和 `warn`（黄叹号），不写就是绿勾。
 
-## 09 · quiz —— 自测
+## 10 · quiz —— 自测
 
 **这是最容易被忽略、但最重要的一块。** 知识库死于「收藏代替理解」，
 每篇笔记结尾放 2~3 题，逼自己合上答案复述一遍。
@@ -188,7 +211,7 @@ items:
 
 同一时刻只允许展开一题，避免一口气看完答案。
 
-## 10 · demo —— 可交互模拟
+## 11 · demo —— 可交互模拟
 
 **只在「静态图讲不清」时用。** 判据：用一句话说不清「A 和 B 差在哪」，
 但让用户亲手跑一遍就秒懂。
@@ -226,7 +249,7 @@ panes:
 
 两边靠 `log` 这个 key 对接。页面只声明外壳，逻辑全在 `app.js`。
 
-## 11 · summary / raw
+## 12 · summary / raw
 
 ```summary
 title: 一句话总结
@@ -237,7 +260,7 @@ text: |
 `raw` 块直接输出 HTML，是一次性排版实验的逃生口，**不要长期使用** ——
 它绕过了积木系统，换肤和校验都管不到它。
 
-## 12 · 写完之后
+## 13 · 写完之后
 
 ```bash
 npm run check              # 先校验。会指出第几行哪个积木有问题
@@ -245,7 +268,7 @@ npm run view -- <slug>     # 构建 + 在浏览器打开
 npm run build:standalone   # 产出 dist/*.html（内联全部资源，可直接发给别人）
 ```
 
-## 13 · 自测
+## 14 · 自测
 
 ```quiz
 - q: 什么时候该用 journey 而不是 lane-stack？

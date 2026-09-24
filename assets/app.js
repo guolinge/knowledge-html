@@ -390,7 +390,7 @@
     var sqlEl = root.querySelector('[data-jl-sql]');
     var statusEl = root.querySelector('[data-status]');
 
-    var byKey = (list, k) => list.filter((x) => x.key === k)[0];
+    var byKey = (list, k) => list.find((x) => x.key === k);
     var cur = 'inner';
 
     /* ---- 每个模式下：哪些行留下来、哪些连线存在 ---- */
@@ -470,12 +470,13 @@
       const head = h('tr', null, ['u.name', 'o.product', '这行怎么来的']
         .map((t) => h('th', { text: t })));
       const body = rows.map((r) => {
-        const tag = r.kind === 'match' ? h('span', { cls: 'tag tone-green', text: '匹配' })
-          : r.kind === 'cross' ? h('span', { cls: 'tag tone-red', text: '组合' })
-          : h('span', {
-              cls: 'tag tone-amber',
-              text: r.u ? '左表独有 · 补 NULL' : '右表独有 · 补 NULL',
-            });
+        let tag;
+        if (r.kind === 'match') tag = h('span', { cls: 'tag tone-green', text: '匹配' });
+        else if (r.kind === 'cross') tag = h('span', { cls: 'tag tone-red', text: '组合' });
+        else tag = h('span', {
+          cls: 'tag tone-amber',
+          text: r.u ? '左表独有 · 补 NULL' : '右表独有 · 补 NULL',
+        });
         return h('tr', { cls: r.kind === 'match' ? '' : r.kind }, [
           h('td', r.u ? { text: r.u.name } : { cls: 'nul', text: 'NULL' }),
           h('td', r.o ? { text: r.o.product } : { cls: 'nul', text: 'NULL' }),
@@ -490,7 +491,7 @@
 
     function render(id) {
       cur = id;
-      var cfg = MODES.filter((m) => m.id === id)[0];
+      const cfg = MODES.find((m) => m.id === id);
       var st = stateFor(id);
 
       Array.prototype.forEach.call(modesBox.children, (b) =>
@@ -632,6 +633,173 @@
       modesBox.appendChild(b);
     });
     render('on');
+  };
+
+  /* ---------- 8. 流程图连线 ----------
+     节点用 flex 排版，这里测量它们的位置，再把连线画成 SVG 路径。
+     好处：文字多长都不用调坐标，换行/窄屏自动重算。
+  ------------------------------------------------ */
+  (function flowDiagram() {
+    const roots = Array.from(document.querySelectorAll('[data-flow]'));
+    if (!roots.length) return;
+
+    function draw(root) {
+      const svg = root.querySelector('.flowd-svg');
+      const grid = root.querySelector('.flowd-grid');
+      if (!svg || !grid) return;
+
+      let edges = [];
+      try { edges = JSON.parse(root.getAttribute('data-edges') || '[]'); } catch { edges = []; }
+
+      // 用 offset* 而不是 getBoundingClientRect，避免页面缩放/滚动带来的误差
+      const nodes = {};
+      root.querySelectorAll('.fnode').forEach((el) => {
+        nodes[el.getAttribute('data-id')] = {
+          cx: el.offsetLeft + el.offsetWidth / 2,
+          cy: el.offsetTop + el.offsetHeight / 2,
+          top: el.offsetTop,
+          bottom: el.offsetTop + el.offsetHeight,
+          left: el.offsetLeft,
+          right: el.offsetLeft + el.offsetWidth,
+          h: el.offsetHeight,
+        };
+      });
+
+      const W = grid.offsetWidth;
+      const H = grid.offsetHeight;
+      svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+      svg.setAttribute('width', W);
+      svg.setAttribute('height', H);
+
+      const parts = [];
+      for (const e of edges) {
+        const a = nodes[e.from];
+        const b = nodes[e.to];
+        if (!a || !b) continue;
+
+        const vertical = Math.abs(b.cy - a.cy) > (a.h + b.h) / 2 + 6;
+        let d;
+        let lx;
+        let ly;
+        if (vertical) {
+          const y1 = a.cy < b.cy ? a.bottom : a.top;
+          const y2 = a.cy < b.cy ? b.top : b.bottom;
+          const my = (y1 + y2) / 2;
+          d = `M ${a.cx} ${y1} C ${a.cx} ${my}, ${b.cx} ${my}, ${b.cx} ${y2}`;
+          lx = (a.cx + b.cx) / 2;
+          ly = my;
+        } else {
+          const [l, r] = a.cx < b.cx ? [a, b] : [b, a];
+          const mx = (l.right + r.left) / 2;
+          d = `M ${l.right} ${l.cy} C ${mx} ${l.cy}, ${mx} ${r.cy}, ${r.left} ${r.cy}`;
+          lx = mx;
+          ly = (l.cy + r.cy) / 2 - 7;
+        }
+
+        const cls = ['fedge', e.dashed && 'dashed', e.anim && 'anim'].filter(Boolean).join(' ');
+        parts.push(`<path class="${cls}" d="${d}"${e.tone ? ` style="color:var(--${e.tone})"` : ''}/>`);
+        if (e.label) {
+          parts.push(`<text class="felabel" x="${lx}" y="${ly}">${escapeXml(e.label)}</text>`);
+        }
+      }
+      svg.innerHTML = svg.querySelector('defs').outerHTML + parts.join('');
+    }
+
+    function escapeXml(s) {
+      return String(s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[c]);
+    }
+
+    function drawAll() { roots.forEach(draw); }
+
+    drawAll();
+    window.addEventListener('resize', drawAll);
+    // 字体加载完宽度会变，重画一次
+    if (document.fonts && document.fonts.ready) document.fonts.ready.then(drawAll);
+  })();
+
+  /* —— 控件：knex 链式调用到底在干什么 ——
+     点方法按钮 → 看内部状态累积；点 rawQuery() → 才编译成 SQL。
+     要讲清的就一件事：==链式调用不生成 SQL，取值时才编译。==
+  ------------------------------------------------ */
+  WIDGETS['knex-chain'] = (root) => {
+    const stateBox = root.querySelector('[data-kc-state]');
+    const sqlBox = root.querySelector('[data-kc-sql]');
+    const hintBox = root.querySelector('[data-kc-hint]');
+    const btns = Array.from(root.querySelectorAll('[data-kc-step]'));
+    const statusEl = root.querySelector('[data-status]');
+
+    const STEPS = {
+      select: { state: { columns: ['uid'] }, hint: '只是把「要查哪些列」记在对象上' },
+      from: { state: { table: 'user_portrait' }, hint: '再把「查哪张表」记上去' },
+      where: { state: { where: [['uid', 'in', [1, 2, 3]]] }, hint: '再把「筛选条件」记上去' },
+    };
+    const ORDER = ['select', 'from', 'where'];
+
+    const SQL_PLACEHOLDER =
+      'select `uid` from `user_portrait` where (`uid` in (?))';
+    const SQL_INLINED =
+      'select `uid` from `user_portrait` where (`uid` in (1, 2, 3))';
+
+    let applied = [];   // 只放 select / from / where
+    let compiled = false; // 是否已调过 rawQuery()
+
+    function renderState() {
+      if (!applied.length) {
+        stateBox.textContent = '{}   // 空空如也';
+        return;
+      }
+      const merged = {};
+      applied.forEach((k) => Object.assign(merged, STEPS[k].state));
+      stateBox.textContent = JSON.stringify(merged, null, 2);
+    }
+
+    function render() {
+      renderState();
+      const done = applied.length === ORDER.length;
+      btns.forEach((b) => {
+        const k = b.getAttribute('data-kc-step');
+        if (k === 'raw') {
+          b.classList.toggle('on', compiled);
+          b.disabled = !done;
+        } else {
+          b.classList.toggle('on', applied.includes(k));
+          b.disabled = applied.includes(k);
+        }
+      });
+
+      if (compiled) {
+        sqlBox.textContent = SQL_INLINED;
+        hintBox.textContent =
+          '✅ rawQuery() 触发了编译：加反引号 + 值内联。这才是最终交给数据库的东西。';
+        statusEl.textContent = '已编译';
+      } else if (done) {
+        sqlBox.textContent = SQL_PLACEHOLDER;
+        hintBox.textContent =
+          '🔍 三个方法都调完了，但 SQL 里的值还是 ? —— 因为还没取值。点 .rawQuery() 试试。';
+        statusEl.textContent = '状态齐了，还没编译';
+      } else {
+        sqlBox.textContent = '// 还没编译。链式调用只往对象上记东西，不生成 SQL。';
+        hintBox.textContent = '点上面的方法，看内部状态怎么一点点攒起来。';
+        statusEl.textContent = '攒状态中';
+      }
+    }
+
+    btns.forEach((b) =>
+      b.addEventListener('click', () => {
+        const k = b.getAttribute('data-kc-step');
+        if (k === 'raw') {
+          compiled = !compiled;
+        } else {
+          compiled = false; // 改了链式调用，之前的编译结果作废
+          applied.includes(k)
+            ? applied.splice(applied.indexOf(k), 1)
+            : applied.push(k);
+        }
+        render();
+      }),
+    );
+
+    render();
   };
 
   /* ---------- 挂载 ---------- */

@@ -116,76 +116,214 @@ text: |
   lodash 给骨架，剩下三个合并成一张表。
 ```
 
-#### knex —— 整个库的地基
+### knex —— 从零理解它的工作原理
 
-```spec
-title: knex
-subtitle: SQL 查询构造器 · 被调用 43 处
+```callout
+tone: blue
+icon: 📖
+text: |
+  下面从**五个概念**开始，每个概念配一张图。概念讲完了，knex 的原理就清楚了。
+```
+
+#### 概念 ①：数据库只认「一段文本」
+
+你在代码里写的东西，数据库一个都看不懂。**它只接受一段 SQL 文本。**
+
+```flow
+nodes:
+  - { id: app, label: 你的代码, sub: "想查一批用户", row: 0, tone: blue }
+  - { id: str, label: 一段文本, sub: "SELECT uid FROM user_portrait WHERE ...", row: 1, tone: violet }
+  - { id: db, label: 数据库, sub: "不认对象，不认函数，只认文本", row: 2, tone: green }
+edges:
+  - { from: app, to: str, label: 拼出来 }
+  - { from: str, to: db, label: 发过去 }
+```
+
+所以「操作数据库」这件事，本质上就是 **把想干的事翻译成一段文本**。
+
+#### 概念 ②：但手写文本会出事
+
+最直接的做法是拼字符串：
+
+```js
+const sql = "SELECT uid FROM user_portrait WHERE city = '" + city + "'";
+```
+
+问题在于：`city` 是外部传进来的。如果它的值是：
+
+```text
+杭州' OR '1'='1
+```
+
+拼出来的 SQL 就变成了 `WHERE city = '杭州' OR '1'='1'` —— **条件被改写了**。这就是 SQL 注入。
+
+```flow
+nodes:
+  - { id: a, label: 手写拼接, sub: "值直接嵌进字符串", row: 0, tone: red }
+  - { id: b, label: 构造器, sub: "值单独放，不混进 SQL", row: 0, tone: green }
+  - { id: r1, label: 注入风险, sub: "值里带引号就出事", row: 1, tone: red }
+  - { id: r2, label: 自动转义, sub: "转义交给库", row: 1, tone: green }
+edges:
+  - { from: a, to: r1, dashed: true }
+  - { from: b, to: r2 }
+```
+
+==knex 就是「构造器」这一类东西：你用 JS 方法描述要干什么，它负责生成安全的 SQL。==
+
+#### 概念 ③：链式调用 = 每个方法都返回自己
+
+knex 的用法长这样：
+
+```js
+DB.getInstance().select('uid').from('user_portrait').where(...)
+```
+
+为什么能一直点下去？因为**每个方法执行完，返回的还是这个对象本身**。
+
+```flow
+nodes:
+  - { id: o, label: 一个查询对象, sub: "像一张空白表单", row: 0, tone: violet }
+  - { id: m1, label: ".select('uid')", sub: "填「要查哪些列」", row: 1, tone: blue }
+  - { id: m2, label: ".from('...')", sub: "填「查哪张表」", row: 2, tone: blue }
+  - { id: m3, label: ".where(...)", sub: "填「筛选条件」", row: 3, tone: blue }
+edges:
+  - { from: o, to: m1, label: 点第一个方法 }
+  - { from: m1, to: m2, label: 返回同一个对象 }
+  - { from: m2, to: m3, label: 返回同一个对象 }
+```
+
+==每一步返回的都是同一个对象，所以能无限点下去。这叫「链式调用」。==
+
+#### 概念 ④：链式调用**不生成 SQL**，只往对象上记东西
+
+这是最反直觉的一点。上面那串调用跑完，**一条 SQL 都没有产生** ——
+它只是把「要查哪些列、哪张表、什么条件」记在了那个对象上。
+
+```flow
+nodes:
+  - { id: s0, label: 空对象, sub: "{}", row: 0, tone: muted }
+  - { id: s1, label: 记下列, sub: "{ columns: ['uid'] }", row: 1, tone: violet }
+  - { id: s2, label: 记下表, sub: "+ { table: 'user_portrait' }", row: 2, tone: violet }
+  - { id: s3, label: 记下条件, sub: "+ { where: [...] }", row: 3, tone: violet }
+  - { id: sql, label: 编译成 SQL, sub: "还没发生", row: 4, tone: amber }
+edges:
+  - { from: s0, to: s1, label: ".select('uid')" }
+  - { from: s1, to: s2, label: ".from(...)" }
+  - { from: s2, to: s3, label: ".where(...)" }
+  - { from: s3, to: sql, label: "要主动触发", dashed: true }
+```
+
+**自己点一下试试** —— 看状态怎么攒起来、什么时候才真的生成 SQL：
+
+```demo
+widget: knex-chain
+title: 链式调用到底在干什么
+hint: 攒状态中
+actions: false
+html: |
+  <div class="kc">
+    <div class="kc-btns">
+      <button data-kc-step="select">.select('uid')</button>
+      <button data-kc-step="from">.from('user_portrait')</button>
+      <button data-kc-step="where">.where('uid', 'in', [1, 2, 3])</button>
+      <button data-kc-step="raw" class="kc-final">.rawQuery()</button>
+    </div>
+    <div class="kc-panes">
+      <div class="kc-pane"><h5>对象内部状态</h5><pre data-kc-state></pre></div>
+      <div class="kc-pane"><h5>生成的 SQL</h5><pre data-kc-sql></pre></div>
+    </div>
+    <div class="kc-hint" data-kc-hint></div>
+  </div>
+```
+
+#### 概念 ⑤：取值时才编译 —— 编译做了两件事
+
+「取值」在 knex 里就是调 `.toString()` 或 `.toQuery()`。这一刻它才把内部状态翻成 SQL，做两件事：
+
+```flow
+nodes:
+  - { id: in, label: 内部状态, sub: "{ table: 'user_portrait', where: [uid in [1,2,3]] }", row: 0, tone: violet }
+  - { id: id1, label: 标识符加反引号, sub: "user_portrait → `user_portrait`", row: 1, tone: amber }
+  - { id: id2, label: 值变占位符, sub: "[1, 2, 3] → ?", row: 1, tone: amber }
+  - { id: out, label: 一段 SQL, sub: "select `uid` from `user_portrait` where `uid` in (?)", row: 2, tone: green }
+edges:
+  - { from: in, to: id1 }
+  - { from: in, to: id2 }
+  - { from: id1, to: out }
+  - { from: id2, to: out }
+```
+
+```callout
 tone: violet
-rows:
-  - k: 输入
-    v: |
-      链式调用累积出来的**查询状态**：表名 + 筛选条件 + 选取列 + 分组。
+icon: 💡
+text: |
+  **为什么要留 `?` 不直接写值？**
 
-      在 core 里，输入是一个 `Knex.QueryBuilder` 实例，或者一段 `Knex.Raw` 片段。
-  - k: 处理
-    v: |
-      链式方法（`.select()` / `.from()` / `.where()`）**不立即生成 SQL**，
-      只是往内部状态里追加。直到最后取 SQL 时才真正编译。
+  因为 `?` 是**占位符** —— 真正的值放在一个单独的参数数组里，由数据库驱动去填充。
+  这样值永远不会被当成 SQL 语法解析，==注入就不可能发生==。
 
-      编译时做两件事：给标识符加反引号，把值换成 `?` 占位符。
-  - k: 输出
-    v: |
-      一段**可直接执行的 SQL 字符串**（带反引号、值已转义）。
+  这个机制叫**参数绑定**，是概念②里那个问题的真正解法。
+```
 
-      这个库对外只交付字符串 —— 下游网关不接受别的形态。
-  - k: 怎么调用
-    code: |
-      // core/src/db.ts 里只有这一处创建实例
-      const mysql = knex({ client: 'mysql' });
+**为什么叫「惰性」**：链式调用只记状态，编译推迟到取值那一刻。好处是——
+你可以在中途根据条件决定要不要再加一个 `.where()`，反正还没编译。
 
-      // 两种入口，共享同一个 Builder.prototype
-      DB.getInstance()        → mysql.queryBuilder()   // 空 builder
-      DB.getInstance('name')  → mysql(name)            // 命名连接
+#### 现在看这个库做了什么
 
-      // 实际用法（43 处调用长这样）
-      DB.getInstance()
-        .select('uid')
-        .from('user_portrait')
-        .where('uid', 'in', DB.raw(subSql))
-        .rawQuery();          // ← core 挂上去的，= toString().trim()
-  - k: 为什么这么设计
-    v: |
-      **① 为什么要加一个 `rawQuery()`？**
+knex 原生给了 `.toString()` 和 `.toQuery()`。这个库只加了一个 `.rawQuery()`：
 
-      knex 原生的取值方式返回值结构不同，而这个库对外只交付**一段字符串**。
-      所以 core 在 `QueryBuilder.prototype` 上挂了一个 `rawQuery()` = `toString().trim()`。
+```text
+rawQuery() { return this.toString().trim(); }   // ← 就这么一行
+```
 
-      **② 为什么用挂原型，不用 `knex.QueryBuilder.extend()`？**
+**为什么要加**：knex 原生的取值方式返回值结构不统一，而这个库对外只交付**一段字符串**
+（下游网关不接受别的形态）。所以统一一个出口。
 
-      代码注释里写了：==extend 要求方法的返回值必须是 builder 实例==，
-      而 `rawQuery()` 要返回字符串。所以只能挂原型。
+**为什么挂在原型上，而不是用 `knex.QueryBuilder.extend()`**：
 
-      **③ 为什么 `mysql(name)` 和 `mysql.queryBuilder()` 能共用？**
+```flow
+nodes:
+  - { id: e1, label: "DB.getInstance()", sub: "→ queryBuilder()", row: 0, tone: blue }
+  - { id: e2, label: "DB.getInstance('name')", sub: "→ mysql(name)", row: 0, tone: blue }
+  - { id: p, label: 同一个 Builder.prototype, sub: "两种入口共享这一份", row: 1, tone: violet }
+  - { id: r, label: "rawQuery()", sub: "挂一次，两种入口都能用", row: 2, tone: green }
+edges:
+  - { from: e1, to: p }
+  - { from: e2, to: p }
+  - { from: p, to: r, label: "core 挂上去的" }
+```
 
-      代码注释：==两者共享同一个 `Builder.prototype`==，
-      所以挂载一次，两种入口都能访问到。
+```callout
+tone: amber
+icon: ⚠
+text: |
+  **为什么不能用 `extend()`？** 代码注释里写了答案：
 
-      **④ `toQuery()` 为什么还在用？**
+  ==extend 要求方法的返回值必须是 builder 实例==，而 `rawQuery()` 要返回字符串。
+  类型不匹配，所以只能直接挂原型。
+```
 
-      搜一遍会发现它只出现在 9 处，而且**全是值转义**：
-      `sqlValue` 用 `DB.raw('?', [val]).toQuery()` 把字符串转义成 SQL 字面量，
-      借 knex 的转义能力，不手写。
+#### 那 `toQuery()` 还在用吗？
 
-      所以分工很清楚：==`rawQuery()` 管出口，`toQuery()` 管转义。==
-  - k: 业务价值
-    v: |
-      它是**「业务条件」和「SQL 字符串」之间的最后一层**。
+搜一遍：`rawQuery()` 出现 **43 处**，`toQuery()` 只有 **9 处**，而且**全是值转义**：
 
-      上游（crowd 的六种条件实现）只管往 builder 上挂 `where`，
-      不用操心反引号、转义、括号这些 SQL 细节 —— 那些全是 knex 的事。
+```js
+// core/src/db.ts · sqlValue
+return DB.raw('?', [val]).toQuery();   // 把字符串转义成 SQL 字面量，借 knex 的能力
+```
 
-      这个库对 knex 的**唯一改动**就是加了 `rawQuery()`，把出口统一成字符串。
+所以分工很清楚：==`rawQuery()` 管出口，`toQuery()` 管转义。==
+
+#### 一句话总结
+
+```summary
+title: knex 在这个库里的角色
+text: |
+  它是**「业务条件」和「SQL 字符串」之间的最后一层**。
+
+  上游只管往 builder 上挂 `where`，不用操心反引号、转义、括号 —— 那些全是 knex 的事。
+
+  这个库对它的唯一改动就是加了一个 `rawQuery()`，把出口统一成字符串。
 ```
 
 #### murmurhash —— 决定事件去哪个分片
