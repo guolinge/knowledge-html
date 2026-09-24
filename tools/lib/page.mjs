@@ -78,7 +78,7 @@ export function renderPage({ meta, body, toc, assetPrefix, backHref, assets }) {
     : '';
 
   return `<!DOCTYPE html>
-<html lang="zh-CN" data-theme="light">
+<html lang="zh-CN" data-theme="light"${toc.length ? ' data-has-toc="1"' : ''}>
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -88,9 +88,11 @@ ${head}
 </head>
 <body>
 <div id="progress"></div>
+<div id="tocScrim"></div>
 
 <header class="topbar">
   <div class="topbar-inner">
+    <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
     <a class="brand" href="${esc(backHref)}"><span class="dot"></span>${esc(meta.site || '知识笔记')}</a>
     <span class="spacer"></span>
     <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>

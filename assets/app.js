@@ -2,32 +2,76 @@
    app.js — 全站交互
    ------------------------------------------------------------
    1. 主题切换（跟随系统 + localStorage）
-   2. 阅读进度条
-   3. 目录滚动高亮
-   4. 代码块复制
-   5. 自测题（原生 <details>，这里只做增强）
-   6. 交互演示控件注册表 WIDGETS
+   2. 目录开合（宽屏收起 / 窄屏抽屉）
+   3. 阅读进度条
+   4. 目录滚动高亮
+   5. 代码块复制
+   6. 自测题（原生 <details>，这里只做增强）
+   7. 交互演示控件注册表 WIDGETS
    ============================================================ */
 (() => {
-  
+  /* localStorage 在隐私模式、部分 file:// 场景下会抛异常。
+     统一包一层，失败就静默降级成「不记忆」，不阻断页面。 */
+  const store = {
+    get(k) { try { return localStorage.getItem(k); } catch { return null; } },
+    set(k, v) { try { localStorage.setItem(k, v); } catch { /* 忽略 */ } },
+  };
 
   /* ---------- 1. 主题 ---------- */
   (function theme() {
-    var root = document.documentElement;
-    var saved = null;
-    try { saved = localStorage.getItem('kh-theme'); } catch (e) {}
-    var prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+    const root = document.documentElement;
+    const saved = store.get('kh-theme');
+    const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
     root.setAttribute('data-theme', saved || (prefersDark ? 'dark' : 'light'));
 
-    var btn = document.getElementById('themeBtn');
+    const btn = document.getElementById('themeBtn');
     if (btn) btn.addEventListener('click', () => {
-      var next = root.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+      const next = root.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
       root.setAttribute('data-theme', next);
-      try { localStorage.setItem('kh-theme', next); } catch (e) {}
+      store.set('kh-theme', next);
     });
   })();
 
-  /* ---------- 2. 阅读进度 ---------- */
+  /* ---------- 2. 目录开合 ----------
+     宽屏：目录是一列，收起时宽度变 0；窄屏：变成左侧抽屉。
+     两者的开合状态都记在 <html data-toc> 上，样式在 theme.css。
+  ------------------------------------------------ */
+  (function tocToggle() {
+    const root = document.documentElement;
+    const btn = document.getElementById('tocBtn');
+    if (!btn || root.getAttribute('data-has-toc') !== '1') return;
+
+    const narrow = () => window.matchMedia('(max-width: 1080px)').matches;
+
+    // 窄屏不恢复「展开」—— 否则一进页就弹抽屉
+    root.setAttribute('data-toc', narrow() ? 'closed' : store.get('kh-toc') || 'open');
+
+    function set(state) {
+      root.setAttribute('data-toc', state);
+      btn.setAttribute('aria-expanded', state === 'open' ? 'true' : 'false');
+      store.set('kh-toc', state);
+    }
+
+    btn.addEventListener('click', () => {
+      set(root.getAttribute('data-toc') === 'open' ? 'closed' : 'open');
+    });
+
+    // 窄屏点目录项后自动收起
+    document.querySelectorAll('#toc a').forEach((a) =>
+      a.addEventListener('click', () => { if (narrow()) set('closed'); }),
+    );
+
+    // 遮罩、Esc 关闭
+    var scrim = document.getElementById('tocScrim');
+    if (scrim) scrim.addEventListener('click', () => set('closed'));
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && narrow()) set('closed');
+    });
+
+    btn.setAttribute('aria-expanded', root.getAttribute('data-toc') === 'open' ? 'true' : 'false');
+  })();
+
+  /* ---------- 3. 阅读进度 ---------- */
   (function progress() {
     var bar = document.getElementById('progress');
     if (!bar) return;
@@ -40,7 +84,7 @@
     update();
   })();
 
-  /* ---------- 3. 目录滚动高亮 ---------- */
+  /* ---------- 4. 目录滚动高亮 ---------- */
   (function scrollspy() {
     var links = Array.prototype.slice.call(document.querySelectorAll('#toc a'));
     if (!links.length) return;
@@ -61,12 +105,12 @@
     update();
   })();
 
-  /* ---------- 4. 复制 ---------- */
+  /* ---------- 5. 复制 ---------- */
   (function copy() {
     document.querySelectorAll('[data-copy]').forEach((btn) => {
       btn.addEventListener('click', () => {
-        var pre = btn.parentElement.querySelector('pre');
-        var text = pre ? pre.innerText : '';
+        const pre = btn.parentElement.querySelector('pre');
+        const text = pre ? pre.innerText : '';
         function done() {
           btn.textContent = '已复制';
           setTimeout(() => { btn.textContent = '复制'; }, 1400);
@@ -74,16 +118,16 @@
         if (navigator.clipboard && navigator.clipboard.writeText) {
           navigator.clipboard.writeText(text).then(done, done);
         } else {
-          var ta = document.createElement('textarea');
+          const ta = document.createElement('textarea');
           ta.value = text; document.body.appendChild(ta); ta.select();
-          try { document.execCommand('copy'); } catch (e) {}
+          try { document.execCommand('copy'); } catch { /* 忽略 */ }
           document.body.removeChild(ta); done();
         }
       });
     });
   })();
 
-  /* ---------- 5. 自测题：只允许同时展开一题，避免一口气看答案 ---------- */
+  /* ---------- 6. 自测题：只允许同时展开一题，避免一口气看答案 ---------- */
   (function quiz() {
     document.querySelectorAll('.quiz').forEach((box) => {
       var items = box.querySelectorAll('details');
@@ -96,7 +140,7 @@
     });
   })();
 
-  /* ---------- 6. 交互演示控件注册表 ----------
+  /* ---------- 7. 交互演示控件注册表 ----------
      新增控件：WIDGETS['名字'] = function (root, opts) { ... }
      在 note.md 里用：
        ```demo
