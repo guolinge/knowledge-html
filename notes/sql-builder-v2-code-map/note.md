@@ -101,6 +101,79 @@ rows:
 
 ==crowd 是这个仓库的主体==（约 4000 行），core 是它的地基，goods 是另一条平行的线。
 
+### 这些依赖具体干什么
+
+上面「依赖谁」一栏里全是名字。逐个说清楚它们在这里的作用：
+
+```compare
+first: 依赖
+head: [它是什么, 在这个库里干什么, 在哪用到]
+rows:
+  - knex:
+      - SQL 查询构造器（JS 库）
+      - "**整个库的地基**。所有 SQL 字符串都由它生成；core 的 DB 类只是它的包装"
+      - "core/src/db.ts（唯一的入口）"
+  - lodash:
+      - 通用工具库
+      - "**只用了 `cloneDeep` 一个函数** —— 深拷条件对象，避免改到调用方传进来的数据"
+      - "entrepots/factory.ts · modules/segmentation.ts"
+  - murmurhash:
+      - 哈希算法库
+      - "算事件名的哈希，决定落在 `event_biz_1..8` 哪张分片表"
+      - "dialect/bytehouse.ts（**仅此一处**）"
+  - mysql2:
+      - MySQL 驱动
+      - "**src 里没有直接 import**。它是 knex 用 `client: 'mysql'` 时的底层驱动，列在 deps 里是为了保证部署环境有驱动"
+      - 由 knex 间接使用
+  - tslib:
+      - TypeScript 运行时辅助函数
+      - "**src 里也没有直接 import**。`tsconfig.base.json` 里 `importHelpers: true`，编译后的 JS 会 `require('tslib')` 拿 `__spreadArray` 这类辅助函数，所以它必须是 dependency 而不是 devDependency"
+      - 编译产物自动引入
+  - type-fest:
+      - TS 类型工具库
+      - "**只用了 `ValueOf` 一个类型**，而且全是 `import type`（编译后消失，不进运行时）"
+      - "goods 包 3 个文件"
+```
+
+```callout
+tone: violet
+icon: 💡
+text: |
+  **注意 `mysql2` 和 `tslib` 都不是主动依赖**，你在 `src/` 里搜不到它们的 import。
+  它们存在的原因是「别人需要」：knex 要驱动，编译产物要辅助函数。
+
+  看依赖表时先区分这两类：
+  ==主动依赖决定代码怎么写，被动依赖只决定能不能跑起来。==
+```
+
+### 版本写在哪儿：catalog
+
+`crowd/package.json` 里写的是 `"knex": "catalog:"` 而不是具体版本号 ——
+版本统一在 `pnpm-workspace.yaml` 的 `catalog:` 段里定义。
+
+```text
+# pnpm-workspace.yaml
+catalog:
+  knex: "^1.0.2"
+  lodash: "^4.17.21"
+  murmurhash: "^2.0.1"
+  mysql2: "^2.3.3"
+  tslib: "^2.3.1"
+```
+
+```callout
+tone: amber
+icon: ⚠
+text: |
+  ==但只有 `crowd` 用了 catalog，`core` 和 `goods` 写的是硬编码版本号：==
+
+  - `core`: `"knex": "^1.0.2"`
+  - `goods`: `"type-fest": "^4.41.0"`
+
+  所以 catalog 在这个仓库里**并不是统一机制**，只在一个包上用。
+  要改版本，别只改 `pnpm-workspace.yaml` —— 先看对应包的 `package.json` 是不是硬编码的。
+```
+
 ## 03 · `packages/core` —— 通用层
 
 ### `src/` 根文件
