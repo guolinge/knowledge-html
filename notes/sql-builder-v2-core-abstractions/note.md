@@ -1,3 +1,21 @@
+```callout
+tone: amber
+icon: ⚠
+text: |
+  ==**这篇已经被一棵「嵌套产物树」替代了，内容不再单独维护。**==
+
+  它讲的东西已经拆进这 12 篇里，按「概念 → 组织 → 架构 → 模块」重新组织过：
+
+  - [① 概念](../sql-builder-v2-concepts/) · [② 组织](../sql-builder-v2-organization/) · [③ 架构](../sql-builder-v2-architecture/)
+  - [④ core](../sql-builder-v2-core/) · [⑤ Rule[]](../sql-builder-v2-core-rule/) · [⑥ 方言](../sql-builder-v2-core-dialect/) · [⑦ 时间表达式](../sql-builder-v2-core-time/)
+  - [⑧ crowd](../sql-builder-v2-crowd/) · [⑨ entrepot](../sql-builder-v2-crowd-entrepot/) · [⑩ combi](../sql-builder-v2-crowd-combi/)
+
+  **建议从 [① 概念篇](../sql-builder-v2-concepts/) 开始读。**
+
+  这篇留着是因为里面有些原始素材（比如依赖库的逐个拆解）没有全部搬过去。
+  要看最新的、互相链接的版本，请走上面那棵树。
+```
+
 # sql_builder_v2 的核心抽象
 
 ```callout

@@ -38,7 +38,8 @@ text: |
 
 | 词 | 在这里是什么意思 |
 |---|---|
-| **workspace** | 一个仓库里装多个 npm 包。由 `pnpm-workspace.yaml` 声明 `packages/*` |
+| **monorepo** | 一个仓库里装多个包。这就是这个仓库的形态 |
+| **workspace** | monorepo 的具体实现方式。由 `pnpm-workspace.yaml` 声明 `packages/*` |
 | **package** | 一个可独立发布的 npm 包，有自己的 `package.json` / 入口 / 依赖 |
 | **catalog** | pnpm 的版本统一机制。版本写一次，各包用 `catalog:` 引用 |
 
@@ -342,7 +343,84 @@ text: |
   所以「这个库用了哪些库」这个问题，答案取决于你问的是哪一种。
 ```
 
-## 08 · 我想改 X → 去哪个文件
+## 08 · 从哪开始读
+
+```callout
+tone: green
+icon: ✅
+text: |
+  ==**前五步加起来不到 600 行**，就能把主干搞懂。==
+
+  剩下 1600 多行是「同一套模式的重复应用」—— 看懂最容易的那种，
+  其他只是细节不同。
+```
+
+```lane-stack
+- badge: STEP 01
+  title: 先看词汇表
+  desc: 43 行，一次看完
+  tone: green
+  nodes:
+    - { title: crowd/src/define.ts, sub: "系统认识哪些表、哪些条件类型" }
+  next: "再找入口 :: :: 从哪进"
+
+- badge: STEP 02
+  title: 找入口
+  desc: 看清「谁调用谁」的骨架
+  tone: blue
+  nodes:
+    - { title: crowd/src/index.ts, sub: 对外导出什么 }
+    - { title: crowd/src/context.ts, sub: "SqlContext —— 唯一入口" }
+  next: "看模块 :: :: 业务场景分几类"
+
+- badge: STEP 03
+  title: 看模块骨架
+  desc: 只读最短的那个，跳过最长的
+  tone: blue
+  nodes:
+    - { title: crowd/src/modules/crowd.ts, sub: "59 行，list / count 两步" }
+    - { title: modules/segmentation.ts, sub: "324 行 —— 先跳过" }
+  next: "进组合层 :: :: 最核心的机制"
+
+- badge: STEP 04
+  title: 看组合层
+  desc: 这里藏着最反直觉的设计
+  tone: violet
+  nodes:
+    - { title: combi/combination.ts, sub: "165 行，UNION ALL + HAVING" }
+    - { title: combi/pkg.ts, sub: "123 行，include / exclude" }
+    - { title: combi/utils.ts, sub: "381 行 —— 只看 treeSimplifier，其余是历史包袱" }
+  next: "看分发 :: :: 六种条件怎么选"
+
+- badge: STEP 05
+  title: 看工厂
+  desc: 看清六种条件的分发方式
+  tone: violet
+  nodes:
+    - { title: entrepots/factory.ts, sub: "192 行，两个 switch" }
+  next: "最后再看具体条件 :: :: 按需读，不用全看"
+
+- badge: STEP 06
+  title: 具体条件实现
+  desc: 只读你关心的那一种
+  tone: amber
+  nodes:
+    - { title: portrait.ts, sub: "233 行，最容易懂" }
+    - { title: crowd.ts, sub: "134 行，第二容易" }
+    - { title: "event.ts / relation.ts", sub: "906 + 715 行 —— 业务细节堆叠，最后看", tone: red }
+```
+
+```callout
+tone: violet
+icon: 💡
+text: |
+  **为什么先看 `portrait.ts`？**
+
+  它是最小完整样本：**递归 + 时间展开 + 五个出口**，一样不缺。
+  ==看懂它之后，`event.ts` 和 `relation.ts` 只是「同样的模式 + 更多分支」。==
+```
+
+## 09 · 我想改 X → 去哪个文件
 
 ```callout
 tone: green
@@ -383,7 +461,7 @@ rows:
   - 改业务枚举: ["`crowd/src/define.ts`", "全部在这 45 行里"]
 ```
 
-## 09 · 自测
+## 10 · 自测
 
 ```quiz
 - q: 为什么 core 要独立成一个包？
