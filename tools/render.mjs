@@ -14,6 +14,7 @@ import MarkdownIt from 'markdown-it';
 import { blocksPlugin, addAnchors } from './lib/blocks.mjs';
 import { renderPage } from './lib/page.mjs';
 import { renderHome } from './lib/home.mjs';
+import { readAllPlans, attachNotes, needsHtml } from './lib/plan.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const NOTES = path.join(ROOT, 'notes');
@@ -124,10 +125,16 @@ function main() {
     .filter((s) => !ONLY || s === ONLY)
     .sort();
 
+  const existingSlugs = new Set(slugs);
+
   if (!slugs.length) {
     console.log('notes/ 下还没有笔记。用 npm run new -- <slug> 创建第一篇。');
     return;
   }
+
+  const { plans, errors: planErrors } = readAllPlans();
+  for (const msg of planErrors) console.error(`  ✗ ${msg}`);
+  const planByTopic = new Map(plans.map((p) => [p.topic, p]));
 
   const entries = [];
   const now = new Date().toISOString().slice(0, 10);
@@ -158,10 +165,24 @@ function main() {
 
     if (CHECK) continue;
 
+    // 「前置」区块：笔记只在 meta.json 里写 tree.topic / tree.id，
+    // 层级和依赖关系全从 plans/*.yaml 取 —— 不在两处维护
+    let needs = '';
+    const plan = meta.tree?.topic ? planByTopic.get(meta.tree.topic) : null;
+    if (plan && meta.tree.id) {
+      try {
+        needs = needsHtml(plan, meta.tree.id, existingSlugs);
+      } catch (e) {
+        console.error(`  ✗ ${slug}: 前置区块生成失败 —— ${e.message}`);
+        errors++;
+      }
+    }
+
     const full = renderPage({
       meta: { site: '知识笔记', ...meta, title: meta.title || h1 || slug },
       body: anchored,
       toc,
+      needs,
       assetPrefix: '../../',
       backHref: '../../index.html',
     });
@@ -190,6 +211,7 @@ function main() {
       status: meta.status || 'draft',
       generated: meta.generated || now,
       updated: meta.updated || '',
+      tree: meta.tree || null,
       plain: toPlain(anchored).slice(0, 4000),
     });
 
@@ -197,6 +219,8 @@ function main() {
       `  ✓ ${slug}  ${toc.length} 个章节${STANDALONE ? `  → dist/${slug}.html` : ''}`,
     );
   }
+
+  errors += planErrors.length;
 
   if (CHECK) {
     console.log(
@@ -214,7 +238,7 @@ function main() {
   const allEntries = [...byslug.values()].sort((a, b) => a.slug.localeCompare(b.slug));
   write(
     path.join(ROOT, 'index.html'),
-    renderHome(allEntries, { site: '知识笔记', assetPrefix: '' }),
+    renderHome(allEntries, { site: '知识笔记', assetPrefix: '', plans }),
   );
   console.log(`  ✓ index.html (${allEntries.length} 篇)`);
 

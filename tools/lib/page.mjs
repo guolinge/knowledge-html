@@ -61,8 +61,9 @@ function tocHtml(toc, backHref) {
  * @param {string} o.assetPrefix  资源前缀（子目录页面用 '../../'）
  * @param {string} o.backHref     返回索引的链接
  * @param {string} [o.assets]     内联资源 { theme, blocks, app }，用于 --standalone
+ * @param {string} [o.needs]      「前置」区块 HTML（来自 plans/*.yaml 的 needs）
  */
-export function renderPage({ meta, body, toc, assetPrefix, backHref, assets }) {
+export function renderPage({ meta, body, toc, assetPrefix, backHref, assets, needs = '' }) {
   const head = assets
     ? `<style>\n${assets.theme}\n</style>\n<style>\n${assets.blocks}\n</style>`
     : `<link rel="stylesheet" href="${assetPrefix}assets/theme.css" />
@@ -114,6 +115,7 @@ ${head}
     </div>
 
     ${draftBanner(meta)}
+${needs}
     ${provenance(meta)}
     ${tags}
 

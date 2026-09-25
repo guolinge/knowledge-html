@@ -22,26 +22,45 @@ const OUT = path.join(ROOT, '.preview');
 
 const md = new MarkdownIt({ html: true, linkify: true }).use(blocksPlugin);
 
-const PAGES = [
+const DEFAULT_PAGES = [
   {
     slug: 'skill',
-    file: 'SKILL.md',
+    file: '.agents/skills/knowledge-html/SKILL.md',
     title: 'knowledge-html skill',
-    summary: '总入口：原则 · 工作流 · 规范 · 硬约束',
+    summary: '总入口：原则 · 工作流 · 规范 · 多会话协作 · 硬约束',
   },
   {
     slug: 'blocks',
-    file: 'references/blocks.md',
+    file: '.agents/skills/knowledge-html/references/blocks.md',
     title: '积木参考',
     summary: '17 个积木的完整 DSL（示例都是真的，能直接跑）',
   },
   {
     slug: 'extend',
-    file: 'references/extend.md',
+    file: '.agents/skills/knowledge-html/references/extend.md',
     title: '加新积木',
     summary: '积木不够用时怎么办',
   },
 ];
+
+/* 也支持直接给文件路径：node tools/skill-view.mjs plans/xxx.md
+   —— 方案、设计文档这类也该能渲染出来读 */
+const argvFiles = process.argv.slice(2).filter((a) => !a.startsWith('--'));
+const PAGES = argvFiles.length
+  ? argvFiles.map((f) => {
+      const rel = path.relative(ROOT, path.resolve(ROOT, f));
+      const base = path.basename(rel, '.md');
+      // 从 markdown 的第一个 # 标题当页面标题
+      const head = fs.readFileSync(path.join(ROOT, rel), 'utf8').match(/^#\s+(.+)$/m);
+      return {
+        slug: base,
+        file: rel,
+        title: head ? head[1].trim() : base,
+        summary: rel,
+        root: ROOT,
+      };
+    })
+  : DEFAULT_PAGES.map((p) => ({ ...p, root: SKILL }));
 
 /** 去掉 SKILL.md 顶部的 YAML frontmatter（name / description 是给 agent 读的） */
 function stripFrontmatter(src) {
@@ -59,7 +78,7 @@ const built = [];
 let failed = 0;
 
 for (const p of PAGES) {
-  const src = stripLeadingH1(stripFrontmatter(fs.readFileSync(path.join(SKILL, p.file), 'utf8')));
+  const src = stripLeadingH1(stripFrontmatter(fs.readFileSync(path.join(p.root, p.file), 'utf8')));
   const env = { file: p.file, warnings: [] };
 
   let anchored;

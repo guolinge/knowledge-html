@@ -350,6 +350,83 @@ text: |
   **信号**：如果用户连续三轮都在问「那 X 是什么」，说明第一轮就该梳理脉络。
 ```
 
+#### 1.7 落地：把树写成 `plans/<topic>.yaml`
+
+```callout
+tone: red
+icon: ⚠
+text: |
+  ==确认的脉络不要只留在对话里。==
+
+  对话会滚走，脉络会丢。写进文件，它才能驱动页面、才能在几周后还看得见。
+```
+
+```bash
+# 树的唯一真相源
+plans/<topic>.yaml
+```
+
+```yaml
+topic: sql-builder-v2
+title: 理解 sql_builder_v2
+summary: 从零理解这个「把业务圈人需求翻译成 SQL」的库
+source: sources/gitlab/sql_builder_v2 @ 2c500b2
+
+nodes:
+  - id: concepts                    # needs 里引用它
+    title: 概念
+    layer: 概念                     # 概念 / 组织 / 架构 / 模块
+    needs: []                       # 前置节点 —— 理解它之前必须先理解谁
+    artifact: sql-builder-v2-concepts   # 对应的笔记 slug（还没写也先填）
+    status: planned                 # planned / drafted / done
+    blurb: 圈人是什么、有哪些词、两套词汇
+    children: []                    # 子节点，递归
+
+  - id: core
+    title: core 篇
+    layer: 模块
+    needs: [organization, architecture]
+    artifact: sql-builder-v2-core
+    status: planned
+    blurb: 通用层：递归六层讲一遍
+    children:
+      - id: core-rule
+        title: Rule[]
+        layer: 概念
+        needs: [core]
+        artifact: sql-builder-v2-core-rule
+        status: planned
+        blurb: 四种形态 + buildWhere 怎么处理它
+        children: []
+```
+
+**笔记那边只写两行**（`meta.json`）—— 层级和依赖关系**不在两处维护**：
+
+```json
+{ "tree": { "topic": "sql-builder-v2", "id": "core-rule" } }
+```
+
+**自动得到两样东西**：
+
+| 得到什么 | 从哪来 |
+|---|---|
+| 首页的**树视图**（我在哪、下一步看什么、哪些还没写） | plan 的整棵树 |
+| 每篇顶部的**「前置」区块** | plan 的 `needs` |
+
+```
+读这篇之前，你需要先知道
+  ← 1. 概念    圈人是什么、有哪些词、两套词汇
+  ← 2. 组织    仓库形状、三个包的分工、改哪里速查
+```
+
+**两个自动行为**（不用你操心）：
+
+- 前置节点**还没写出来**时，显示成灰色的「待产出」，**不做成 404 死链接**
+- `needs` 引用了不存在的 id → **`npm run check` 直接报错**，不会静默少一条
+
+> **没挂树的笔记照常存在**，在首页显示在「未归类」区。
+> 一棵树不是必须的 —— 只讲一个点的时候（「这个函数干什么」），不需要建树。
+
 ### 第 2 步 · 找到卡点
 
 用户可能明说（「Flink CDC 和 CDC 有什么区别」），也可能没说（只粘了一篇文档）。
@@ -1024,6 +1101,9 @@ pre-push 会重建 + 量图。**它拦下来通常不是你的问题。**
 
 ### 文档
 
+- `plans/<topic>.yaml` —— **嵌套产物树的唯一真相源**（树 + 依赖 + 进度）
+- `tools/lib/plan.mjs` —— 读 plan、生成「前置」区块
+- `tools/lib/home.mjs` —— 首页：树视图 + 未归类区
 - [`references/blocks.md`](references/blocks.md) —— 17 个积木的完整 DSL
 - [`references/extend.md`](references/extend.md) —— 积木不够用时怎么加一个
 - `notes/blocks-cheatsheet/note.md` —— 可运行的积木示例
