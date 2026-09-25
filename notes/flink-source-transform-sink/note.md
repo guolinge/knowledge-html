@@ -132,7 +132,150 @@ text: |
   `env.execute("realtime-order-job")` 才是按下启动键的那一刻。
 ````
 
-## 04 · 九个算子，其实是五类
+## 04 · 运行时：从算子到集群
+
+先回答一个常见问题：**Flink 一定要分布式跑吗？**
+
+不一定。本地学习调试时可以在本机跑（本地读个文件、起个 Socket 做 WordCount），
+就算设了并行度，也只是本机多个线程在跑，不涉及跨机器网络。
+但==生产环境几乎都是集群==：一个 JobManager + 好几个 TaskManager。
+
+那集群里到底有哪些东西？先把五个极易混的词分清：
+
+```compare
+first: 词
+head: [是什么, 别和谁混]
+rows:
+  - Operator:
+      - 逻辑上的一个处理步骤，比如 map / filter / sum
+      - "Subtask —— Operator 是图纸，本身没有并行度"
+  - Subtask:
+      - 某个算子的一个并行副本。parallelism = 3 就有 3 个 Subtask
+      - "Operator —— 一个是逻辑，一个是实例"
+  - Task:
+      - 真正被调度的执行单元，通常是一串链起来的算子
+      - "TaskManager —— Task 是工作单元，TaskManager 是进程"
+  - TaskManager:
+      - 干活的 Worker 进程（JVM），跑一个或多个 Task
+      - "JobManager —— 它干活，JobManager 管事"
+  - Slot:
+      - TaskManager 划出来的一份资源配额
+      - "「1 Slot = 1 算子」—— 不是这样"
+```
+
+### Operator：逻辑上的处理步骤
+
+`source.map(...).filter(...).keyBy(...).sum(...)` 里的 Source / Map / Filter / KeyBy / Sum，
+每一个都是一个 Operator。它们只是你定义的「处理流程」—— ==还没体现跑在哪台机器、启动几个实例==。
+
+### Subtask：一个算子的并行副本
+
+设了 `env.setParallelism(3)` 之后，一个 `Map` 算子会被拆成 3 个并行实例：
+
+```text
+Map 算子
+├── Map Subtask 0
+├── Map Subtask 1
+└── Map Subtask 2
+```
+
+```text
+Operator    ：一个逻辑算子
+Subtask     ：该算子的一个并行执行副本
+Parallelism ：该算子启动多少个 Subtask
+```
+
+所以 `Map(3)` 并不是「一个 Map」，而是**3 个 Map Subtask 同时处理不同部分的数据**。
+
+### Task：真正被调度的执行单元
+
+Flink 会把**不需要重分区**的连续算子合并成一个 Task，这叫**算子链（Operator Chaining）**：
+
+```text
+代码里写的：
+Source → map → filter → keyBy → sum
+
+运行时实际跑的：
+Task 1 = Source + map + filter        ← 串在一起，一个线程跑完
+        ↓ keyBy 必须重分区（网络 shuffle）
+Task 2 = sum
+```
+
+好处很实在：一条数据进来，在同一个线程里依次完成「读 Kafka → 解析 JSON → 过滤」，
+==中间不做线程切换、不做序列化、不走网络==。
+
+```callout
+tone: blue
+icon: 🧱
+text: |
+  所以 `Task` 常常不是「一个算子」，而是**「一串可合并算子的一个并行实例」**。
+  这也解释了为什么上一节的执行图里有 6 个算子，运行时可能只有 2 个 Task。
+```
+
+### TaskManager 和 Slot
+
+**TaskManager** 是集群里干活的 Worker 进程（JVM）：跑 Task、管内存和网络、维护本地状态、向 JobManager 汇报。
+
+**Slot** 是 TaskManager 划出来的一份资源配额。一个配了 3 个 Slot 的 TaskManager：
+
+```text
+TaskManager-1
+├── Slot 0
+├── Slot 1
+└── Slot 2
+```
+
+!!千万不要把它理解成「1 Slot = 1 算子」。!!
+更接近的说法是：**1 Slot = TaskManager 可分配给作业执行的一份资源**。
+多个 Task 也可以通过 Slot Sharing 共享同一个 Slot。
+
+### 把它们串起来
+
+```raw
+<div class="flarch">
+  <div class="fa-node tone-muted">
+    <b>Flink Client</b>
+    <small>提交 JAR / SQL Job</small>
+  </div>
+  <div class="fa-down tone-muted">提交 JobGraph</div>
+  <div class="fa-node tone-violet">
+    <b>JobManager</b>
+    <small>接收作业 · 生成执行计划 · 调度 Task · 协调 Checkpoint · 故障恢复</small>
+  </div>
+  <div class="fa-down tone-violet">分配 Task / Slot</div>
+  <div class="fa-flow">
+    <div class="fa-tm tone-blue">
+      <div class="fa-tm-head">TaskManager-1<small>一台机器 · 一个 JVM</small></div>
+      <div class="fa-slots">
+        <div class="fa-slot"><b>Slot 0</b><span>Task = Source + Map + Filter</span><em>3 个 Subtask 链在一起</em></div>
+        <div class="fa-slot"><b>Slot 1</b><span>Task = Source + Map + Filter</span><em>3 个 Subtask 链在一起</em></div>
+      </div>
+    </div>
+    <div class="fa-shuffle">keyBy(userId)<br>按 Key 哈希<br>网络 Shuffle</div>
+    <div class="fa-tm tone-green">
+      <div class="fa-tm-head">TaskManager-2<small>另一台机器 · 另一个 JVM</small></div>
+      <div class="fa-slots">
+        <div class="fa-slot"><b>Slot 0</b><span>Task = Aggregate</span><em>负责 u01 / u04 / …</em></div>
+        <div class="fa-slot"><b>Slot 1</b><span>Task = Aggregate</span><em>负责 u02 / u05 / …</em></div>
+      </div>
+    </div>
+  </div>
+  <div class="fa-down tone-green">写出结果</div>
+  <div class="fa-node tone-green">
+    <b>ClickHouse / Redis / Kafka</b>
+    <small>下游系统</small>
+  </div>
+</div>
+```
+
+五个词的包含关系可以背成一行：
+
+```text
+TaskManager  ⊃  Slot  ⊃  Task  ⊃  Subtask  ⊃  Operator
+（进程）        （资源）   （执行单元） （并行副本）   （逻辑步骤）
+```
+
+## 05 · 九个算子，其实是五类
 
 !!先说清楚：这不是 Flink 官方的严格分类标准，而是一种「按解决什么问题来分」的功能分类。!!
 
@@ -171,7 +314,7 @@ text: |
   所以 `keyBy` 单独用是看不出任何效果的 —— 它必须跟着 reduce / aggregate / window / process 才有意义。
 ```
 
-## 05 · 亲手跑一遍：同一批订单，过不同算子
+## 06 · 亲手跑一遍：同一批订单，过不同算子
 
 下面 6 条订单，点算子看产出。盯三件事：**输入栏哪几条被划掉了**、**输出栏多了还是少了几行**、**输出到底是一条条记录还是一堆桶**。
 
@@ -211,7 +354,7 @@ html: |-
 - **`flatMap` 让条数变多了**：6 条订单拆成 7 条商品行。而订单 `1006` 一个商品都没有 —— ==它一条也不产出==，这就是 `flatMap` 的「1 → 0」。
 - **`keyBy` 的输出不是列表，是三个桶**：6 条进、6 条出，**一条没多一条没少**，但数据被分成了 `u01 / u02 / u03` 三堆。这是全篇最该记住的一张图。
 
-## 06 · `keyBy`：唯一一个不产出数据的算子
+## 07 · `keyBy`：唯一一个不产出数据的算子
 
 它同时做了三件事，缺一不可：
 

@@ -29,6 +29,12 @@
       <a href="#一条流水线三段">一条流水线，三段</a>
       <a href="#source五种入口">Source：五种入口</a>
       <a href="#算子写在代码里的一张流程图">算子：写在代码里的一张流程图</a>
+      <a href="#运行时从算子到集群">运行时：从算子到集群</a>
+      <a href="#operator逻辑上的处理步骤" class="sub">Operator：逻辑上的处理步骤</a>
+      <a href="#subtask一个算子的并行副本" class="sub">Subtask：一个算子的并行副本</a>
+      <a href="#task真正被调度的执行单元" class="sub">Task：真正被调度的执行单元</a>
+      <a href="#taskmanager-和-slot" class="sub">TaskManager 和 Slot</a>
+      <a href="#把它们串起来" class="sub">把它们串起来</a>
       <a href="#九个算子其实是五类">九个算子，其实是五类</a>
       <a href="#亲手跑一遍同一批订单过不同算子">亲手跑一遍：同一批订单，过不同算子</a>
       <a href="#keyby唯一一个不产出数据的算子">keyBy：唯一一个不产出数据的算子</a>
@@ -233,7 +239,95 @@
 <p>你写的是「我要怎么处理数据」，<strong>怎么执行由引擎决定</strong>。
 <code>env.execute(&quot;realtime-order-job&quot;)</code> 才是按下启动键的那一刻。</p>
 </div>
-    </div><h2 id="九个算子其实是五类"><span class="num">04</span>九个算子，其实是五类</h2>
+    </div><h2 id="运行时从算子到集群"><span class="num">04</span>运行时：从算子到集群</h2>
+<p>先回答一个常见问题：<strong>Flink 一定要分布式跑吗？</strong></p>
+<p>不一定。本地学习调试时可以在本机跑（本地读个文件、起个 Socket 做 WordCount），
+就算设了并行度，也只是本机多个线程在跑，不涉及跨机器网络。
+但<mark class="mk-blue">生产环境几乎都是集群</mark>：一个 JobManager + 好几个 TaskManager。</p>
+<p>那集群里到底有哪些东西？先把五个极易混的词分清：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>词</th><th>是什么</th><th>别和谁混</th></tr></thead><tbody><tr><th>Operator</th><td data-label="是什么">逻辑上的一个处理步骤，比如 map / filter / sum</td><td data-label="别和谁混">Subtask —— Operator 是图纸，本身没有并行度</td></tr><tr><th>Subtask</th><td data-label="是什么">某个算子的一个并行副本。parallelism = 3 就有 3 个 Subtask</td><td data-label="别和谁混">Operator —— 一个是逻辑，一个是实例</td></tr><tr><th>Task</th><td data-label="是什么">真正被调度的执行单元，通常是一串链起来的算子</td><td data-label="别和谁混">TaskManager —— Task 是工作单元，TaskManager 是进程</td></tr><tr><th>TaskManager</th><td data-label="是什么">干活的 Worker 进程（JVM），跑一个或多个 Task</td><td data-label="别和谁混">JobManager —— 它干活，JobManager 管事</td></tr><tr><th>Slot</th><td data-label="是什么">TaskManager 划出来的一份资源配额</td><td data-label="别和谁混">「1 Slot = 1 算子」—— 不是这样</td></tr></tbody></table></div><h3 id="operator逻辑上的处理步骤">Operator：逻辑上的处理步骤</h3>
+<p><code>source.map(...).filter(...).keyBy(...).sum(...)</code> 里的 Source / Map / Filter / KeyBy / Sum，
+每一个都是一个 Operator。它们只是你定义的「处理流程」—— <mark class="mk-blue">还没体现跑在哪台机器、启动几个实例</mark>。</p>
+<h3 id="subtask一个算子的并行副本">Subtask：一个算子的并行副本</h3>
+<p>设了 <code>env.setParallelism(3)</code> 之后，一个 <code>Map</code> 算子会被拆成 3 个并行实例：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">Map 算子
+├── Map Subtask 0
+├── Map Subtask 1
+└── Map Subtask 2
+</code></pre></div>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">Operator    ：一个逻辑算子
+Subtask     ：该算子的一个并行执行副本
+Parallelism ：该算子启动多少个 Subtask
+</code></pre></div>
+<p>所以 <code>Map(3)</code> 并不是「一个 Map」，而是<strong>3 个 Map Subtask 同时处理不同部分的数据</strong>。</p>
+<h3 id="task真正被调度的执行单元">Task：真正被调度的执行单元</h3>
+<p>Flink 会把<strong>不需要重分区</strong>的连续算子合并成一个 Task，这叫<strong>算子链（Operator Chaining）</strong>：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">代码里写的：
+Source → map → filter → keyBy → sum
+
+运行时实际跑的：
+Task 1 = Source + map + filter        ← 串在一起，一个线程跑完
+        ↓ keyBy 必须重分区（网络 shuffle）
+Task 2 = sum
+</code></pre></div>
+<p>好处很实在：一条数据进来，在同一个线程里依次完成「读 Kafka → 解析 JSON → 过滤」，
+<mark class="mk-blue">中间不做线程切换、不做序列化、不走网络</mark>。</p>
+<div class="callout tone-blue">
+      <span class="ic">🧱</span>
+      <div><p>所以 <code>Task</code> 常常不是「一个算子」，而是<strong>「一串可合并算子的一个并行实例」</strong>。
+这也解释了为什么上一节的执行图里有 6 个算子，运行时可能只有 2 个 Task。</p>
+</div>
+    </div><h3 id="taskmanager-和-slot">TaskManager 和 Slot</h3>
+<p><strong>TaskManager</strong> 是集群里干活的 Worker 进程（JVM）：跑 Task、管内存和网络、维护本地状态、向 JobManager 汇报。</p>
+<p><strong>Slot</strong> 是 TaskManager 划出来的一份资源配额。一个配了 3 个 Slot 的 TaskManager：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">TaskManager-1
+├── Slot 0
+├── Slot 1
+└── Slot 2
+</code></pre></div>
+<p><mark class="mk-amber">千万不要把它理解成「1 Slot = 1 算子」。</mark>
+更接近的说法是：<strong>1 Slot = TaskManager 可分配给作业执行的一份资源</strong>。
+多个 Task 也可以通过 Slot Sharing 共享同一个 Slot。</p>
+<h3 id="把它们串起来">把它们串起来</h3>
+<div class="flarch">
+  <div class="fa-node tone-muted">
+    <b>Flink Client</b>
+    <small>提交 JAR / SQL Job</small>
+  </div>
+  <div class="fa-down tone-muted">提交 JobGraph</div>
+  <div class="fa-node tone-violet">
+    <b>JobManager</b>
+    <small>接收作业 · 生成执行计划 · 调度 Task · 协调 Checkpoint · 故障恢复</small>
+  </div>
+  <div class="fa-down tone-violet">分配 Task / Slot</div>
+  <div class="fa-flow">
+    <div class="fa-tm tone-blue">
+      <div class="fa-tm-head">TaskManager-1<small>一台机器 · 一个 JVM</small></div>
+      <div class="fa-slots">
+        <div class="fa-slot"><b>Slot 0</b><span>Task = Source + Map + Filter</span><em>3 个 Subtask 链在一起</em></div>
+        <div class="fa-slot"><b>Slot 1</b><span>Task = Source + Map + Filter</span><em>3 个 Subtask 链在一起</em></div>
+      </div>
+    </div>
+    <div class="fa-shuffle">keyBy(userId)<br>按 Key 哈希<br>网络 Shuffle</div>
+    <div class="fa-tm tone-green">
+      <div class="fa-tm-head">TaskManager-2<small>另一台机器 · 另一个 JVM</small></div>
+      <div class="fa-slots">
+        <div class="fa-slot"><b>Slot 0</b><span>Task = Aggregate</span><em>负责 u01 / u04 / …</em></div>
+        <div class="fa-slot"><b>Slot 1</b><span>Task = Aggregate</span><em>负责 u02 / u05 / …</em></div>
+      </div>
+    </div>
+  </div>
+  <div class="fa-down tone-green">写出结果</div>
+  <div class="fa-node tone-green">
+    <b>ClickHouse / Redis / Kafka</b>
+    <small>下游系统</small>
+  </div>
+</div>
+<p>五个词的包含关系可以背成一行：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">TaskManager  ⊃  Slot  ⊃  Task  ⊃  Subtask  ⊃  Operator
+（进程）        （资源）   （执行单元） （并行副本）   （逻辑步骤）
+</code></pre></div>
+<h2 id="九个算子其实是五类"><span class="num">05</span>九个算子，其实是五类</h2>
 <p><mark class="mk-amber">先说清楚：这不是 Flink 官方的严格分类标准，而是一种「按解决什么问题来分」的功能分类。</mark></p>
 <p>它的用处是：拿到一个需求时，先判断该用哪一类。</p>
 <div class="cards" data-cols="3"><div class="ccard tone-blue">
@@ -333,7 +427,7 @@
       <div><p><mark class="mk-blue"><code>keyBy</code> 不产出数据。</mark> 它做的事只有一件：<strong>告诉 Flink「接下来的计算按这个 Key 分开算」</strong>。
 所以 <code>keyBy</code> 单独用是看不出任何效果的 —— 它必须跟着 reduce / aggregate / window / process 才有意义。</p>
 </div>
-    </div><h2 id="亲手跑一遍同一批订单过不同算子"><span class="num">05</span>亲手跑一遍：同一批订单，过不同算子</h2>
+    </div><h2 id="亲手跑一遍同一批订单过不同算子"><span class="num">06</span>亲手跑一遍：同一批订单，过不同算子</h2>
 <p>下面 6 条订单，点算子看产出。盯三件事：<strong>输入栏哪几条被划掉了<strong>、</strong>输出栏多了还是少了几行<strong>、</strong>输出到底是一条条记录还是一堆桶</strong>。</p>
 <div class="demo" data-widget="operator-lab">
       <div class="demo-head">
@@ -371,7 +465,7 @@
 <li><strong><code>flatMap</code> 让条数变多了</strong>：6 条订单拆成 7 条商品行。而订单 <code>1006</code> 一个商品都没有 —— <mark class="mk-blue">它一条也不产出</mark>，这就是 <code>flatMap</code> 的「1 → 0」。</li>
 <li><strong><code>keyBy</code> 的输出不是列表，是三个桶<strong>：6 条进、6 条出，</strong>一条没多一条没少</strong>，但数据被分成了 <code>u01 / u02 / u03</code> 三堆。这是全篇最该记住的一张图。</li>
 </ul>
-<h2 id="keyby唯一一个不产出数据的算子"><span class="num">06</span><code>keyBy</code>：唯一一个不产出数据的算子</h2>
+<h2 id="keyby唯一一个不产出数据的算子"><span class="num">07</span><code>keyBy</code>：唯一一个不产出数据的算子</h2>
 <p>它同时做了三件事，缺一不可：</p>
 <ol>
 <li><strong>路由</strong> —— 相同 Key 的数据被送到<strong>同一个并行实例</strong>上。<code>u01</code> 的三笔订单一定落在同一个 slot。</li>
