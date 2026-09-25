@@ -227,13 +227,21 @@ export function blocksPlugin(md) {
       </div>`,
       )
       .join('');
+    // 三种形态：
+    //   panes  —— 双栏日志式（默认）
+    //   html   —— 作者手写标记，控件只负责接线
+    //   config —— 数据驱动，控件自己渲染整个 body（推荐给通用控件）
     const bodyHtml = cfg.html
       ? `<div class="demo-body custom">${cfg.html}</div>`
-      : `<div class="demo-body">${panes}</div>`;
-    return `<div class="demo" data-widget="${esc(cfg.widget)}">
+      : cfg.config
+        ? '<div class="demo-body custom" data-mount></div>'
+        : `<div class="demo-body">${panes}</div>`;
+    return `<div class="demo" data-widget="${esc(cfg.widget)}"${
+      cfg.config ? ` data-config="${esc(JSON.stringify(cfg.config))}"` : ''
+    }>
       <div class="demo-head">
         <span class="title">${esc(cfg.title || '')}</span>
-        <span class="status" data-status>${esc(cfg.hint || '未开始')}</span>
+        <span class="status" data-status>${esc(cfg.hint || (actions ? '未开始' : ''))}</span>
         <span class="spacer"></span>
         ${
           actions

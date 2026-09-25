@@ -100,6 +100,37 @@ const RENDERERS = {
 
 **加新积木前先 grep 一下你要用的类名。** 短类名（`.row` `.cell` `.item`）几乎一定会撞。
 
+## 加交互控件（不是积木，但同样要积累）
+
+控件注册在 `assets/app.js` 的 `WIDGETS` 对象里。**优先做数据驱动的**：
+
+```js
+WIDGETS.myWidget = (root) => {
+  const cfg = cfgOf(root);            // 读 data-config
+  const box = mountOf(root);          // 找到 [data-mount]
+  const statusEl = root.querySelector('[data-status]');
+
+  const btn = el('button', 'mw-btn', '点我');
+  box.append(btn);
+  btn.addEventListener('click', () => {
+    statusEl.textContent = '已点击';   // 标题栏右侧的状态文字
+  });
+};
+```
+
+三个现成的工具函数（已定义在 app.js 顶部）：
+
+| 函数 | 作用 |
+|---|---|
+| `el(tag, cls, text)` | 建元素，省掉 createElement + className + textContent 三行 |
+| `cfgOf(root)` | 读并解析 `data-config` |
+| `mountOf(root)` | 拿到 `[data-mount]` 容器 |
+
+**两条约定**：
+
+1. **数据驱动优先。** 能用 `config` 表达的，别让作者手写 HTML。
+2. **CSS 类名加前缀。** 控件样式同样会撞车 —— 参考上面「类名必须加前缀」。
+
 ## 第 4 步 · 加示例（必做）
 
 积木没有示例就等于不存在 —— 下次没人记得怎么用。

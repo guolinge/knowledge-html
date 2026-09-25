@@ -414,6 +414,77 @@ panes:
 
 两边的 `log` key 必须对得上。页面只声明外壳，逻辑全在 `app.js`。
 
+### 通用控件库（推荐优先用这些）
+
+这几个控件**不绑定具体知识**，只写 YAML 就能用。比手写 `html` 省事得多。
+
+#### `stepper` —— 逐步执行器
+
+**讲算法、协议、状态机**：点下一步，看代码/状态逐行走。
+
+```demo
+widget: stepper
+title: 二分查找怎么缩小范围
+actions: false
+config:
+  steps:
+    - { label: 初始, code: "low = 0, high = 9", note: 范围是全部 10 个元素 }
+    - { label: 第 1 次, code: "mid = 4\ntarget > a[4] → low = 5", note: 砍掉一半 }
+    - { label: 命中, code: "mid = 5\na[5] === target ✓", note: 共比较 3 次 }
+```
+
+`steps[]`：`label`（按钮文字）、`code`（等宽代码，`\n` 换行）、`note`（说明）。
+
+#### `tuner` —— 参数调节器
+
+**讲公式、阈值、性能曲线**：拖动滑块，多个指标实时变化。
+
+```demo
+widget: tuner
+title: 数据量增长时两种方案的耗时
+actions: false
+config:
+  param: { label: 数据量, unit: 万行, values: [1, 10, 100, 1000] }
+  outputs:
+    - { label: 全表扫描, unit: ms, values: [8, 80, 800, 8000], tone: red }
+    - { label: 走索引,   unit: ms, values: [0.1, 0.15, 0.3, 0.9], tone: green }
+```
+
+**注意**：`values` 是**离散档位**，不是公式。==不要指望它算数== ——
+你给什么值就显示什么值。这样设计是为了避免 `eval`，安全且可控。
+
+#### `diff` —— 并排差异对比
+
+**讲「改前 vs 改后」**：行首写 `- ` / `+ ` 自动标红绿，悬停两边对应行联动高亮。
+
+```demo
+widget: diff
+title: 从字符串拼接改成参数绑定
+actions: false
+config:
+  left:
+    title: 改前 · 字符串拼接
+    code: |
+      const sql =
+      -   "SELECT ... WHERE city = '" + city + "'";
+  right:
+    title: 改后 · 参数绑定
+    code: |
+      const sql =
+      +   "SELECT ... WHERE city = ?";
+      + db.query(sql, [city]);
+```
+
+### 数据驱动的写法（`config`）
+
+上面三个控件都用 `config`，作者**只写 YAML，不写 HTML**：
+
+- `panes` → 双栏日志式（配合日志型控件）
+- `html` → 作者手写标记，控件只负责接线
+- **`config` → 控件自己渲染整个 body（推荐）**
+
+`config` 会序列化成 JSON 塞进 `data-config`，控件用 `cfgOf(root)` 读。
+
 ---
 
 ## 13. `summary` / `raw`

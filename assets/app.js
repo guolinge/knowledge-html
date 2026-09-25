@@ -936,6 +936,217 @@
     if (document.fonts && document.fonts.ready) document.fonts.ready.then(drawAll);
   })();
 
+  /* ============================================================
+     通用控件库
+     ------------------------------------------------------------
+     约定：控件从 root.dataset.config 读配置，自己渲染 [data-mount] 里的内容。
+     这样作者只写 YAML，不用手写 HTML。
+  ============================================================ */
+  const el = (tag, cls, text) => {
+    const n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text !== undefined) n.textContent = text;
+    return n;
+  };
+  const cfgOf = (root) => {
+    try { return JSON.parse(root.getAttribute('data-config') || '{}'); }
+    catch { return {}; }
+  };
+  const mountOf = (root) => root.querySelector('[data-mount]') || root;
+
+  /* —— 控件：逐步执行器 ——
+     点下一步，看代码/状态逐行走。适合讲算法、协议、状态机。
+     config:
+       steps: [{ label, code, note }]
+  ------------------------------------------------ */
+  WIDGETS.stepper = (root) => {
+    const cfg = cfgOf(root);
+    const steps = cfg.steps || [];
+    if (!steps.length) return;
+    const box = mountOf(root);
+    const statusEl = root.querySelector('[data-status]');
+    let i = 0;
+    let timer = null;
+
+    const bar = el('div', 'st-bar');
+    const dots = el('div', 'st-dots');
+    const list = el('div', 'st-list');
+    const pane = el('div', 'st-pane');
+    const code = el('pre', 'st-code');
+    const note = el('p', 'st-note');
+
+    const prev = el('button', 'st-btn', '‹ 上一步');
+    const next = el('button', 'st-btn st-primary', '下一步 ›');
+    const play = el('button', 'st-btn', '▶ 自动播放');
+    const reset = el('button', 'st-btn st-ghost', '重置');
+    bar.append(prev, next, play, reset);
+
+    const items = steps.map((s, k) => {
+      const d = el('button', 'st-item');
+      d.append(el('span', 'st-idx', String(k + 1)), el('span', 'st-label', s.label || ''));
+      d.addEventListener('click', () => { stop(); go(k); });
+      list.append(d);
+      const dot = el('span', 'st-dot');
+      dots.append(dot);
+      return { d, dot };
+    });
+
+    pane.append(code, note);
+    box.append(dots, list, pane, bar);
+
+    function go(k) {
+      i = Math.max(0, Math.min(steps.length - 1, k));
+      const s = steps[i];
+      items.forEach(({ d, dot }, n) => {
+        d.classList.toggle('on', n === i);
+        d.classList.toggle('done', n < i);
+        dot.classList.toggle('on', n === i);
+        dot.classList.toggle('done', n < i);
+      });
+      code.textContent = s.code || '';
+      note.textContent = s.note || '';
+      code.hidden = !s.code;
+      note.hidden = !s.note;
+      prev.disabled = i === 0;
+      next.disabled = i === steps.length - 1;
+      if (statusEl) statusEl.textContent = `第 ${i + 1} / ${steps.length} 步`;
+    }
+    function stop() {
+      if (timer) { clearInterval(timer); timer = null; play.textContent = '▶ 自动播放'; }
+    }
+    prev.addEventListener('click', () => { stop(); go(i - 1); });
+    next.addEventListener('click', () => { stop(); go(i + 1); });
+    reset.addEventListener('click', () => { stop(); go(0); });
+    play.addEventListener('click', () => {
+      if (timer) return stop();
+      play.textContent = '⏸ 暂停';
+      timer = setInterval(() => {
+        if (i >= steps.length - 1) return stop();
+        go(i + 1);
+      }, 1100);
+    });
+    go(0);
+  };
+
+  /* —— 控件：参数调节器 ——
+     拖动滑块，看多个指标实时变化。
+     config:
+       param:  { label, unit, values: [...] }
+       outputs:[{ label, unit, values: [...], tone }]
+  ------------------------------------------------ */
+  WIDGETS.tuner = (root) => {
+    const cfg = cfgOf(root);
+    const param = cfg.param || {};
+    const vals = param.values || [];
+    if (!vals.length) return;
+    const box = mountOf(root);
+    const statusEl = root.querySelector('[data-status]');
+
+    const head = el('div', 'tn-head');
+    const val = el('b', 'tn-val', String(vals[0]));
+    const lab = el('span', 'tn-lab', (param.label || '') + (param.unit ? `（${param.unit}）` : ''));
+    const range = el('input', 'tn-range');
+    range.type = 'range';
+    range.min = '0';
+    range.max = String(vals.length - 1);
+    range.value = '0';
+    head.append(lab, val);
+
+    const out = el('div', 'tn-out');
+    const cards = (cfg.outputs || []).map((o) => {
+      const c = el('div', `tn-card tone-${o.tone || 'muted'}`);
+      c.append(el('small', '', o.label || ''));
+      const v = el('b', 'tn-num');
+      c.append(v);
+      if (o.unit) c.append(el('span', 'tn-unit', o.unit));
+      out.append(c);
+      return { v, o };
+    });
+
+    // 刻度：显示首尾，避免滑到哪都不知道范围
+    const scale = el('div', 'tn-scale');
+    scale.append(el('span', '', String(vals[0])));
+    if (vals.length > 2) scale.append(el('span', 'tn-mid', String(vals[Math.floor(vals.length / 2)])));
+    scale.append(el('span', '', String(vals[vals.length - 1])));
+
+    box.append(head, range, scale, out);
+
+    function apply() {
+      const i = Number(range.value);
+      val.textContent = String(vals[i]);
+      cards.forEach(({ v, o }) => {
+        const x = (o.values || [])[i];
+        v.textContent = x === undefined ? '—' : String(x);
+      });
+      if (statusEl) statusEl.textContent = `${param.label || '参数'} = ${vals[i]}`;
+    }
+    range.addEventListener('input', apply);
+    apply();
+  };
+
+  /* —— 控件：并排差异对比 ——
+     行首写 `- ` / `+ ` 自动识别为删除/新增；悬停时两边对应行联动高亮。
+     config:
+       left:  { title, code }
+       right: { title, code }
+       link:  true   # 是否联动高亮（默认 true）
+  ------------------------------------------------ */
+  WIDGETS.diff = (root) => {
+    const cfg = cfgOf(root);
+    const box = mountOf(root);
+    const link = cfg.link !== false;
+
+    const cols = ['left', 'right'].map((side) => {
+      const c = cfg[side] || {};
+      const col = el('div', `df-col df-${side}`);
+      col.append(el('div', 'df-title', c.title || ''));
+      const pre = el('div', 'df-code');
+      const rows = String(c.code || '')
+        .replace(/\n$/, '')
+        .split('\n')
+        .map((line) => {
+          let kind = '';
+          let text = line;
+          if (/^- /.test(line)) { kind = 'del'; text = line.slice(2); }
+          else if (/^\+ /.test(line)) { kind = 'add'; text = line.slice(2); }
+          else if (/^  /.test(line)) { text = line.slice(2); }
+          const r = el('div', `df-row${kind ? ' ' + kind : ''}`);
+          r.append(el('span', 'df-mark', kind === 'del' ? '−' : kind === 'add' ? '+' : ''));
+          r.append(el('span', 'df-text', text || ' '));
+          pre.append(r);
+          return r;
+        });
+      col.append(pre);
+      return { col, rows };
+    });
+
+    box.append(cols[0].col, cols[1].col);
+
+    if (!link) return;
+    // 悬停联动：把另一边对应的「有标记行」也高亮
+    ['del', 'add'].forEach(() => {});
+    const markRows = (side, kind) => cols[side].rows.filter((r) => r.classList.contains(kind));
+    cols[0].rows.forEach((r, i) => {
+      r.addEventListener('mouseenter', () => {
+        const other = cols[1].rows[i];
+        if (other) other.classList.add('hover');
+        r.classList.add('hover');
+      });
+      r.addEventListener('mouseleave', () => {
+        cols[0].rows.forEach((x) => x.classList.remove('hover'));
+        cols[1].rows.forEach((x) => x.classList.remove('hover'));
+      });
+    });
+    cols[1].rows.forEach((r, i) => {
+      r.addEventListener('mouseenter', () => {
+        const other = cols[0].rows[i];
+        if (other) other.classList.add('hover');
+        r.classList.add('hover');
+      });
+    });
+    void markRows;
+  };
+
   /* ---------- 挂载 ---------- */
   document.querySelectorAll('[data-widget]').forEach((root) => {
     var name = root.getAttribute('data-widget');
