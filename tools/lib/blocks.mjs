@@ -428,6 +428,43 @@ export function blocksPlugin(md) {
     </div>`;
   }
 
+  /* ===== 积木 14 · matrix =====
+     2x2 定位矩阵。
+     设计依据：阈值线的位置决定分类结果，所以它是主角；
+     轴标签放在两端、极简，不写 HIGH/LOW 这类修饰。 */
+  function matrix(body) {
+    const cfg = YAML.parse(body) || {};
+    const cells = cfg.cells || [];
+    const x = cfg.x || {};
+    const y = cfg.y || {};
+
+    const cell = (c, i) =>
+      c
+        ? `<div class="mcell tone-${c.tone || 'muted'}">
+            <b>${inline(c.title)}</b>
+            ${c.desc ? `<span>${inline(c.desc)}</span>` : ''}
+          </div>`
+        : `<div class="mcell tone-muted is-empty"></div>`;
+
+    return `<div class="mx">
+      ${y.label ? `<div class="mx-ylab">${inline(y.label)}</div>` : ''}
+      <div class="mx-body">
+        <div class="mx-y mx-yto">${inline(y.to || '')}</div>
+        <div class="mx-grid">
+          ${cell(cells[0], 0)}
+          ${cell(cells[1], 1)}
+          ${cell(cells[2], 2)}
+          ${cell(cells[3], 3)}
+        </div>
+        <div class="mx-y mx-yfrom">${inline(y.from || '')}</div>
+        <div class="mx-xrow">
+          <span>${inline(x.from || '')}</span><span>${inline(x.to || '')}</span>
+        </div>
+        ${x.label ? `<div class="mx-xlab">${inline(x.label)}</div>` : ''}
+      </div>
+    </div>`;
+  }
+
   /* ---------- 注册 ---------- */
   const RENDERERS = {
     'lane-stack': laneStack,
@@ -437,6 +474,7 @@ export function blocksPlugin(md) {
     timeline,
     flow,
     seq,
+    matrix,
     spec,
     callout,
     checklist,
