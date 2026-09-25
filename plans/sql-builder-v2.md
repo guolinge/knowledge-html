@@ -1,6 +1,6 @@
 # 方案：sql_builder_v2 的嵌套产物树
 
-> 状态：**已确认**（2026-09-26）
+> 状态：**已完成**（2026-09-26）· 12 篇全部产出
 > 源码：`sources/gitlab/sql_builder_v2 @ 2c500b2`
 > 机器可读的树在 [`sql-builder-v2.yaml`](sql-builder-v2.yaml)
 
@@ -60,24 +60,36 @@ text: |
     │     │     ← 前置：core 篇
     │     │     17 个方法 + 两个实现 + 什么时候调
     │     │
-    │     └─ ⑦ 时间表达式篇 ─────────── sql-builder-v2-core-time
-    │           ← 前置：core 篇
-    │           utils.ts 675 行里最大的一块：相对/绝对时间怎么变成 SQL
+    │     ├─ ⑦ 时间表达式篇 ─────────── sql-builder-v2-core-time
+    │     │     ← 前置：core 篇
+    │     │     utils.ts 675 行里最大的一块：相对/绝对时间怎么变成 SQL
+    │     │
+    │     └─ ⑧ 数组条件的两种路径 ────── sql-builder-v2-core-dialect-array
+    │           ← 前置：⑥ 方言篇
+    │           走接口的 vs 按 dbType 分支的 —— 一处架构裂缝
+    │           ==写 ⑥ 时发现那里塞不下，长出来的新节点==
     │
-    └─ ⑧ crowd 篇 ───────────────────── sql-builder-v2-crowd
+    └─ ⑨ crowd 篇 ───────────────────── sql-builder-v2-crowd
           ← 前置：组织篇 + 架构篇
           递归六层：core 之上加了什么
           │
-          ├─ ⑨ entrepot 篇 ──────────── sql-builder-v2-crowd-entrepot
+          ├─ ⑩ entrepot 篇 ──────────── sql-builder-v2-crowd-entrepot
           │     ← 前置：crowd 篇
           │     六种条件入口：是什么 / 怎么分发 / 怎么生成 SQL
           │
-          └─ ⑩ combi 篇 ─────────────── sql-builder-v2-crowd-combi
+          ├─ ⑪ combi 篇 ─────────────── sql-builder-v2-crowd-combi
+          │     ← 前置：crowd 篇
+          │     AND/OR 怎么变成集合运算 + include/exclude
+          │
+          └─ ⑫ 条件树重写 ───────────── sql-builder-v2-crowd-combi-optimizer
                 ← 前置：crowd 篇
-                AND/OR 怎么变成集合运算 + include/exclude
+                翻译之前先重写一遍 —— treeSimplifier 优化器
+                ==回头审时发现架构篇的主干图漏了这一步，长出来的新节点==
 ```
 
-**共 10 篇。** 主干 3 篇，分支 7 篇。
+**共 12 篇。** 主干 3 篇，分支 9 篇。
+
+> 一开始定的是 10 篇。写到一半长出来两篇 —— 详见文末「树是边写边长的」。
 
 **依赖图**（`needs` 关系）：
 
@@ -279,7 +291,7 @@ nodes:
 ### 4. 首页改成**树视图**
 
 ```
-▾ 理解 sql_builder_v2                        3 / 10 篇
+▾ 理解 sql_builder_v2                       12 / 12 篇
     ├─ ① 概念篇          ✅
     ├─ ② 组织篇          ✅
     ├─ ③ 架构篇          ✅
@@ -305,7 +317,7 @@ tone: green
 icon: ✅
 text: |
   ==一篇一篇做，每做完一篇就是完整可用的一篇。==
-  不要「十篇同时开工」—— 那样又回到「东补西补」。
+  不要「十二篇同时开工」—— 那样又回到「东补西补」。
 ```
 
 | 阶段 | 做什么 | 为什么这个顺序 |
@@ -331,7 +343,69 @@ text: |
 
 | 问题 | 决定 |
 |---|---|
-| 篇数 | **10 篇**（主干 3 + 分支 7） |
+| 篇数 | **12 篇**（主干 3 + 分支 9）—— 从 10 长到 12 |
 | `utils.ts` 时间表达式 | **单独一篇**（⑦）—— 675 行里最大的一块 |
 | `packages/goods` | **并入组织篇** —— 相对独立且小 |
 | 首页 | **改成树视图** —— 这是「嵌套产物树」的关键一环 |
+
+---
+
+## 八、树是边写边长的
+
+```callout
+tone: red
+icon: ⚠
+quote: true
+text: |
+  ==**第一次读代码，只看得见「结构」，看不见「哪个分支信息量大」。**==
+
+  信息量是在**写的时候**才暴露的。一开始定了 10 篇，
+  写到第 6 篇时发现两处「塞不下」—— 树长到了 12 篇。
+```
+
+| 长出来的节点 | 什么时候发现的 | 为什么够格 |
+|---|---|---|
+| **⑧ 数组条件的两种路径** | 写 ⑥ 方言篇时 | 它不是「方言层的一个方法」，是一条独立的架构裂缝：跨 core+crowd、3 个 DB 分支、两套机制并存、带 MySql 时代的历史痕迹 |
+| **⑫ 条件树重写** | 回头审时 | **架构篇的主干图漏了一整个步骤** —— `initMajorListSqlGen` 的第一行就是 `treeSimplifier()`，然后才翻译。所以它是主干的一部分，会被别的节点引用 |
+
+**判断标准**（不是「它挺大」，而是）：
+
+> **它能被别的节点 `needs` 吗？**
+> 能 → 独立成篇；不能且只有父节点用它 → 就是父节点的一节。
+
+**还处理了一个循环依赖**：架构篇要提优化器，优化器住在 crowd 里，而 crowd `needs` 架构篇 —— 会成环。
+解法是**架构篇只「提一句 + 链接」，不加 `needs`**（和它对待 ⑤ Rule[] 篇一样）。
+
+### 反过来：该并的要并
+
+`code-map` 里有一节「推荐的看代码顺序」（6 步阅读指南），收尾检查时发现新树没覆盖它。
+但按判据它**不能被别人 `needs`**（它是起点指南，不是谁的前置）——
+所以**并入组织篇**，而不是开新篇。
+
+```callout
+tone: green
+icon: ✅
+text: |
+  ==**树会长，也会缩。**== 两个方向都要走一遍，才叫「维护脉络」。
+```
+
+---
+
+## 九、最终产出
+
+| # | 篇 | 层 |
+|---|---|---|
+| ① | [概念](../notes/sql-builder-v2-concepts/) | 概念 | 圈人是什么、有哪些词 |
+| ② | [组织](../notes/sql-builder-v2-organization/) | 组织 | 仓库形状、三个包、从哪开始读 |
+| ③ | [架构](../notes/sql-builder-v2-architecture/) | 架构 | 主干三步 + 四条机制 + 取舍 |
+| ④ | [core](../notes/sql-builder-v2-core/) | 模块 | 不懂业务的翻译器 |
+| ⑤ | [Rule[]](../notes/sql-builder-v2-core-rule/) | 概念 | 四种形态的 2×2 |
+| ⑥ | [方言](../notes/sql-builder-v2-core-dialect/) | 模块 | 17 个方法、两个实现 |
+| ⑦ | [时间表达式](../notes/sql-builder-v2-core-time/) | 模块 | 「最近 N 天」的三种 SQL 形态 |
+| ⑧ | [数组条件的两种路径](../notes/sql-builder-v2-core-dialect-array/) | 模块 | 一处架构裂缝 ★长出来的 |
+| ⑨ | [crowd](../notes/sql-builder-v2-crowd/) | 模块 | core 之上加了什么 |
+| ⑩ | [entrepot](../notes/sql-builder-v2-crowd-entrepot/) | 模块 | 六种条件入口 |
+| ⑪ | [combi](../notes/sql-builder-v2-crowd-combi/) | 模块 | AND/OR = 集合运算 |
+| ⑫ | [条件树重写](../notes/sql-builder-v2-crowd-combi-optimizer/) | 模块 | 翻译前先重写 ★长出来的 |
+
+**旧的 `code-map` 和 `core-abstractions` 已标记为「已被替代」**，内容拆进上面 12 篇，但没有删除。
