@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-has-toc="1">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>sql_builder_v2 的数组条件：两条路</title>
+<meta name="description" content="同一件事——判断一个数组里有没有某个值——有两套实现：一套走方言接口，一套按 dbType 分支。它们不是重复，而是接口只建模了一个维度，装不下「同一语义 × 两种底层存储」这个 2×2。" />
+<link rel="stylesheet" href="../../assets/theme.css" />
+  <link rel="stylesheet" href="../../assets/blocks.css" />
+  <link rel="stylesheet" href="../../assets/archify-embed.css" />
+</head>
+<body>
+<div id="progress"></div>
+<div id="tocScrim"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
+    <a class="brand" href="../../index.html"><span class="dot"></span>知识笔记</a>
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="toc" id="toc">
+      <p class="toc-title">目录</p>
+      <a href="../../index.html" class="sub">← 全部笔记</a>
+      <a href="#概念同一件事两条路">概念：同一件事，两条路</a>
+      <a href="#组织它其实是个-22">组织：它其实是个 2×2</a>
+      <a href="#而接口只建模了一个维度" class="sub">而接口只建模了一个维度</a>
+      <a href="#架构为什么它走不了接口">架构：为什么它走不了接口</a>
+      <a href="#两条路各自服务谁" class="sub">两条路各自服务谁</a>
+      <a href="#细节三个容易看漏的地方">细节：三个容易看漏的地方</a>
+      <a href="#①-doris-的-string-分支直接复用了-mysql-的实现" class="sub">① Doris 的 string 分支直接复用了 MySql 的实现</a>
+      <a href="#②-findinset-的参数顺序是反的" class="sub">② find_in_set 的参数顺序是反的</a>
+      <a href="#③-它有-mysql-分支-说明年代更早" class="sub">③ 它有 MySql 分支 —— 说明年代更早</a>
+      <a href="#取舍该不该统一">取舍：该不该统一</a>
+      <a href="#自测">自测</a>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow">● 从零理解 · 模块</span>
+      <h1>sql_builder_v2 的数组条件：两条路</h1>
+      <p class="lede">同一件事——判断一个数组里有没有某个值——有两套实现：一套走方言接口，一套按 dbType 分支。它们不是重复，而是接口只建模了一个维度，装不下「同一语义 × 两种底层存储」这个 2×2。</p>
+    </div>
+
+    <div class="draft-banner">
+    <span>⚠</span>
+    <span>本页状态为 <b>draft</b>：内容尚未人工核对，引用前请自行验证。</span>
+  </div>
+<aside class="needs">
+      <p class="needs-title">读这篇之前，你需要先知道</p>
+      <a class="need" href="../sql-builder-v2-core-dialect/">← <b>6. 方言</b><span>17 个方法 + 两个实现 + 什么时候调</span></a>
+    </aside>
+    <div class="provenance"><span><b>来源</b> sources/gitlab/sql_builder_v2 @ 2c500b2</span><span><b>生成</b> 2026-09-26</span><span><b>模型</b> deepseek-v4.1-flash</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">架构</span> <span class="tag tone-muted">SQL</span> <span class="tag tone-muted">TypeScript</span> <span class="tag tone-muted">圈人</span></span></div>
+
+<div class="callout tone-blue">
+      <span class="ic">🧭</span>
+      <div><p>前置是 <a href="../sql-builder-v2-core-dialect/">⑥ 方言篇</a>。</p>
+<p>那篇讲「方言接口怎么设计的」。这篇讲<strong>一个不走接口的东西</strong> ——
+以及它为什么走不了。</p>
+<p>读完你应该能说出：「<mark class="mk-blue">不是重复实现，是接口只建模了一个维度。</mark>」</p>
+</div>
+    </div><h2 id="概念同一件事两条路"><span class="num">01</span>概念：同一件事，两条路</h2>
+<p>「判断一个数组里有没有某个值」——这件事有两套实现：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>路径</th><th>在哪</th><th>怎么区分库</th><th>被谁用</th></tr></thead><tbody><tr><th><code>SqlDialect.jsonArray*Rule</code></th><td data-label="在哪"><code>core/src/dialect/</code></td><td data-label="怎么区分库"><span class="tag tone-green">走接口，两个实现类</span></td><td data-label="被谁用"><code>event.ts</code> —— 事件的<strong>属性</strong></td></tr><tr><th><code>getStringArrayRule</code></th><td data-label="在哪"><code>core/src/utils.ts</code></td><td data-label="怎么区分库"><span class="tag tone-red">**按 dbType if/else**</span></td><td data-label="被谁用"><code>relation.ts</code> —— 关系的<strong>属性</strong></td></tr></tbody></table></div><div class="callout tone-red quote">
+      <span class="ic">⚠</span>
+      <div><p><mark class="mk-blue"><strong>第二条路违反了方言层的初衷。</strong></mark></p>
+<p>方言层的意义就是「把这些 if/else 收拢到一处」，
+而 <code>getStringArrayRule</code> 又把 if/else 搬回了 <code>utils.ts</code>。</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">if (dbType === DbType.Bytehouse) { ... }
+else if (dbType === DbType.Doris) { ... }
+else if (dbType === DbType.MySql) { ... }
+else { throw new Error(`invalid dbType: ${dbType}`); }
+</code></pre></div>
+</div>
+    </div><h2 id="组织它其实是个-22"><span class="num">02</span>组织：它其实是个 2×2</h2>
+<div class="callout tone-violet quote">
+      <span class="ic">💡</span>
+      <div><p><mark class="mk-blue"><strong>先别急着说「重复实现」。</strong></mark></p>
+<p>看它的签名 —— 比接口版<strong>多一个参数</strong>：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">getStringArrayRule(op, columnName, value, dbType, columnType?)
+                                                    ↑ 就是它
+</code></pre></div>
+<p><code>columnType</code> 是 <code>'array' | 'string'</code> ——
+<mark class="mk-blue">「同一个语义」在底层有<strong>两种存储形态</strong>。</mark></p>
+</div>
+    </div><p><strong>这个参数展开来，是一个 2×2 的矩阵</strong>：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>库 × 存储</th><th>columnType = 'array'</th><th>columnType = 'string'</th></tr></thead><tbody><tr><th>ByteHouse</th><td data-label="columnType = 'array'"><code>has(\</code>col`, ?)`</td><td data-label="columnType = 'string'"><code>has(splitByChar(',', \</code>col`), ?)`</td></tr><tr><th>Doris</th><td data-label="columnType = 'array'"><code>ARRAY_CONTAINS(\</code>col`, ?)`</td><td data-label="columnType = 'string'"><code>find_in_set(?, \</code>col`)`</td></tr><tr><th>MySql</th><td data-label="columnType = 'array'"><span class="tag tone-muted">—（没有 array）</span></td><td data-label="columnType = 'string'"><code>find_in_set(?, \</code>col`)`</td></tr></tbody></table></div><div class="callout tone-violet">
+      <span class="ic">💡</span>
+      <div><p><strong>「底层存的是数组，还是逗号分隔的字符串」——这是第二个维度。</strong></p>
+<ul>
+<li><strong>数组</strong>：<code>has(col, ?)</code> —— 直接问「这个数组里有吗」</li>
+<li><strong>逗号分隔字符串</strong>：<code>has(splitByChar(',', col), ?)</code> ——
+<mark class="mk-blue">先按逗号切开，再问</mark></li>
+</ul>
+<p>同样的语义，两种存储，SQL 完全不一样。</p>
+</div>
+    </div><h3 id="而接口只建模了一个维度">而接口只建模了一个维度</h3>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">// core/src/dialect/interface.ts —— 没有 columnType 这种东西
+jsonArrayContainsRule(field: string, values: string[]): Rule;
+jsonArrayNotContainsRule(field: string, values: string[]): Rule;
+jsonArrayEqualsRule(field: string, values: string[], op: Op.Eq | Op.NotEq): Rule;
+</code></pre></div>
+<div class="callout tone-red">
+      <span class="ic">⚠</span>
+      <div><p><mark class="mk-blue"><strong>接口版的假设是「底层就是 JSON 数组」。</strong></mark></p>
+<p>看 ByteHouse 的实现就知道：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">const convertedField = `assumeNotNull(JSONExtract(${field}, 'Array(String)'))`;
+</code></pre></div>
+<p>它<strong>无条件</strong>把字段当 JSON 数组解析。所以接口里没有 <code>columnType</code> 的位置 ——
+<mark class="mk-blue">它的设计前提里就没有「另一种存储形态」。</mark></p>
+</div>
+    </div><h2 id="架构为什么它走不了接口"><span class="num">03</span>架构：为什么它走不了接口</h2>
+<div class="callout tone-green quote">
+      <span class="ic">✅</span>
+      <div><p><strong>这不是谁偷懒，是接口的形状装不下这个需求。</strong></p>
+<p>接口的抽象是「<strong>一个语义 × N 个库</strong>」。
+而 <code>getStringArrayRule</code> 面对的是「<strong>一个语义 × N 个库 × 2 种存储</strong>」。</p>
+<p>强行塞进接口会有两个后果：</p>
+<ul>
+<li>每个方法都多一个 <code>columnType</code> 参数 —— <mark class="mk-blue">接口变丑，而且大部分实现用不上</mark></li>
+<li><code>jsonArray*Rule</code> 那三个方法的语义会变得模糊（它到底是「JSON 数组」还是「数组类属性」）</li>
+</ul>
+</div>
+    </div><p><strong>调用点只有一个</strong>：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">// crowd/src/entrepots/relation.ts
+if (isContainOp(expr.op)) {
+    return getStringArrayRule(
+        expr.op,
+        expr.name,
+        (expr as StringArrayPropExpr).value,
+        dbType,        // ← 从哪来的？
+        'string'       // ← 硬编码
+    );
+}
+</code></pre></div>
+<div class="callout tone-amber">
+      <span class="ic">⚠</span>
+      <div><p><strong>注意两个细节，它们暴露了这条路的「旁路」性质：</strong></p>
+<p>① <code>dbType</code> 是<strong>作为参数传进 <code>Relation</code> 类</strong>的，
+而不是从 dialect 实例上读（<code>this._dialect.name</code> 就能拿到）。</p>
+<p>② <code>columnType</code> <strong>硬编码成 <code>'string'</code></strong> ——
+虽然函数支持 <code>'array'</code>，但关系属性这里永远传字符串形态。</p>
+<p><mark class="mk-blue">所以它是「知道具体是哪个库」的人在写，而不是「知道有个方言接口」的人在写。</mark></p>
+</div>
+    </div><h3 id="两条路各自服务谁">两条路各自服务谁</h3>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>路径</th><th>服务什么数据</th><th>底层存什么</th><th>谁来传 columnType</th></tr></thead><tbody><tr><th>接口版</th><td data-label="服务什么数据">事件的属性（stringArray 类型 prop）</td><td data-label="底层存什么"><span class="tag tone-green">JSON 数组</span></td><td data-label="谁来传 columnType"><span class="tag tone-muted">不需要 —— 写死了</span></td></tr><tr><th>裂缝版</th><td data-label="服务什么数据">关系的属性</td><td data-label="底层存什么"><span class="tag tone-amber">数组 **或** 逗号分隔字符串</span></td><td data-label="谁来传 columnType">调用方传（这里硬编码 string）</td></tr></tbody></table></div><div class="callout tone-violet">
+      <span class="ic">💡</span>
+      <div><p><mark class="mk-blue"><strong>所以严格说它们不是「重复」，是「两个不同的需求碰巧长得像」。</strong></mark></p>
+<ul>
+<li>事件的属性：一定是 JSON 数组 → 接口能表达</li>
+<li>关系的属性：可能是两种形态 → 接口表达不了</li>
+</ul>
+<p><mark class="mk-blue">但它们的 SQL 片段高度重合（<code>has</code> / <code>ARRAY_CONTAINS</code> / <code>find_in_set</code>），
+所以看着像重复。</mark></p>
+</div>
+    </div><h2 id="细节三个容易看漏的地方"><span class="num">04</span>细节：三个容易看漏的地方</h2>
+<h3 id="①-doris-的-string-分支直接复用了-mysql-的实现">① Doris 的 string 分支直接复用了 MySql 的实现</h3>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">function _getDorisStringArrayExpression(op, columnName, value, columnType) {
+    if (columnType === 'array') {
+        return { raw: `ARRAY_CONTAINS(${DB.formatField(columnName)}, ?)`, value };
+    } else {
+        // 逗号分隔字符串，使用 FIND_IN_SET（与 mysql 逻辑相同）
+        return _getMysqlStringArrayExpression(op, columnName, value);
+    }
+}
+</code></pre></div>
+<div class="callout tone-violet">
+      <span class="ic">💡</span>
+      <div><p><strong><code>find_in_set</code> 是 MySQL 的函数，Doris 也支持它。</strong></p>
+<p>所以这里不是「复制粘贴」，是<strong>主动复用</strong> —— 注释也写明了「与 mysql 逻辑相同」。</p>
+<p><mark class="mk-blue">这是三个 <code>_get*StringArrayExpression</code> 里唯一的跨库复用。</mark></p>
+</div>
+    </div><h3 id="②-findinset-的参数顺序是反的">② <code>find_in_set</code> 的参数顺序是反的</h3>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">function _getMysqlStringArrayExpression(op, columnName, value) {
+    const _prefix = op === ContainOp.Has ? 'find_in_set' : 'not find_in_set';
+    const raw = DB.raw(DB.formatField(columnName))
+        .wrap(_prefix + '(?, ', ')')      // ← 注意这里
+        .toQuery();
+    return { raw, value };
+}
+</code></pre></div>
+<p>拼出来是：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-sql">find_in_set(?, `col`)     -- 值在前，列名在后
+</code></pre></div>
+<div class="callout tone-amber">
+      <span class="ic">⚠</span>
+      <div><p><mark class="mk-blue"><strong>这不是笔误。</strong></mark></p>
+<p><code>FIND_IN_SET(str, strlist)</code> 的签名就是「<strong>要查找的字符串在前，列表在后</strong>」。</p>
+<p>对比一下别的分支：<code>has(\</code>col`, ?)<code>、</code>ARRAY_CONTAINS(`col`, ?)` ——
+都是<strong>列名在前</strong>。</p>
+<p><mark class="mk-blue">所以这一个方法是反的，而且必须反。</mark> 读代码时容易看漏。</p>
+</div>
+    </div><h3 id="③-它有-mysql-分支-说明年代更早">③ 它有 <code>MySql</code> 分支 —— 说明年代更早</h3>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">} else if (dbType === DbType.MySql) {
+    // ! 注意，mysql 场景的 Array，实际上是，用逗号分隔的字符串 String
+    if (_v.length === 1) { ... }
+</code></pre></div>
+<div class="callout tone-amber">
+      <span class="ic">⚠</span>
+      <div><p><strong>而 <code>SqlDialect</code> 里根本没有 MySql 实现。</strong></p>
+<p><code>DbType.MySql</code> 的注释写着「<strong>作为历史枚举值保留</strong>，
+仅在 <code>getStringArrayRule()</code> 和 <code>buildDetailWhereClause()</code> 中使用」。</p>
+<p><mark class="mk-blue">注意它点名了这两个函数</mark> —— 也就是说，<strong>整个仓库里只有这两个地方还认识 MySql</strong>。</p>
+</div>
+    </div><h2 id="取舍该不该统一"><span class="num">05</span>取舍：该不该统一</h2>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>方案</th><th>怎么做</th><th>代价</th></tr></thead><tbody><tr><th>保持现状</th><td data-label="怎么做">两条路各管各的</td><td data-label="代价"><span class="tag tone-amber">看着乱，但两边行为明确</span></td></tr><tr><th>合并到接口</th><td data-label="怎么做">给接口加 columnType 参数</td><td data-label="代价"><span class="tag tone-red">==接口变丑，大部分实现用不上==</span></td></tr><tr><th>抽出第三个维度</th><td data-label="怎么做">把「存储形态」单独建模，像 <code>SqlDialect</code> 一样做成策略</td><td data-label="代价"><span class="tag tone-violet">干净，但要动 core + crowd 两层</span></td></tr></tbody></table></div><div class="callout tone-green">
+      <span class="ic">✅</span>
+      <div><p><strong>看到这种「两套并存」，别急着统一。</strong></p>
+<p>先确认三件事：</p>
+<ol>
+<li><strong>它们的行为真的一样吗？</strong> —— 这里不一样（一个假设 JSON 数组，一个支持两种存储）</li>
+<li><strong>合并会不会让接口变形？</strong> —— 这里会（多一个大部分实现用不上的参数）</li>
+<li><strong>有没有人依赖旧路径的某个行为？</strong> —— 这里可能有（<code>columnType</code> 硬编码成 <code>'string'</code>）</li>
+</ol>
+<p><mark class="mk-blue">三个答案都不利于合并，所以现状是合理的妥协。</mark></p>
+</div>
+    </div><div class="callout tone-violet">
+      <span class="ic">💡</span>
+      <div><p><strong>真实代码库里，这种「看起来该统一、其实不该」的地方很多。</strong></p>
+<p>判断标准不是「代码整齐」，是「<strong>改了会不会引入 bug</strong>」。
+<mark class="mk-blue">能说清为什么它长这样，比把它改整齐更重要。</mark></p>
+</div>
+    </div><h2 id="自测"><span class="num">06</span>自测</h2>
+<div class="quiz"><details>
+        <summary><code>getStringArrayRule</code> 和 <code>SqlDialect.jsonArrayContainsRule</code> 是重复实现吗？</summary>
+        <div class="a"><p><strong>不是。</strong> 它们服务两个不同的需求：
+接口版服务「事件的属性」（一定是 JSON 数组），
+裂缝版服务「关系的属性」（可能是数组，也可能是逗号分隔字符串）。
+它们的 SQL 片段高度重合，所以看着像重复，但前提假设不一样。</p>
+</div>
+      </details><details>
+        <summary><code>getStringArrayRule</code> 为什么走不了方言接口？</summary>
+        <div class="a"><p>因为它面对的是「<strong>一个语义 × N 个库 × 2 种存储</strong>」，
+而接口的抽象是「一个语义 × N 个库」—— <strong>少了一个维度</strong>。
+接口版无条件把字段当 JSON 数组解析（<code>JSONExtract(field, 'Array(String)')</code>），
+它的设计前提里就没有「另一种存储形态」。
+强行塞进去会让每个方法都多一个大部分实现用不上的参数。</p>
+</div>
+      </details><details>
+        <summary><code>columnType</code> 是 <code>'string'</code> 时，ByteHouse 和 Doris 各生成什么？</summary>
+        <div class="a"><p>ByteHouse：<code>has(splitByChar(',', \</code>col`), ?)<code> —— 先按逗号切开再问。 Doris：</code>find_in_set(?, `col`)` —— 直接复用 MySql 的实现。
+<mark class="mk-blue">注意 Doris 这里是主动复用，注释写明了「与 mysql 逻辑相同」。</mark></p>
+</div>
+      </details><details>
+        <summary>为什么 <code>find_in_set(?, </code>col<code>)</code> 的参数顺序是反的？</summary>
+        <div class="a"><p><strong>不是笔误。</strong> <code>FIND_IN_SET(str, strlist)</code> 的签名就是「要查找的字符串在前，列表在后」。
+对比 <code>has(\</code>col`, ?)<code>/</code>ARRAY_CONTAINS(`col`, ?)` 都是列名在前 ——
+所以只有这一个方法是反的，而且必须反。</p>
+</div>
+      </details><details>
+        <summary><code>getStringArrayRule</code> 里有 MySql 分支，说明什么？</summary>
+        <div class="a"><p>说明它<strong>写于「还支持三个库」的年代</strong>。
+而 <code>SqlDialect</code> 里根本没有 MySql 实现 —— <code>DbType.MySql</code> 的注释写着
+「作为历史枚举值保留，仅在 <code>getStringArrayRule()</code> 和 <code>buildDetailWhereClause()</code>
+中使用」。
+<mark class="mk-blue">注意它点名了这两个函数：整个仓库里只有这两个地方还认识 MySql。</mark></p>
+</div>
+      </details><details>
+        <summary>看到这种「两套并存」，该不该统一？</summary>
+        <div class="a"><p><strong>先确认三件事</strong>：① 行为真的一样吗 ② 合并会不会让接口变形
+③ 有没有人依赖旧路径的某个行为。
+这里三个答案都不利于合并（行为不同、接口会变形、columnType 被硬编码依赖），
+所以现状是合理的妥协。
+<mark class="mk-blue">判断标准不是「代码整齐」，是「改了会不会引入 bug」。</mark></p>
+</div>
+      </details></div>
+
+    <footer>
+      <span>sql_builder_v2 的数组条件：两条路</span>
+      <span>最后更新 2026-09-26 · 单文件可离线打开</span>
+    </footer>
+  </main>
+</div>
+
+<script src="../../assets/app.js"></script>
+</body>
+</html>
