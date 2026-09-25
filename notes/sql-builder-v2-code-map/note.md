@@ -478,41 +478,228 @@ svg: core-package
 caption: packages/core 的组成与数据流 —— 由 archify skill 生成
 ```
 
-### 数据怎么流过它
+### 拿一个真实条件走完全程
 
-```lane-stack
-- badge: 第 1 步
-  title: 拿到表达式树
-  desc: 纯数据，没有任何行为
-  tone: blue
-  nodes:
-    - { title: "Rule[]", sub: "Expression | Condition 递归嵌套" }
-  next: "递归展开 :: :: 遇到 Condition 就往下钻"
+下面的每一层，用的都是**同一个条件**。盯着数据看它怎么变。
 
-- badge: 第 2 步
-  title: 翻译
-  desc: 把树的每个节点落到 knex 上
+```text
+{ logic: "AND", items: [
+    { op: "IN", column: "city", value: ["杭州", "深圳"] },
+    { logic: "OR", items: [
+        { op: ">=", column: "vip_level", value: 3 },
+        { op: "=",  column: "channel",   value: "APP" }
+    ]}
+]}
+```
+
+```journey
+- tag: ① 调用方给进来
+  tone: muted
+  name: Rule[]
+  badge: 纯数据
+  code: |
+    { logic: "AND", items: [
+        { op: "IN", column: "city", value: ["杭州", "深圳"] },
+        { logic: "OR", items: [
+            { op: ">=", column: "vip_level", value: 3 },
+            { op: "=",  column: "channel",   value: "APP" }
+        ]}
+    ]}
+  note: |
+    这里**只有字段，没有任何方法**。它不是对象，是数据。
+    判别一个节点是什么，靠「**哪个字段存在**」——
+    `'logic' in rule` 就是 Condition，`'raw' in rule` 就是裸 SQL 片段。
+  next: "DB.buildWhere(builder, rules, AND) :: :: 开始递归"
+
+- tag: ② buildWhere 第 1 层
   tone: violet
-  nodes:
-    - { title: Condition, sub: "展开成 andWhere / orWhere" }
-    - { title: Expression, sub: "展开成 where / whereRaw" }
-  next: "遇到方言差异 :: :: 交给 SqlDialect"
+  name: 遇到 Condition
+  badge: 没处理数据，先建括号
+  fields:
+    - { k: 入参 rules, v: "[整个数组]", note: 2 个元素 }
+    - { k: 入参 logic, v: "'AND'" }
+    - { k: 判别, v: "有 'logic' 字段", note: "→ Condition", tone: warn }
+    - { k: 动作, v: "builder.andWhere(sub => ...)", note: 建了一个子查询 }
+  note: |
+    ==注意：这一层一条 SQL 都没生成。== 它只是说「接下来这些条件要包在括号里，
+    而且括号内用 AND 连接」，然后把活儿交给下一层。
+  next: "递归 :: :: 进括号内部"
 
-- badge: 第 3 步
-  title: 方言层
-  desc: 所有数据库差异只在这里
+- tag: ③ buildWhere 第 2 层
+  tone: violet
+  name: 遍历 items 的两个元素
+  badge: 分叉
+  code: |
+    items[0] = { op: "IN", column: "city", value: ["杭州","深圳"] }
+      → 没有 'logic'，有 'column'+'op'+'value'
+      → 是 NormalExpression（叶子）
+
+    items[1] = { logic: "OR", items: [...] }
+      → 有 'logic'
+      → 又是 Condition（子树），继续递归
+  note: |
+    第一个是叶子，**直接落到 knex**：
+    `sub.andWhere(DB.raw('\`city\`'), 'in', ['杭州','深圳'])`
+
+    第二个是子树，重复第 1 层的动作，只是这次用 `OR`。
+  next: "第 3 层 :: :: 子树里还是叶子"
+
+- tag: ④ buildWhere 第 3 层
+  tone: violet
+  name: OR 子树的两个叶子
+  code: |
+    sub2.orWhere(DB.raw('`vip_level`'), '>=', 3)
+    sub2.orWhere(DB.raw('`channel`'),   '=',  'APP')
+  note: |
+    到这里递归到底了。`logic: 'OR'` 让 `getWhereFn` 选 `orWhere` 而不是 `andWhere` ——
+    ==整个 AND/OR 的实现就是「选哪个方法名」，没有别的魔法。==
+  next: "knex 编译 :: :: 加反引号 + 值变占位符"
+
+- tag: ⑤ knex 内部
   tone: amber
-  nodes:
-    - { title: SqlDialect, sub: "14 个方法的接口" }
-    - { title: BytehouseDialect, sub: "unix 时间戳 / DS_DATETIME_ADD" }
-    - { title: DorisDialect, sub: "ARRAY_CONTAINS / JSON_CONTAINS" }
+  name: 编译成 SQL
+  fields:
+    - { k: "column 'city'", v: "→ formatField → `city`", note: 加反引号, tone: ok }
+    - { k: "value ['杭州','深圳']", v: "→ encodeValue → 原样", note: 检查有没有 '?' }
+    - { k: 结果, v: "where `city` in (?, ?)", note: "bindings: ['杭州','深圳']" }
+  note: |
+    `encodeValue` 只做一件事：**把值里的 `?` 换掉** ——
+    否则会和 knex 的占位符撞车，把 SQL 拆错。
+  next: "输出 :: :: 交给网关"
 
-- badge: 第 4 步
-  title: 输出
-  desc: knex 编译成字符串
+- tag: ⑥ 最终产出
   tone: green
-  nodes:
-    - { title: SQL 字符串, sub: "交给数据网关" }
+  name: SQL 字符串
+  badge: 全部拼好
+  code: |
+    select `uid` from `user_portrait`
+    where (`city` in ('杭州', '深圳')
+      and (`vip_level` >= 3 or `channel` = 'APP'))
+  note: |
+    括号的位置就是递归的层级：外层是第 1 层的 `andWhere`，
+    内层是第 2 层那个 `OR` 子树建出来的子查询。
+```
+
+### 递归到底在干什么
+
+一句话：==**遇到 Condition 就建一个括号往下钻，遇到 Expression 就往 builder 上挂一个 where。**==
+
+```flow
+grid: true
+nodes:
+  - { id: in,   label: "buildWhere(builder, rules, logic)", sub: "入参", row: 0, kind: backend }
+  - { id: q,    label: "这个 rule 是什么？", sub: "看哪个字段存在", row: 1, tone: amber, shape: note }
+  - { id: cond, label: "有 'logic'", sub: "→ Condition", row: 2, tone: violet }
+  - { id: expr, label: "有 'column'+'op'", sub: "→ Expression", row: 2, tone: green }
+  - { id: both, label: "都不是", sub: "→ throw", row: 2, tone: red }
+  - { id: sub,  label: "建子查询", sub: "whereFn(sub => 递归)", row: 3, tone: violet }
+  - { id: leaf, label: "挂到 builder", sub: "whereFn(column, op, value)", row: 3, tone: green }
+edges:
+  - { from: in, to: q }
+  - { from: q, to: cond, label: "是" }
+  - { from: q, to: expr, label: "否" }
+  - { from: q, to: both, label: "否", dashed: true }
+  - { from: cond, to: sub, label: "往下钻" }
+  - { from: expr, to: leaf, label: "到底了" }
+```
+
+```callout
+tone: violet
+icon: 💡
+text: |
+  **AND / OR 的差别只有一行**：`getWhereFn` 里选 `builder.andWhere` 还是 `builder.orWhere`。
+
+  递归本身没有任何条件判断的分支复杂度 —— 就是「是树就钻，是叶子就挂」。
+```
+
+### 四种 Expression，靠字段名区分
+
+```tree
+- label: Rule
+  sub: "Condition | Expression"
+  tone: violet
+  note: 调用方传进来的东西
+  children:
+    - label: Condition
+      sub: "{ logic, items }"
+      note: "判别：'logic' in rule —— items 里可以再嵌套 Condition"
+      children:
+        - { label: 第 1 层 AND, note: "items: [叶子, OR子树]" }
+        - { label: 第 2 层 OR, note: "items: [叶子, 叶子]" }
+    - label: NormalExpression
+      sub: "{ op, column, value }"
+      note: 最普通的一种 —— 列名 + 操作符 + 值
+      children:
+        - { label: "city IN ['杭州','深圳']", note: "生成 `city` in (?, ?)" }
+    - label: RawValueExpression
+      sub: "{ op, column, rawValue }"
+      note: "判别：'rawValue' in rule —— 值是裸 SQL，不加引号"
+      children:
+        - { label: "vip_level >= (a + b)", note: "rawValue 是 '(a + b)'" }
+    - label: RawColumnExpression
+      sub: "{ op, rawColumn, value }"
+      note: "判别：'rawColumn' in rule —— 列名是裸 SQL"
+      children:
+        - { label: "JSONExtract(...) = 3", note: "rawColumn 是一段表达式" }
+    - label: RawExpression
+      sub: "{ raw, value? }"
+      note: "判别：'raw' in rule —— 整段 whereRaw 透传"
+      children:
+        - { label: "CASE WHEN ... THEN 1 END = 1", note: "方言方法返回的就是它" }
+```
+
+```callout
+tone: amber
+icon: ⚠
+text: |
+  ==用「哪个字段存在」来判别类型，是鸭子类型。==
+
+  好处：不用建 class，JSON 直接就能用，跨进程传输天然友好。
+
+  代价：**拼错字段名不会报错**，会掉进「都不是」那个分支抛异常 ——
+  异常信息是 `条件结构错误：{...}`，能看出是什么，但不知道期望什么。
+```
+
+### 方言在哪里插进来
+
+**只有遇到「特殊类型」才调方言**：时间、正则、JSON 数组、bool、map。
+
+普通条件（`=`、`>`、`IN`）**根本不碰方言** —— 那是 knex 的活。
+
+同一个方法，两个库给出完全不同的 SQL：
+
+```compare
+first: 输入（同一个）
+head: [ByteHouse 输出, Doris 输出]
+rows:
+  - "JSON 数组属性 · `channel` = ['APP','WEB']":
+      - |-
+        hasAny(
+          assumeNotNull(JSONExtract(\`channel\`, 'Array(String)')),
+          JSONExtract('["APP","WEB"]', 'Array(String)')
+        ) = 1
+      - |-
+        (JSON_CONTAINS(
+           CAST(IFNULL(\`channel\`, '[]') AS JSON),
+           CAST('"APP"' AS JSON)
+         ) OR JSON_CONTAINS(...))
+  - "bool 属性 · `vip` = 'true'":
+      - toInt64(\`vip\`)
+      - CASE WHEN \`vip\` = true THEN 1 ELSE 0 END
+  - "map 属性 · `name`，取 key='a'":
+      - mapElement(\`name\`, 'a')
+      - ELEMENT_AT(\`name\`, 'a')
+```
+
+```callout
+tone: green
+icon: ✅
+text: |
+  **这些方法全是纯字符串转换**：输入字段名，输出一段 SQL 片段。
+  没有状态、没有副作用、不碰数据库。
+
+  ==这是整个 core 里最容易看懂的部分== —— 打开 `dialect/doris.ts`，
+  139 行里全是这种「输入 → 输出」的小函数，一行一个语义。
 ```
 
 ### 四个部分

@@ -37,7 +37,10 @@
       <a href="#版本写在哪儿catalog" class="sub">版本写在哪儿：catalog</a>
       <a href="#packagescore-通用层">packages/core —— 通用层</a>
       <a href="#它是干什么的" class="sub">它是干什么的</a>
-      <a href="#数据怎么流过它" class="sub">数据怎么流过它</a>
+      <a href="#拿一个真实条件走完全程" class="sub">拿一个真实条件走完全程</a>
+      <a href="#递归到底在干什么" class="sub">递归到底在干什么</a>
+      <a href="#四种-expression靠字段名区分" class="sub">四种 Expression，靠字段名区分</a>
+      <a href="#方言在哪里插进来" class="sub">方言在哪里插进来</a>
       <a href="#四个部分" class="sub">四个部分</a>
       <a href="#一个藏在里面的不一致" class="sub">一个藏在里面的不一致</a>
       <a href="#src-根文件" class="sub">src/ 根文件</a>
@@ -788,72 +791,305 @@ catalog:
         </g>
       </svg>
       <figcaption>packages/core 的组成与数据流 —— 由 archify skill 生成</figcaption>
-    </figure><h3 id="数据怎么流过它">数据怎么流过它</h3>
-<div class="pipe"><div class="lane tone-blue">
-        <div class="lane-meta">
-          <span class="ln">第 1 步</span>
-          <b>拿到表达式树</b>
-          <small>纯数据，没有任何行为</small>
-        </div>
-        <div class="lane-body"><div class="pnode">
-        <b>Rule[]</b>
-        <small>Expression | Condition 递归嵌套</small>
-        
-      </div></div>
-      </div><div class="conn">
+    </figure><h3 id="拿一个真实条件走完全程">拿一个真实条件走完全程</h3>
+<p>下面的每一层，用的都是<strong>同一个条件</strong>。盯着数据看它怎么变。</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">{ logic: &quot;AND&quot;, items: [
+    { op: &quot;IN&quot;, column: &quot;city&quot;, value: [&quot;杭州&quot;, &quot;深圳&quot;] },
+    { logic: &quot;OR&quot;, items: [
+        { op: &quot;&gt;=&quot;, column: &quot;vip_level&quot;, value: 3 },
+        { op: &quot;=&quot;,  column: &quot;channel&quot;,   value: &quot;APP&quot; }
+    ]}
+]}
+</code></pre></div>
+<div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-muted">① 调用方给进来</span>
+            <span class="name">Rule[]</span>
+            <span class="spacer"></span>
+            <span class="tag tone-muted">纯数据</span>
+          </div>
+          
+          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>{ logic: &quot;AND&quot;, items: [
+    { op: &quot;IN&quot;, column: &quot;city&quot;, value: [&quot;杭州&quot;, &quot;深圳&quot;] },
+    { logic: &quot;OR&quot;, items: [
+        { op: &quot;&gt;=&quot;, column: &quot;vip_level&quot;, value: 3 },
+        { op: &quot;=&quot;,  column: &quot;channel&quot;,   value: &quot;APP&quot; }
+    ]}
+]}
+</pre></div>
+          <p class="jnote">这里<strong>只有字段，没有任何方法</strong>。它不是对象，是数据。
+判别一个节点是什么，靠「<strong>哪个字段存在</strong>」——
+<code>'logic' in rule</code> 就是 Condition，<code>'raw' in rule</code> 就是裸 SQL 片段。</p>
+        </div><div class="conn">
       <span class="stem"></span>
-      <span class="pill">递归展开<span class="note">遇到 Condition 就往下钻</span></span>
+      <span class="pill">DB.buildWhere(builder, rules, AND)<span class="note">开始递归</span></span>
       <span class="stem"></span><span class="head"></span>
-    </div><div class="lane tone-violet">
-        <div class="lane-meta">
-          <span class="ln">第 2 步</span>
-          <b>翻译</b>
-          <small>把树的每个节点落到 knex 上</small>
-        </div>
-        <div class="lane-body"><div class="pnode">
-        <b>Condition</b>
-        <small>展开成 andWhere / orWhere</small>
-        
-      </div><div class="pnode">
-        <b>Expression</b>
-        <small>展开成 where / whereRaw</small>
-        
-      </div></div>
-      </div><div class="conn">
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-violet">② buildWhere 第 1 层</span>
+            <span class="name">遇到 Condition</span>
+            <span class="spacer"></span>
+            <span class="tag tone-violet">没处理数据，先建括号</span>
+          </div>
+          <div class="rec"><div class="">
+            <b>入参 rules</b><span>[整个数组]</span><em>2 个元素</em></div><div class="">
+            <b>入参 logic</b><span>'AND'</span></div><div class="warn">
+            <b>判别</b><span>有 'logic' 字段</span><em>→ Condition</em></div><div class="">
+            <b>动作</b><span>builder.andWhere(sub =&gt; ...)</span><em>建了一个子查询</em></div></div>
+          
+          <p class="jnote"><mark class="mk-blue">注意：这一层一条 SQL 都没生成。</mark> 它只是说「接下来这些条件要包在括号里，
+而且括号内用 AND 连接」，然后把活儿交给下一层。</p>
+        </div><div class="conn">
       <span class="stem"></span>
-      <span class="pill">遇到方言差异<span class="note">交给 SqlDialect</span></span>
+      <span class="pill">递归<span class="note">进括号内部</span></span>
       <span class="stem"></span><span class="head"></span>
-    </div><div class="lane tone-amber">
-        <div class="lane-meta">
-          <span class="ln">第 3 步</span>
-          <b>方言层</b>
-          <small>所有数据库差异只在这里</small>
-        </div>
-        <div class="lane-body"><div class="pnode">
-        <b>SqlDialect</b>
-        <small>14 个方法的接口</small>
-        
-      </div><div class="pnode">
-        <b>BytehouseDialect</b>
-        <small>unix 时间戳 / DS_DATETIME_ADD</small>
-        
-      </div><div class="pnode">
-        <b>DorisDialect</b>
-        <small>ARRAY_CONTAINS / JSON_CONTAINS</small>
-        
-      </div></div>
-      </div><div class="lane tone-green">
-        <div class="lane-meta">
-          <span class="ln">第 4 步</span>
-          <b>输出</b>
-          <small>knex 编译成字符串</small>
-        </div>
-        <div class="lane-body"><div class="pnode">
-        <b>SQL 字符串</b>
-        <small>交给数据网关</small>
-        
-      </div></div>
-      </div></div><h3 id="四个部分">四个部分</h3>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-violet">③ buildWhere 第 2 层</span>
+            <span class="name">遍历 items 的两个元素</span>
+            <span class="spacer"></span>
+            <span class="tag tone-violet">分叉</span>
+          </div>
+          
+          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>items[0] = { op: &quot;IN&quot;, column: &quot;city&quot;, value: [&quot;杭州&quot;,&quot;深圳&quot;] }
+  → 没有 'logic'，有 'column'+'op'+'value'
+  → 是 NormalExpression（叶子）
+
+items[1] = { logic: &quot;OR&quot;, items: [...] }
+  → 有 'logic'
+  → 又是 Condition（子树），继续递归
+</pre></div>
+          <p class="jnote">第一个是叶子，<strong>直接落到 knex</strong>：
+<code>sub.andWhere(DB.raw('\</code>city`'), 'in', ['杭州','深圳'])<code> 第二个是子树，重复第 1 层的动作，只是这次用</code>OR`。</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">第 3 层<span class="note">子树里还是叶子</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-violet">④ buildWhere 第 3 层</span>
+            <span class="name">OR 子树的两个叶子</span>
+            <span class="spacer"></span>
+            
+          </div>
+          
+          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>sub2.orWhere(DB.raw('`vip_level`'), '&gt;=', 3)
+sub2.orWhere(DB.raw('`channel`'),   '=',  'APP')
+</pre></div>
+          <p class="jnote">到这里递归到底了。<code>logic: 'OR'</code> 让 <code>getWhereFn</code> 选 <code>orWhere</code> 而不是 <code>andWhere</code> ——
+<mark class="mk-blue">整个 AND/OR 的实现就是「选哪个方法名」，没有别的魔法。</mark></p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">knex 编译<span class="note">加反引号 + 值变占位符</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-amber">⑤ knex 内部</span>
+            <span class="name">编译成 SQL</span>
+            <span class="spacer"></span>
+            
+          </div>
+          <div class="rec"><div class="ok">
+            <b>column 'city'</b><span>→ formatField → `city`</span><em>加反引号</em></div><div class="">
+            <b>value ['杭州','深圳']</b><span>→ encodeValue → 原样</span><em>检查有没有 '?'</em></div><div class="">
+            <b>结果</b><span>where `city` in (?, ?)</span><em>bindings: ['杭州','深圳']</em></div></div>
+          
+          <p class="jnote"><code>encodeValue</code> 只做一件事：<strong>把值里的 <code>?</code> 换掉</strong> ——
+否则会和 knex 的占位符撞车，把 SQL 拆错。</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">输出<span class="note">交给网关</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-green">⑥ 最终产出</span>
+            <span class="name">SQL 字符串</span>
+            <span class="spacer"></span>
+            <span class="tag tone-green">全部拼好</span>
+          </div>
+          
+          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>select `uid` from `user_portrait`
+where (`city` in ('杭州', '深圳')
+  and (`vip_level` &gt;= 3 or `channel` = 'APP'))
+</pre></div>
+          <p class="jnote">括号的位置就是递归的层级：外层是第 1 层的 <code>andWhere</code>，
+内层是第 2 层那个 <code>OR</code> 子树建出来的子查询。</p>
+        </div><h3 id="递归到底在干什么">递归到底在干什么</h3>
+<p>一句话：<mark class="mk-blue"><strong>遇到 Condition 就建一个括号往下钻，遇到 Expression 就往 builder 上挂一个 where。</strong></mark></p>
+<div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;in&quot;,&quot;to&quot;:&quot;q&quot;},{&quot;from&quot;:&quot;q&quot;,&quot;to&quot;:&quot;cond&quot;,&quot;label&quot;:&quot;是&quot;},{&quot;from&quot;:&quot;q&quot;,&quot;to&quot;:&quot;expr&quot;,&quot;label&quot;:&quot;否&quot;},{&quot;from&quot;:&quot;q&quot;,&quot;to&quot;:&quot;both&quot;,&quot;label&quot;:&quot;否&quot;,&quot;dashed&quot;:true},{&quot;from&quot;:&quot;cond&quot;,&quot;to&quot;:&quot;sub&quot;,&quot;label&quot;:&quot;往下钻&quot;},{&quot;from&quot;:&quot;expr&quot;,&quot;to&quot;:&quot;leaf&quot;,&quot;label&quot;:&quot;到底了&quot;}]">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-green" data-id="in">
+              
+              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5L3 8l3 4.5M10 3.5L13 8l-3 4.5"/></svg>
+              <b>buildWhere(builder, rules, logic)</b>
+              <small>入参</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-amber shape-note" data-id="q">
+              
+              
+              <b>这个 rule 是什么？</b>
+              <small>看哪个字段存在</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="cond">
+              
+              
+              <b>有 'logic'</b>
+              <small>→ Condition</small>
+            </div><div class="fnode tone-green" data-id="expr">
+              
+              
+              <b>有 'column'+'op'</b>
+              <small>→ Expression</small>
+            </div><div class="fnode tone-red" data-id="both">
+              
+              
+              <b>都不是</b>
+              <small>→ throw</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="sub">
+              
+              
+              <b>建子查询</b>
+              <small>whereFn(sub =&gt; 递归)</small>
+            </div><div class="fnode tone-green" data-id="leaf">
+              
+              
+              <b>挂到 builder</b>
+              <small>whereFn(column, op, value)</small>
+            </div></div></div>
+      
+    </div><div class="callout tone-violet">
+      <span class="ic">💡</span>
+      <div><p><strong>AND / OR 的差别只有一行</strong>：<code>getWhereFn</code> 里选 <code>builder.andWhere</code> 还是 <code>builder.orWhere</code>。</p>
+<p>递归本身没有任何条件判断的分支复杂度 —— 就是「是树就钻，是叶子就挂」。</p>
+</div>
+    </div><h3 id="四种-expression靠字段名区分">四种 Expression，靠字段名区分</h3>
+<div class="tree" data-tree><ul class="tlist"><li class="has-kids">
+            <div class="tnode tone-violet" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>Rule</b>
+              <code>Condition | Expression</code>
+              <span class="tnote">调用方传进来的东西</span>
+            </div>
+            <ul class="tlist"><li class="has-kids">
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>Condition</b>
+              <code>{ logic, items }</code>
+              <span class="tnote">判别：'logic' in rule —— items 里可以再嵌套 Condition</span>
+            </div>
+            <ul class="tlist"><li>
+            <div class="tnode tone-muted" data-tree-node>
+              
+              <b>第 1 层 AND</b>
+              
+              <span class="tnote">items: [叶子, OR子树]</span>
+            </div>
+            
+          </li><li>
+            <div class="tnode tone-muted" data-tree-node>
+              
+              <b>第 2 层 OR</b>
+              
+              <span class="tnote">items: [叶子, 叶子]</span>
+            </div>
+            
+          </li></ul>
+          </li><li class="has-kids">
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>NormalExpression</b>
+              <code>{ op, column, value }</code>
+              <span class="tnote">最普通的一种 —— 列名 + 操作符 + 值</span>
+            </div>
+            <ul class="tlist"><li>
+            <div class="tnode tone-muted" data-tree-node>
+              
+              <b>city IN ['杭州','深圳']</b>
+              
+              <span class="tnote">生成 <code>city</code> in (?, ?)</span>
+            </div>
+            
+          </li></ul>
+          </li><li class="has-kids">
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>RawValueExpression</b>
+              <code>{ op, column, rawValue }</code>
+              <span class="tnote">判别：'rawValue' in rule —— 值是裸 SQL，不加引号</span>
+            </div>
+            <ul class="tlist"><li>
+            <div class="tnode tone-muted" data-tree-node>
+              
+              <b>vip_level &gt;= (a + b)</b>
+              
+              <span class="tnote">rawValue 是 '(a + b)'</span>
+            </div>
+            
+          </li></ul>
+          </li><li class="has-kids">
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>RawColumnExpression</b>
+              <code>{ op, rawColumn, value }</code>
+              <span class="tnote">判别：'rawColumn' in rule —— 列名是裸 SQL</span>
+            </div>
+            <ul class="tlist"><li>
+            <div class="tnode tone-muted" data-tree-node>
+              
+              <b>JSONExtract(...) = 3</b>
+              
+              <span class="tnote">rawColumn 是一段表达式</span>
+            </div>
+            
+          </li></ul>
+          </li><li class="has-kids">
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>RawExpression</b>
+              <code>{ raw, value? }</code>
+              <span class="tnote">判别：'raw' in rule —— 整段 whereRaw 透传</span>
+            </div>
+            <ul class="tlist"><li>
+            <div class="tnode tone-muted" data-tree-node>
+              
+              <b>CASE WHEN ... THEN 1 END = 1</b>
+              
+              <span class="tnote">方言方法返回的就是它</span>
+            </div>
+            
+          </li></ul>
+          </li></ul>
+          </li></ul></div><div class="callout tone-amber">
+      <span class="ic">⚠</span>
+      <div><p><mark class="mk-blue">用「哪个字段存在」来判别类型，是鸭子类型。</mark></p>
+<p>好处：不用建 class，JSON 直接就能用，跨进程传输天然友好。</p>
+<p>代价：<strong>拼错字段名不会报错</strong>，会掉进「都不是」那个分支抛异常 ——
+异常信息是 <code>条件结构错误：{...}</code>，能看出是什么，但不知道期望什么。</p>
+</div>
+    </div><h3 id="方言在哪里插进来">方言在哪里插进来</h3>
+<p><strong>只有遇到「特殊类型」才调方言</strong>：时间、正则、JSON 数组、bool、map。</p>
+<p>普通条件（<code>=</code>、<code>&gt;</code>、<code>IN</code>）<strong>根本不碰方言</strong> —— 那是 knex 的活。</p>
+<p>同一个方法，两个库给出完全不同的 SQL：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>输入（同一个）</th><th>ByteHouse 输出</th><th>Doris 输出</th></tr></thead><tbody><tr><th>JSON 数组属性 · <code>channel</code> = ['APP','WEB']</th><td data-label="ByteHouse 输出">hasAny(
+assumeNotNull(JSONExtract(`channel`, 'Array(String)')),
+JSONExtract('[&quot;APP&quot;,&quot;WEB&quot;]', 'Array(String)')
+) = 1</td><td data-label="Doris 输出">(JSON_CONTAINS(
+CAST(IFNULL(`channel`, '[]') AS JSON),
+CAST('&quot;APP&quot;' AS JSON)
+) OR JSON_CONTAINS(...))</td></tr><tr><th>bool 属性 · <code>vip</code> = 'true'</th><td data-label="ByteHouse 输出">toInt64(`vip`)</td><td data-label="Doris 输出">CASE WHEN `vip` = true THEN 1 ELSE 0 END</td></tr><tr><th>map 属性 · <code>name</code>，取 key='a'</th><td data-label="ByteHouse 输出">mapElement(`name`, 'a')</td><td data-label="Doris 输出">ELEMENT_AT(`name`, 'a')</td></tr></tbody></table></div><div class="callout tone-green">
+      <span class="ic">✅</span>
+      <div><p><strong>这些方法全是纯字符串转换</strong>：输入字段名，输出一段 SQL 片段。
+没有状态、没有副作用、不碰数据库。</p>
+<p><mark class="mk-blue">这是整个 core 里最容易看懂的部分</mark> —— 打开 <code>dialect/doris.ts</code>，
+139 行里全是这种「输入 → 输出」的小函数，一行一个语义。</p>
+</div>
+    </div><h3 id="四个部分">四个部分</h3>
 <div class="tree" data-tree><ul class="tlist"><li class="has-kids">
             <div class="tnode tone-violet" data-tree-node>
               <span class="tcaret" aria-hidden="true"></span>
