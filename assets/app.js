@@ -1393,6 +1393,198 @@
     setMode('batch', false);
   };
 
+  /* —— 控件：operator-lab ——
+     同一批 6 条订单，过不同的 Transformation 算子，看产出怎么变。
+     想说的就一件事：==算子之间的区别是「一条进几条出」和「以什么为单位」==。
+       map / filter / flatMap —— 逐条处理，条数会变
+       keyBy                —— 条数不变，变的是「桶」
+       keyBy + sum          —— 每条输入都产出一条「当前累计」 */
+  WIDGETS['operator-lab'] = (root) => {
+    var ORDERS = [
+      { id: '1001', uid: 'u01', amount: 99, status: 'PAID', products: ['A100', 'B200'] },
+      { id: '1002', uid: 'u02', amount: 0, status: 'PAID', products: ['A100'] },
+      { id: '1003', uid: 'u01', amount: -10, status: 'UNPAID', products: ['C300'] },
+      { id: '1004', uid: 'u03', amount: 50, status: 'PAID', products: ['B200', 'C300'] },
+      { id: '1005', uid: 'u01', amount: 20, status: 'PAID', products: ['A100'] },
+      { id: '1006', uid: 'u02', amount: 80, status: 'UNPAID', products: [] },
+    ];
+
+    var OPS = [
+      {
+        id: 'map', label: 'map', tone: 'blue',
+        rule: '1 条进 → 1 条出。只换内容，条数不变。',
+        head: '输出 · Order → (uid, amount)',
+        io: '6 条进 → 6 条出', note: '字段从 5 个变成 2 个，条数一个没少',
+        keep: function () { return true; },
+      },
+      {
+        id: 'filter', label: 'filter 金额 > 0', tone: 'green',
+        rule: '1 条进 → 0 或 1 条出。条件不满足的，连人带记录一起消失。',
+        head: '输出 · 留下来的订单',
+        io: '6 条进 → 4 条出', note: '丢掉 2 条金额非法的',
+        keep: function (o) { return o.amount > 0; },
+      },
+      {
+        id: 'flatMap', label: 'flatMap 拆商品', tone: 'violet',
+        rule: '1 条进 → 0 到多条出。一条记录拆成好几条。',
+        head: '输出 · 商品行（一条订单拆成 N 行）',
+        io: '6 条进 → 7 条出', note: '订单 1006 没有商品，一条也不出',
+        keep: function () { return true; },
+      },
+      {
+        id: 'keyBy', label: 'keyBy(uid)', tone: 'amber',
+        rule: '条数一点没变 —— keyBy 不产出数据，它只决定后续计算以什么为单位。',
+        head: '输出 · 按 uid 分的桶',
+        io: '6 条进 → 6 条出，分成了 3 个桶', note: '这就是 keyBy：不加工，只分堆',
+        keep: function () { return true; },
+      },
+      {
+        id: 'sum', label: 'keyBy + sum', tone: 'green',
+        rule: '每个 key 各维护一份状态，每条输入都产出一条「当前累计」。',
+        head: '输出 · 每个 key 的当前累计',
+        io: '6 条进 → 6 条出', note: '不是最后才出一条，是每条都出',
+        keep: function () { return true; },
+      },
+    ];
+
+    var modesBox = root.querySelector('[data-ol-modes]');
+    var ruleEl = root.querySelector('[data-ol-rule]');
+    var inBox = root.querySelector('[data-log="in"]');
+    var outBox = root.querySelector('[data-log="out"]');
+    var inHead = root.querySelector('[data-ol-inhead]');
+    var outHead = root.querySelector('[data-ol-outhead]');
+    var ioEl = root.querySelector('[data-ol-io]');
+    var statusEl = root.querySelector('[data-status]');
+    var runBtn = root.querySelector('[data-run]');
+    var resetBtn = root.querySelector('[data-reset]');
+
+    var cur = 'map';
+    var timers = [];
+
+    function rec(parts, cls) {
+      return h('div', { cls: 'ol-rec' + (cls ? ' ' + cls : '') },
+        parts.map((p) => h(p.t, { cls: p.c || '', text: p.v })));
+    }
+    function inputParts(o) {
+      return [
+        { t: 'b', v: o.id },
+        { t: 'i', v: o.uid },
+        { t: 'u', v: o.amount + ' 元' },
+        { t: 's', c: o.status === 'PAID' ? 'paid' : 'unpaid', v: o.status },
+        { t: 'em', v: o.products.length ? o.products.join(', ') : '（无商品）' },
+      ];
+    }
+    function byId(id) { return OPS.find((o) => o.id === id); }
+    function clearTimers() { timers.forEach(clearTimeout); timers = []; }
+
+    /* 每个算子的产出，逐条（或逐桶）排好，交给动画按时序吐出来 */
+    function outputs(op) {
+      var out = [];
+      if (op.id === 'map') {
+        ORDERS.forEach((o) => out.push({
+          parts: [{ t: 'b', v: o.uid }, { t: 'u', v: o.amount + ' 元' }, { t: 'em', v: '← 订单 ' + o.id }],
+        }));
+      } else if (op.id === 'filter') {
+        ORDERS.filter(op.keep).forEach((o) => out.push({ parts: inputParts(o), cls: 'kept' }));
+      } else if (op.id === 'flatMap') {
+        ORDERS.forEach((o) => o.products.forEach((p) => out.push({
+          parts: [{ t: 'b', v: p }, { t: 'em', v: '← 订单 ' + o.id }],
+        })));
+      } else if (op.id === 'sum') {
+        var acc = {};
+        ORDERS.forEach((o) => {
+          acc[o.uid] = (acc[o.uid] || 0) + o.amount;
+          out.push({
+            parts: [{ t: 'b', v: o.uid }, { t: 'u', v: '累计 ' + acc[o.uid] + ' 元' },
+              { t: 'em', v: '← 订单 ' + o.id }],
+          });
+        });
+      }
+      return out;
+    }
+
+    function buckets() {
+      var order = [], map = {};
+      ORDERS.forEach((o) => {
+        if (!map[o.uid]) { map[o.uid] = []; order.push(o.uid); }
+        map[o.uid].push(o);
+      });
+      return order.map((uid) => ({ uid: uid, items: map[uid] }));
+    }
+
+    function reset() {
+      clearTimers();
+      fill(inBox, []); fill(outBox, []);
+      inHead.textContent = '输入 · 6 条订单';
+      outHead.textContent = '输出';
+      ioEl.className = 'ol-io tone-muted';
+      fill(ioEl, [h('span', { text: '点一个算子，看它把数据变成了什么' })]);
+      statusEl.textContent = '未开始';
+      runBtn.disabled = false;
+      runBtn.textContent = '▶ 重放';
+    }
+
+    function play(id) {
+      clearTimers();
+      var op = byId(id);
+      cur = id;
+
+      Array.prototype.forEach.call(modesBox.children, (b) =>
+        b.classList.toggle('on', b.getAttribute('data-ol-mode') === id));
+      ruleEl.className = 'ol-rule tone-' + op.tone;
+      ruleEl.textContent = op.rule;
+      outHead.textContent = op.head;
+      inHead.textContent = '输入 · 6 条订单';
+      statusEl.textContent = op.io;
+
+      ioEl.className = 'ol-io tone-' + op.tone;
+      fill(ioEl, [h('b', { text: op.io }), h('span', { text: op.note })]);
+
+      // 输入栏：全在，被丢掉的标灰
+      fill(inBox, ORDERS.map((o) => rec(inputParts(o), op.keep(o) ? '' : 'drop')));
+
+      // 输出栏：逐条 / 逐桶吐出来
+      fill(outBox, []);
+      var step = 90;
+      if (op.id === 'keyBy') {
+        buckets().forEach((bk, i) => {
+          timers.push(setTimeout(() => {
+            var kids = [h('div', { cls: 'ol-bhead' }, [
+              h('span', { text: 'key = ' + bk.uid }),
+              h('span', { cls: 'cnt', text: bk.items.length + ' 条' }),
+            ])];
+            bk.items.forEach((o) => kids.push(rec(inputParts(o))));
+            outBox.appendChild(h('div', { cls: 'ol-bucket tone-amber' }, kids));
+            outBox.scrollTop = outBox.scrollHeight;
+          }, i * 220 + 40));
+        });
+      } else {
+        outputs(op).forEach((r, i) => {
+          timers.push(setTimeout(() => {
+            outBox.appendChild(rec(r.parts, r.cls));
+            outBox.scrollTop = outBox.scrollHeight;
+          }, i * step + 40));
+        });
+      }
+
+      runBtn.disabled = false;
+      runBtn.textContent = '▶ 重放';
+    }
+
+    OPS.forEach((op) => {
+      var b = h('button', { cls: 'tone-' + op.tone, text: op.label, attrs: { 'data-ol-mode': op.id } });
+      b.type = 'button';
+      b.addEventListener('click', () => play(op.id));
+      modesBox.appendChild(b);
+    });
+    runBtn.addEventListener('click', () => play(cur));
+    if (resetBtn) resetBtn.addEventListener('click', reset);
+
+    // 初始直接把 map 的结果摆好 —— 这个控件的重点是「对比产出」，
+    // 上来就空着反而不知道该干什么。点其它算子才是探索。
+    play('map');
+  };
+
   /* ---------- 挂载 ---------- */
   document.querySelectorAll('[data-widget]').forEach((root) => {
     var name = root.getAttribute('data-widget');
