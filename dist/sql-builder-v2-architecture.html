@@ -995,6 +995,79 @@ mark.mk-green { background: var(--green-soft); color: var(--green); }
 }
 
 /* ============================================================
+   积木 13 · seq —— 时序图
+   参与者横排，时间向下，消息是水平箭头（UML 2.5 记法）
+   ============================================================ */
+.seqd { position: relative; margin: 0 0 20px; }
+
+.seqd-head {
+  position: relative; z-index: 1;
+  display: grid; gap: 10px;
+  grid-auto-flow: column; grid-auto-columns: 1fr;
+}
+.scell { display: flex; justify-content: center; min-width: 0; }
+.spart {
+  min-width: 0; max-width: 100%;
+  background: var(--surface);
+  border: 1px solid color-mix(in srgb, var(--tone, var(--border-strong)) 40%, var(--border));
+  border-top: 3px solid var(--tone, var(--border-strong));
+  border-radius: 10px; padding: 10px 12px;
+  text-align: center; box-shadow: var(--shadow);
+}
+.spart b { display: block; font-size: 13.5px; font-weight: 640; color: var(--text); }
+.spart small {
+  display: block; margin-top: 3px; font-family: var(--mono);
+  font-size: 10.5px; color: var(--muted);
+}
+
+.seqd-body { position: relative; z-index: 1; }
+.smsg {
+  position: relative;
+  height: 52px;                       /* 一行 = 一条消息的垂直空间 */
+  display: flex; align-items: center; justify-content: center;
+}
+.smsg .slabel {
+  position: relative; z-index: 1;
+  font-family: var(--mono); font-size: 11.5px; color: var(--text-2);
+  background: var(--bg); padding: 2px 8px; border-radius: 5px;
+  max-width: 70%; text-align: center;
+}
+/* 自调用：环画在 lifeline 右侧，标签跟着环走（x 由 app.js 写进 --lx） */
+.smsg.is-self .slabel {
+  position: absolute; top: 50%; left: calc(var(--lx, 0px) + 46px);
+  transform: translateY(-50%); max-width: 40%;
+}
+
+.seqd-svg {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  z-index: 0; pointer-events: none; overflow: visible;
+  color: var(--muted); opacity: .9;
+}
+.seqd-svg .lifeline {
+  stroke: var(--border-strong); stroke-width: 1.2; stroke-dasharray: 4 4;
+}
+.seqd-svg .msg { fill: none; stroke: currentColor; stroke-width: 1.6; }
+.seqd-svg .msg.sync  { marker-end: url(#s-fill); }
+.seqd-svg .msg.async { marker-end: url(#s-open); }
+.seqd-svg .msg.reply {
+  stroke-dasharray: 5 4; marker-end: url(#s-open);
+}
+.seqd-svg .msg.self  { marker-end: url(#s-fill); }
+.seqd-svg .msg.hot   { color: var(--blue); stroke-width: 2.2; }
+.seqd-svg .note {
+  font-family: var(--mono); font-size: 10px; fill: var(--muted);
+  text-anchor: middle;
+}
+
+@media (max-width: 640px) {
+  .spart { padding: 8px; }
+  .spart b { font-size: 12px; }
+  .spart small { display: none; }
+  .smsg { height: 46px; }
+  .smsg .slabel { font-size: 10.5px; max-width: 88%; }
+}
+
+/* ============================================================
    响应式：lane-stack / journey
    ============================================================ */
 @media (max-width: 900px) { .lane { grid-template-columns: 132px minmax(0, 1fr); gap: 12px; } }
@@ -2895,6 +2968,97 @@ core 不知道 portrait / crowd / event_v2 这些概念，
 
     render();
   };
+
+  /* ---------- 9. 时序图 ----------
+     参与者横排，时间向下，消息是水平箭头。
+     lifeline（虚线）和消息箭头都画在 SVG 里，标签用 HTML 居中。
+  ------------------------------------------------ */
+  (function sequenceDiagram() {
+    const roots = Array.from(document.querySelectorAll('[data-seq]'));
+    if (!roots.length) return;
+
+    function draw(root) {
+      const svg = root.querySelector('.seqd-svg');
+      const head = root.querySelector('.seqd-head');
+      const body = root.querySelector('.seqd-body');
+      if (!svg || !head || !body) return;
+
+      // 每个参与者的中心 x（grid 均分，所以可以直接算）
+      const n = Number(root.getAttribute('data-n')) || 1;
+      const W = head.offsetWidth;
+      const cellW = W / n;
+      const cx = {};
+      root.querySelectorAll('.spart').forEach((el, i) => {
+        const id = el.getAttribute('data-id');
+        cx[id] = i * cellW + cellW / 2;
+      });
+
+      const headH = head.offsetHeight;
+      const bodyH = body.offsetHeight;
+      const totalH = headH + 18 + bodyH;
+      svg.setAttribute('viewBox', `0 0 ${W} ${totalH}`);
+      svg.setAttribute('width', W);
+      svg.setAttribute('height', totalH);
+
+      const parts = [];
+
+      // 1) lifeline：从头部底部到主体底部
+      const lifeTop = headH + 6;
+      const lifeBottom = headH + 18 + bodyH;
+      Object.values(cx).forEach((x) => {
+        parts.push(
+          `<line class="lifeline" x1="${x}" y1="${lifeTop}" x2="${x}" y2="${lifeBottom}"/>`,
+        );
+      });
+
+      // 2) 消息箭头
+      root.querySelectorAll('.smsg').forEach((row) => {
+        const from = row.getAttribute('data-from');
+        const to = row.getAttribute('data-to');
+        const kind = row.getAttribute('data-kind') || 'sync';
+        const note = row.getAttribute('data-note');
+        const x1 = cx[from];
+        const x2 = cx[to];
+        if (x1 === undefined || x2 === undefined) return;
+
+        const y = headH + 18 + row.offsetTop + row.offsetHeight / 2;
+
+        if (from === to) {
+          // 自调用：右侧一个环，标签的 x 交给 CSS 用
+          row.style.setProperty('--lx', `${x1}px`);
+          const r = 34;
+          parts.push(
+            `<path class="msg self" d="M ${x1 + 6} ${y - 11} L ${x1 + r} ${y - 11} ` +
+              `L ${x1 + r} ${y + 11} L ${x1 + 8} ${y + 11}"/>`,
+          );
+        } else {
+          const dir = x2 > x1 ? 1 : -1;
+          // 留出箭头位置，别被标签盖住
+          const pad = 8;
+          parts.push(
+            `<path class="msg ${kind}" d="M ${x1 + dir * pad} ${y} L ${x2 - dir * pad} ${y}"/>`,
+          );
+        }
+
+        if (note) {
+          parts.push(
+            `<text class="note" x="${(x1 + x2) / 2}" y="${y - 13}">${escapeXml2(note)}</text>`,
+          );
+        }
+      });
+
+      svg.innerHTML = svg.querySelector('defs').outerHTML + parts.join('');
+    }
+
+    function escapeXml2(s) {
+      return String(s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[c]);
+    }
+
+    function drawAll() { roots.forEach(draw); }
+    drawAll();
+    window.addEventListener('resize', drawAll);
+    if (document.fonts && document.fonts.ready) document.fonts.ready.then(drawAll);
+  })();
 
   /* ---------- 挂载 ---------- */
   document.querySelectorAll('[data-widget]').forEach((root) => {

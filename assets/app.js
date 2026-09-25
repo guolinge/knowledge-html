@@ -845,6 +845,97 @@
     render();
   };
 
+  /* ---------- 9. 时序图 ----------
+     参与者横排，时间向下，消息是水平箭头。
+     lifeline（虚线）和消息箭头都画在 SVG 里，标签用 HTML 居中。
+  ------------------------------------------------ */
+  (function sequenceDiagram() {
+    const roots = Array.from(document.querySelectorAll('[data-seq]'));
+    if (!roots.length) return;
+
+    function draw(root) {
+      const svg = root.querySelector('.seqd-svg');
+      const head = root.querySelector('.seqd-head');
+      const body = root.querySelector('.seqd-body');
+      if (!svg || !head || !body) return;
+
+      // 每个参与者的中心 x（grid 均分，所以可以直接算）
+      const n = Number(root.getAttribute('data-n')) || 1;
+      const W = head.offsetWidth;
+      const cellW = W / n;
+      const cx = {};
+      root.querySelectorAll('.spart').forEach((el, i) => {
+        const id = el.getAttribute('data-id');
+        cx[id] = i * cellW + cellW / 2;
+      });
+
+      const headH = head.offsetHeight;
+      const bodyH = body.offsetHeight;
+      const totalH = headH + 18 + bodyH;
+      svg.setAttribute('viewBox', `0 0 ${W} ${totalH}`);
+      svg.setAttribute('width', W);
+      svg.setAttribute('height', totalH);
+
+      const parts = [];
+
+      // 1) lifeline：从头部底部到主体底部
+      const lifeTop = headH + 6;
+      const lifeBottom = headH + 18 + bodyH;
+      Object.values(cx).forEach((x) => {
+        parts.push(
+          `<line class="lifeline" x1="${x}" y1="${lifeTop}" x2="${x}" y2="${lifeBottom}"/>`,
+        );
+      });
+
+      // 2) 消息箭头
+      root.querySelectorAll('.smsg').forEach((row) => {
+        const from = row.getAttribute('data-from');
+        const to = row.getAttribute('data-to');
+        const kind = row.getAttribute('data-kind') || 'sync';
+        const note = row.getAttribute('data-note');
+        const x1 = cx[from];
+        const x2 = cx[to];
+        if (x1 === undefined || x2 === undefined) return;
+
+        const y = headH + 18 + row.offsetTop + row.offsetHeight / 2;
+
+        if (from === to) {
+          // 自调用：右侧一个环，标签的 x 交给 CSS 用
+          row.style.setProperty('--lx', `${x1}px`);
+          const r = 34;
+          parts.push(
+            `<path class="msg self" d="M ${x1 + 6} ${y - 11} L ${x1 + r} ${y - 11} ` +
+              `L ${x1 + r} ${y + 11} L ${x1 + 8} ${y + 11}"/>`,
+          );
+        } else {
+          const dir = x2 > x1 ? 1 : -1;
+          // 留出箭头位置，别被标签盖住
+          const pad = 8;
+          parts.push(
+            `<path class="msg ${kind}" d="M ${x1 + dir * pad} ${y} L ${x2 - dir * pad} ${y}"/>`,
+          );
+        }
+
+        if (note) {
+          parts.push(
+            `<text class="note" x="${(x1 + x2) / 2}" y="${y - 13}">${escapeXml2(note)}</text>`,
+          );
+        }
+      });
+
+      svg.innerHTML = svg.querySelector('defs').outerHTML + parts.join('');
+    }
+
+    function escapeXml2(s) {
+      return String(s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[c]);
+    }
+
+    function drawAll() { roots.forEach(draw); }
+    drawAll();
+    window.addEventListener('resize', drawAll);
+    if (document.fonts && document.fonts.ready) document.fonts.ready.then(drawAll);
+  })();
+
   /* ---------- 挂载 ---------- */
   document.querySelectorAll('[data-widget]').forEach((root) => {
     var name = root.getAttribute('data-widget');

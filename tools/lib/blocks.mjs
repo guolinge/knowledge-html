@@ -372,6 +372,54 @@ export function blocksPlugin(md) {
     </div>`;
   }
 
+  /* ===== 积木 13 · seq =====
+     时序图。参与者横排，时间向下流，消息是水平箭头。
+     依据 UML 2.5：每条消息线必须「水平或向下」，不能向上。
+     几何全由 app.js 测量后画成 SVG（和 flow 同一套思路）。 */
+  function seq(body) {
+    const cfg = YAML.parse(body) || {};
+    const parts = cfg.participants || [];
+    const msgs = cfg.messages || [];
+    const n = parts.length || 1;
+
+    const head = parts
+      .map(
+        (p) => `<div class="scell"><div class="spart tone-${p.tone || 'muted'}" data-id="${esc(
+          p.id,
+        )}">
+          <b>${inline(p.label)}</b>${p.sub ? `<small>${esc(p.sub)}</small>` : ''}
+        </div></div>`,
+      )
+      .join('');
+
+    const rows = msgs
+      .map(
+        (m) => `<div class="smsg${m.from === m.to ? ' is-self' : ''}" data-from="${esc(
+          m.from,
+        )}" data-to="${esc(m.to)}" data-kind="${esc(m.kind || 'sync')}"${
+          m.note ? ` data-note="${esc(m.note)}"` : ''
+        }>${m.label ? `<span class="slabel">${inline(m.label)}</span>` : ''}</div>`,
+      )
+      .join('');
+
+    return `<div class="seqd" data-seq data-n="${n}">
+      <svg class="seqd-svg" aria-hidden="true">
+        <defs>
+          <marker id="s-fill" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+          <marker id="s-open" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10" fill="none" stroke="currentColor" stroke-width="1.4"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="seqd-head">${head}</div>
+      <div class="seqd-body">${rows}</div>
+    </div>`;
+  }
+
   /* ---------- 注册 ---------- */
   const RENDERERS = {
     'lane-stack': laneStack,
@@ -380,6 +428,7 @@ export function blocksPlugin(md) {
     cards,
     timeline,
     flow,
+    seq,
     spec,
     callout,
     checklist,

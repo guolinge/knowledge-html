@@ -88,7 +88,30 @@ edges:
 - `row` 相同的节点并排；`edges[].dashed` 表示弱关系，`anim` 让线流动起来。
 - 连线走节点背后，不用手动算边框交点。
 
-## 04 · journey —— 每一步的形态快照
+## 04 · seq —— 时序图
+
+适合：**调用链** —— 谁在什么时候调谁、等不等回复、返回什么。
+
+```seq
+participants:
+  - { id: c, label: 客户端, tone: blue }
+  - { id: g, label: 数据网关, tone: violet }
+  - { id: d, label: ByteHouse, tone: green }
+messages:
+  - { from: c, to: g, label: "POST /query", kind: sync, note: 1 }
+  - { from: g, to: d, label: "SELECT uid FROM ...", kind: sync, note: 2 }
+  - { from: d, to: g, label: 结果集, kind: reply, note: 3 }
+  - { from: g, to: c, label: "200 OK", kind: reply, note: 4 }
+  - { from: g, to: g, label: 重试, kind: self }
+```
+
+要点：
+
+- `kind` 决定箭头：`sync` 实心 / `async` 空心 / `reply` 虚线+空心 / `self` 自调用。
+- **一行 = 一条消息**，时间轴等距。`note` 是画在箭头上方的序号或旁注。
+- 参与者别超过 5 个，否则列太窄。
+
+## 05 · journey —— 每一步的形态快照
 
 适合：一个东西（一行数据、一个请求、一次支付）在流转过程中**长什么样**的变化。
 
@@ -121,7 +144,7 @@ edges:
 - `noteTone: bad` 把行首的 `→` 换成 `!`。
 - `code` 会转义显示；想上色就改用 `codeHtml`（内容按原始 HTML 输出）。
 
-## 05 · compare —— 多维对比
+## 06 · compare —— 多维对比
 
 适合：两个及以上方案的横向对比。
 
@@ -137,7 +160,7 @@ rows:
 
 要点：单元格写字符串就是普通文本，写 `{text, tone}` 就渲染成彩色标签。窄屏会自动折叠成卡片。
 
-## 06 · cards —— 并列概念网格
+## 07 · cards —— 并列概念网格
 
 适合：一堆**没有先后关系**的并列概念。用文字排会很平，卡片能一眼扫完。
 
@@ -151,7 +174,7 @@ items:
 
 要点：`cols` 可选 `2` / `3` / `4`，不写则按宽度自动排。卡片还可带 `code` 字段放一小段代码。
 
-## 07 · timeline —— 时间线 / 版本演进
+## 08 · timeline —— 时间线 / 版本演进
 
 适合：按时间顺序发生的事件、技术选型的演进、事故时间线。
 
@@ -172,7 +195,7 @@ items:
 
 要点：`when` 会渲染成等宽小字并着色，`tone` 同时决定时间轴圆点的颜色。
 
-## 08 · callout —— 提示 / 陷阱 / 引用
+## 09 · callout —— 提示 / 陷阱 / 引用
 
 ```callout
 tone: amber
@@ -185,7 +208,7 @@ text: |
 
 要点：`quote: true` 会把正文放大加粗，用于一句话结论。`text` 里可以写多行 Markdown。
 
-## 09 · checklist —— 正例 / 反例
+## 10 · checklist —— 正例 / 反例
 
 ```checklist
 tone: cross
@@ -196,7 +219,7 @@ items:
 
 要点：`tone` 可选 `cross`（红叉）和 `warn`（黄叹号），不写就是绿勾。
 
-## 10 · quiz —— 自测
+## 11 · quiz —— 自测
 
 **这是最容易被忽略、但最重要的一块。** 知识库死于「收藏代替理解」，
 每篇笔记结尾放 2~3 题，逼自己合上答案复述一遍。
@@ -211,7 +234,7 @@ items:
 
 同一时刻只允许展开一题，避免一口气看完答案。
 
-## 11 · demo —— 可交互模拟
+## 12 · demo —— 可交互模拟
 
 **只在「静态图讲不清」时用。** 判据：用一句话说不清「A 和 B 差在哪」，
 但让用户亲手跑一遍就秒懂。
@@ -249,7 +272,7 @@ panes:
 
 两边靠 `log` 这个 key 对接。页面只声明外壳，逻辑全在 `app.js`。
 
-## 12 · summary / raw
+## 13 · summary / raw
 
 ```summary
 title: 一句话总结
@@ -260,7 +283,7 @@ text: |
 `raw` 块直接输出 HTML，是一次性排版实验的逃生口，**不要长期使用** ——
 它绕过了积木系统，换肤和校验都管不到它。
 
-## 13 · 写完之后
+## 14 · 写完之后
 
 ```bash
 npm run check              # 先校验。会指出第几行哪个积木有问题
@@ -268,7 +291,7 @@ npm run view -- <slug>     # 构建 + 在浏览器打开
 npm run build:standalone   # 产出 dist/*.html（内联全部资源，可直接发给别人）
 ```
 
-## 14 · 自测
+## 15 · 自测
 
 ```quiz
 - q: 什么时候该用 journey 而不是 lane-stack？

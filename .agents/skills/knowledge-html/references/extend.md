@@ -79,6 +79,27 @@ const RENDERERS = {
 `--tone` / `--tone-soft` 由 `.tone-*` 类自动提供，只要给元素加上 `tone-xxx` 类就能着色。
 这条规矩换来的是：换肤不用动任何内容。
 
+## 类名必须加前缀（踩过的坑）
+
+**所有积木的 CSS 类名要用自己独有的前缀**，否则会和别的积木撞车。
+
+真实事故：`spec`（拆解卡）用了 `.srow`，后来 `seq`（时序图）也用了 `.srow` ——
+结果时序图每一行都多出一条横线（`spec` 的 `.srow + .srow { border-top }` 生效了），
+**而且不报错**，只是默默画错。
+
+约定：
+
+| 积木 | 前缀 | 例子 |
+|---|---|---|
+| `lane-stack` | `.lane` `.pnode` `.conn` | |
+| `flow` | `.flowd` `.fnode` `.fedge` | |
+| `seq` | `.seqd` `.spart` `.smsg` | |
+| `spec` | `.spec` `.srow` `.sk` `.sv` | |
+| `journey` | `.jcard` `.rec` `.jnote` | |
+| `cards` | `.cards` `.ccard` | |
+
+**加新积木前先 grep 一下你要用的类名。** 短类名（`.row` `.cell` `.item`）几乎一定会撞。
+
 ## 第 4 步 · 加示例（必做）
 
 积木没有示例就等于不存在 —— 下次没人记得怎么用。

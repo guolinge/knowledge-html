@@ -239,7 +239,54 @@ edges:
 
 ---
 
-## 7. `spec` —— 拆解卡
+## 7. `seq` —— 时序图
+
+**什么时候用**：讲**调用链** —— 谁在什么时候调谁、等不等回复、返回什么。
+
+> 记法依据 UML 2.5：参与者横排，**时间向下流**，消息是水平箭头。
+> 核心约束是「每条消息线必须水平或向下」—— 所以不可能出现向上的箭头（回复除外）。
+
+```seq
+participants:
+  - { id: c, label: 客户端, tone: blue }
+  - { id: g, label: 数据网关, tone: violet }
+  - { id: d, label: ByteHouse, tone: green }
+messages:
+  - { from: c, to: g, label: "POST /query", kind: sync, note: 1 }
+  - { from: g, to: d, label: "SELECT uid FROM ...", kind: sync, note: 2 }
+  - { from: d, to: g, label: 结果集, kind: reply, note: 3 }
+  - { from: g, to: c, label: "200 OK", kind: reply, note: 4 }
+  - { from: g, to: g, label: 重试, kind: self }
+```
+
+| 键 | 说明 |
+|---|---|
+| `participants[].id` | 唯一标识，消息靠它引用 |
+| `participants[].label` / `sub` | 参与者名字 / 等宽小字（窄屏会隐藏 `sub`） |
+| `participants[].tone` | 配色 |
+| `messages[].from` / `to` | 两端参与者。**相同就是自调用** |
+| `messages[].label` | 消息文字 |
+| `messages[].note` | 序号或旁注，画在箭头上方 |
+| `messages[].kind` | 箭头样式，见下 |
+
+**箭头样式（`kind`）**：
+
+| kind | 画成 | 语义 |
+|---|---|---|
+| `sync`（默认） | 实心三角箭头 | 同步调用，等回复 |
+| `async` | 空心箭头 | 异步调用，不等 |
+| `reply` | **虚线** + 空心箭头 | 回复 |
+| `self` | 右侧小环 | 自调用（`from` 等于 `to` 时自动识别） |
+
+**要点**：
+
+- 参与者按 **grid 均分**，lifeline（虚线）和箭头由 `app.js` 测量后画成 SVG。
+- **一行 = 一条消息**，行高固定，所以时间轴是等距的。
+- 参与者不要超过 5 个，否则列会太窄。
+
+---
+
+## 8. `spec` —— 拆解卡
 
 **什么时候用**：要把一个东西按固定维度拆开讲透。
 
@@ -283,7 +330,7 @@ rows:
 
 ---
 
-## 8. `callout` — 提示 / 陷阱 / 引用
+## 9. `callout` — 提示 / 陷阱 / 引用
 
 ```callout
 tone: amber
@@ -300,7 +347,7 @@ text: |
 
 ---
 
-## 9. `checklist` — 正例 / 反例
+## 10. `checklist` — 正例 / 反例
 
 ```checklist
 tone: cross
@@ -313,7 +360,7 @@ items:
 
 ---
 
-## 10. `quiz` — 自测
+## 11. `quiz` — 自测
 
 **每篇必带。**
 
@@ -329,7 +376,7 @@ items:
 
 ---
 
-## 11. `demo` — 可交互模拟
+## 12. `demo` — 可交互模拟
 
 **只在「静态图讲不清」时用。** 需要两步：
 
@@ -369,7 +416,7 @@ panes:
 
 ---
 
-## 12. `summary` / `raw`
+## 13. `summary` / `raw`
 
 ```summary
 title: 一句话总结
