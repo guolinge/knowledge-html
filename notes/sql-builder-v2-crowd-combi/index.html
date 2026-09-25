@@ -1,0 +1,405 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-has-toc="1">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>sql_builder_v2 的条件组合层</title>
+<meta name="description" content="AND / OR 怎么变成集合运算、include / exclude 为什么必须单独一层，以及藏在 381 行 utils.ts 里的一个优化器——它把能用单表查询的场景从 UNION ALL 里救出来。" />
+<link rel="stylesheet" href="../../assets/theme.css" />
+  <link rel="stylesheet" href="../../assets/blocks.css" />
+  <link rel="stylesheet" href="../../assets/archify-embed.css" />
+</head>
+<body>
+<div id="progress"></div>
+<div id="tocScrim"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
+    <a class="brand" href="../../index.html"><span class="dot"></span>知识笔记</a>
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="toc" id="toc">
+      <p class="toc-title">目录</p>
+      <a href="../../index.html" class="sub">← 全部笔记</a>
+      <a href="#概念combi-这一层在做什么">概念：combi 这一层在做什么</a>
+      <a href="#架构and-or-怎么变成集合运算">架构：AND / OR 怎么变成集合运算</a>
+      <a href="#三种模式" class="sub">三种模式</a>
+      <a href="#两个容易忽略的细节" class="sub">两个容易忽略的细节</a>
+      <a href="#架构二次加工-include-exclude">架构：二次加工 include / exclude</a>
+      <a href="#多条规则怎么排" class="sub">多条规则怎么排</a>
+      <a href="#细节treesimplifier-藏在里面的优化器">细节：treeSimplifier —— 藏在里面的优化器</a>
+      <a href="#为什么需要它" class="sub">为什么需要它</a>
+      <a href="#它做七件事" class="sub">它做七件事</a>
+      <a href="#为什么有些-uid-条件能转成画像" class="sub">为什么有些 uid 条件能转成画像</a>
+      <a href="#细节combiutilsts-里还有什么">细节：combi/utils.ts 里还有什么</a>
+      <a href="#自测">自测</a>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow">● 从零理解 · 模块</span>
+      <h1>sql_builder_v2 的条件组合层</h1>
+      <p class="lede">AND / OR 怎么变成集合运算、include / exclude 为什么必须单独一层，以及藏在 381 行 utils.ts 里的一个优化器——它把能用单表查询的场景从 UNION ALL 里救出来。</p>
+    </div>
+
+    <div class="draft-banner">
+    <span>⚠</span>
+    <span>本页状态为 <b>draft</b>：内容尚未人工核对，引用前请自行验证。</span>
+  </div>
+<aside class="needs">
+      <p class="needs-title">读这篇之前，你需要先知道</p>
+      <a class="need" href="../sql-builder-v2-crowd/">← <b>8. crowd 篇</b><span>业务层：core 之上加了什么</span></a>
+    </aside>
+    <div class="provenance"><span><b>来源</b> sources/gitlab/sql_builder_v2 @ 2c500b2</span><span><b>生成</b> 2026-09-26</span><span><b>模型</b> deepseek-v4.1-flash</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">架构</span> <span class="tag tone-muted">SQL</span> <span class="tag tone-muted">TypeScript</span> <span class="tag tone-muted">圈人</span></span></div>
+
+<div class="callout tone-blue">
+      <span class="ic">🧭</span>
+      <div><p>前置是 <a href="../sql-builder-v2-crowd/">⑧ crowd 篇</a>。</p>
+<p>前面几篇一直在说「AND / OR 其实是集合运算」，但没展开。<strong>这篇把它拆开。</strong></p>
+<p>读完你应该能说出：「<mark class="mk-blue">条件之间的 AND / OR 是一种运算，include / exclude 是另一种，
+它们不能合并，因为一个要计数、一个不要。</mark>」</p>
+</div>
+    </div><h2 id="概念combi-这一层在做什么"><span class="num">01</span>概念：combi 这一层在做什么</h2>
+<p><code>combi/</code> 目录管<strong>两种完全不同的组合</strong>：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>组合</th><th>在组合什么</th><th>怎么实现</th><th>要不要计数</th></tr></thead><tbody><tr><th>第一层：条件之间</th><td data-label="在组合什么">加购 AND VIP</td><td data-label="怎么实现"><code>UNION ALL</code> + <code>GROUP BY</code> + <code>HAVING</code></td><td data-label="要不要计数"><span class="tag tone-red">要</span></td></tr><tr><th>第二层：二次加工</th><td data-label="在组合什么">先算出一批人，再 include / exclude</td><td data-label="怎么实现"><code>UNION ALL</code> / <code>NOT IN</code></td><td data-label="要不要计数"><span class="tag tone-green">不要</span></td></tr></tbody></table></div><div class="callout tone-amber">
+      <span class="ic">⚠</span>
+      <div><p><mark class="mk-blue"><strong>这两层最容易混。</strong></mark></p>
+<p>用一句话区分：</p>
+<ul>
+<li><strong>第一层</strong>问「一个人命中了几条条件」—— 命中 2 条和 3 条，结果不一样</li>
+<li><strong>第二层</strong>问「一个人在不在这个名单里」—— 在就是在，不在就是不在</li>
+</ul>
+<p>一个是<strong>计数问题<strong>，一个是</strong>存在性问题</strong>。这就是它们不能合并的原因。</p>
+</div>
+    </div><h2 id="架构and-or-怎么变成集合运算"><span class="num">02</span>架构：AND / OR 怎么变成集合运算</h2>
+<p>核心就一个方法：<code>combineSql</code>。它做四件事：</p>
+<div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;in&quot;,&quot;to&quot;:&quot;map&quot;},{&quot;from&quot;:&quot;map&quot;,&quot;to&quot;:&quot;union&quot;,&quot;label&quot;:&quot;sqls[]&quot;},{&quot;from&quot;:&quot;union&quot;,&quot;to&quot;:&quot;group&quot;},{&quot;from&quot;:&quot;group&quot;,&quot;to&quot;:&quot;hav&quot;},{&quot;from&quot;:&quot;hav&quot;,&quot;to&quot;:&quot;out&quot;}]">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-green" data-id="in">
+              
+              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5L3 8l3 4.5M10 3.5L13 8l-3 4.5"/></svg>
+              <b>combineSql(trees, decode, level)</b>
+              <small>一棵组合树</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="map">
+              
+              
+              <b>每个条件生成一段子 SQL</b>
+              <small>递归处理嵌套的组合</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-blue" data-id="union">
+              
+              
+              <b>UNION ALL 堆起来</b>
+              <small>包成 ( ... ) ct1</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-blue" data-id="group">
+              
+              
+              <b>GROUP BY uid</b>
+              <small>把同一个人的多行归并</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-amber shape-note" data-id="hav">
+              
+              
+              <b>HAVING count(uid) ...</b>
+              <small>AND 和自定义数量才有</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="out">
+              
+              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="8" cy="4.2" rx="5" ry="1.9"/><path d="M3 4.2v7.6c0 1.05 2.24 1.9 5 1.9s5-.85 5-1.9V4.2"/></svg>
+              <b>一段 SQL</b>
+              
+            </div></div></div>
+      
+    </div><h3 id="三种模式">三种模式</h3>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>模式</th><th>HAVING 怎么写</th><th>结果</th></tr></thead><tbody><tr><th>OR</th><td data-label="HAVING 怎么写"><span class="tag tone-green">不写 HAVING</span></td><td data-label="结果">任一条件命中即保留</td></tr><tr><th>AND</th><td data-label="HAVING 怎么写"><code>HAVING count(uid) = N</code></td><td data-label="结果">N 个子查询里<strong>都出现</strong>才保留</td></tr><tr><th>自定义数量</th><td data-label="HAVING 怎么写"><code>HAVING count(uid) &gt;= 2</code></td><td data-label="结果">至少 N 个条件命中</td></tr></tbody></table></div><p>对应代码：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">// combi/combination.ts · combineSql
+if (isCustomMultiEntrepot(trees)) {
+    query.having(havingCount(UID), trees.unionCount!.op, trees.unionCount!.count);
+} else {
+    if (trees.logic === Logic.And) {
+        query.having(havingCount(UID), Op.Eq, sqls.length);
+    }
+}
+</code></pre></div>
+<div class="callout tone-violet">
+      <span class="ic">💡</span>
+      <div><p><mark class="mk-blue"><strong>AND 的实现就是「多加一行 HAVING」。</strong></mark></p>
+<p><code>OR</code> 什么都不加，<code>AND</code> 加一句 <code>HAVING count(uid) = sqls.length</code>，
+自定义数量把等号换成 <code>&gt;=</code>。</p>
+<p>没有别的魔法。这是整个「条件组合」的全部实现。</p>
+</div>
+    </div><h3 id="两个容易忽略的细节">两个容易忽略的细节</h3>
+<p><strong>① 递归的层数变成了表别名</strong></p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">const unionRawSql = DB.raw(DB.unionAllRaws(sqls)).wrap('(', `) ct${level}`);
+</code></pre></div>
+<div class="callout tone-amber">
+      <span class="ic">⚠</span>
+      <div><p>嵌套组合会产生嵌套的 <code>( ... ) ctN</code>。如果别名重了，SQL 会报错或语义错乱。</p>
+<p>所以 <code>combineSql</code> 带了一个 <code>level</code> 参数，每递归一层 +1。
+<mark class="mk-blue">这是那种「不看代码永远想不到，看了觉得理所当然」的细节。</mark></p>
+</div>
+    </div><p><strong>② 只有最外层 decode</strong></p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">// 内层不 decode，最外层 decode 就可
+return this.combineSql(condition, false, level + 1).rawQuery();
+</code></pre></div>
+<p>因为 <code>UID_DECODE</code> 是个函数调用，嵌套 N 层就调 N 次，纯浪费。</p>
+<h2 id="架构二次加工-include-exclude"><span class="num">03</span>架构：二次加工 include / exclude</h2>
+<p>举一个真实场景：</p>
+<blockquote>
+<p>先圈出最近 7 天加购的人，<strong>但要把内部测试账号剔掉<strong>，</strong>再加上运营给的白名单</strong>。</p>
+</blockquote>
+<div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-blue">第一步</span>
+            <span class="name">主体</span>
+            <span class="spacer"></span>
+            
+          </div>
+          
+          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>「最近 7 天加购的人」
+</pre></div>
+          <p class="jnote">第 02 节的组合层算出来的。</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">include <span class="en">加一批</span><span class="note">并集</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-green">第二步</span>
+            <span class="name">include</span>
+            <span class="spacer"></span>
+            
+          </div>
+          
+          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>select `uid` from (
+  &lt;majorSql&gt; UNION ALL &lt;minorSql&gt;
+) iut group by `uid`
+</pre></div>
+          <p class="jnote"><strong>并集。</strong> <code>UNION ALL</code> 堆起来再 <code>GROUP BY</code> 去重。
+
+别名 <code>iut</code> / <code>ict</code> / <code>irt</code> 按条件类型区分（uid / crowd / rawSql）。</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">exclude <span class="en">减一批</span><span class="note">差集</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-red">第三步</span>
+            <span class="name">exclude</span>
+            <span class="spacer"></span>
+            
+          </div>
+          
+          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>select `uid` from ( &lt;majorSql&gt; ) mt
+where `uid` NOT IN ( &lt;minorSql&gt; )
+</pre></div>
+          <p class="jnote"><strong>差集。</strong> 直接 <code>NOT IN</code>。
+
+<mark class="mk-blue">注意它没有 <code>GROUP BY</code></mark> —— 因为不需要计数。</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">排序<span class="note">多条规则怎么排</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><h3 id="多条规则怎么排">多条规则怎么排</h3>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">// pkg.ts · list()
+_rules.sort((a, b) =&gt; bOrder - aOrder);   // 降序
+const bulkSql = _rules.reduce((sql, rule) =&gt; { ... }, majorSql);
+</code></pre></div>
+<div class="callout tone-amber">
+      <span class="ic">⚠</span>
+      <div><p><strong>代码注释写着「order 越小，权重越大」，但排序是降序的 —— 这两句要合起来看。</strong></p>
+<p>降序排列 + 从头 reduce ⇒ <mark class="mk-blue">order 大的先应用，order 小的后应用。</mark></p>
+<p>后应用的那个会覆盖前面的效果。所以「order 小 = 权重高」成立：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">rules = [ {order: 0, exclude}, {order: 1, include} ]
+降序后 → [ include, exclude ]
+reduce → major → include → exclude
+最终 exclude 生效（order 0 赢）
+</code></pre></div>
+</div>
+    </div><p><mark class="mk-blue">这种「注释和代码要合起来读才对得上」的地方，是读代码最容易卡住的。</mark></p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code>
+### 一个设计上的小细节
+
+```text
+const _crowdInstance = new Crowd();
+const _rawSqlInstance = new RawSql();
+</code></pre></div>
+<div class="callout tone-violet">
+      <span class="ic">💡</span>
+      <div><p>这两个实例建在<strong>模块级</strong>（文件顶部），不是每次调用都 new。</p>
+<p>但 <code>_uidInstance</code> 建在<strong>构造函数里</strong> —— 因为它需要 dialect，
+而模块级没有 dialect。</p>
+<p><mark class="mk-blue">同一个文件里两种写法，区别只在于「要不要方言」。</mark></p>
+</div>
+    </div><h2 id="细节treesimplifier-藏在里面的优化器"><span class="num">04</span>细节：<code>treeSimplifier</code> —— 藏在里面的优化器</h2>
+<p><code>combi/utils.ts</code> 381 行里最重要的东西是 <code>treeSimplifier</code>。</p>
+<div class="callout tone-red quote">
+      <span class="ic">⚠</span>
+      <div><p><mark class="mk-blue"><strong>它在生成 SQL 之前，先重写一遍条件树。</strong></mark></p>
+<p>这是个<strong>优化器</strong> —— 目标只有一个：<strong>减少没必要的 <code>UNION ALL</code>。</strong></p>
+</div>
+    </div><h3 id="为什么需要它">为什么需要它</h3>
+<p>看这个条件：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">城市是杭州 AND 城市是深圳
+</code></pre></div>
+<p><strong>直觉上</strong>它是两个条件，走第 02 节的组合层就会变成：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-sql">-- ❌ 没优化的结果：两个子查询
+select `uid` from (
+  select `uid` from `user_portrait` where `city` = '杭州'
+  union all
+  select `uid` from `user_portrait` where `city` = '深圳'
+) ct1
+group by `uid`
+having count(`uid`) = 2
+</code></pre></div>
+<p><strong>但这明显浪费</strong> —— 两个条件查的是<strong>同一张表</strong>，完全可以写成一个 WHERE：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-sql">-- ✅ 优化后：一个查询
+select `uid` from `user_portrait`
+where `city` = '杭州' and `city` = '深圳'
+</code></pre></div>
+<div class="callout tone-green">
+      <span class="ic">✅</span>
+      <div><p><mark class="mk-blue">这就是 <code>treeSimplifier</code> 存在的全部理由。</mark></p>
+<p>它识别出「这些条件都在同一张表上」，把它们合并成一个节点，
+让组合层生成单表查询而不是 <code>UNION ALL</code>。</p>
+<p>代码注释原话：<strong>「减少没必要的 union all; 优化计算效率」</strong></p>
+</div>
+    </div><h3 id="它做七件事">它做七件事</h3>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">// combi/utils.ts · treeSimplifier()
+① checkHasCustomCountCombination  → 是「自定义计数」场景就直接返回，不优化
+② cloneDeep                       → 不改调用方传进来的对象
+③ _checkAndConvertTreeNodeToPortraitEntrepot  → 把能转的节点转成画像类型
+④ _mergePortraitEntrepot          → 合并同一层的所有画像节点
+⑤ _partitionSpecialCondition      → 分裂特殊条件（人群包要拆）
+⑥ _mainTreeMinimizer              → 压掉只有一个子节点的组合
+⑦ 空了就兜底 → select `uid` from user_portrait
+</code></pre></div>
+<p><strong>第 ④ 步是关键</strong>：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">// _mergePortraitEntrepot
+if (isPortraitEntrepotOnly(tree)) {
+    return integratePortraitEntrepot(tree);   // 整棵树全是画像 → 合成一个
+}
+// 否则把同一层的画像挑出来，合并成一个节点，非画像的保持原样
+return {
+    logic: tree.logic,
+    conditions: [
+        ..._others,
+        { type: Entrepots.Portrait, condition: { items: _portraits.map(p =&gt; p.condition), logic: tree.logic } }
+    ]
+};
+</code></pre></div>
+<h3 id="为什么有些-uid-条件能转成画像">为什么有些 uid 条件能转成画像</h3>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">// uid.ts
+static checkCanBeConvertToPortraitEntrepot(condition: UidCondition) {
+    return !(condition.op === ScopeOp.In &amp;&amp; condition.ignoreNoExist !== true);
+}
+</code></pre></div>
+<div class="callout tone-amber">
+      <span class="ic">⚠</span>
+      <div><p><strong>这个条件看着绕，但语义很直白：</strong></p>
+<p>「给一批 uid」要转成「查画像表 where uid in (...)」有个前提 ——
+<mark class="mk-blue">画像表里得有这些人。</mark></p>
+<p>如果这批 uid 里有人<strong>不在画像表</strong>，两种写法结果就不一样：</p>
+<ul>
+<li><strong>原始语义<strong>（<code>ignoreNoExist = false</code>）：这批人</strong>都要算上</strong>，哪怕画像表里没有</li>
+<li><strong>转成画像后</strong>：<code>where uid in (...)</code> 查不出不存在的人，<mark class="mk-blue">会静默丢掉</mark></li>
+</ul>
+<p>所以只有 <code>ignoreNoExist = true</code>（不存在就忽略）时才允许转 ——
+因为那时候两种写法才等价。</p>
+</div>
+    </div><div class="callout tone-violet">
+      <span class="ic">💡</span>
+      <div><p><strong>这个判断是「优化不能改变语义」这条铁律的体现。</strong></p>
+<p>优化器可以改 SQL 的写法，但不能改结果。
+一旦拿不准，就<strong>不优化</strong> —— 所以第 ① 步遇到「自定义计数」直接返回。</p>
+</div>
+    </div><h2 id="细节combiutilsts-里还有什么"><span class="num">05</span>细节：<code>combi/utils.ts</code> 里还有什么</h2>
+<p>381 行、8 个导出函数。除了 <code>treeSimplifier</code>，还有：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>函数</th><th>干什么</th><th>谁在用</th></tr></thead><tbody><tr><th><code>getMainStruct(tree)</code></th><td data-label="干什么">从 <code>{ main, include, exclude }</code> 里取出主体</td><td data-label="谁在用">Module 层</td></tr><tr><th><code>initMajorListSqlGen(type, dialect)</code></th><td data-label="干什么">生成「处理 main」的 SQL 生成器</td><td data-label="谁在用">Module 层</td></tr><tr><th><code>initMajorCountSqlGen(type, dialect)</code></th><td data-label="干什么">同上，count 版</td><td data-label="谁在用">Module 层</td></tr><tr><th><code>checkAndGetIncluOrExcluRule(tree)</code></th><td data-label="干什么">取出 include / exclude 规则</td><td data-label="谁在用">Module 层</td></tr><tr><th><code>isOldUidAdditionalStruct</code> / <code>isOldCrowdAdditionalStruct</code></th><td data-label="干什么"><span class="tag tone-amber">旧结构兼容判断</span></td><td data-label="谁在用">兼容层</td></tr><tr><th><code>optionCorrector(tree)</code></th><td data-label="干什么"><span class="tag tone-amber">把旧结构转成新结构</span></td><td data-label="谁在用">兼容层</td></tr></tbody></table></div><div class="callout tone-amber">
+      <span class="ic">⚠</span>
+      <div><p><strong>最后三个是历史包袱。</strong></p>
+<p>它们的注释里直接写着「后续线上没有这个结构可以删除」。</p>
+<p><mark class="mk-blue">读这个文件时可以先跳过它们。</mark> 但改的时候别删 ——
+除非你确认线上真的没有旧结构的数据在跑。</p>
+</div>
+    </div><div class="callout tone-violet">
+      <span class="ic">💡</span>
+      <div><p><strong><code>initMajorListSqlGen</code> 这个名字里的 <code>Major</code> 是「主体」的意思。</strong></p>
+<p>对应 <code>BuildInfoTree</code> 的三个部分：<code>main</code>（主体）+ <code>include</code> / <code>exclude</code>（二次加工）。</p>
+<ul>
+<li><code>initMajorListSqlGen</code> → 处理主体</li>
+<li><code>Pkg.list(majorSql, rules)</code> → 在主体结果上做二次加工</li>
+</ul>
+<p><mark class="mk-blue">看懂 <code>Major</code> 这个词，<code>utils.ts</code> 的一半函数名就通了。</mark></p>
+</div>
+    </div><h2 id="自测"><span class="num">06</span>自测</h2>
+<div class="quiz"><details>
+        <summary>为什么 AND / OR 不能用 SQL 的 AND / OR 实现？</summary>
+        <div class="a"><p>因为每个条件查的是<strong>不同的表、不同的时间窗口</strong>，没法拼进一个 WHERE。
+实际实现是<strong>集合运算</strong>：把各条件的 uid 用 <code>UNION ALL</code> 堆在一起，
+再 <code>GROUP BY uid</code> + <code>HAVING count(uid) = N</code>。
+<mark class="mk-blue">AND 的实现就是「多加一行 HAVING」</mark> —— OR 什么都不加，
+自定义数量把等号换成 <code>&gt;=</code>。</p>
+</div>
+      </details><details>
+        <summary>include / exclude 为什么不能并进 AND / OR 里？</summary>
+        <div class="a"><p>因为<strong>运算性质不同</strong>：
+第一层（AND / OR）要<strong>计数</strong> —— 「N 个条件里命中几个」决定留不留；
+第二层（include / exclude）<strong>不计数</strong>，只关心在不在。
+所以 <code>exclude</code> 能写成 <code>NOT IN</code>（不需要 <code>GROUP BY</code>），
+而 AND 必须 <code>HAVING count(uid) = N</code>。</p>
+</div>
+      </details><details>
+        <summary><code>treeSimplifier</code> 是干什么的？为什么需要它？</summary>
+        <div class="a"><p>它是<strong>生成 SQL 之前的优化器<strong>，目标只有一个：</strong>减少没必要的 UNION ALL</strong>。
+比如「城市是杭州 AND 城市是深圳」是两个画像条件，
+不优化会生成两个子查询 UNION ALL；优化后识别出它们在同一张表上，
+合并成一个节点，变成单表 <code>where city = '杭州' and city = '深圳'</code>。
+代码注释：「减少没必要的 union all; 优化计算效率」。</p>
+</div>
+      </details><details>
+        <summary>为什么有些 uid 条件不能转成画像条件？</summary>
+        <div class="a"><p>因为「给一批 uid」和「查画像表 where uid in (...)」有个前提差异 ——
+画像表里得有这些人。
+如果这批 uid 里有人<strong>不在画像表<strong>，转成画像后 <code>where uid in (...)</code> 会</strong>静默丢掉</strong>他们，
+而原始语义（<code>ignoreNoExist = false</code>）是「这批人都要算上」。
+所以只有 <code>ignoreNoExist = true</code>（不存在就忽略）时才允许转。
+<mark class="mk-blue">这是「优化不能改变语义」这条铁律的体现。</mark></p>
+</div>
+      </details><details>
+        <summary><code>include</code> / <code>exclude</code> 有多条规则时，按什么顺序应用？</summary>
+        <div class="a"><p>按 <code>options.order</code> <strong>降序</strong>排列后依次 reduce。
+所以 <mark class="mk-blue">order 大的先应用，order 小的后应用</mark>，后应用的效果会覆盖前面的。
+代码注释说「order 越小，权重越大」—— 要和排序方向合起来读才对得上。</p>
+</div>
+      </details><details>
+        <summary><code>combineSql</code> 里的 <code>level</code> 参数是干什么的？</summary>
+        <div class="a"><p>用来生成子查询的别名 <code>( ... ) ct${level}</code>。
+嵌套组合会产生嵌套的 <code>( ... ) ctN</code>，如果别名重了 SQL 会报错或语义错乱，
+所以每递归一层 +1。
+同一层的另一个细节是：<mark class="mk-blue">内层不 decode，只有最外层 decode</mark> ——
+因为 <code>UID_DECODE</code> 是函数调用，嵌套 N 层就调 N 次，纯浪费。</p>
+</div>
+      </details></div>
+
+    <footer>
+      <span>sql_builder_v2 的条件组合层</span>
+      <span>最后更新 2026-09-26 · 单文件可离线打开</span>
+    </footer>
+  </main>
+</div>
+
+<script src="../../assets/app.js"></script>
+</body>
+</html>

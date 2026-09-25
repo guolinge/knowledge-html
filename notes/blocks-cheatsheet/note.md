@@ -261,7 +261,52 @@ items:
   - { title: ADS 应用层, desc: 直接给报表用的结果表，查询毫秒级, tag: LAYER 06, tone: green }
 ```
 
-要点：`cols` 可选 `2` / `3` / `4`，不写则按宽度自动排。卡片还可带 `code` 字段放一小段代码。
+要点：`cols` 可选 `1` / `2` / `3` / `4`，不写则按宽度自动排。
+
+### 卡片里能放多少东西
+
+两个字段，按需要选：
+
+| 字段 | 能写什么 | 什么时候用 |
+|---|---|---|
+| `desc` | **一行**，走行内 Markdown（`**粗体**` / `` `代码` `` / `==标记==`） | 一句话说清的概念 |
+| `body` | **完整 Markdown** —— 多段、列表、`###` 小标题、围栏代码块 | 要「标题 + 解释 + 例子 + 代码」的概念卡 |
+
+`tag`（左上角标签）、`code`（单个代码块）两个字段两者都能配。
+
+内容一多卡片就不能再窄，==用 `body` 时建议配 `cols: 1` 或 `cols: 2`==：
+
+```cards
+cols: 2
+items:
+  - title: 有状态聚合
+    tag: reduce / aggregate
+    tone: green
+    body: |
+      同一个 Key 的多条数据不断合并成一个结果。
+
+      **前提是先 `keyBy`** —— 没有它就没有「按 Key 的状态」。
+
+      两个算子怎么选：
+
+      - `reduce`：输入 / 状态 / 输出**同类型**
+      - `aggregate`：可以自定义累加器
+    code: |
+      keyBy(uid).sum(amount)
+  - title: 底层逃生口
+    tag: process
+    tone: red
+    body: |
+      当 `map` / `filter` / `reduce` 表达不了时用它。
+
+      出现这两个信号就该换：
+
+      1. 需求里说「**等 N 分钟再检查**」→ 定时器
+      2. 需求里说「**之前发生过什么**」→ 状态
+    code: |
+      ctx.timerService()
+         .registerProcessingTimeTimer(t + 30min)
+```
 
 ## 11 · timeline —— 时间线 / 版本演进
 

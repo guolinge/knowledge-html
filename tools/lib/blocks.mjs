@@ -277,8 +277,9 @@ export function blocksPlugin(md) {
         const tone = it.tone || 'muted';
         return `<div class="ccard tone-${tone}">
           ${it.tag ? `<span class="tag tone-${tone}">${esc(it.tag)}</span>` : ''}
-          <h4>${inline(it.title)}</h4>
+          ${it.title ? `<h4>${inline(it.title)}</h4>` : ''}
           ${it.desc ? `<p>${inline(it.desc)}</p>` : ''}
+          ${it.body ? `<div class="cbody">${md.render(String(it.body))}</div>` : ''}
           ${it.code ? `<pre>${esc(it.code)}</pre>` : ''}
         </div>`;
       })
