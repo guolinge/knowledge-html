@@ -136,7 +136,33 @@ cells:
 - 阈值线是这个积木的主角，所以单元格不画自己的色条 —— 否则分不清谁是阈值。
 - **阈值放哪儿要有理由。** 说不出理由就别用矩阵，改用 `compare`。
 
-## 06 · journey —— 每一步的形态快照
+## 06 · tree —— 层级结构图
+
+适合：谁包含谁、谁继承谁、目录长什么样。**有孩子的节点可点击折叠。**
+
+```tree
+- label: DB
+  sub: core/src/db.ts
+  tone: violet
+  note: 唯一直接碰 knex 的地方
+  children:
+    - { label: getInstance, sub: "name?: string", note: 两种入口共享同一个原型 }
+    - label: buildWhere
+      sub: "(builder, rules, logic)"
+      note: 递归展开表达式树
+      children:
+        - { label: isCondition, note: 有 logic 字段就是子树 }
+        - { label: isRawExpr, note: "whereRaw 片段" }
+    - { label: formatField, note: 反引号包裹列名 }
+```
+
+要点：
+
+- `sub` 渲染成代码 chip，`note` 是灰色小字。
+- 顶层节点有底色（树的锚点），子层透明、hover 才浮出来。
+- **纯线性链条用 `lane-stack`，别用这个。**
+
+## 07 · journey —— 每一步的形态快照
 
 适合：一个东西（一行数据、一个请求、一次支付）在流转过程中**长什么样**的变化。
 
@@ -169,7 +195,7 @@ cells:
 - `noteTone: bad` 把行首的 `→` 换成 `!`。
 - `code` 会转义显示；想上色就改用 `codeHtml`（内容按原始 HTML 输出）。
 
-## 07 · compare —— 多维对比
+## 08 · compare —— 多维对比
 
 适合：两个及以上方案的横向对比。
 
@@ -185,7 +211,7 @@ rows:
 
 要点：单元格写字符串就是普通文本，写 `{text, tone}` 就渲染成彩色标签。窄屏会自动折叠成卡片。
 
-## 08 · cards —— 并列概念网格
+## 09 · cards —— 并列概念网格
 
 适合：一堆**没有先后关系**的并列概念。用文字排会很平，卡片能一眼扫完。
 
@@ -199,7 +225,7 @@ items:
 
 要点：`cols` 可选 `2` / `3` / `4`，不写则按宽度自动排。卡片还可带 `code` 字段放一小段代码。
 
-## 09 · timeline —— 时间线 / 版本演进
+## 10 · timeline —— 时间线 / 版本演进
 
 适合：按时间顺序发生的事件、技术选型的演进、事故时间线。
 
@@ -220,7 +246,7 @@ items:
 
 要点：`when` 会渲染成等宽小字并着色，`tone` 同时决定时间轴圆点的颜色。
 
-## 10 · callout —— 提示 / 陷阱 / 引用
+## 11 · callout —— 提示 / 陷阱 / 引用
 
 ```callout
 tone: amber
@@ -233,7 +259,7 @@ text: |
 
 要点：`quote: true` 会把正文放大加粗，用于一句话结论。`text` 里可以写多行 Markdown。
 
-## 11 · checklist —— 正例 / 反例
+## 12 · checklist —— 正例 / 反例
 
 ```checklist
 tone: cross
@@ -244,7 +270,7 @@ items:
 
 要点：`tone` 可选 `cross`（红叉）和 `warn`（黄叹号），不写就是绿勾。
 
-## 12 · quiz —— 自测
+## 13 · quiz —— 自测
 
 **这是最容易被忽略、但最重要的一块。** 知识库死于「收藏代替理解」，
 每篇笔记结尾放 2~3 题，逼自己合上答案复述一遍。
@@ -259,7 +285,7 @@ items:
 
 同一时刻只允许展开一题，避免一口气看完答案。
 
-## 13 · demo —— 可交互模拟
+## 14 · demo —— 可交互模拟
 
 **只在「静态图讲不清」时用。** 判据：用一句话说不清「A 和 B 差在哪」，
 但让用户亲手跑一遍就秒懂。
@@ -297,7 +323,7 @@ panes:
 
 两边靠 `log` 这个 key 对接。页面只声明外壳，逻辑全在 `app.js`。
 
-## 14 · summary / raw
+## 15 · summary / raw
 
 ```summary
 title: 一句话总结
@@ -308,7 +334,7 @@ text: |
 `raw` 块直接输出 HTML，是一次性排版实验的逃生口，**不要长期使用** ——
 它绕过了积木系统，换肤和校验都管不到它。
 
-## 15 · 写完之后
+## 16 · 写完之后
 
 ```bash
 npm run check              # 先校验。会指出第几行哪个积木有问题
@@ -316,7 +342,7 @@ npm run view -- <slug>     # 构建 + 在浏览器打开
 npm run build:standalone   # 产出 dist/*.html（内联全部资源，可直接发给别人）
 ```
 
-## 16 · 自测
+## 17 · 自测
 
 ```quiz
 - q: 什么时候该用 journey 而不是 lane-stack？

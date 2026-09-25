@@ -130,10 +130,12 @@ text: |
 你在代码里写的东西，数据库一个都看不懂。**它只接受一段 SQL 文本。**
 
 ```flow
+grid: true
+legend: true
 nodes:
-  - { id: app, label: 你的代码, sub: "想查一批用户", row: 0, tone: blue }
+  - { id: app, label: 你的代码, sub: "想查一批用户", row: 0, kind: frontend }
   - { id: str, label: 一段文本, sub: "SELECT uid FROM user_portrait WHERE ...", row: 1, tone: violet }
-  - { id: db, label: 数据库, sub: "不认对象，不认函数，只认文本", row: 2, tone: green }
+  - { id: db, label: 数据库, sub: "不认对象，不认函数，只认文本", row: 2, kind: database }
 edges:
   - { from: app, to: str, label: 拼出来 }
   - { from: str, to: db, label: 发过去 }
@@ -158,11 +160,15 @@ const sql = "SELECT uid FROM user_portrait WHERE city = '" + city + "'";
 拼出来的 SQL 就变成了 `WHERE city = '杭州' OR '1'='1'` —— **条件被改写了**。这就是 SQL 注入。
 
 ```flow
+grid: true
+groups:
+  - { id: naive, label: "手写拼接这条路", tone: red }
+  - { id: safe,  label: "构造器这条路", tone: green }
 nodes:
-  - { id: a, label: 手写拼接, sub: "值直接嵌进字符串", row: 0, tone: red }
-  - { id: b, label: 构造器, sub: "值单独放，不混进 SQL", row: 0, tone: green }
-  - { id: r1, label: 注入风险, sub: "值里带引号就出事", row: 1, tone: red }
-  - { id: r2, label: 自动转义, sub: "转义交给库", row: 1, tone: green }
+  - { id: a, label: 手写拼接, sub: "值直接嵌进字符串", row: 0, tone: red, group: naive }
+  - { id: b, label: 构造器, sub: "值单独放，不混进 SQL", row: 0, tone: green, group: safe }
+  - { id: r1, label: 注入风险, sub: "值里带引号就出事", row: 1, tone: red, group: naive }
+  - { id: r2, label: 自动转义, sub: "转义交给库", row: 1, tone: green, group: safe }
 edges:
   - { from: a, to: r1, dashed: true }
   - { from: b, to: r2 }
@@ -181,6 +187,7 @@ DB.getInstance().select('uid').from('user_portrait').where(...)
 为什么能一直点下去？因为**每个方法执行完，返回的还是这个对象本身**。
 
 ```flow
+grid: true
 nodes:
   - { id: o, label: 一个查询对象, sub: "像一张空白表单", row: 0, tone: violet }
   - { id: m1, label: ".select('uid')", sub: "填「要查哪些列」", row: 1, tone: blue }
@@ -200,11 +207,14 @@ edges:
 它只是把「要查哪些列、哪张表、什么条件」记在了那个对象上。
 
 ```flow
+grid: true
+groups:
+  - { id: acc, label: "这一整段都只是在记东西 —— 一条 SQL 都没生成", tone: violet }
 nodes:
-  - { id: s0, label: 空对象, sub: "{}", row: 0, tone: muted }
-  - { id: s1, label: 记下列, sub: "{ columns: ['uid'] }", row: 1, tone: violet }
-  - { id: s2, label: 记下表, sub: "+ { table: 'user_portrait' }", row: 2, tone: violet }
-  - { id: s3, label: 记下条件, sub: "+ { where: [...] }", row: 3, tone: violet }
+  - { id: s0, label: 空对象, sub: "{}", row: 0, tone: muted, group: acc }
+  - { id: s1, label: 记下列, sub: "{ columns: ['uid'] }", row: 1, tone: violet, group: acc }
+  - { id: s2, label: 记下表, sub: "+ { table: 'user_portrait' }", row: 2, tone: violet, group: acc }
+  - { id: s3, label: 记下条件, sub: "+ { where: [...] }", row: 3, tone: violet, group: acc }
   - { id: sql, label: 编译成 SQL, sub: "还没发生", row: 4, tone: amber }
 edges:
   - { from: s0, to: s1, label: ".select('uid')" }
@@ -241,6 +251,7 @@ html: |
 「取值」在 knex 里就是调 `.toString()` 或 `.toQuery()`。这一刻它才把内部状态翻成 SQL，做两件事：
 
 ```flow
+grid: true
 nodes:
   - { id: in, label: 内部状态, sub: "{ table: 'user_portrait', where: [uid in [1,2,3]] }", row: 0, tone: violet }
   - { id: id1, label: 标识符加反引号, sub: "user_portrait → `user_portrait`", row: 1, tone: amber }
@@ -282,10 +293,13 @@ rawQuery() { return this.toString().trim(); }   // ← 就这么一行
 **为什么挂在原型上，而不是用 `knex.QueryBuilder.extend()`**：
 
 ```flow
+grid: true
+groups:
+  - { id: same, label: "两种入口落到同一个原型上", tone: violet }
 nodes:
-  - { id: e1, label: "DB.getInstance()", sub: "→ queryBuilder()", row: 0, tone: blue }
-  - { id: e2, label: "DB.getInstance('name')", sub: "→ mysql(name)", row: 0, tone: blue }
-  - { id: p, label: 同一个 Builder.prototype, sub: "两种入口共享这一份", row: 1, tone: violet }
+  - { id: e1, label: "DB.getInstance()", sub: "→ queryBuilder()", row: 0, tone: blue, group: same }
+  - { id: e2, label: "DB.getInstance('name')", sub: "→ mysql(name)", row: 0, tone: blue, group: same }
+  - { id: p, label: 同一个 Builder.prototype, sub: "两种入口共享这一份", row: 1, tone: violet, group: same }
   - { id: r, label: "rawQuery()", sub: "挂一次，两种入口都能用", row: 2, tone: green }
 edges:
   - { from: e1, to: p }

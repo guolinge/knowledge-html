@@ -1169,6 +1169,14 @@
     void markRows;
   };
 
+  /* ---------- 10. 结构图折叠 ----------
+     点节点收起/展开它的子树。纯属性切换，样式在 blocks.css。 */
+  (function treeFold() {
+    document.querySelectorAll('[data-tree] li.has-kids > [data-tree-node]').forEach((node) => {
+      node.addEventListener('click', () => node.parentElement.classList.toggle('folded'));
+    });
+  })();
+
   /* ---------- 挂载 ---------- */
   document.querySelectorAll('[data-widget]').forEach((root) => {
     var name = root.getAttribute('data-widget');

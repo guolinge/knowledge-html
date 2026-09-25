@@ -357,6 +357,46 @@ text: |
 
 ---
 
+## 9. `tree` —— 层级结构图
+
+**什么时候用**：表达「谁包含谁」「谁继承谁」「目录长什么样」。
+
+> 横向缩进 + 肘形连接线。任意深度都不会挤，比纵向树紧凑得多。
+
+```tree
+- label: DB
+  sub: core/src/db.ts
+  tone: violet
+  note: 唯一直接碰 knex 的地方
+  children:
+    - label: getInstance
+      sub: "name?: string"
+      note: 两种入口，共享同一个 Builder.prototype
+    - label: buildWhere
+      sub: "(builder, rules, logic)"
+      note: 递归展开表达式树
+      children:
+        - { label: isCondition, note: 有 logic 字段就是子树 }
+        - { label: isRawExpr, note: "whereRaw 片段" }
+    - { label: formatField, note: 反引号包裹列名 }
+```
+
+| 键 | 说明 |
+|---|---|
+| `label` | 主文字（等宽字体） |
+| `sub` | 签名 / 类型，渲染成代码 chip |
+| `note` | 补充说明（灰色小字） |
+| `tone` | 左侧色条。顶层默认紫，子层默认灰 |
+| `children` | 子节点数组，可无限嵌套 |
+
+**要点**：
+
+- **有孩子的节点可点击折叠** —— 适合展示大结构，读者先看骨架再展开细节。
+- 顶层节点有底色（树的锚点），子层默认透明，hover 才浮出来 —— 每行都染色会很吵。
+- 目录树、类层次、对象组成、调用栈都适合。**纯线性链条用 `lane-stack`，别用这个。**
+
+---
+
 ## 9. `spec` —— 拆解卡
 
 **什么时候用**：要把一个东西按固定维度拆开讲透。

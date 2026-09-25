@@ -528,6 +528,31 @@ const KIND_TONE = {
     </div>`;
   }
 
+  /* ===== 积木 15 · tree =====
+     层级结构图：谁包含谁、谁继承谁、目录长什么样。
+     横向缩进 + 肘形连接线 —— 任意深度都不会挤，比纵向树紧凑得多。
+     节点可点击折叠，适合展示代码结构。 */
+  function tree(body) {
+    const items = YAML.parse(body) || [];
+    const render = (nodes, depth) =>
+      `<ul class="tlist">${nodes
+        .map((n) => {
+          const kids = Array.isArray(n.children) ? n.children : [];
+          const tone = n.tone || (depth === 0 ? 'violet' : 'muted');
+          return `<li${kids.length ? ' class="has-kids"' : ''}>
+            <div class="tnode tone-${tone}" data-tree-node>
+              ${kids.length ? '<span class="tcaret" aria-hidden="true"></span>' : ''}
+              <b>${inline(n.label)}</b>
+              ${n.sub ? `<code>${esc(n.sub)}</code>` : ''}
+              ${n.note ? `<span class="tnote">${inline(n.note)}</span>` : ''}
+            </div>
+            ${kids.length ? render(kids, depth + 1) : ''}
+          </li>`;
+        })
+        .join('')}</ul>`;
+    return `<div class="tree" data-tree>${render(items, 0)}</div>`;
+  }
+
   /* ---------- 注册 ---------- */
   const RENDERERS = {
     'lane-stack': laneStack,
@@ -538,6 +563,7 @@ const KIND_TONE = {
     flow,
     seq,
     matrix,
+    tree,
     spec,
     callout,
     checklist,
