@@ -671,23 +671,61 @@
       svg.setAttribute('width', W);
       svg.setAttribute('height', H);
 
+      // 同一对节点之间可能有多条边（或同一目标有多条汇入），
+      // 给它们一个水平偏移，否则会完全重叠
+      const pairCount = {};
+      for (const e of edges) {
+        const k = `${e.from}->${e.to}`;
+        pairCount[k] = (pairCount[k] || 0) + 1;
+      }
+      const pairSeen = {};
+
       const parts = [];
       for (const e of edges) {
         const a = nodes[e.from];
         const b = nodes[e.to];
         if (!a || !b) continue;
 
-        const vertical = Math.abs(b.cy - a.cy) > (a.h + b.h) / 2 + 6;
+        const pk = `${e.from}->${e.to}`;
+        const idx = pairSeen[pk] = (pairSeen[pk] || 0);
+        pairSeen[pk] += 1;
+        // 同对多边时，向外散开
+        const spread = pairCount[pk] > 1 ? (idx - (pairCount[pk] - 1) / 2) * 26 : 0;
+
         let d;
         let lx;
         let ly;
+
+        // 自环：状态不变但有事件触发，画成节点上方的一个弧
+        if (e.self || e.from === e.to) {
+          const r = 30;
+          d = `M ${a.cx - 16} ${a.top} C ${a.cx - 34} ${a.top - r * 1.7}, ${a.cx + 34} ${
+            a.top - r * 1.7
+          }, ${a.cx + 16} ${a.top}`;
+          lx = a.cx;
+          ly = a.top - r * 1.32;   // 标签放在弧顶上方，不压线
+          const cls0 = ['fedge', 'self', e.dashed && 'dashed', e.anim && 'anim']
+            .filter(Boolean)
+            .join(' ');
+          parts.push(`<path class="${cls0}" d="${d}"/>`);
+          if (e.on || e.label) {
+            parts.push(
+              `<text class="felabel" x="${lx}" y="${ly}">${escapeXml(e.on || e.label)}</text>`,
+            );
+          }
+          continue;
+        }
+
+        const vertical = Math.abs(b.cy - a.cy) > (a.h + b.h) / 2 + 6;
         if (vertical) {
           const y1 = a.cy < b.cy ? a.bottom : a.top;
           const y2 = a.cy < b.cy ? b.top : b.bottom;
           const my = (y1 + y2) / 2;
-          d = `M ${a.cx} ${y1} C ${a.cx} ${my}, ${b.cx} ${my}, ${b.cx} ${y2}`;
-          lx = (a.cx + b.cx) / 2;
-          ly = my;
+          const ox = a.cx + spread;
+          const ix = b.cx + spread;
+          d = `M ${a.cx} ${y1} C ${ox} ${my}, ${ix} ${my}, ${b.cx} ${y2}`;
+          lx = (ox + ix) / 2;
+          ly = my + idx * 13;   // 标签也错开，不互相压
         } else {
           const [l, r] = a.cx < b.cx ? [a, b] : [b, a];
           const mx = (l.right + r.left) / 2;
@@ -697,9 +735,14 @@
         }
 
         const cls = ['fedge', e.dashed && 'dashed', e.anim && 'anim'].filter(Boolean).join(' ');
-        parts.push(`<path class="${cls}" d="${d}"${e.tone ? ` style="color:var(--${e.tone})"` : ''}/>`);
-        if (e.label) {
-          parts.push(`<text class="felabel" x="${lx}" y="${ly}">${escapeXml(e.label)}</text>`);
+        parts.push(
+          `<path class="${cls}" d="${d}"${e.tone ? ` style="color:var(--${e.tone})"` : ''}${
+            e.both ? ' marker-start="url(#fa)"' : ''
+          }/>`,
+        );
+        const edgeText = e.on || e.label;
+        if (edgeText) {
+          parts.push(`<text class="felabel" x="${lx}" y="${ly}">${escapeXml(edgeText)}</text>`);
         }
       }
       svg.innerHTML = svg.querySelector('defs').outerHTML + parts.join('');

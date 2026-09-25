@@ -335,11 +335,21 @@ export function blocksPlugin(md) {
       (rows[r] = rows[r] || []).push(n);
     });
 
+    // 哪些节点有自环 —— 它要往上画弧，得给那一行留出空间
+    const selfLoopIds = new Set(
+      edges.filter((e) => e.self || e.from === e.to).map((e) => e.from),
+    );
+
     const grid = rows
       .map(
-        (row) => `<div class="flowd-row">${(row || [])
+        (row) => `<div class="flowd-row${
+          (row || []).some((n) => selfLoopIds.has(n.id)) ? ' has-selfloop' : ''
+        }">${(row || [])
           .map(
-            (n) => `<div class="fnode tone-${n.tone || 'muted'}" data-id="${esc(n.id)}">
+            (n) => `<div class="fnode tone-${n.tone || 'muted'}${
+              n.shape ? ` shape-${n.shape}` : ''
+            }${n.initial ? ' is-initial' : ''}" data-id="${esc(n.id)}">
+              ${n.initial ? '<span class="finit" title="初始状态"></span>' : ''}
               <b>${inline(n.label)}</b>
               ${n.sub ? `<small>${inline(n.sub)}</small>` : ''}
             </div>`,
