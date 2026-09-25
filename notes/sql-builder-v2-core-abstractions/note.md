@@ -16,7 +16,7 @@ cols: 3
 items:
   - { title: 概念, desc: 为什么需要「条件」这个抽象；一个条件由什么构成；六种条件入口；四种表达式形态, tag: "01 ~ 04", tone: green }
   - { title: 组织, desc: 条件怎么组合成树；两套词汇怎么分工；两次翻译各做什么, tag: "05 ~ 06", tone: blue }
-  - { title: 架构, desc: adapter 怎么翻译；六种实现怎么组织；方言怎么隔离库差异, tag: "07 ~ 09", tone: violet }
+  - { title: 架构, desc: "条件怎么翻译成 Rule[]；六种实现怎么组织；方言怎么隔离库差异", tag: "07 ~ 09", tone: violet }
 ```
 
 ## 01 · 需求：为什么需要「条件」这个抽象
@@ -364,7 +364,22 @@ text: |
   ==`core` 永远不知道「什么是相对时间」「什么是画像属性」。==
 ```
 
-## 07 · 架构：adapter 怎么翻译
+## 07 · 架构：以画像为例，看条件怎么翻译
+
+```callout
+tone: red
+icon: ⚠
+text: |
+  ==**先更正一个容易搞错的地方：没有统一的 `adapter`。**==
+
+  翻译是**每种条件自己做的** —— 六种实现各写各的，没有一个公共的翻译函数。
+
+  这一节讲的 `adapter()` 是 **`portrait.ts` 的私有方法**，只是因为它写得最清楚，
+  拿它当例子。事件和关系各有自己的一堆函数（`getPropRules` / `getBaseRules` /
+  `buildTimeRangRules` …），uid / 人群包 / rawSql 则基本没有转换逻辑。
+
+  ==展开讲在 [⑧ crowd 篇](../sql-builder-v2-crowd/)。==
+```
 
 ### 它是个递归函数
 
