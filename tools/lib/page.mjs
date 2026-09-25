@@ -65,7 +65,8 @@ export function renderPage({ meta, body, toc, assetPrefix, backHref, assets }) {
   const head = assets
     ? `<style>\n${assets.theme}\n</style>\n<style>\n${assets.blocks}\n</style>`
     : `<link rel="stylesheet" href="${assetPrefix}assets/theme.css" />
-  <link rel="stylesheet" href="${assetPrefix}assets/blocks.css" />`;
+  <link rel="stylesheet" href="${assetPrefix}assets/blocks.css" />
+  <link rel="stylesheet" href="${assetPrefix}assets/archify-embed.css" />`;
   const foot = assets
     ? `<script>\n${assets.app}\n</script>`
     : `<script src="${assetPrefix}assets/app.js"></script>`;

@@ -184,6 +184,63 @@ text: |
   它的图值得当参照 —— 需要更复杂的图时，可以去读它的 SKILL.md 和 examples。
 ```
 
+## 复杂图：调用 archify skill
+
+我们的积木是「半自动」的 —— 你给 `row`，它排位置，但**不做标签避让和碰撞检测**。
+图一稠密，标签就会叠在一起（这是硬限制，不是 bug）。
+
+**遇到这种情况，调用 `archify` skill**（`~/.agents/skills/archify`）。
+它是一个成熟的架构图渲染器，有真正的布局引擎。
+
+### 什么时候该调 archify
+
+| 用 archify | 用我们的积木 |
+|---|---|
+| 8 个节点以上 | 3~6 个节点 |
+| 有**交叉边**（需要路由） | 线性或简单分支 |
+| 标签长、容易重叠 | 标签短 |
+| 需要嵌套边界框 + 精确避让 | 简单分组 |
+| 要作为独立图交付 | 图文混排的一节 |
+
+### 怎么调（已封装好）
+
+```bash
+# 1. 写 archify 的 JSON spec 放 archify/ 目录
+#    参考 ~/.agents/skills/archify/examples/*.architecture.json
+# 2. 生成并抠图
+node tools/archify.mjs archify/<名字>.json <名字>
+# 3. 在 note.md 里用 arch 积木
+```
+
+```arch
+svg: core-package
+caption: packages/core 的组成与数据流
+```
+
+**`tools/archify.mjs` 做了三件事**（这三件事不做会踩坑）：
+
+1. 调 archify 的 `validate` + `deliver`（校验不过会直接报出诊断）
+2. **只抠 SVG**（archify 的 HTML 有 600KB，但 SVG 本体只有 ~20KB）
+3. **给它的 CSS 变量加 `--af-` 前缀** ——
+   ==archify 在 `:root` 定义了 32 个变量，名字和我们完全一样（`--bg` / `--text` / `--panel`），
+   直接嵌会把我们整页变成深色。==
+
+两边都用 `data-theme` 属性，所以**深浅色天然同步**，不用额外处理。
+
+### archify 的校验值不值得用
+
+**值得，而且这是它最值钱的部分。** 它会精确告诉你：
+
+```text
+Label "crowd 的六种条件实现" (~132px) is wider than component "caller" (120px)
+Label "传入条件" overlaps component "caller"
+  label rect: [286, 120, 48, 14]
+  component "caller" rect: [250, 80, 120, 60]
+  Suggested fix: labelAt [310, 154] or labelDy +24
+```
+
+它**测量了文字宽度**、**检测了碰撞**、**给了具体坐标**。我们的积木完全不做这些。
+
 ## 依赖策略：默认零依赖
 
 页面要能**单文件发人**，所以每加一个库都在增加分发成本。

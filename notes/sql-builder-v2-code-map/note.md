@@ -466,6 +466,135 @@ text: |
 
 ## 03 · `packages/core` —— 通用层
 
+### 它是干什么的
+
+`core` 只做一件事：**把一棵「表达式树」翻译成一段 SQL 字符串。**
+
+它不知道什么是画像、什么是事件、什么是圈人 —— 那些是 `crowd` 的事。
+它只知道「有个条件树，要变成 SQL」。
+
+```arch
+svg: core-package
+caption: packages/core 的组成与数据流 —— 由 archify skill 生成
+```
+
+### 数据怎么流过它
+
+```lane-stack
+- badge: 第 1 步
+  title: 拿到表达式树
+  desc: 纯数据，没有任何行为
+  tone: blue
+  nodes:
+    - { title: "Rule[]", sub: "Expression | Condition 递归嵌套" }
+  next: "递归展开 :: :: 遇到 Condition 就往下钻"
+
+- badge: 第 2 步
+  title: 翻译
+  desc: 把树的每个节点落到 knex 上
+  tone: violet
+  nodes:
+    - { title: Condition, sub: "展开成 andWhere / orWhere" }
+    - { title: Expression, sub: "展开成 where / whereRaw" }
+  next: "遇到方言差异 :: :: 交给 SqlDialect"
+
+- badge: 第 3 步
+  title: 方言层
+  desc: 所有数据库差异只在这里
+  tone: amber
+  nodes:
+    - { title: SqlDialect, sub: "14 个方法的接口" }
+    - { title: BytehouseDialect, sub: "unix 时间戳 / DS_DATETIME_ADD" }
+    - { title: DorisDialect, sub: "ARRAY_CONTAINS / JSON_CONTAINS" }
+
+- badge: 第 4 步
+  title: 输出
+  desc: knex 编译成字符串
+  tone: green
+  nodes:
+    - { title: SQL 字符串, sub: "交给数据网关" }
+```
+
+### 四个部分
+
+```tree
+- label: 表达式模型
+  sub: src/db.ts
+  tone: violet
+  note: 只有数据结构，没有任何行为
+  children:
+    - { label: Expression, sub: "四种形态", note: "普通 / 裸值 / 裸列 / 裸 SQL 片段" }
+    - { label: Condition, sub: "{ logic, items }", note: "logic 是 AND 或 OR，items 可以再嵌套" }
+    - { label: Rule, sub: "Condition | Expression", note: "调用方传进来的就是它" }
+- label: 翻译器
+  sub: src/db.ts
+  tone: green
+  note: DB 类上的静态方法
+  children:
+    - { label: buildWhere, note: "递归展开 —— 遇到 Condition 就建子查询再往下钻" }
+    - { label: "raw / unionAllRaws", note: "拼 SQL 片段和 UNION ALL" }
+    - { label: formatField, note: "反引号包裹列名" }
+- label: 方言层
+  sub: src/dialect/
+  tone: amber
+  note: 所有数据库差异都收在这里
+  children:
+    - { label: interface.ts, sub: "SqlDialect", note: "14 个方法的接口" }
+    - { label: bytehouse.ts, note: "111 行" }
+    - { label: doris.ts, note: "139 行" }
+- label: 工具集
+  sub: src/utils.ts
+  tone: muted
+  note: 675 行 —— 其实是个杂物抽屉
+  children:
+    - { label: 时间表达式, note: "getTimeRules / generateLatestDaysRules" }
+    - { label: uid 编解码, note: "encodeUid / decodeUid / noDecodedSqlGen" }
+    - { label: 树压缩, note: "treeMinimizer —— 去掉只有一个孩子的组合节点" }
+    - { label: 标签表, note: "buildLabelTable —— 其实是给 crowd 的 segmentation 用的" }
+```
+
+```callout
+tone: amber
+icon: ⚠
+text: |
+  ==`utils.ts` 是个杂物抽屉。== 675 行里塞了四类互不相关的东西：
+  时间表达式、uid 编解码、树压缩、标签表。
+
+  其中**标签表是给 `crowd` 的 segmentation 用的** —— 严格说它不属于「通用层」。
+  这是历史遗留，不是设计。
+```
+
+### 一个藏在里面的不一致
+
+```callout
+tone: red
+icon: ⚠
+tinted: true
+text: |
+  **方言差异并不全都走 `SqlDialect` 接口。**
+
+  `getStringArrayRule()` 直接按 `dbType` 分支：
+```
+
+```text
+// core/src/utils.ts:455
+if (dbType === DbType.Bytehouse) { ... }
+else if (dbType === DbType.Doris) { ... }
+else if (dbType === DbType.MySql) { ... }
+```
+
+```callout
+tone: red
+icon: ⚠
+text: |
+  这意味着**要加一种数据库，光实现 `SqlDialect` 接口不够** ——
+  还得回来改 `utils.ts` 里这个 `if/else`。
+
+  ==这是这套架构里最明显的裂缝。== 理想情况下所有方言分支都该收进接口。
+```
+
+
+
 ### `src/` 根文件
 
 ```cards

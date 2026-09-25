@@ -11,7 +11,12 @@
    围栏内的 body 是 YAML。未注册的语言名会退化成普通代码块。
    ============================================================ */
 
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import YAML from 'yaml';
+
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 
 /* ---------- 小工具 ---------- */
 
@@ -553,6 +558,29 @@ const KIND_TONE = {
     return `<div class="tree" data-tree>${render(items, 0)}</div>`;
   }
 
+  /* ===== 积木 16 · arch =====
+     内联一张用 archify skill 生成的复杂图。
+     SVG 由 tools/archify.mjs 预先抠好放 assets/arch/，这里只负责读进来。
+     为什么不在构建时调 archify：那样别人 clone 仓库后没有 archify 就构建不了。 */
+  function arch(body) {
+    const cfg = YAML.parse(body) || {};
+    const name = cfg.svg;
+    if (!name) throw new Error('arch 积木需要 svg: <名字>（对应 assets/arch/<名字>.svg）');
+
+    const file = path.join(ROOT, 'assets/arch', `${name}.svg`);
+    if (!fs.existsSync(file)) {
+      throw new Error(
+        `找不到 assets/arch/${name}.svg。\n` +
+          `  先生成：node tools/archify.mjs archify/${name}.json ${name}`,
+      );
+    }
+    const svg = fs.readFileSync(file, 'utf8');
+    return `<figure class="archfig">
+      ${svg}
+      ${cfg.caption ? `<figcaption>${inline(cfg.caption)}</figcaption>` : ''}
+    </figure>`;
+  }
+
   /* ---------- 注册 ---------- */
   const RENDERERS = {
     'lane-stack': laneStack,
@@ -564,6 +592,7 @@ const KIND_TONE = {
     seq,
     matrix,
     tree,
+    arch,
     spec,
     callout,
     checklist,
