@@ -499,56 +499,182 @@ rows:
 
 #### 边 ① `crowd → Rule[]`：adapter 在干什么
 
-业务条件不是天然就长成 `Rule[]` 的，中间有一次**改写**。
+**这是整条链路里唯一的「业务语义 → 数据语义」翻译点。** 值得拆细。
 
-拿画像条件举例。业务侧写的是：
+##### 为什么需要这一步：两套词汇表
 
-```text
-{ op: 'IN', name: 'city', value: ['杭州','深圳'] }
-                ↑ 业务叫 name
+业务侧和表达式模型**结构长得很像，但词汇完全不同**：
+
+```compare
+first: 同一个概念
+head: [业务模型（crowd）, 表达式模型（core）]
+rows:
+  - 属性名: ["`name`", "`column`"]
+  - 时间条件: ["`dateType` + `relativeDateType` + `dateFormat`", "展开成多个 `op` + `column` + `value`"]
+  - 逻辑组合: ["`logic` + `items`", "`logic` + `items`（**一样**）"]
+  - 裸值: ["`rawValue`", "`rawValue`（**一样**）"]
+  - 操作符: ["`Op` / `ScopeOp` / `ContainOp` …", "同一套枚举（**一样**）"]
 ```
 
-`adapter()` 处理后变成：
+```callout
+tone: violet
+icon: 💡
+text: |
+  ==两个模型有一半的词汇是共享的，另一半是业务独有的。==
 
-```text
-{ op: 'IN', column: 'city', value: ['杭州','深圳'] }
-                  ↑ 表达式模型叫 column
+  共享的（`logic` / `items` / `rawValue` / 操作符枚举）**直接透传**；
+  业务独有的（`name` / `dateType` 那一堆）**在这一步翻译掉**。
+
+  这样 `core` 就永远不需要知道「什么是相对时间」「什么是画像属性」。
 ```
 
-==**adapter 做的第一件事就是字段改名**：业务词汇（`name`）翻译成模型词汇（`column`）。==
+##### 它是个递归函数
 
-```tree
-- label: adapter(rule)
-  sub: crowd/src/entrepots/portrait.ts
-  tone: blue
-  note: 把业务条件翻译成表达式模型
-  children:
-    - label: "'logic' in rule"
-      note: 是树 → 保持结构，递归 items
-      children:
-        - { label: "{ logic: 'OR', items: [...] }", note: 原样保留 logic" }
-    - label: "'op' in rule"
-      note: 是叶子 → 看有没有 'dateType'
-      children:
-        - label: "有 'dateType'"
-          note: 时间条件 → **调方言或 utils**（边 ② 和边 ③）
-          children:
-            - { label: "展开成 { logic: 'AND', items: [...] }", note: "一个时间条件变成一棵子树" }
-        - label: "有 'rawValue'"
-          note: "→ { column, op, rawValue }"
-        - label: "普通条件"
-          note: "→ { column, op, value }"
-    - label: 都不是
-      note: "throw 条件错误"
+```flow
+grid: true
+nodes:
+  - { id: in, label: "adapter(rules)", sub: "单个条件或数组", row: 0, kind: backend }
+  - { id: loop, label: 遍历每个 rule, row: 1, tone: violet }
+  - { id: q1, label: "有 'logic'？", sub: "是树", row: 2, tone: amber, shape: note }
+  - { id: q2, label: "有 'op'？", sub: "是叶子", row: 2, tone: amber, shape: note }
+  - { id: rec, label: "递归 adapter(items)", sub: "保持 logic 不变", row: 3, tone: violet }
+  - { id: q3, label: "有 'dateType'？", sub: "时间条件", row: 3, tone: amber, shape: note }
+  - { id: plain, label: "直接改名", sub: "name → column", row: 4, tone: green }
+  - { id: time, label: "展开成 AND 子树", sub: "调方言或 utils", row: 4, tone: red }
+  - { id: bad, label: throw, sub: "条件错误", row: 4, tone: red }
+edges:
+  - { from: in, to: loop }
+  - { from: loop, to: q1, label: "是" }
+  - { from: q1, to: rec, label: "是" }
+  - { from: q1, to: q2, label: "否", dashed: true }
+  - { from: q2, to: q3, label: "是" }
+  - { from: q2, to: bad, label: "否", dashed: true }
+  - { from: q3, to: plain, label: "否" }
+  - { from: q3, to: time, label: "是" }
 ```
 
 ```callout
 tone: amber
 icon: ⚠
 text: |
-  时间条件**不是**变成一个叶子，而是变成**一棵 AND 子树**。
+  **递归点在第 1 个分支**：`'logic' in rule` 时执行 `items: this.adapter(rule.items)` ——
+  子树交给同一个函数处理。==所以 adapter 的输入输出类型是同一个（`Rule[]`），
+  这让它天然能处理任意深度的嵌套。==
+```
 
-  因为「最近 3 天」在 SQL 里得写成 `>= 开始 AND <= 结束` —— 一个条件拆成两个。
+##### 五个出口，各产出什么
+
+```compare
+first: 分支
+head: [产出, 真实数据]
+rows:
+  - "有 `logic`":
+      - "**递归**，结构不变"
+      - |-
+        { logic: 'OR', items: [...] }
+          → { logic: 'OR', items: [递归结果] }
+  - "有 `dateType`\n且是相对时间戳":
+      - "**调方言**，展开成 AND 子树"
+      - |-
+        { op: Gte, name: '..._time', value: 3 }
+          → { logic: AND, items: [3 个 Expression] }
+  - "有 `dateType`\n其它时间":
+      - "**调 utils**，展开成 AND 子树"
+      - |-
+        同上，但生成的是通用 Rule
+  - "有 `rawValue`":
+      - "改名 + 透传"
+      - |-
+        { op: Eq, name: 'c', rawValue: 'a+b' }
+          → { column: 'c', op: Eq, rawValue: 'a+b' }
+  - "普通条件":
+      - "**只改名**"
+      - |-
+        { op: IN, name: 'city', value: ['杭州'] }
+          → { column: 'city', op: IN, value: ['杭州'] }
+  - "都不是":
+      - "throw"
+      - "条件错误: {...}"
+```
+
+```callout
+tone: violet
+icon: 💡
+text: |
+  ==注意时间条件那两个分支：一个输入条件变成了一棵子树。==
+
+  而且外面**强制包一层 `logic: 'AND'`** —— 代码注释解释了原因：
+
+  > 这里包装一层，因为 timeRules 必须是 And 的关系，
+  > 而 result 这一层的关系可能是 Or
+
+  如果不包，「最近 3 天 **或** 是 VIP」会被解析成
+  「`>= 开始` **或** `<= 结束` **或** 是 VIP」—— 语义就错了。
+```
+
+##### 一个完整例子：看结构怎么膨胀
+
+输入（业务侧）：
+
+```text
+{ logic: 'AND', items: [
+    { op: 'IN',  name: 'city',       value: ['杭州'] },
+    { op: 'Gte', name: '..._time',   dateType: 'Relative', value: 3 }
+]}
+```
+
+`adapter` 处理完：
+
+```text
+{ logic: 'AND', items: [                    ← 外层结构不变，logic 透传
+    { op: 'IN', column: 'city', value: ['杭州'] },        ← 只改名
+
+    { logic: 'AND', items: [                ← 时间条件膨胀成一棵子树
+        { op: 'Gte', column: '..._time', ... },   ← 起点
+        { op: 'Lte', column: '..._time', ... }    ← 终点
+    ]}
+]}
+```
+
+**一个叶子（1 行）→ 一棵子树（5 行）。** 这是 adapter 里唯一会改变结构的地方。
+
+##### 为什么相对时间戳要单独走方言
+
+同样是相对时间，**两个库的 SQL 完全不一样**：
+
+```compare
+first: 库
+head: [getRelativeTimestampRules 的实现, 生成的 SQL 形态]
+rows:
+  - ByteHouse:
+      - "**薄壳** —— 直接转发给 `utils.getTimestampRules()`"
+      - |-
+        `..._time` >= UNIX_TIMESTAMP(
+          DS_DATETIME_ADD('day', -3, NOW())
+        ) * 1000
+  - Doris:
+      - "**自己实现** —— 因为 Doris 的 event_time 是 DATETIME"
+      - |-
+        `..._time` >= DS_DATETIME_ADD('day', -3,
+          FROM_UNIXTIME(UNIX_TIMESTAMP(), '%Y-%m-%d 00:00:00')
+        )
+```
+
+```callout
+tone: amber
+icon: ⚠
+text: |
+  **差别在于要不要 `UNIX_TIMESTAMP(...) * 1000` 那层包装。**
+
+  ByteHouse 的 `event_time` 是**毫秒时间戳**（数字），所以要把日期转成毫秒再比。
+  Doris 的 `event_time` 是 **DATETIME**（日期类型），直接比就行。
+
+  代码注释原话：
+
+  > Doris event_time 是 DATETIME，复用 DS_DATETIME_ADD UDF，
+  > 去掉 UNIX_TIMESTAMP(...) * 1000 包装，直接与 DATETIME 列比较
+
+  ==这就是「为什么时间戳必须走方言」的答案 —— 不是风格差异，是列的数据类型不同。==
 ```
 
 #### 边 ② `utils.ts → Rule[]`：时间条件怎么展开

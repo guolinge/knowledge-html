@@ -2772,92 +2772,133 @@ catalog:
 <p>上面那张图有 <strong>8 个框、7 条边</strong>，每条边都带编号。</p>
 <div class="compare-wrap"><table class="compare"><thead><tr><th>边</th><th>从 → 到</th><th>这一步在干什么</th></tr></thead><tbody><tr><th>①</th><td data-label="从 → 到"><code>crowd 条件实现</code> → <code>Rule[]</code></td><td data-label="这一步在干什么">adapter 改写：字段改名 + 展开特殊条件</td></tr><tr><th>②</th><td data-label="从 → 到"><code>utils.ts</code> → <code>Rule[]</code></td><td data-label="这一步在干什么">时间条件展开成一棵 AND 子树</td></tr><tr><th>③</th><td data-label="从 → 到"><code>crowd 条件实现</code> → <code>SqlDialect</code></td><td data-label="这一步在干什么">属性类型特殊时才调方言</td></tr><tr><th>④</th><td data-label="从 → 到"><code>SqlDialect</code> → <code>Bytehouse</code> / <code>Doris</code></td><td data-label="这一步在干什么">接口落到具体实现</td></tr><tr><th>⑤</th><td data-label="从 → 到"><code>Rule[]</code> → <code>DB.buildWhere</code></td><td data-label="这一步在干什么">递归展开成 knex 调用</td></tr><tr><th>⑥</th><td data-label="从 → 到"><code>DB.buildWhere</code> → <code>knex</code></td><td data-label="这一步在干什么">五种表达式形态各落到哪个方法</td></tr><tr><th>⑦</th><td data-label="从 → 到"><code>knex</code> → <code>SQL 字符串</code></td><td data-label="这一步在干什么">链式累积，取值时才编译</td></tr></tbody></table></div><p>下面按编号一条条走。</p>
 <h4>边 ① <code>crowd → Rule[]</code>：adapter 在干什么</h4>
-<p>业务条件不是天然就长成 <code>Rule[]</code> 的，中间有一次<strong>改写</strong>。</p>
-<p>拿画像条件举例。业务侧写的是：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">{ op: 'IN', name: 'city', value: ['杭州','深圳'] }
-                ↑ 业务叫 name
-</code></pre></div>
-<p><code>adapter()</code> 处理后变成：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">{ op: 'IN', column: 'city', value: ['杭州','深圳'] }
-                  ↑ 表达式模型叫 column
-</code></pre></div>
-<p><mark class="mk-blue"><strong>adapter 做的第一件事就是字段改名</strong>：业务词汇（<code>name</code>）翻译成模型词汇（<code>column</code>）。</mark></p>
-<div class="tree" data-tree><ul class="tlist"><li class="has-kids">
-            <div class="tnode tone-blue" data-tree-node>
-              <span class="tcaret" aria-hidden="true"></span>
-              <b>adapter(rule)</b>
-              <code>crowd/src/entrepots/portrait.ts</code>
-              <span class="tnote">把业务条件翻译成表达式模型</span>
-            </div>
-            <ul class="tlist"><li class="has-kids">
-            <div class="tnode tone-muted" data-tree-node>
-              <span class="tcaret" aria-hidden="true"></span>
-              <b>'logic' in rule</b>
+<p><strong>这是整条链路里唯一的「业务语义 → 数据语义」翻译点。</strong> 值得拆细。</p>
+<h5>为什么需要这一步：两套词汇表</h5>
+<p>业务侧和表达式模型<strong>结构长得很像，但词汇完全不同</strong>：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>同一个概念</th><th>业务模型（crowd）</th><th>表达式模型（core）</th></tr></thead><tbody><tr><th>属性名</th><td data-label="业务模型（crowd）"><code>name</code></td><td data-label="表达式模型（core）"><code>column</code></td></tr><tr><th>时间条件</th><td data-label="业务模型（crowd）"><code>dateType</code> + <code>relativeDateType</code> + <code>dateFormat</code></td><td data-label="表达式模型（core）">展开成多个 <code>op</code> + <code>column</code> + <code>value</code></td></tr><tr><th>逻辑组合</th><td data-label="业务模型（crowd）"><code>logic</code> + <code>items</code></td><td data-label="表达式模型（core）"><code>logic</code> + <code>items</code>（<strong>一样</strong>）</td></tr><tr><th>裸值</th><td data-label="业务模型（crowd）"><code>rawValue</code></td><td data-label="表达式模型（core）"><code>rawValue</code>（<strong>一样</strong>）</td></tr><tr><th>操作符</th><td data-label="业务模型（crowd）"><code>Op</code> / <code>ScopeOp</code> / <code>ContainOp</code> …</td><td data-label="表达式模型（core）">同一套枚举（<strong>一样</strong>）</td></tr></tbody></table></div><div class="callout tone-violet">
+      <span class="ic">💡</span>
+      <div><p><mark class="mk-blue">两个模型有一半的词汇是共享的，另一半是业务独有的。</mark></p>
+<p>共享的（<code>logic</code> / <code>items</code> / <code>rawValue</code> / 操作符枚举）<strong>直接透传</strong>；
+业务独有的（<code>name</code> / <code>dateType</code> 那一堆）<strong>在这一步翻译掉</strong>。</p>
+<p>这样 <code>core</code> 就永远不需要知道「什么是相对时间」「什么是画像属性」。</p>
+</div>
+    </div><h5>它是个递归函数</h5>
+<div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;in&quot;,&quot;to&quot;:&quot;loop&quot;},{&quot;from&quot;:&quot;loop&quot;,&quot;to&quot;:&quot;q1&quot;,&quot;label&quot;:&quot;是&quot;},{&quot;from&quot;:&quot;q1&quot;,&quot;to&quot;:&quot;rec&quot;,&quot;label&quot;:&quot;是&quot;},{&quot;from&quot;:&quot;q1&quot;,&quot;to&quot;:&quot;q2&quot;,&quot;label&quot;:&quot;否&quot;,&quot;dashed&quot;:true},{&quot;from&quot;:&quot;q2&quot;,&quot;to&quot;:&quot;q3&quot;,&quot;label&quot;:&quot;是&quot;},{&quot;from&quot;:&quot;q2&quot;,&quot;to&quot;:&quot;bad&quot;,&quot;label&quot;:&quot;否&quot;,&quot;dashed&quot;:true},{&quot;from&quot;:&quot;q3&quot;,&quot;to&quot;:&quot;plain&quot;,&quot;label&quot;:&quot;否&quot;},{&quot;from&quot;:&quot;q3&quot;,&quot;to&quot;:&quot;time&quot;,&quot;label&quot;:&quot;是&quot;}]">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-green" data-id="in">
               
-              <span class="tnote">是树 → 保持结构，递归 items</span>
-            </div>
-            <ul class="tlist"><li>
-            <div class="tnode tone-muted" data-tree-node>
-              <span class="tdot" aria-hidden="true"></span>
-              <b>{ logic: 'OR', items: [...] }</b>
+              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5L3 8l3 4.5M10 3.5L13 8l-3 4.5"/></svg>
+              <b>adapter(rules)</b>
+              <small>单个条件或数组</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="loop">
               
-              <span class="tnote">原样保留 logic&quot;</span>
-            </div>
-            
-          </li></ul>
-          </li><li class="has-kids">
-            <div class="tnode tone-muted" data-tree-node>
-              <span class="tcaret" aria-hidden="true"></span>
-              <b>'op' in rule</b>
               
-              <span class="tnote">是叶子 → 看有没有 'dateType'</span>
-            </div>
-            <ul class="tlist"><li class="has-kids">
-            <div class="tnode tone-muted" data-tree-node>
-              <span class="tcaret" aria-hidden="true"></span>
-              <b>有 'dateType'</b>
+              <b>遍历每个 rule</b>
               
-              <span class="tnote">时间条件 → <strong>调方言或 utils</strong>（边 ② 和边 ③）</span>
-            </div>
-            <ul class="tlist"><li>
-            <div class="tnode tone-muted" data-tree-node>
-              <span class="tdot" aria-hidden="true"></span>
-              <b>展开成 { logic: 'AND', items: [...] }</b>
+            </div></div><div class="flowd-row"><div class="fnode tone-amber shape-note" data-id="q1">
               
-              <span class="tnote">一个时间条件变成一棵子树</span>
-            </div>
-            
-          </li></ul>
-          </li><li>
-            <div class="tnode tone-muted" data-tree-node>
-              <span class="tdot" aria-hidden="true"></span>
-              <b>有 'rawValue'</b>
               
-              <span class="tnote">→ { column, op, rawValue }</span>
-            </div>
-            
-          </li><li>
-            <div class="tnode tone-muted" data-tree-node>
-              <span class="tdot" aria-hidden="true"></span>
-              <b>普通条件</b>
+              <b>有 'logic'？</b>
+              <small>是树</small>
+            </div><div class="fnode tone-amber shape-note" data-id="q2">
               
-              <span class="tnote">→ { column, op, value }</span>
-            </div>
-            
-          </li></ul>
-          </li><li>
-            <div class="tnode tone-muted" data-tree-node>
-              <span class="tdot" aria-hidden="true"></span>
-              <b>都不是</b>
               
-              <span class="tnote">throw 条件错误</span>
-            </div>
-            
-          </li></ul>
-          </li></ul></div><div class="callout tone-amber">
+              <b>有 'op'？</b>
+              <small>是叶子</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="rec">
+              
+              
+              <b>递归 adapter(items)</b>
+              <small>保持 logic 不变</small>
+            </div><div class="fnode tone-amber shape-note" data-id="q3">
+              
+              
+              <b>有 'dateType'？</b>
+              <small>时间条件</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="plain">
+              
+              
+              <b>直接改名</b>
+              <small>name → column</small>
+            </div><div class="fnode tone-red" data-id="time">
+              
+              
+              <b>展开成 AND 子树</b>
+              <small>调方言或 utils</small>
+            </div><div class="fnode tone-red" data-id="bad">
+              
+              
+              <b>throw</b>
+              <small>条件错误</small>
+            </div></div></div>
+      
+    </div><div class="callout tone-amber">
       <span class="ic">⚠</span>
-      <div><p>时间条件<strong>不是</strong>变成一个叶子，而是变成<strong>一棵 AND 子树</strong>。</p>
-<p>因为「最近 3 天」在 SQL 里得写成 <code>&gt;= 开始 AND &lt;= 结束</code> —— 一个条件拆成两个。</p>
+      <div><p><strong>递归点在第 1 个分支</strong>：<code>'logic' in rule</code> 时执行 <code>items: this.adapter(rule.items)</code> ——
+子树交给同一个函数处理。<mark class="mk-blue">所以 adapter 的输入输出类型是同一个（<code>Rule[]</code>），
+这让它天然能处理任意深度的嵌套。</mark></p>
+</div>
+    </div><h5>五个出口，各产出什么</h5>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>分支</th><th>产出</th><th>真实数据</th></tr></thead><tbody><tr><th>有 <code>logic</code></th><td data-label="产出"><strong>递归</strong>，结构不变</td><td data-label="真实数据">{ logic: 'OR', items: [...] }
+→ { logic: 'OR', items: [递归结果] }</td></tr><tr><th>有 <code>dateType</code>
+且是相对时间戳</th><td data-label="产出"><strong>调方言</strong>，展开成 AND 子树</td><td data-label="真实数据">{ op: Gte, name: '..._time', value: 3 }
+→ { logic: AND, items: [3 个 Expression] }</td></tr><tr><th>有 <code>dateType</code>
+其它时间</th><td data-label="产出"><strong>调 utils</strong>，展开成 AND 子树</td><td data-label="真实数据">同上，但生成的是通用 Rule</td></tr><tr><th>有 <code>rawValue</code></th><td data-label="产出">改名 + 透传</td><td data-label="真实数据">{ op: Eq, name: 'c', rawValue: 'a+b' }
+→ { column: 'c', op: Eq, rawValue: 'a+b' }</td></tr><tr><th>普通条件</th><td data-label="产出"><strong>只改名</strong></td><td data-label="真实数据">{ op: IN, name: 'city', value: ['杭州'] }
+→ { column: 'city', op: IN, value: ['杭州'] }</td></tr><tr><th>都不是</th><td data-label="产出">throw</td><td data-label="真实数据">条件错误: {...}</td></tr></tbody></table></div><div class="callout tone-violet">
+      <span class="ic">💡</span>
+      <div><p><mark class="mk-blue">注意时间条件那两个分支：一个输入条件变成了一棵子树。</mark></p>
+<p>而且外面<strong>强制包一层 <code>logic: 'AND'</code></strong> —— 代码注释解释了原因：</p>
+<blockquote>
+<p>这里包装一层，因为 timeRules 必须是 And 的关系，
+而 result 这一层的关系可能是 Or</p>
+</blockquote>
+<p>如果不包，「最近 3 天 <strong>或</strong> 是 VIP」会被解析成
+「<code>&gt;= 开始</code> <strong>或</strong> <code>&lt;= 结束</code> <strong>或</strong> 是 VIP」—— 语义就错了。</p>
+</div>
+    </div><h5>一个完整例子：看结构怎么膨胀</h5>
+<p>输入（业务侧）：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">{ logic: 'AND', items: [
+    { op: 'IN',  name: 'city',       value: ['杭州'] },
+    { op: 'Gte', name: '..._time',   dateType: 'Relative', value: 3 }
+]}
+</code></pre></div>
+<p><code>adapter</code> 处理完：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">{ logic: 'AND', items: [                    ← 外层结构不变，logic 透传
+    { op: 'IN', column: 'city', value: ['杭州'] },        ← 只改名
+
+    { logic: 'AND', items: [                ← 时间条件膨胀成一棵子树
+        { op: 'Gte', column: '..._time', ... },   ← 起点
+        { op: 'Lte', column: '..._time', ... }    ← 终点
+    ]}
+]}
+</code></pre></div>
+<p><strong>一个叶子（1 行）→ 一棵子树（5 行）。</strong> 这是 adapter 里唯一会改变结构的地方。</p>
+<h5>为什么相对时间戳要单独走方言</h5>
+<p>同样是相对时间，<strong>两个库的 SQL 完全不一样</strong>：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>库</th><th>getRelativeTimestampRules 的实现</th><th>生成的 SQL 形态</th></tr></thead><tbody><tr><th>ByteHouse</th><td data-label="getRelativeTimestampRules 的实现"><strong>薄壳</strong> —— 直接转发给 <code>utils.getTimestampRules()</code></td><td data-label="生成的 SQL 形态"><code>..._time</code> &gt;= UNIX_TIMESTAMP(
+DS_DATETIME_ADD('day', -3, NOW())
+) * 1000</td></tr><tr><th>Doris</th><td data-label="getRelativeTimestampRules 的实现"><strong>自己实现</strong> —— 因为 Doris 的 event_time 是 DATETIME</td><td data-label="生成的 SQL 形态"><code>..._time</code> &gt;= DS_DATETIME_ADD('day', -3,
+FROM_UNIXTIME(UNIX_TIMESTAMP(), '%Y-%m-%d 00:00:00')
+)</td></tr></tbody></table></div><div class="callout tone-amber">
+      <span class="ic">⚠</span>
+      <div><p><strong>差别在于要不要 <code>UNIX_TIMESTAMP(...) * 1000</code> 那层包装。</strong></p>
+<p>ByteHouse 的 <code>event_time</code> 是<strong>毫秒时间戳</strong>（数字），所以要把日期转成毫秒再比。
+Doris 的 <code>event_time</code> 是 <strong>DATETIME</strong>（日期类型），直接比就行。</p>
+<p>代码注释原话：</p>
+<blockquote>
+<p>Doris event_time 是 DATETIME，复用 DS_DATETIME_ADD UDF，
+去掉 UNIX_TIMESTAMP(...) * 1000 包装，直接与 DATETIME 列比较</p>
+</blockquote>
+<p><mark class="mk-blue">这就是「为什么时间戳必须走方言」的答案 —— 不是风格差异，是列的数据类型不同。</mark></p>
 </div>
     </div><h4>边 ② <code>utils.ts → Rule[]</code>：时间条件怎么展开</h4>
 <p><code>utils.ts</code> 里跟这条边有关的是 <code>getTimeRules()</code>。看它的真实输入输出：</p>
