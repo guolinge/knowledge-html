@@ -1297,7 +1297,7 @@
       fill(inBox, []); fill(outBox, []);
       countEl.textContent = '0 / ' + EVENTS.length + ' 条';
       setTask('未开始', 'muted', '点「开始模拟」跑一遍');
-      statusEl.textContent = '未开始';
+      statusEl.textContent = '未开始 · ' + EVENTS.length + ' 条订单等着被处理';
       runBtn.disabled = false;
       runBtn.textContent = '▶ 开始模拟';
     }
@@ -1369,27 +1369,28 @@
       }, EVENTS.length * step + 480));
     }
 
-    function setMode(id) {
+    function setMode(id, autoplay) {
       mode = id;
       var cfg = MODES.filter((m) => m.id === id)[0];
       Array.prototype.forEach.call(modesBox.children, (b) =>
         b.classList.toggle('on', b.getAttribute('data-sm-mode') === id));
       ruleEl.className = 'seg-rule tone-' + cfg.tone;
       ruleEl.textContent = cfg.rule;
-      play();
+      if (autoplay) play();
+      else reset();
     }
 
     MODES.forEach((m) => {
       var b = h('button', { cls: 'tone-' + m.tone, text: m.label, attrs: { 'data-sm-mode': m.id } });
       b.type = 'button';
-      b.addEventListener('click', () => setMode(m.id));
+      b.addEventListener('click', () => setMode(m.id, true));
       modesBox.appendChild(b);
     });
     runBtn.addEventListener('click', play);
     if (resetBtn) resetBtn.addEventListener('click', reset);
 
-    reset();
-    setMode('batch');
+    // 初始只把状态摆好，不自动跑 —— 读者滚到这里时应该看到一个「还没开始」的场
+    setMode('batch', false);
   };
 
   /* ---------- 挂载 ---------- */
