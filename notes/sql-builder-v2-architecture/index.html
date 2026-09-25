@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>sql_builder_v2 架构</title>
-<meta name="description" content="从零开始理解 sql_builder_v2：先讲清圈人、画像、事件这些概念，再讲条件怎么组织成树，最后才是代码架构。核心机制是 AND / OR 被实现成 UNION ALL + GROUP BY + HAVING COUNT，而不是 SQL 的 AND / OR。" />
+<title>sql_builder_v2 架构篇</title>
+<meta name="description" content="它怎么工作：一条条件经过两次翻译变成 SQL。以及四个反直觉的设计——AND / OR 其实是集合运算、方言不生成 SQL、include / exclude 为什么必须单独一层、工厂遇到未知类型为什么直接 throw。" />
 <link rel="stylesheet" href="../../assets/theme.css" />
   <link rel="stylesheet" href="../../assets/blocks.css" />
   <link rel="stylesheet" href="../../assets/archify-embed.css" />
@@ -26,35 +26,26 @@
   <aside class="toc" id="toc">
       <p class="toc-title">目录</p>
       <a href="../../index.html" class="sub">← 全部笔记</a>
-      <a href="#这个库是给谁用的">这个库是给谁用的</a>
-      <a href="#四个基础概念">四个基础概念</a>
-      <a href="#uid-用户的唯一标识" class="sub">uid —— 用户的唯一标识</a>
-      <a href="#画像-portrait-用户的静态属性" class="sub">画像 Portrait —— 用户的「静态属性」</a>
-      <a href="#事件-event-用户的行为流水" class="sub">事件 Event —— 用户的「行为流水」</a>
-      <a href="#人群包-crowd-预先算好的一批人" class="sub">人群包 Crowd —— 预先算好的一批人</a>
-      <a href="#关系-relation-用户和某个对象的关系" class="sub">关系 Relation —— 用户和某个「对象」的关系</a>
-      <a href="#一张表看清区别" class="sub">一张表看清区别</a>
-      <a href="#一个需求怎么变成条件树">一个需求怎么变成「条件树」</a>
-      <a href="#六种条件单元">六种条件单元</a>
-      <a href="#每种条件的最小例子真实入参-真实-sql" class="sub">每种条件的最小例子（真实入参 → 真实 SQL）</a>
-      <a href="#所以这个库到底在做什么">所以这个库到底在做什么</a>
-      <a href="#组织一棵树-六种叶子-两层组合">组织：一棵树 + 六种叶子 + 两层组合</a>
-      <a href="#架构一条条件要走-8-层">架构：一条条件要走 8 层</a>
-      <a href="#两个包的边界">两个包的边界</a>
-      <a href="#六个核心角色">六个核心角色</a>
-      <a href="#最不直觉的设计and-or-不是-sql-的-and-or">最不直觉的设计：AND / OR 不是 SQL 的 AND / OR</a>
-      <a href="#一条条件是怎么变成-sql-的">一条条件是怎么变成 SQL 的</a>
-      <a href="#为什么二次加工必须单独存在" class="sub">为什么「二次加工」必须单独存在</a>
-      <a href="#方言策略同一套条件两种数据库">方言策略：同一套条件，两种数据库</a>
+      <a href="#主干一条条件怎么变成-sql">主干：一条条件怎么变成 SQL</a>
+      <a href="#两次翻译各管什么">两次翻译，各管什么</a>
+      <a href="#组合为什么-and-or-不是-sql-的-and-or">组合：为什么 AND / OR 不是 SQL 的 AND / OR</a>
+      <a href="#二次加工include-exclude">二次加工：include / exclude</a>
+      <a href="#为什么必须单独一层" class="sub">为什么必须单独一层</a>
+      <a href="#分发六种入口怎么选">分发：六种入口怎么选</a>
+      <a href="#隔离方言怎么吸收库差异">隔离：方言怎么吸收库差异</a>
+      <a href="#关键方言不生成-sql" class="sub">关键：方言不生成 SQL</a>
+      <a href="#什么时候调方言" class="sub">什么时候调方言</a>
+      <a href="#什么时候决定用哪个实现" class="sub">什么时候决定用哪个实现</a>
+      <a href="#设计取舍">设计取舍</a>
       <a href="#扩展点">扩展点</a>
       <a href="#自测">自测</a>
   </aside>
 
   <main>
     <div class="hero">
-      <span class="eyebrow">● 代码架构 · 源码通读</span>
-      <h1>sql_builder_v2 架构</h1>
-      <p class="lede">从零开始理解 sql_builder_v2：先讲清圈人、画像、事件这些概念，再讲条件怎么组织成树，最后才是代码架构。核心机制是 AND / OR 被实现成 UNION ALL + GROUP BY + HAVING COUNT，而不是 SQL 的 AND / OR。</p>
+      <span class="eyebrow">● 从零理解 · 架构</span>
+      <h1>sql_builder_v2 架构篇</h1>
+      <p class="lede">它怎么工作：一条条件经过两次翻译变成 SQL。以及四个反直觉的设计——AND / OR 其实是集合运算、方言不生成 SQL、include / exclude 为什么必须单独一层、工厂遇到未知类型为什么直接 throw。</p>
     </div>
 
     <div class="draft-banner">
@@ -70,555 +61,280 @@
 
 <div class="callout tone-blue">
       <span class="ic">🧭</span>
-      <div><p>这篇笔记按 <strong>概念 → 组织 → 架构</strong> 三层写。如果你完全没接触过这套代码，
-从第 01 节顺着读；已经懂业务的可以直接跳到第 07 节。</p>
+      <div><p>前置是 <a href="../sql-builder-v2-concepts/">① 概念篇</a> 和 <a href="../sql-builder-v2-organization/">② 组织篇</a>。</p>
+<p>这篇回答一个问题：<mark class="mk-blue">这些东西怎么配合工作？</mark></p>
+<p>读完你应该能说出：「一条条件经过<strong>两次翻译</strong>变成 SQL，而 AND / OR 其实是<strong>集合运算</strong>」。</p>
 </div>
-    </div><div class="cards" data-cols="3"><div class="ccard tone-green">
-          <span class="tag tone-green">01 ~ 04</span>
-          <h4>概念</h4>
-          <p>圈人是什么、画像和事件有什么区别、六种条件各是什么东西</p>
-          
-        </div><div class="ccard tone-blue">
-          <span class="tag tone-blue">05 ~ 06</span>
-          <h4>组织</h4>
-          <p>为什么需要这个库、一个需求怎么变成条件树、条件怎么组合</p>
-          
-        </div><div class="ccard tone-violet">
-          <span class="tag tone-violet">07 ~ 13</span>
-          <h4>架构</h4>
-          <p>代码怎么分层、两个包怎么切、AND/OR 到底怎么实现的</p>
-          
-        </div></div><h2 id="这个库是给谁用的"><span class="num">01</span>这个库是给谁用的</h2>
-<p>先忘掉代码。想象一个真实场景。</p>
-<blockquote>
-<p>运营要发一张优惠券，<mark class="mk-blue">只发给「最近 7 天加购过、并且是 VIP」的用户</mark>。</p>
-</blockquote>
-<p>这句话要落地，系统必须回答一个问题：<mark class="mk-blue">这批人是谁？</mark></p>
-<p>而数据是长这样的：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">用户 1001 最近 7 天加购过 3 次，VIP 等级 3   →  要发
-用户 1002 最近 7 天没加购，VIP 等级 5        →  不发（没加购）
-用户 1003 最近 7 天加购过 1 次，不是 VIP      →  不发（不是 VIP）
-用户 1004 最近 7 天加购过 8 次，VIP 等级 4   →  要发
-</code></pre></div>
-<p>要找出这批人，得去数据库里查。<strong>这就是「圈人」。</strong></p>
-<div class="callout tone-violet quote">
-      <span class="ic">🎯</span>
-      <div><p>圈人 = 按一组条件，从数据里筛出符合条件的用户 ID 列表。</p>
+    </div><h2 id="主干一条条件怎么变成-sql"><span class="num">01</span>主干：一条条件怎么变成 SQL</h2>
+<p>先看全貌。下面这张图有 <strong>8 个框、7 条边</strong>，每条边都带编号：</p>
+<figure class="archfig">
+      <svg viewBox="0 0 620 748" role="img" aria-labelledby="archify-diagram-title archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
+        <title id="archify-diagram-title">packages/core —— 表达式树到 SQL 的翻译器</title>
+        <desc id="archify-diagram-description">A architecture diagram generated by Archify.</desc>
+        <!-- Definitions -->
+        <defs>
+          <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-default" />
+          </marker>
+          <marker id="arrowhead-emphasis" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-emphasis" />
+          </marker>
+          <marker id="arrowhead-security" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-security" />
+          </marker>
+          <marker id="arrowhead-dashed" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-dashed" />
+          </marker>
+          <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+            <path d="M 40 0 L 0 0 0 40" class="c-grid" stroke-width="0.5"/>
+          </pattern>
+        </defs>
+
+        <!-- Background Grid -->
+        <rect width="100%" height="100%" fill="url(#grid)" />
+
+        <!-- Boundaries (behind everything) -->
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="0" x="220" y="158" width="180" height="110" rx="12" class="c-region" stroke-width="1"/>
+        <text x="228" y="176" class="t-cloud" font-size="9" font-weight="600">表达式模型：只有数据结构，没有行为</text>
+
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="security-group" data-composition-frame-id="1" x="10" y="374" width="390" height="218" rx="8" class="c-security-group" stroke-width="1"/>
+        <text x="18" y="392" class="t-security" font-size="9" font-weight="600">方言层：所有数据库差异只在这里</text>
+
+        <!-- Connection paths (before components for correct z-order) -->
+        <path data-edge-from="caller" data-edge-to="rule" data-edge-label="① 传入条件" data-edge-key="0" data-edge-id="c1" data-composition-points="310,140;310,188" d="M 310 140 L 310 188" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="rule" data-edge-to="build" data-edge-label="⑤ 递归展开" data-edge-key="1" data-edge-id="c2" data-composition-points="250,218;205,218;205,319;160,319" d="M 250 218 L 213 218 Q 205 218 205 226 L 205 311 Q 205 319 197 319 L 160 319" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="iface" data-edge-to="bh" data-edge-label="④ 实现" data-edge-key="2" data-edge-id="c4" data-composition-points="100,464;100,512" d="M 100 464 L 100 512" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="iface" data-edge-to="doris" data-edge-key="3" data-edge-id="c5" data-composition-points="160,434;205,434;205,542;250,542" d="M 160 434 L 197 434 Q 205 434 205 442 L 205 534 Q 205 542 213 542 L 250 542" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="build" data-edge-to="knex" data-edge-label="⑥ whereRaw / raw" data-edge-key="4" data-edge-id="c6" data-composition-points="160,333;310,333;310,434;460,434" d="M 160 333 L 302 333 Q 310 333 310 341 L 310 426 Q 310 434 318 434 L 460 434" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
+        <path data-edge-from="helpers" data-edge-to="rule" data-edge-label="② 产出 Rule" data-edge-key="5" data-edge-id="c7" data-composition-points="460,326;415,326;415,218;370,218" d="M 460 326 L 423 326 Q 415 326 415 318 L 415 226 Q 415 218 407 218 L 370 218" class="a-dashed" stroke-width="1.5" marker-end="url(#arrowhead-dashed)"/>
+        <path data-edge-from="knex" data-edge-to="sql" data-edge-label="⑦ 编译" data-edge-key="6" data-edge-id="c8" data-composition-points="520,464;520,620" d="M 520 464 L 520 620" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="caller" data-edge-to="iface" data-edge-label="③ 遇到时间/map/JSON 属性" data-edge-key="7" data-edge-id="c3" data-composition-points="250,110;30,110;30,434;40,434" d="M 250 110 L 38 110 Q 30 110 30 118 L 30 429 Q 30 434 35 434 L 40 434" class="a-security" stroke-width="1.5" marker-end="url(#arrowhead-security)"/>
+
+        <!-- Components -->
+        <g id="node-caller" data-node-id="caller" data-node-label="crowd 条件实现" tabindex="0" role="button" aria-label="Focus crowd 条件实现, adapter 转换, Architecture component" aria-pressed="false" data-node-kind="external" data-node-sublabel="adapter 转换" data-node-context="Architecture component">
+          <title>crowd 条件实现 · adapter 转换 · Architecture component</title>
+          <rect x="250" y="80" width="120" height="60" rx="6" class="c-mask"/>
+          <rect x="250" y="80" width="120" height="60" rx="6" class="c-external" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="external" class="semantic-sigil s-external" transform="translate(256 86) scale(0.6875)">
+            <rect x="2.5" y="5" width="8.5" height="8" rx="1.5"/>
+            <path d="M8 2.5h5.5V8M13.5 2.5 7.5 8.5"/>
+          </g>
+          <text data-detail-anchor x="310" y="108" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">crowd 条件实现</text>
+        <text data-detail="context" x="310" y="124" class="t-muted" font-size="9" text-anchor="middle">adapter 转换</text>
+        </g>
+
+        <g id="node-rule" data-node-id="rule" data-node-label="Rule[]" tabindex="0" role="button" aria-label="Focus Rule[], 表达式树（纯数据）, 表达式模型：只有数据结构，没有行为" aria-pressed="false" data-node-kind="backend" data-node-sublabel="表达式树（纯数据）" data-node-tag="Expression | Condition" data-node-context="表达式模型：只有数据结构，没有行为">
+          <title>Rule[] · 表达式树（纯数据） · 表达式模型：只有数据结构，没有行为 · Expression | Condition</title>
+          <rect x="250" y="188" width="120" height="60" rx="6" class="c-mask"/>
+          <rect x="250" y="188" width="120" height="60" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(256 194) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text data-detail-anchor x="310" y="216" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">Rule[]</text>
+        <text data-detail="context" x="310" y="232" class="t-muted" font-size="9" text-anchor="middle">表达式树（纯数据）</text>
+        <text data-detail="fine" x="310" y="240" class="t-backend" font-size="7" text-anchor="middle">Expression | Condition</text>
+        </g>
+
+        <g id="node-build" data-node-id="build" data-node-label="DB.buildWhere" tabindex="0" role="button" aria-label="Focus DB.buildWhere, 递归翻译器, Architecture component" aria-pressed="false" data-node-kind="backend" data-node-sublabel="递归翻译器" data-node-tag="235 行" data-node-context="Architecture component">
+          <title>DB.buildWhere · 递归翻译器 · Architecture component · 235 行</title>
+          <rect x="40" y="296" width="120" height="60" rx="6" class="c-mask"/>
+          <rect x="40" y="296" width="120" height="60" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(46 302) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text data-detail-anchor x="100" y="324" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">DB.buildWhere</text>
+        <text data-detail="context" x="100" y="340" class="t-muted" font-size="9" text-anchor="middle">递归翻译器</text>
+        <text data-detail="fine" x="100" y="348" class="t-backend" font-size="7" text-anchor="middle">235 行</text>
+        </g>
+
+        <g id="node-helpers" data-node-id="helpers" data-node-label="utils.ts" tabindex="0" role="button" aria-label="Focus utils.ts, 时间 / uid / 树压缩, Architecture component" aria-pressed="false" data-node-kind="backend" data-node-sublabel="时间 / uid / 树压缩" data-node-tag="675 行" data-node-context="Architecture component">
+          <title>utils.ts · 时间 / uid / 树压缩 · Architecture component · 675 行</title>
+          <rect x="460" y="296" width="120" height="60" rx="6" class="c-mask"/>
+          <rect x="460" y="296" width="120" height="60" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(466 302) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text data-detail-anchor x="520" y="324" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">utils.ts</text>
+        <text data-detail="context" x="520" y="340" class="t-muted" font-size="9" text-anchor="middle">时间 / uid / 树压缩</text>
+        <text data-detail="fine" x="520" y="348" class="t-backend" font-size="7" text-anchor="middle">675 行</text>
+        </g>
+
+        <g id="node-iface" data-node-id="iface" data-node-label="SqlDialect" tabindex="0" role="button" aria-label="Focus SqlDialect, 方言接口 · 17 个方法, 方言层：所有数据库差异只在这里" aria-pressed="false" data-node-kind="security" data-node-sublabel="方言接口 · 17 个方法" data-node-context="方言层：所有数据库差异只在这里">
+          <title>SqlDialect · 方言接口 · 17 个方法 · 方言层：所有数据库差异只在这里</title>
+          <rect x="40" y="404" width="120" height="60" rx="6" class="c-mask"/>
+          <rect x="40" y="404" width="120" height="60" rx="6" class="c-security" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="security" class="semantic-sigil s-security" transform="translate(46 410) scale(0.6875)">
+            <path d="M8 2.2 13 4v3.5c0 3.1-1.8 5.4-5 6.5-3.2-1.1-5-3.4-5-6.5V4Z"/>
+            <path d="m5.8 8 1.5 1.5 3-3"/>
+          </g>
+          <text data-detail-anchor x="100" y="432" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">SqlDialect</text>
+        <text data-detail="context" x="100" y="448" class="t-muted" font-size="9" text-anchor="middle">方言接口 · 17 个方法</text>
+        </g>
+
+        <g id="node-bh" data-node-id="bh" data-node-label="BytehouseDialect" tabindex="0" role="button" aria-label="Focus BytehouseDialect, unix 时间戳 / DS_DATETIME_ADD, 方言层：所有数据库差异只在这里" aria-pressed="false" data-node-kind="cloud" data-node-sublabel="unix 时间戳 / DS_DATETIME_ADD" data-node-context="方言层：所有数据库差异只在这里">
+          <title>BytehouseDialect · unix 时间戳 / DS_DATETIME_ADD · 方言层：所有数据库差异只在这里</title>
+          <rect x="40" y="512" width="120" height="60" rx="6" class="c-mask"/>
+          <rect x="40" y="512" width="120" height="60" rx="6" class="c-cloud" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="cloud" class="semantic-sigil s-cloud" transform="translate(46 518) scale(0.6875)">
+            <path d="M4.3 12.5h7.3a2.4 2.4 0 0 0 .2-4.8 4 4 0 0 0-7.5-1.3A3.1 3.1 0 0 0 4.3 12.5Z"/>
+          </g>
+          <text data-detail-anchor x="100" y="540" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">BytehouseDialect</text>
+        <text data-detail="context" x="100" y="556" class="t-muted" font-size="6.4" text-anchor="middle">unix 时间戳 / DS_DATETIME_ADD</text>
+        </g>
+
+        <g id="node-doris" data-node-id="doris" data-node-label="DorisDialect" tabindex="0" role="button" aria-label="Focus DorisDialect, ARRAY_CONTAINS / JSON_CONTAINS, 方言层：所有数据库差异只在这里" aria-pressed="false" data-node-kind="cloud" data-node-sublabel="ARRAY_CONTAINS / JSON_CONTAINS" data-node-context="方言层：所有数据库差异只在这里">
+          <title>DorisDialect · ARRAY_CONTAINS / JSON_CONTAINS · 方言层：所有数据库差异只在这里</title>
+          <rect x="250" y="512" width="120" height="60" rx="6" class="c-mask"/>
+          <rect x="250" y="512" width="120" height="60" rx="6" class="c-cloud" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="cloud" class="semantic-sigil s-cloud" transform="translate(256 518) scale(0.6875)">
+            <path d="M4.3 12.5h7.3a2.4 2.4 0 0 0 .2-4.8 4 4 0 0 0-7.5-1.3A3.1 3.1 0 0 0 4.3 12.5Z"/>
+          </g>
+          <text data-detail-anchor x="310" y="540" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">DorisDialect</text>
+        <text data-detail="context" x="310" y="556" class="t-muted" font-size="6.2" text-anchor="middle">ARRAY_CONTAINS / JSON_CONTAINS</text>
+        </g>
+
+        <g id="node-knex" data-node-id="knex" data-node-label="knex" tabindex="0" role="button" aria-label="Focus knex, 底层 SQL 构造器, Architecture component" aria-pressed="false" data-node-kind="database" data-node-sublabel="底层 SQL 构造器" data-node-tag="唯一外部依赖" data-node-context="Architecture component">
+          <title>knex · 底层 SQL 构造器 · Architecture component · 唯一外部依赖</title>
+          <rect x="460" y="404" width="120" height="60" rx="6" class="c-mask"/>
+          <rect x="460" y="404" width="120" height="60" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(466 410) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <text data-detail-anchor x="520" y="432" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">knex</text>
+        <text data-detail="context" x="520" y="448" class="t-muted" font-size="9" text-anchor="middle">底层 SQL 构造器</text>
+        <text data-detail="fine" x="520" y="456" class="t-database" font-size="7" text-anchor="middle">唯一外部依赖</text>
+        </g>
+
+        <g id="node-sql" data-node-id="sql" data-node-label="SQL 字符串" tabindex="0" role="button" aria-label="Focus SQL 字符串, 交给数据网关, Architecture component" aria-pressed="false" data-node-kind="external" data-node-sublabel="交给数据网关" data-node-context="Architecture component">
+          <title>SQL 字符串 · 交给数据网关 · Architecture component</title>
+          <rect x="460" y="620" width="120" height="60" rx="6" class="c-mask"/>
+          <rect x="460" y="620" width="120" height="60" rx="6" class="c-external" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="external" class="semantic-sigil s-external" transform="translate(466 626) scale(0.6875)">
+            <rect x="2.5" y="5" width="8.5" height="8" rx="1.5"/>
+            <path d="M8 2.5h5.5V8M13.5 2.5 7.5 8.5"/>
+          </g>
+          <text data-detail-anchor x="520" y="648" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">SQL 字符串</text>
+        <text data-detail="context" x="520" y="664" class="t-muted" font-size="9" text-anchor="middle">交给数据网关</text>
+        </g>
+
+        <!-- Connection labels -->
+        <g data-detail="context" data-edge-from="caller" data-edge-to="rule" data-edge-label="① 传入条件" data-edge-key="0" data-edge-id="c1">
+          <rect x="281" y="150" width="58" height="14" rx="3" class="c-mask"/>
+          <text x="310" y="160" class="t-muted" font-size="8" text-anchor="middle">① 传入条件</text>
+        </g>
+        <g data-detail="context" data-edge-from="rule" data-edge-to="build" data-edge-label="⑤ 递归展开" data-edge-key="1" data-edge-id="c2">
+          <rect x="176" y="248.5" width="58" height="14" rx="3" class="c-mask"/>
+          <text x="205" y="258.5" class="t-muted" font-size="8" text-anchor="middle">⑤ 递归展开</text>
+        </g>
+        <g data-detail="context" data-edge-from="iface" data-edge-to="bh" data-edge-label="④ 实现" data-edge-key="2" data-edge-id="c4">
+          <rect x="80.6" y="468" width="38.8" height="14" rx="3" class="c-mask"/>
+          <text x="100" y="478" class="t-muted" font-size="8" text-anchor="middle">④ 实现</text>
+        </g>
+
+        <g data-detail="context" data-edge-from="build" data-edge-to="knex" data-edge-label="⑥ whereRaw / raw" data-edge-key="4" data-edge-id="c6">
+          <rect x="266.6" y="363.5" width="86.8" height="14" rx="3" class="c-mask"/>
+          <text x="310" y="373.5" class="t-backend" font-size="8" text-anchor="middle">⑥ whereRaw / raw</text>
+        </g>
+        <g data-detail="context" data-edge-from="helpers" data-edge-to="rule" data-edge-label="② 产出 Rule" data-edge-key="5" data-edge-id="c7">
+          <rect x="383.6" y="252" width="62.8" height="14" rx="3" class="c-mask"/>
+          <text x="415" y="262" class="t-messagebus" font-size="8" text-anchor="middle">② 产出 Rule</text>
+        </g>
+        <g data-detail="context" data-edge-from="knex" data-edge-to="sql" data-edge-label="⑦ 编译" data-edge-key="6" data-edge-id="c8">
+          <rect x="500.6" y="474" width="38.8" height="14" rx="3" class="c-mask"/>
+          <text x="520" y="484" class="t-muted" font-size="8" text-anchor="middle">⑦ 编译</text>
+        </g>
+        <g data-detail="context" data-edge-from="caller" data-edge-to="iface" data-edge-label="③ 遇到时间/map/JSON 属性" data-edge-key="7" data-edge-id="c3">
+          <rect x="87.4" y="100" width="125.19999999999999" height="14" rx="3" class="c-mask"/>
+          <text x="150" y="110" class="t-security" font-size="8" text-anchor="middle">③ 遇到时间/map/JSON 属性</text>
+        </g>
+
+        <!-- Legend -->
+        <g data-legend data-legend-bridge>
+          <text x="40" y="712" class="t-primary" font-size="12" font-weight="650">Legend</text>
+          <g data-legend-semantic-kind="backend" data-legend-kind="backend" data-legend-label="Backend" data-legend-x="40" data-legend-baseline="732" data-legend-width="78">
+            <rect x="40" y="723" width="16" height="10" rx="2.5" class="c-backend" stroke-width="1"/>
+            <text x="62" y="732" class="t-muted" font-size="10" font-weight="500">Backend</text>
+          </g>
+          <g data-legend-semantic-kind="database" data-legend-kind="database" data-legend-label="Database" data-legend-x="140" data-legend-baseline="732" data-legend-width="83">
+            <rect x="140" y="723" width="16" height="10" rx="2.5" class="c-database" stroke-width="1"/>
+            <text x="162" y="732" class="t-muted" font-size="10" font-weight="500">Database</text>
+          </g>
+          <g data-legend-semantic-kind="cloud" data-legend-kind="cloud" data-legend-label="Cloud" data-legend-x="245" data-legend-baseline="732" data-legend-width="68">
+            <rect x="245" y="723" width="16" height="10" rx="2.5" class="c-cloud" stroke-width="1"/>
+            <text x="267" y="732" class="t-muted" font-size="10" font-weight="500">Cloud</text>
+          </g>
+          <g data-legend-semantic-kind="security" data-legend-kind="security" data-legend-label="Security" data-legend-x="335" data-legend-baseline="732" data-legend-width="83">
+            <rect x="335" y="723" width="16" height="10" rx="2.5" class="c-security" stroke-width="1"/>
+            <text x="357" y="732" class="t-muted" font-size="10" font-weight="500">Security</text>
+          </g>
+          <g data-legend-semantic-kind="external" data-legend-kind="external" data-legend-label="External" data-legend-x="440" data-legend-baseline="732" data-legend-width="83">
+            <rect x="440" y="723" width="16" height="10" rx="2.5" class="c-external" stroke-width="1"/>
+            <text x="462" y="732" class="t-muted" font-size="10" font-weight="500">External</text>
+          </g>
+        </g>
+      </svg>
+      <figcaption>主干：8 个框、7 条边。下面的表格按编号逐条对应</figcaption>
+    </figure><div class="compare-wrap"><table class="compare"><thead><tr><th>边</th><th>从 → 到</th><th>这一步在干什么</th></tr></thead><tbody><tr><th>①</th><td data-label="从 → 到">业务条件 → <code>Rule[]</code></td><td data-label="这一步在干什么"><strong>adapter 改写</strong>：字段改名 + 展开特殊条件</td></tr><tr><th>②</th><td data-label="从 → 到"><code>utils.ts</code> → <code>Rule[]</code></td><td data-label="这一步在干什么"><strong>时间条件展开</strong>成一棵 AND 子树</td></tr><tr><th>③</th><td data-label="从 → 到">业务条件 → 方言</td><td data-label="这一步在干什么">属性类型特殊时才调方言</td></tr><tr><th>④</th><td data-label="从 → 到">方言接口 → 两个实现</td><td data-label="这一步在干什么">接口落到 ByteHouse / Doris</td></tr><tr><th>⑤</th><td data-label="从 → 到"><code>Rule[]</code> → <code>buildWhere</code></td><td data-label="这一步在干什么"><strong>递归展开</strong>成 knex 调用</td></tr><tr><th>⑥</th><td data-label="从 → 到"><code>buildWhere</code> → knex</td><td data-label="这一步在干什么">每种表达式形态各落到哪个方法</td></tr><tr><th>⑦</th><td data-label="从 → 到">knex → SQL 字符串</td><td data-label="这一步在干什么">链式累积，取值时才编译</td></tr></tbody></table></div><div class="callout tone-violet quote">
+      <span class="ic">💡</span>
+      <div><p><mark class="mk-blue">记住这 7 条边，整个架构就懂了。</mark></p>
+<p>后面每一节都在展开其中某几条。真正陌生的只有 <strong>①</strong>（adapter 改写）
+和 <strong>⑤</strong>（递归展开）—— 其余都是「把东西往下传」。</p>
 </div>
-    </div><h2 id="四个基础概念"><span class="num">02</span>四个基础概念</h2>
-<p>圈人系统里有几个词天天出现。<strong>先搞懂它们，后面才看得懂。</strong></p>
-<h3 id="uid-用户的唯一标识">uid —— 用户的唯一标识</h3>
-<p>一串代表「一个人」的编号。系统里到处都用它串起来。</p>
-<p>有个细节：uid 在存储时是<strong>加密</strong>的，所以 SQL 里会出现两个函数：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">UID_ENCODE(1001)   -- 查询时把明文 uid 加密，用来跟库里的值比对
-UID_DECODE(`uid`)  -- 取出时把加密的 uid 解密，给业务用
-</code></pre></div>
-<h3 id="画像-portrait-用户的静态属性">画像 Portrait —— 用户的「静态属性」</h3>
-<p>描述用户<mark class="mk-blue">当前是什么样</mark>，存在 <code>user_portrait</code> 表。一行 = 一个人。</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">uid    | futu_hk_account_gender_type | vip_level | city   | ...
--------|-----------------------------|-----------|--------|----
-1001   | 1                           | 3         | 杭州   | ...
-1002   | 2                           | 5         | 深圳   | ...
-</code></pre></div>
-<p><mark class="mk-blue">关键特征：属性会被覆盖，只存当前值。</mark> 用户今天改成 VIP 4，昨天是 VIP 3 这件事就没了。</p>
-<h3 id="事件-event-用户的行为流水">事件 Event —— 用户的「行为流水」</h3>
-<p>描述用户<strong>做过什么</strong>，存在 <code>event_v2</code>（或 ByteHouse 的 <code>event_biz_N</code>）。一行 = 一个人 + 一个时刻 + 一个动作。</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">$user_id | event_type | event_time      | 商品ID | ...
----------|------------|-----------------|--------|----
-1001     | 加购       | 1758... 10:03   | A001   | ...
-1001     | 加购       | 1758... 15:20   | B007   | ...
-1001     | 下单       | 1758... 15:31   | B007   | ...
-1004     | 加购       | 1758... 09:12   | A001   | ...
-</code></pre></div>
-<p><mark class="mk-blue">关键特征：只追加，不覆盖。</mark> 是流水账，所以能回答「最近 7 天加购了<strong>几次</strong>」。</p>
+    </div><h2 id="两次翻译各管什么"><span class="num">02</span>两次翻译，各管什么</h2>
+<div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;biz&quot;,&quot;to&quot;:&quot;rule&quot;,&quot;label&quot;:&quot;边 ① adapter 翻译&quot;},{&quot;from&quot;:&quot;rule&quot;,&quot;to&quot;:&quot;sql&quot;,&quot;label&quot;:&quot;边 ⑤⑥⑦ 编译&quot;}]">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-muted" data-id="biz">
+              
+              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="3" width="11" height="8.5" rx="1.5"/><path d="M2.5 6h11"/></svg>
+              <b>业务条件</b>
+              <small>运营/产品能懂的语言</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="rule">
+              
+              
+              <b>Rule[]</b>
+              <small>core 能懂的语言</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="sql">
+              
+              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="8" cy="4.2" rx="5" ry="1.9"/><path d="M3 4.2v7.6c0 1.05 2.24 1.9 5 1.9s5-.85 5-1.9V4.2"/></svg>
+              <b>SQL 字符串</b>
+              <small>数据库能懂的语言</small>
+            </div></div></div>
+      
+    </div><div class="compare-wrap"><table class="compare"><thead><tr><th>阶段</th><th>谁在做</th><th>做什么</th><th>关心什么</th></tr></thead><tbody><tr><th>第一次翻译</th><td data-label="谁在做"><code>crowd</code> 包</td><td data-label="做什么">业务词汇 → 数据词汇</td><td data-label="关心什么">「最近 3 天」是什么意思</td></tr><tr><th>第二次翻译</th><td data-label="谁在做"><code>core</code> 包 + knex</td><td data-label="做什么">数据词汇 → SQL 文本</td><td data-label="关心什么">反引号、占位符、方言</td></tr></tbody></table></div><div class="callout tone-green">
+      <span class="ic">✅</span>
+      <div><p><strong>这样分层换来的是：core 永远不知道「什么是相对时间」。</strong></p>
+<p>它只认「一个列、一个操作符、一个值」。
+<mark class="mk-blue">所以换一种业务场景时，core 一行都不用改。</mark></p>
+</div>
+    </div><p><strong>两次翻译的边界，就在 <code>Rule[]</code> 这个数据结构上。</strong></p>
+<p>它是 core 的唯一输入格式。左边是业务世界，右边是 SQL 世界，<code>Rule[]</code> 是中间那个接缝。</p>
 <div class="callout tone-amber">
       <span class="ic">⚠</span>
-      <div><p><strong>注意两件事：</strong></p>
-<p><mark class="mk-amber">① 画像表的用户列叫 <code>uid</code>，事件表的叫 <code>$user_id</code>。</mark>
-名字不一样，所以事件查询必须做一次 join 把两边接起来：
-<code>left join ... on t1.uid = t2.$user_id</code>。
-这不是设计失误，是两个系统各自的历史遗留。</p>
-<p><mark class="mk-amber">② 事件表在 ByteHouse 里被拆成 8 张。</mark>
-按事件名哈希（<code>murmurhash(eventName) % 8 + 1</code>）决定去哪张，
-所以同一个查询里不同事件可能落在 <code>event_biz_3</code> 和 <code>event_biz_7</code>。</p>
+      <div><p><strong><code>Rule[]</code> 本身有四种形态</strong>（普通 / 值是 SQL / 列名是 SQL / 整段透传），
+这是「数据 vs 代码」的区分。</p>
+<p><mark class="mk-blue">那部分展开在 <a href="../sql-builder-v2-core-rule/">⑤ Rule[] 篇</a>。</mark>
+这篇只需要知道：它是 core 认识的输入格式。</p>
 </div>
-    </div><h3 id="人群包-crowd-预先算好的一批人">人群包 Crowd —— 预先算好的一批人</h3>
-<p>运营今天圈了一批人，明天还想用同一批。于是把结果<strong>存下来</strong>，给个编号，存在 <code>crowds</code> 表。</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">crowd_id | crowd_version | uid
----------|---------------|------
-C_888    | v3            | 1001
-C_888    | v3            | 1002
-C_888    | v3            | 1004
-</code></pre></div>
-<p><code>crowd_version</code> 是版本号 —— 同一批人重新算一遍，结果可能变，所以要用版本区分「当时那批人」。</p>
-<h3 id="关系-relation-用户和某个对象的关系">关系 Relation —— 用户和某个「对象」的关系</h3>
-<p>比如「领过 coupon001 这张券的人」。存在各种业务明细表里，用 <code>object_id</code> 表示那个对象。</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">uid  | object_id
------|-----------
-1001 | coupon001
-1002 | coupon001
-1003 | coupon007
-</code></pre></div>
-<h3 id="一张表看清区别">一张表看清区别</h3>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>概念</th><th>回答什么问题</th><th>存哪张表</th><th>一行代表</th><th>会变吗</th></tr></thead><tbody><tr><th>uid</th><td data-label="回答什么问题">这是谁</td><td data-label="存哪张表"><span class="tag tone-muted">到处都有</span></td><td data-label="一行代表">一个人</td><td data-label="会变吗"><span class="tag tone-green">不变</span></td></tr><tr><th>画像 Portrait</th><td data-label="回答什么问题">他现在是什么样</td><td data-label="存哪张表"><code>user_portrait</code></td><td data-label="一行代表">一个人的所有属性</td><td data-label="会变吗"><span class="tag tone-amber">会被覆盖</span></td></tr><tr><th>事件 Event</th><td data-label="回答什么问题">他做过什么、几次</td><td data-label="存哪张表"><code>event_v2</code> / <code>event_biz_N</code></td><td data-label="一行代表">一个人某一刻的一个动作</td><td data-label="会变吗"><span class="tag tone-green">只追加</span></td></tr><tr><th>人群包 Crowd</th><td data-label="回答什么问题">预先算好的一批人是谁</td><td data-label="存哪张表"><code>crowds</code></td><td data-label="一行代表">人群包 + 版本 + 一个人</td><td data-label="会变吗"><span class="tag tone-green">只追加</span></td></tr><tr><th>关系 Relation</th><td data-label="回答什么问题">他和某个对象什么关系</td><td data-label="存哪张表">各种业务明细表</td><td data-label="一行代表">一个人 + 一个对象</td><td data-label="会变吗"><span class="tag tone-green">只追加</span></td></tr></tbody></table></div><h2 id="一个需求怎么变成条件树"><span class="num">03</span>一个需求怎么变成「条件树」</h2>
-<p>回到那句话：<strong>「最近 7 天加购过、并且是 VIP」</strong>。</p>
-<p>拆开看，它其实是两件事用 <strong>并且</strong> 连起来：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">        AND  ← 「并且」
-       ╱    ╲
-  事件条件    画像条件
-  「加购」    「VIP」
-  最近 7 天   等级 ≥ 3
-  至少 1 次
-</code></pre></div>
-<ul>
-<li>左边是<strong>事件条件</strong>：查行为流水，算「加购了几次」</li>
-<li>右边是<strong>画像条件</strong>：查属性表，看「VIP 等级是多少」</li>
-<li>中间的 <code>AND</code> 是<strong>逻辑</strong>，说明两边都要满足</li>
-</ul>
-<p>如果运营说「最近 7 天加购过 <strong>或者</strong> 是 VIP」，那中间的 <code>AND</code> 就换成 <code>OR</code>。</p>
-<div class="callout tone-green tinted">
-      <span class="ic">🌳</span>
-      <div><p>这种「用 AND / OR 把条件串起来的树形结构」，就叫<strong>条件树</strong>。</p>
-<p>叶子节点是<strong>具体条件<strong>（加购、VIP），中间节点是</strong>逻辑</strong>（AND / OR）。
-树可以嵌套：AND 里套 OR，OR 里再套 AND。</p>
-</div>
-    </div><p>换成 JSON，大概长这样：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-json">{
-  &quot;logic&quot;: &quot;AND&quot;,
-  &quot;conditions&quot;: [
-    { &quot;type&quot;: &quot;event&quot;,    &quot;condition&quot;: { &quot;事件&quot;: &quot;加购&quot;, &quot;时间&quot;: &quot;最近7天&quot;, &quot;次数&quot;: &quot;&gt;0&quot; } },
-    { &quot;type&quot;: &quot;portrait&quot;, &quot;condition&quot;: { &quot;vip_level&quot;: &quot;&gt;= 3&quot; } }
-  ]
-}
-</code></pre></div>
-<h2 id="六种条件单元"><span class="num">04</span>六种条件单元</h2>
-<p>树的叶子不只有「事件」和「画像」。系统里一共支持 <strong>6 种<strong>，这是这个库的</strong>词汇表</strong>：</p>
-<div class="cards" data-cols="3"><div class="ccard tone-green">
-          <span class="tag tone-green">最常见</span>
-          <h4>画像 portrait</h4>
-          <p>用户的静态属性。查 user_portrait 表</p>
-          
-        </div><div class="ccard tone-violet">
-          <span class="tag tone-violet">功能最多</span>
-          <h4>事件 event</h4>
-          <p>做过什么事、几次。查事件表，最复杂的一个</p>
-          
-        </div><div class="ccard tone-blue">
-          <span class="tag tone-blue">可复用</span>
-          <h4>人群包 crowd</h4>
-          <p>预先算好的一批人。查 crowds 表</p>
-          
-        </div><div class="ccard tone-muted">
-          <span class="tag tone-muted">最简单</span>
-          <h4>uid</h4>
-          <p>直接给一批用户 ID，不查表。常用于「这批人再加上…」</p>
-          
-        </div><div class="ccard tone-amber">
-          <span class="tag tone-amber">按对象</span>
-          <h4>关系 relation</h4>
-          <p>和某个对象的关系。查各种业务明细表</p>
-          
-        </div><div class="ccard tone-red">
-          <span class="tag tone-red">兜底</span>
-          <h4>rawSql</h4>
-          <p>直接塞一段 SQL。逃生口，前五种表达不了时用</p>
-          
-        </div></div><h3 id="每种条件的最小例子真实入参-真实-sql">每种条件的最小例子（真实入参 → 真实 SQL）</h3>
-<p><strong>① 画像：查性别是 1、2、3 的人</strong></p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">入参：{ op: 'IN', name: 'futu_hk_account_gender_type', value: [1, 2, 3] }
-
-SQL ：select `uid` from `user_portrait`
-      where (`futu_hk_account_gender_type` in (1, 2, 3))
-</code></pre></div>
-<p><strong>② uid：直接给三个人</strong></p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">入参：['111', '222', '333']
-
-SQL ：select `uid` from (
-        select arrayJoin(array(UID_ENCODE('111'), UID_ENCODE('222'), UID_ENCODE('333'))) as `uid`
-      ) uidt group by `uid`
-</code></pre></div>
-<p><strong>③ 关系：领过 coupon001 或 coupon002 的人</strong></p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">入参：{ op: 'IN', table: 'niuniu_user_coupon_receive_last', objectIds: ['coupon001', 'coupon002'] }
-
-SQL ：select `uid` from `niuniu_user_coupon_receive_last`
-      where `object_id` in ('coupon001', 'coupon002')
-      group by `uid`          -- 一个人领两张券会出现两次，要去重
-</code></pre></div>
-<p><strong>④ 人群包：C_888 这个包的 v3 版本</strong></p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">入参：{ crowdId: 'C_888', crowdVersion: 'v3' }
-
-SQL ：select `uid` from `crowds`
-      where `crowd_id` = 'C_888' and `crowd_version` = 'v3'
-      group by `uid`
-</code></pre></div>
-<p><strong>⑤ 事件：最近 3 天点过某事件、且 fdid 为空、超过 3 次的人</strong></p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">入参：{ 事件: 'ClickSimStockMatchedEvent', 时间: '最近3天', 过滤: 'fdid is null', 次数: '&gt; 3' }
-
-SQL ：select `uid` as `uid`
-      from `user_portrait` as `t1`
-      left join (
-        select `$user_id`, count(1) as `cnt`
-        from `dws`.`event_biz_5`                    -- ← 哈希分片后的表名
-        where (`event_type` = 'ClickSimStockMatchedEvent'
-          and `event_time` &gt;= UNIX_TIMESTAMP(DS_DATETIME_ADD('day', -3, ...)) * 1000
-          and `event_time` &lt;  UNIX_TIMESTAMP(...) * 1000
-          and ((isNull(`fdid`))))
-        group by `$user_id`                          -- ← 按人算次数
-      ) as `t2` on `t1`.`uid` = `t2`.`$user_id`      -- ← 画像表 join 事件表
-      where ifNull(`t2`.`cnt`, 0) &gt; 3                -- ← 没做过的人 cnt 是 NULL，当 0 处理
-</code></pre></div>
-<div class="callout tone-violet">
-      <span class="ic">💡</span>
-      <div><p>事件条件的 SQL 明显比其他五种复杂，因为它要同时处理四件事：
-<strong>事件名 + 时间范围 + 属性过滤 + 次数阈值</strong>。
-这也解释了为什么 <code>entrepots/event.ts</code> 有 906 行，是第二名的两倍多。</p>
-</div>
-    </div><p><strong>⑥ rawSql：直接透传一段 SQL。</strong> 没有结构，原样拼进去。</p>
-<h2 id="所以这个库到底在做什么"><span class="num">05</span>所以这个库到底在做什么</h2>
-<p>到这里可以一句话说清了：</p>
-<div class="callout tone-blue quote">
-      <span class="ic">⚙</span>
-      <div><p>输入一棵<strong>条件树</strong>（业务语言），输出一段 <strong>SQL</strong>（数据库语言）。</p>
-</div>
-    </div><p>最小的例子只需要一行映射：</p>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>输入（业务语言）</th><th>输出（SQL）</th></tr></thead><tbody><tr><th>{ op: 'IN', name: 'gender_type', value: [1,2,3] }</th><td data-label="输出（SQL）"><code>select uid from user_portrait where gender_type in (1,2,3)</code></td></tr></tbody></table></div><p><strong>那为什么需要一个库？</strong> 因为真实的输入输出不是一对一，有三个矛盾：</p>
-<div class="cards" data-cols="3"><div class="ccard tone-blue">
-          <span class="tag tone-blue">翻译</span>
-          <h4>矛盾一 · 语义不同</h4>
-          <p>条件树是业务概念（加购、VIP），SQL 是数据库概念（表、列、join）。中间要有一层翻译</p>
-          
-        </div><div class="ccard tone-violet">
-          <span class="tag tone-violet">方言</span>
-          <h4>矛盾二 · 库有两种</h4>
-          <p>同一棵条件树，要能在 Doris 和 ByteHouse 上跑。两个库的函数名、表结构都不一样</p>
-          
-        </div><div class="ccard tone-amber">
-          <span class="tag tone-amber">组合</span>
-          <h4>矛盾三 · 条件要能任意组合</h4>
-          <p>AND / OR 要能无限嵌套。而每个条件查的是不同的表，没法拼进一个 WHERE</p>
-          
-        </div></div><p>矛盾一和二在后面的架构里很好认。<mark class="mk-blue">矛盾三最难，它导致了一个反直觉的设计</mark> —— 第 10 节专门讲。</p>
-<h2 id="组织一棵树-六种叶子-两层组合"><span class="num">06</span>组织：一棵树 + 六种叶子 + 两层组合</h2>
-<p>把概念层的东西组织起来看，整个系统就三个部分：</p>
-<div class="pipe"><div class="lane tone-blue">
-        <div class="lane-meta">
-          
-          <b>一棵树</b>
-          <small>用户提交进来的东西</small>
-        </div>
-        <div class="lane-body"><div class="pnode">
-        <b>条件树</b>
-        <small>logic + conditions</small>
-        <span class="tag tone-blue">可嵌套</span>
-      </div><div class="pnode">
-        <b>叶子 = 六种条件</b>
-        <small>portrait / event / crowd / uid / relation / rawSql</small>
-        
-      </div></div>
-      </div><div class="conn">
-      <span class="stem"></span>
-      <span class="pill">拆开<span class="note">树归树，叶子归叶子</span></span>
-      <span class="stem"></span><span class="head"></span>
-    </div><div class="lane tone-violet">
-        <div class="lane-meta">
-          
-          <b>两层组合</b>
-          <small>「组合」有两种，很容易混</small>
-        </div>
-        <div class="lane-body"><div class="pnode">
-        <b>第一层：条件之间</b>
-        <small>AND / OR，用 UNION ALL + GROUP BY + HAVING 实现</small>
-        <span class="tag tone-violet">集合运算</span>
-      </div><div class="pnode">
-        <b>第二层：二次加工</b>
-        <small>include 加一批人 / exclude 减一批人</small>
-        <span class="tag tone-violet">增删</span>
-      </div></div>
-      </div><div class="conn">
-      <span class="stem"></span>
-      <span class="pill">翻译<span class="note">交给具体的条件实现</span></span>
-      <span class="stem"></span><span class="head"></span>
-    </div><div class="lane tone-green">
-        <div class="lane-meta">
-          
-          <b>六种叶子各自的翻译器</b>
-          <small>每种条件知道自己该查哪张表、怎么写 WHERE</small>
-        </div>
-        <div class="lane-body"><div class="pnode">
-        <b>Portrait / Event / Relation</b>
-        
-        
-      </div><div class="pnode">
-        <b>Uid / Crowd / RawSql</b>
-        
-        
-      </div></div>
-      </div></div><div class="callout tone-amber">
-      <span class="ic">⚠</span>
-      <div><p><mark class="mk-blue">「两层组合」是最容易混的地方。</mark></p>
-<ul>
-<li><strong>第一层</strong>是「条件之间怎么连」：<code>加购 AND VIP</code> —— 这是<strong>集合运算</strong></li>
-<li><strong>第二层</strong>是「算完一批人之后再增删」：先算出「加购的人」，再 <code>include</code> 一批白名单、<code>exclude</code> 一批黑名单</li>
-</ul>
-<p>第 09 节会讲第二层为什么必须单独存在。</p>
-</div>
-    </div><hr>
-<h2 id="架构一条条件要走-8-层"><span class="num">07</span>架构：一条条件要走 8 层</h2>
-<p>概念讲完了。下面是代码怎么实现这套东西。</p>
-<div class="pipe"><div class="lane tone-muted">
-        <div class="lane-meta">
-          <span class="ln">LAYER 01</span>
-          <b>调用方</b>
-          <small>业务代码 / 数据网关</small>
-        </div>
-        <div class="lane-body"><div class="pnode">
-        <b>业务服务</b>
-        <small>传入条件树 JSON</small>
-        
-      </div><div class="pnode">
-        <b>数据网关</b>
-        <small>只接受 UNION ALL，不接受 UNION</small>
-        
-      </div></div>
-      </div><div class="conn">
-      <span class="stem"></span>
-      <span class="pill">SqlContext.create(dbType, options)<span class="note">全库唯一入口</span></span>
-      <span class="stem"></span><span class="head"></span>
-    </div><div class="wgroup"><div class="wgroup-label">packages/crowd —— 用户域语义</div><div class="lane tone-blue">
-        <div class="lane-meta">
-          <span class="ln">LAYER 02</span>
-          <b>门面层</b>
-          <small>解析目标库，构造方言与模块</small>
-        </div>
-        <div class="lane-body"><div class="pnode">
-        <b>SqlContext</b>
-        <small>static create()</small>
-        <span class="tag tone-blue">唯一入口</span>
-      </div><div class="pnode">
-        <b>_resolveDialect</b>
-        <small>Bytehouse | Doris</small>
-        <span class="tag tone-blue">策略选择</span>
-      </div></div>
-      </div><div class="conn">
-      <span class="stem"></span>
-      <span class="pill">构造三个模块<span class="note">模块持有 dialect，不持有连接</span></span>
-      <span class="stem"></span><span class="head"></span>
-    </div><div class="lane tone-blue">
-        <div class="lane-meta">
-          <span class="ln">LAYER 03</span>
-          <b>领域模块</b>
-          <small>面向具体业务场景的出口</small>
-        </div>
-        <div class="lane-body"><div class="pnode">
-        <b>TagModule</b>
-        <small>list / count</small>
-        
-      </div><div class="pnode">
-        <b>CrowdModule</b>
-        <small>list / count / selectRaw</small>
-        
-      </div><div class="pnode tone-violet">
-        <b>SegmentModule</b>
-        <small>list / count</small>
-        
-      </div></div>
-      </div><div class="conn">
-      <span class="stem"></span>
-      <span class="pill">组合与二次加工<span class="note">AND/OR · include/exclude</span></span>
-      <span class="stem"></span><span class="head"></span>
-    </div><div class="lane tone-violet">
-        <div class="lane-meta">
-          <span class="ln">LAYER 04</span>
-          <b>组合层</b>
-          <small>把多个条件拼成一个用户集合</small>
-        </div>
-        <div class="lane-body"><div class="pnode">
-        <b>Combination</b>
-        <small>UNION ALL + GROUP BY + HAVING</small>
-        <span class="tag tone-violet">第一层</span>
-      </div><div class="pnode">
-        <b>Pkg</b>
-        <small>include: UNION ALL / exclude: NOT IN</small>
-        <span class="tag tone-violet">第二层</span>
-      </div></div>
-      </div><div class="conn">
-      <span class="stem"></span>
-      <span class="pill">工厂分发<span class="note">按 condition.type 选实现</span></span>
-      <span class="stem"></span><span class="head"></span>
-    </div><div class="lane tone-violet">
-        <div class="lane-meta">
-          <span class="ln">LAYER 05</span>
-          <b>入口分发</b>
-          <small>六种条件各自的 SQL 生成器</small>
-        </div>
-        <div class="lane-body"><div class="pnode">
-        <b>initEntrepotListSqlGen</b>
-        <small>返回 (condition, decode) =&gt; string</small>
-        
-      </div><div class="pnode">
-        <b>initEntrepotCountSqlGen</b>
-        <small>返回 (condition) =&gt; string</small>
-        
-      </div></div>
-      </div><div class="conn">
-      <span class="stem"></span>
-      <span class="pill">switch (condition.type)<span class="note">未知类型直接 throw</span></span>
-      <span class="stem"></span><span class="head"></span>
-    </div><div class="lane tone-violet">
-        <div class="lane-meta">
-          <span class="ln">LAYER 06</span>
-          <b>条件实现</b>
-          <small>六种「入口」，每种一个类</small>
-        </div>
-        <div class="lane-body"><div class="pnode">
-        <b>Portrait</b>
-        <small>user_portrait</small>
-        
-      </div><div class="pnode">
-        <b>Event</b>
-        <small>event_v2</small>
-        <span class="tag tone-violet">最复杂</span>
-      </div><div class="pnode">
-        <b>Relation</b>
-        <small>关系条件</small>
-        
-      </div><div class="pnode">
-        <b>Uid</b>
-        <small>直接给 uid 列表</small>
-        
-      </div><div class="pnode">
-        <b>Crowd</b>
-        <small>crowds</small>
-        
-      </div><div class="pnode">
-        <b>RawSql</b>
-        <small>裸 SQL 透传</small>
-        
-      </div></div>
-      </div><div class="conn">
-      <span class="stem"></span>
-      <span class="pill">DB.buildWhere / DB.raw<span class="note">只在这里才碰 knex</span></span>
-      <span class="stem"></span><span class="head"></span>
-    </div></div><div class="wgroup"><div class="wgroup-label">packages/core —— 与 DB 无关的通用层</div><div class="lane tone-green">
-        <div class="lane-meta">
-          <span class="ln">LAYER 07</span>
-          <b>通用 SQL 构造</b>
-          <small>与具体数据库无关的表达式树 → knex builder</small>
-        </div>
-        <div class="lane-body"><div class="pnode">
-        <b>Expression / Condition / Rule</b>
-        <small>递归 AST</small>
-        <span class="tag tone-green">核心抽象</span>
-      </div><div class="pnode">
-        <b>DB.buildWhere</b>
-        <small>递归展开成 andWhere / orWhere</small>
-        
-      </div><div class="pnode">
-        <b>DB.unionAllRaws</b>
-        <small>只支持 UNION ALL</small>
-        
-      </div><div class="pnode">
-        <b>DB.formatField</b>
-        <small>反引号包裹列名</small>
-        
-      </div><div class="pnode">
-        <b>encodeUid / decodeUid</b>
-        <small>UID_ENCODE / UID_DECODE</small>
-        
-      </div></div>
-      </div><div class="conn">
-      <span class="stem"></span>
-      <span class="pill">knex 编译<span class="note">mysql queryBuilder</span></span>
-      <span class="stem"></span><span class="head"></span>
-    </div></div><div class="lane tone-muted">
-        <div class="lane-meta">
-          <span class="ln">LAYER 08</span>
-          <b>输出</b>
-          <small>一段 SQL 字符串</small>
-        </div>
-        <div class="lane-body"><div class="pnode">
-        <b>SQL 字符串</b>
-        <small>交给网关执行</small>
-        
-      </div></div>
-      </div></div><div class="callout tone-green tinted">
-      <span class="ic">↗</span>
-      <div><p><strong>依赖方向是单向的</strong>：<code>crowd</code> 依赖 <code>core</code>，<code>core</code> 不知道 <code>crowd</code> 存在。
-core 里搜不到任何 <code>portrait</code> / <code>crowd</code> / <code>event_v2</code> 这类业务词 —— 这是两个包能拆开的前提。</p>
-</div>
-    </div><h2 id="两个包的边界"><span class="num">08</span>两个包的边界</h2>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>维度</th><th>packages/core</th><th>packages/crowd</th></tr></thead><tbody><tr><th>定位</th><td data-label="packages/core">与数据库无关的通用 SQL 构造</td><td data-label="packages/crowd">用户域的圈人语义</td></tr><tr><th>知道业务吗</th><td data-label="packages/core"><span class="tag tone-green">完全不知道</span></td><td data-label="packages/crowd">知道，且有大量枚举</td></tr><tr><th>核心导出</th><td data-label="packages/core">DB · Expression · SqlDialect · encodeUid</td><td data-label="packages/crowd">SqlContext · 三个 Module · 六种 Entrepot</td></tr><tr><th>依赖</th><td data-label="packages/core">knex</td><td data-label="packages/crowd">core + knex + lodash + murmurhash</td></tr><tr><th>能单独用吗</th><td data-label="packages/core"><span class="tag tone-green">能</span></td><td data-label="packages/crowd"><span class="tag tone-amber">不能，必须带 core</span></td></tr></tbody></table></div><p>core 提供的通用能力：</p>
-<div class="cards" data-cols="3"><div class="ccard tone-green">
-          
-          <h4>Expression 表达式树</h4>
-          <p>Normal / RawValue / RawColumn / Raw 四种形态，可递归嵌套 Condition</p>
-          
-        </div><div class="ccard tone-green">
-          
-          <h4>DB.buildWhere</h4>
-          <p>把表达式树递归展开成 knex 的 andWhere / orWhere 调用</p>
-          
-        </div><div class="ccard tone-green">
-          
-          <h4>SqlDialect 接口</h4>
-          <p>17 个方法，覆盖类型转换、JSON 数组、时间范围、多条件选择</p>
-          
-        </div><div class="ccard tone-green">
-          
-          <h4>UID 编解码</h4>
-          <p>encodeUid / decodeUid 包成网关函数 UID_ENCODE / UID_DECODE</p>
-          
-        </div><div class="ccard tone-green">
-          
-          <h4>treeMinimizer</h4>
-          <p>递归压掉只有一个子节点的组合结构</p>
-          
-        </div><div class="ccard tone-green">
-          
-          <h4>时间表达式</h4>
-          <p>getTimeRules / generateLatestDaysRules 等，把「最近 7 天」转成 SQL 条件</p>
-          
-        </div></div><h2 id="六个核心角色"><span class="num">09</span>六个核心角色</h2>
-<div class="cards" data-cols="3"><div class="ccard tone-blue">
-          <span class="tag tone-blue">门面</span>
-          <h4>SqlContext</h4>
-          <p>唯一入口。解析 dbType、选方言、把方言注入三个模块</p>
-          
-        </div><div class="ccard tone-blue">
-          <span class="tag tone-blue">领域层</span>
-          <h4>Module</h4>
-          <p>对外出口，一个业务场景一个。持有 dialect 和组合器</p>
-          
-        </div><div class="ccard tone-violet">
-          <span class="tag tone-violet">组合</span>
-          <h4>Combination</h4>
-          <p>把多个条件的用户集合做 AND / OR / 自定义数量</p>
-          
-        </div><div class="ccard tone-violet">
-          <span class="tag tone-violet">条件</span>
-          <h4>Entrepot</h4>
-          <p>「条件入口」。六种，每种知道自己该查哪张表</p>
-          
-        </div><div class="ccard tone-amber">
-          <span class="tag tone-amber">策略</span>
-          <h4>GroupSqlDialect</h4>
-          <p>SqlDialect + getEventTable。所有数据库差异都在这里</p>
-          
-        </div><div class="ccard tone-green">
-          <span class="tag tone-green">基础设施</span>
-          <h4>DB</h4>
-          <p>core 里的静态工具，唯一直接碰 knex 的地方</p>
-          
-        </div></div><h2 id="最不直觉的设计and-or-不是-sql-的-and-or"><span class="num">10</span>最不直觉的设计：AND / OR 不是 SQL 的 AND / OR</h2>
+    </div><h2 id="组合为什么-and-or-不是-sql-的-and-or"><span class="num">03</span>组合：为什么 AND / OR 不是 SQL 的 AND / OR</h2>
 <p>看到「条件 A <strong>AND</strong> 条件 B」，直觉会写：</p>
 <div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-sql">-- ❌ 直觉写法：对同一个用户，既要命中 A 又要命中 B
-SELECT uid FROM event_add_cart WHERE ... AND uid IN (SELECT uid FROM user_portrait WHERE ...)
+SELECT uid FROM event_add_cart
+WHERE ... AND uid IN (SELECT uid FROM user_portrait WHERE ...)
 </code></pre></div>
-<p>但这里每个条件查的是<strong>不同的表、不同的时间窗口</strong>，没法拼成一个 WHERE。
+<p><strong>但这里每个条件查的是不同的表、不同的时间窗口</strong>，没法拼进一个 WHERE。
 所以实际实现是<strong>集合运算</strong>：</p>
 <div class="callout tone-amber quote">
       <span class="ic">⚠</span>
-      <div><p>AND / OR 被实现成「对 uid 做集合运算」，而不是 SQL 的 AND / OR。</p>
+      <div><p>AND / OR 被实现成「<strong>对 uid 做集合运算</strong>」，而不是 SQL 的 AND / OR。</p>
 </div>
     </div><div class="demo" data-widget="combination-count">
       <div class="demo-head">
@@ -659,8 +375,8 @@ SELECT uid FROM event_add_cart WHERE ... AND uid IN (SELECT uid FROM user_portra
   <pre data-cc-sql></pre>
 </div>
 </div>
-    </div><p>一句话总结这套机制：</p>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>逻辑</th><th>SQL 怎么写</th><th>结果</th></tr></thead><tbody><tr><th>OR</th><td data-label="SQL 怎么写">GROUP BY uid，不加 HAVING</td><td data-label="结果">任一条件命中即保留</td></tr><tr><th>AND</th><td data-label="SQL 怎么写">GROUP BY uid，HAVING count(uid) = N</td><td data-label="结果">N 个子查询里都出现才保留</td></tr><tr><th>自定义数量</th><td data-label="SQL 怎么写">GROUP BY uid，HAVING count(uid) &gt;= 2</td><td data-label="结果">至少 N 个条件命中</td></tr></tbody></table></div><p>对应代码只有一行：</p>
+    </div><p>一句话总结：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>逻辑</th><th>SQL 怎么写</th><th>结果</th></tr></thead><tbody><tr><th>OR</th><td data-label="SQL 怎么写">GROUP BY uid，<strong>不加</strong> HAVING</td><td data-label="结果">任一条件命中即保留</td></tr><tr><th>AND</th><td data-label="SQL 怎么写">GROUP BY uid，<code>HAVING count(uid) = N</code></td><td data-label="结果">N 个子查询里<strong>都出现</strong>才保留</td></tr><tr><th>自定义数量</th><td data-label="SQL 怎么写">GROUP BY uid，<code>HAVING count(uid) &gt;= 2</code></td><td data-label="结果">至少 N 个条件命中</td></tr></tbody></table></div><p>对应代码只有一行：</p>
 <div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">// packages/crowd/src/combi/combination.ts
 if (trees.logic === Logic.And) {
     query.having(havingCount(UID), Op.Eq, sqls.length);
@@ -668,259 +384,344 @@ if (trees.logic === Logic.And) {
 </code></pre></div>
 <div class="callout tone-violet">
       <span class="ic">💡</span>
-      <div><p>还有一个细节：<code>DB.unionAllRaws</code> 的注释写着 <strong>「网关只支持 union all，不支持 union」</strong>。
-所以这里用 UNION ALL + GROUP BY 去重，而不是 UNION —— 这不只是性能选择，是下游能力约束。</p>
+      <div><p>还有个细节：<code>DB.unionAllRaws</code> 的注释写着 <strong>「网关只支持 union all，不支持 union」</strong>。</p>
+<p>所以这里用 <code>UNION ALL + GROUP BY</code> 去重，而不是 <code>UNION</code> ——
+<mark class="mk-blue">这不只是性能选择，是<strong>下游能力约束</strong>。</mark></p>
 </div>
-    </div><h2 id="一条条件是怎么变成-sql-的"><span class="num">11</span>一条条件是怎么变成 SQL 的</h2>
-<div class="jcard">
-          <div class="jcard-head">
-            <span class="tag tone-muted">① 入参</span>
-            <span class="name">BuildInfoTree</span>
-            <span class="spacer"></span>
-            <span class="tag tone-muted">四种形态</span>
-          </div>
-          
-          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>{
-  main:     { type: 'event', condition: {...} },        // 主体条件
-  include:  [ { entrepot: {...}, type: 'include' } ],   // 二次包含
-  exclude:  [ { entrepot: {...}, type: 'exclude' } ]    // 二次排除
-}
-</pre></div>
-          <p class="jnote">也可能是裸的 <code>EntrepotStruct</code>，或者是 <code>{ logic, conditions }</code> 组合树。
-三种形态都要能处理。</p>
-        </div><div class="conn">
-      <span class="stem"></span>
-      <span class="pill">SqlContext.create<span class="note">先定方言</span></span>
-      <span class="stem"></span><span class="head"></span>
-    </div><div class="jcard">
-          <div class="jcard-head">
-            <span class="tag tone-blue">② 门面</span>
-            <span class="name">SqlContext.create(dbType, options)</span>
-            <span class="spacer"></span>
-            
-          </div>
-          
-          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>Doris     → new DorisGroupDialect(eventTableMap)   // 不传 eventTableMap 直接 throw
-Bytehouse → new BytehouseGroupDialect()
-</pre></div>
-          <p class="jnote">方言在这里被选定，然后注入三个模块。<strong>之后再也不会变</strong>。</p>
-        </div><div class="conn">
-      <span class="stem"></span>
-      <span class="pill">module.list(tree, decode)<span class="note">按业务场景选模块</span></span>
-      <span class="stem"></span><span class="head"></span>
-    </div><div class="jcard">
-          <div class="jcard-head">
-            <span class="tag tone-blue">③ 模块</span>
-            <span class="name">CrowdModule.list</span>
-            <span class="spacer"></span>
-            
-          </div>
-          
-          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>const _main   = getMainStruct(tree);               // 取主体
-const _ieInfo = checkAndGetIncluOrExcluRule(tree); // 取 include/exclude
-</pre></div>
-          <p class="jnote">把「一棵树」拆成「主体 + 二次加工规则」两部分，分别处理。</p>
-        </div><div class="conn">
-      <span class="stem"></span>
-      <span class="pill">initMajorListSqlGen<span class="note">进组合层</span></span>
-      <span class="stem"></span><span class="head"></span>
-    </div><div class="jcard">
-          <div class="jcard-head">
-            <span class="tag tone-violet">④ 组合</span>
-            <span class="name">Combination.combineSql</span>
-            <span class="spacer"></span>
-            <span class="tag tone-violet">核心</span>
-          </div>
-          
-          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>conditions.map(c =&gt; entrepotListGen(c, false))   // 每个条件一段子 SQL
-  → DB.unionAllRaws(sqls)                        // UNION ALL 拼起来
-  → GROUP BY uid                                 // 按用户归并
-  → HAVING count(uid) = sqls.length              // AND 时才有
-</pre></div>
-          <p class="jnote">递归处理嵌套的 <code>{ logic, conditions }</code>，内层不解码，<strong>只有最外层 decode</strong>。</p>
-        </div><div class="conn">
-      <span class="stem"></span>
-      <span class="pill">Pkg.list<span class="note">二次加工</span></span>
-      <span class="stem"></span><span class="head"></span>
-    </div><div class="jcard">
-          <div class="jcard-head">
-            <span class="tag tone-violet">⑤ 二次加工</span>
-            <span class="name">Pkg.list(majorSql, rules, decode)</span>
-            <span class="spacer"></span>
-            
-          </div>
-          
-          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>include → UNION ALL(major, minor) + GROUP BY uid   // 并集，顺带去重
-exclude → major WHERE uid NOT IN (minor)           // 差集
-</pre></div>
-          <p class="jnote">多条规则时按 <code>options.order</code> 排序，<strong>order 越小权重越大</strong>，
-然后从 main 开始依次 reduce。</p>
-        </div><div class="conn">
-      <span class="stem"></span>
-      <span class="pill">decodeUid<span class="note">出口统一包一层</span></span>
-      <span class="stem"></span><span class="head"></span>
-    </div><div class="jcard">
-          <div class="jcard-head">
-            <span class="tag tone-green">⑥ 出口</span>
-            <span class="name">decodeUid</span>
-            <span class="spacer"></span>
-            
-          </div>
-          
-          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>SELECT UID_DECODE(`uid`) as `uid` FROM ( ... ) ct1
-</pre></div>
-          <p class="jnote">所有模块对外暴露的列名都是 <code>uid</code>，加密与否由 decode 参数决定。
-<code>noDecodedSqlGen()</code> 可以反向把这一层剥掉。</p>
-        </div><h3 id="为什么二次加工必须单独存在">为什么「二次加工」必须单独存在</h3>
-<p>第 06 节提到的第二层组合。举一个具体场景：</p>
+    </div><h2 id="二次加工include-exclude"><span class="num">04</span>二次加工：include / exclude</h2>
+<p>上面是「条件之间怎么连」。还有一层<strong>很容易忽略</strong>：算完一批人之后，再增删。</p>
+<p>举个真实场景：</p>
 <blockquote>
-<p>「先圈出最近 7 天加购的人，<strong>但要把内部测试账号剔掉<strong>，</strong>再加上运营给的白名单</strong>。」</p>
+<p>先圈出最近 7 天加购的人，<strong>但要把内部测试账号剔掉<strong>，</strong>再加上运营给的白名单</strong>。</p>
 </blockquote>
 <p>这是三步，不是一步：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">① 主体条件 → 算出「最近 7 天加购的人」
-② include  → 并上白名单（UNION ALL + GROUP BY 去重）
-③ exclude  → 减掉测试账号（NOT IN）
-</code></pre></div>
-<p><code>exclude</code> 之所以能写成 <code>NOT IN</code>，是因为它只需要<strong>排除</strong>，不需要保留谁出现过几次 —— 这和第一层的 AND（必须计数）是不同的运算。</p>
-<div class="callout tone-amber tinted">
+<div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-blue">第一步</span>
+            <span class="name">主体条件</span>
+            <span class="spacer"></span>
+            
+          </div>
+          
+          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>「最近 7 天加购的人」
+</pre></div>
+          <p class="jnote">这就是第 03 节讲的组合层 —— 算出一批 uid。</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">include <span class="en">加一批</span><span class="note">并集</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-green">第二步</span>
+            <span class="name">include</span>
+            <span class="spacer"></span>
+            
+          </div>
+          
+          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>UNION ALL(major, minor) + GROUP BY uid
+</pre></div>
+          <p class="jnote"><strong>并集</strong>，顺带去重。运营给的白名单直接并进来。</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">exclude <span class="en">减一批</span><span class="note">差集</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-red">第三步</span>
+            <span class="name">exclude</span>
+            <span class="spacer"></span>
+            
+          </div>
+          
+          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>major WHERE uid NOT IN (minor)
+</pre></div>
+          <p class="jnote"><strong>差集</strong>。测试账号直接减掉。</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">输出<span class="note">最终 uid 列表</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><h3 id="为什么必须单独一层">为什么必须单独一层</h3>
+<div class="callout tone-amber quote">
       <span class="ic">⚠</span>
-      <div><p>这就是为什么 <code>Combination</code> 和 <code>Pkg</code> 是两个类而不是一个：
-<strong>第一层做集合运算（要计数），第二层做集合增删（不计数）。</strong></p>
+      <div><p><mark class="mk-blue">因为两种运算的性质不同。</mark></p>
+<ul>
+<li><strong>第一层<strong>（AND / OR）要</strong>计数</strong> —— 「N 个条件里命中几个」决定了留不留</li>
+<li><strong>第二层<strong>（include / exclude）</strong>不计数</strong> —— 只关心「在不在」</li>
+</ul>
+<p><code>exclude</code> 能写成 <code>NOT IN</code>，正是因为不需要知道谁出现过几次。</p>
 </div>
-    </div><h2 id="方言策略同一套条件两种数据库"><span class="num">12</span>方言策略：同一套条件，两种数据库</h2>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>维度</th><th>ByteHouse</th><th>Doris</th></tr></thead><tbody><tr><th>事件表怎么定位</th><td data-label="ByteHouse">按事件名 murmurhash 分片</td><td data-label="Doris">调用方传入 eventTableMap</td></tr><tr><th>事件表名</th><td data-label="ByteHouse"><code>dws.event_biz_N</code> / <code>dws.event_monitoring_N</code></td><td data-label="Doris">由调用方决定</td></tr><tr><th>分片规则</th><td data-label="ByteHouse"><code>murmurhash.v3(eventName, 0) % 8 + 1</code> → 8 张表</td><td data-label="Doris"><span class="tag tone-muted">无分片</span></td></tr><tr><th>构造要求</th><td data-label="ByteHouse"><span class="tag tone-green">无参即可</span></td><td data-label="Doris"><span class="tag tone-red">必须传 eventTableMap，否则 throw</span></td></tr><tr><th>默认值</th><td data-label="ByteHouse"><span class="tag tone-green">是（各构造函数 fallback）</span></td><td data-label="Doris"><span class="tag tone-amber">否，必须显式传</span></td></tr></tbody></table></div><p><code>GroupSqlDialect</code> 只比 core 的 <code>SqlDialect</code> 多一个方法：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">// packages/crowd/src/dialect/interface.ts
-export interface GroupSqlDialect extends SqlDialect {
-    getEventTable(params: EventTableParams): string;
-}
-</code></pre></div>
-<p>而 <code>SqlDialect</code> 本身有 17 个方法，全是<strong>「同一种语义在不同库怎么写」</strong>：</p>
-<div class="cards" data-cols="4"><div class="ccard tone-amber">
-          
-          <h4>mapPropertyAccess</h4>
-          <p>map 取值：mapElement(p,'k') vs p['k']</p>
-          
-        </div><div class="ccard tone-muted">
-          
-          <h4>castToInt / castToFloat</h4>
-          <p>类型转换</p>
-          
-        </div><div class="ccard tone-muted">
-          
-          <h4>regexpMatchExpr</h4>
-          <p>正则匹配表达式</p>
-          
-        </div><div class="ccard tone-muted">
-          
-          <h4>jsonArrayContainsRule</h4>
-          <p>JSON 数组包含 / 相等</p>
-          
-        </div><div class="ccard tone-muted">
-          
-          <h4>getRelativeTimestampRules</h4>
-          <p>把「最近 7 天」转成 SQL</p>
-          
-        </div><div class="ccard tone-muted">
-          
-          <h4>getAbsoluteTimestampRules</h4>
-          <p>绝对时间范围</p>
-          
-        </div><div class="ccard tone-muted">
-          
-          <h4>multiIf</h4>
-          <p>多条件选择</p>
-          
-        </div><div class="ccard tone-muted">
-          
-          <h4>arrayExpandSql</h4>
-          <p>UNION ALL 展开数组</p>
-          
-        </div></div><div class="callout tone-amber tinted">
+    </div><p>这就是为什么 <code>Combination</code> 和 <code>Pkg</code> 是<strong>两个类</strong>而不是一个。</p>
+<h2 id="分发六种入口怎么选"><span class="num">05</span>分发：六种入口怎么选</h2>
+<p>条件树的叶子有六种（概念篇讲的画像 / 事件 / 关系 / 人群包 / uid / rawSql）。
+每种都要知道自己<strong>该去哪张表、怎么写查询</strong>。</p>
+<div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;in&quot;,&quot;to&quot;:&quot;sw&quot;},{&quot;from&quot;:&quot;sw&quot;,&quot;to&quot;:&quot;p&quot;,&quot;label&quot;:&quot;portrait&quot;},{&quot;from&quot;:&quot;sw&quot;,&quot;to&quot;:&quot;e&quot;,&quot;label&quot;:&quot;event&quot;},{&quot;from&quot;:&quot;sw&quot;,&quot;to&quot;:&quot;o&quot;,&quot;label&quot;:&quot;...&quot;},{&quot;from&quot;:&quot;sw&quot;,&quot;to&quot;:&quot;err&quot;,&quot;label&quot;:&quot;其它&quot;,&quot;dashed&quot;:true},{&quot;from&quot;:&quot;p&quot;,&quot;to&quot;:&quot;out&quot;},{&quot;from&quot;:&quot;e&quot;,&quot;to&quot;:&quot;out&quot;},{&quot;from&quot;:&quot;o&quot;,&quot;to&quot;:&quot;out&quot;}]">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-green" data-id="in">
+              
+              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5L3 8l3 4.5M10 3.5L13 8l-3 4.5"/></svg>
+              <b>一个条件</b>
+              <small>{ type: 'event', condition: {...} }</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-amber shape-note" data-id="sw">
+              
+              
+              <b>switch (condition.type)</b>
+              <small>工厂里的分发</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="p">
+              
+              
+              <b>画像</b>
+              <small>portrait</small>
+            </div><div class="fnode tone-violet" data-id="e">
+              
+              
+              <b>事件</b>
+              <small>event</small>
+            </div><div class="fnode tone-muted" data-id="o">
+              
+              
+              <b>其余四种</b>
+              <small>关系 / 人群包 / uid / rawSql</small>
+            </div><div class="fnode tone-red" data-id="err">
+              
+              
+              <b>throw</b>
+              <small>未知类型</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="out">
+              
+              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="8" cy="4.2" rx="5" ry="1.9"/><path d="M3 4.2v7.6c0 1.05 2.24 1.9 5 1.9s5-.85 5-1.9V4.2"/></svg>
+              <b>一段子 SQL</b>
+              <small>查出一批 uid</small>
+            </div></div></div>
+      
+    </div><p><strong>每个条件实现都只有两个方法</strong>：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>方法</th><th>产出什么</th><th>给谁用</th></tr></thead><tbody><tr><th><code>list(condition, decode)</code></th><td data-label="产出什么">一段能查出 <strong>uid 列表</strong>的 SQL</td><td data-label="给谁用">list 接口</td></tr><tr><th><code>count(condition)</code></th><td data-label="产出什么">一段能数出<strong>人数</strong>的 SQL</td><td data-label="给谁用">count 接口</td></tr></tbody></table></div><div class="callout tone-red">
       <span class="ic">⚠</span>
-      <div><p><strong>每个条件类都写着 <code>dialect ?? new BytehouseDialect()</code>。</strong>
-这是向后兼容的默认值 —— 意味着<mark class="mk-amber">忘了传 dialect 不会报错，会静默按 ByteHouse 生成 SQL</mark>。
-Doris 场景下这会生成语法能跑但结果不对的 SQL，是个真实的坑。</p>
+      <div><p><strong>工厂遇到未知类型直接 <code>throw</code>，不静默返回空。</strong></p>
+<p>这个选择很重要：<mark class="mk-blue">静默失败会让 bug 跑到生产才被发现</mark> ——
+生成的 SQL 少了一个条件，圈出来的人就多了一批。</p>
 </div>
-    </div><h2 id="扩展点"><span class="num">13</span>扩展点</h2>
+    </div><div class="callout tone-amber">
+      <span class="ic">⚠</span>
+      <div><p><strong>六种实现各自的细节</strong>（比如 <code>event.ts</code> 那 906 行里装了什么）
+展开在 <a href="../sql-builder-v2-crowd-entrepot/">⑨ entrepot 篇</a>。</p>
+</div>
+    </div><h2 id="隔离方言怎么吸收库差异"><span class="num">06</span>隔离：方言怎么吸收库差异</h2>
+<p>同一句业务话，两个数据库的 SQL 完全不一样：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>要做的事</th><th>ByteHouse 写法</th><th>Doris 写法</th></tr></thead><tbody><tr><th>map 取 key</th><td data-label="ByteHouse 写法"><code>mapElement(\</code>name`, 'a')`</td><td data-label="Doris 写法"><code>ELEMENT_AT(\</code>name`, 'a')`</td></tr><tr><th>判空</th><td data-label="ByteHouse 写法"><code>isNull(\</code>x`)`</td><td data-label="Doris 写法"><code>\</code>x` IS NULL`</td></tr><tr><th>转整数</th><td data-label="ByteHouse 写法"><code>toInt64(\</code>x`)`</td><td data-label="Doris 写法"><code>CAST(\</code>x` AS SIGNED)`</td></tr><tr><th>JSON 数组包含</th><td data-label="ByteHouse 写法"><code>hasAny(assumeNotNull(JSONExtract(...)))</code></td><td data-label="Doris 写法"><code>JSON_CONTAINS(CAST(... AS JSON))</code></td></tr><tr><th>相对时间戳</th><td data-label="ByteHouse 写法">要 <code>UNIX_TIMESTAMP(...) * 1000</code> 包装</td><td data-label="Doris 写法">不要包装（event_time 是 DATETIME）</td></tr></tbody></table></div><h3 id="关键方言不生成-sql">关键：方言<strong>不生成 SQL</strong></h3>
+<div class="callout tone-red quote">
+      <span class="ic">⚠</span>
+      <div><p><mark class="mk-blue">方言方法没有一个是直接产出 SQL 的。</mark></p>
+<p>它们返回两种东西：</p>
+<ul>
+<li><strong>SQL 片段字符串</strong> —— 被拼进 <code>Expression.raw</code></li>
+<li><strong>完整的表达式节点</strong> —— core 内部的 <code>Expression</code> / <code>Rule</code>，直接进表达式树</li>
+</ul>
+<p>真正把表达式树变成 SQL 的是 <strong>knex</strong>，不是方言。</p>
+</div>
+    </div><h3 id="什么时候调方言">什么时候调方言</h3>
+<p><strong>只有属性类型特殊时才调</strong> —— 普通条件（<code>=</code>、<code>&gt;</code>、<code>IN</code>）根本不碰方言。</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>属性类型</th><th>调哪个方法</th><th>返回什么</th></tr></thead><tbody><tr><th>相对时间 + 时间戳</th><td data-label="调哪个方法"><code>getRelativeTimestampRules()</code></td><td data-label="返回什么"><code>Expression[]</code></td></tr><tr><th>正则匹配</th><td data-label="调哪个方法"><code>regexpMatchExpr()</code></td><td data-label="返回什么"><code>Expression</code></td></tr><tr><th>JSON 数组</th><td data-label="调哪个方法"><code>jsonArrayContainsRule()</code></td><td data-label="返回什么"><code>Rule</code></td></tr><tr><th>bool</th><td data-label="调哪个方法"><code>castBoolToInt()</code></td><td data-label="返回什么"><code>string</code></td></tr><tr><th>map 取值</th><td data-label="调哪个方法"><code>mapPropertyAccess()</code></td><td data-label="返回什么"><code>string</code></td></tr><tr><th>NULL 判断</th><td data-label="调哪个方法"><code>isNullCheck()</code></td><td data-label="返回什么"><code>string</code></td></tr></tbody></table></div><div class="callout tone-amber">
+      <span class="ic">⚠</span>
+      <div><p><strong>还有一点反直觉：方言不是 <code>buildWhere</code> 调的。</strong></p>
+<p><code>buildWhere</code> 是静态方法，<strong>签名里根本没有 dialect</strong> —— 它压根不知道方言存在。</p>
+<p><mark class="mk-blue">全部方言调用都在 <code>crowd</code> 包里</mark>，调用点是 <code>adapter()</code>。这是架构的一条裂缝。</p>
+</div>
+    </div><h3 id="什么时候决定用哪个实现">什么时候决定用哪个实现</h3>
+<p><strong>不在翻译的时候决定，在最早的时候决定一次。</strong></p>
+<div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;create&quot;,&quot;to&quot;:&quot;q&quot;},{&quot;from&quot;:&quot;q&quot;,&quot;to&quot;:&quot;bh&quot;,&quot;label&quot;:&quot;Bytehouse&quot;},{&quot;from&quot;:&quot;q&quot;,&quot;to&quot;:&quot;doris&quot;,&quot;label&quot;:&quot;Doris&quot;},{&quot;from&quot;:&quot;q&quot;,&quot;to&quot;:&quot;err&quot;,&quot;label&quot;:&quot;其它&quot;,&quot;dashed&quot;:true},{&quot;from&quot;:&quot;bh&quot;,&quot;to&quot;:&quot;mods&quot;},{&quot;from&quot;:&quot;doris&quot;,&quot;to&quot;:&quot;mods&quot;}]">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-green" data-id="create">
+              
+              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5L3 8l3 4.5M10 3.5L13 8l-3 4.5"/></svg>
+              <b>SqlContext.create(dbType, options)</b>
+              <small>全库唯一入口</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-amber shape-note" data-id="q">
+              
+              
+              <b>dbType 是什么？</b>
+              
+            </div></div><div class="flowd-row"><div class="fnode tone-cloud" data-id="bh">
+              
+              
+              <b>Bytehouse 方言</b>
+              <small>无参即可</small>
+            </div><div class="fnode tone-cloud" data-id="doris">
+              
+              
+              <b>Doris 方言</b>
+              <small>必须传 eventTableMap</small>
+            </div><div class="fnode tone-red" data-id="err">
+              
+              
+              <b>throw</b>
+              <small>不支持的 dbType</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="mods">
+              
+              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5L3 8l3 4.5M10 3.5L13 8l-3 4.5"/></svg>
+              <b>注入三个模块</b>
+              <small>之后一路传下去</small>
+            </div></div></div>
+      
+    </div><div class="callout tone-red">
+      <span class="ic">⚠</span>
+      <div><p><strong>但每个条件类都写了兜底</strong>：<code>dialect ?? new BytehouseDialect()</code>。</p>
+<p>意味着 <mark class="mk-blue">忘了传 dialect 不会报错，会静默按 ByteHouse 生成 SQL</mark>。
+Doris 场景下会生成<strong>语法能跑但结果不对</strong>的 SQL。</p>
+<p>这是设计上的一个取舍：向后兼容 vs 早点报错。它选了前者。</p>
+</div>
+    </div><h2 id="设计取舍"><span class="num">07</span>设计取舍</h2>
+<p>前面几节讲的都是「怎么工作」。这一节回答「<strong>为什么这么设计</strong>」。</p>
 <div class="cards" data-cols="2"><div class="ccard tone-green">
+          <span class="tag tone-green">边界</span>
+          <h4>为什么拆两个包</h4>
+          <p>因为 <strong>core 里不许出现任何业务词汇</strong>。
+
+守住这条，加一种数据库不用碰 crowd，加一种业务条件不用碰 core。
+<mark class="mk-blue">这套设计的可扩展性就来自这一个约束。</mark>
+
+验证方法：在 <code>core/src/</code> 里搜 <code>portrait</code> / <code>event_v2</code> / <code>crowd</code>，一个都搜不到。</p>
           
-          <h4>加一种数据库</h4>
-          <p>实现 SqlDialect + GroupSqlDialect 两个接口，在 SqlContext._resolveDialect 加一个 case。core 完全不用改</p>
-          
-        </div><div class="ccard tone-blue">
-          
-          <h4>加一种条件入口</h4>
-          <p>在 Entrepots 枚举加值 → 写一个类实现 list/count → 在 factory 的两个 switch 里注册</p>
-          
-        </div><div class="ccard tone-blue">
-          
-          <h4>加一个业务模块</h4>
-          <p>写一个 Module 类持有 dialect，在 SqlContext 构造函数里加一行</p>
+        </div><div class="ccard tone-violet">
+          <span class="tag tone-violet">分层</span>
+          <h4>为什么方言不生成 SQL</h4>
+          <p>因为方言只负责<strong>「同一语义在不同库怎么写」</strong>，不负责「表达式树怎么变成 SQL」。
+
+后者是 knex 的事。<mark class="mk-blue">如果把这两件事混在一起，方言接口会变成一堆 <code>buildWhere</code>。</mark>
+
+所以方言方法的返回类型是「片段」或「节点」，不是「SQL」。</p>
           
         </div><div class="ccard tone-amber">
+          <span class="tag tone-amber">运算不同</span>
+          <h4>为什么 Combination 和 Pkg 是两个类</h4>
+          <p>因为<strong>第一层要计数，第二层不计数</strong>。
+
+AND / OR 靠 <code>HAVING count(uid) = N</code> 实现，必须知道谁命中了几次；
+include / exclude 只关心在不在，<code>NOT IN</code> 就够。
+
+<mark class="mk-blue">运算性质不同，就没法合并。</mark></p>
           
+        </div><div class="ccard tone-red">
+          <span class="tag tone-red">失败要响</span>
+          <h4>为什么工厂直接 throw</h4>
+          <p>因为<strong>静默失败更贵</strong>。
+
+少一个条件的 SQL 语法完全合法，能跑，只是圈出来的人多了一批 ——
+这种 bug 会跑到生产才被发现。
+
+<mark class="mk-blue">宁可构建时就炸。</mark></p>
+          
+        </div></div><div class="callout tone-amber">
+      <span class="ic">⚠</span>
+      <div><p><strong>但也有一处是反过来的：<code>dialect ?? new BytehouseDialect()</code>。</strong></p>
+<p>同样是「出错」，这里选了<strong>静默兜底</strong>而不是 throw。
+理由是向后兼容（老调用方不传 dialect 也能跑）。</p>
+<p><mark class="mk-blue">同一个代码库里，两种相反的选择并存。</mark> 这是真实工程的常态 ——
+新代码倾向「失败要响」，老代码倾向「别把现有调用方弄挂」。</p>
+</div>
+    </div><h2 id="扩展点"><span class="num">08</span>扩展点</h2>
+<div class="cards" data-cols="2"><div class="ccard tone-green">
+          <span class="tag tone-green">最容易</span>
+          <h4>加一种数据库</h4>
+          <p>实现方言的两个接口，在 <code>SqlContext</code> 里加一个 case。<strong>core 完全不用改</strong></p>
+          <pre>1. core/src/dialect/interface.ts
+   → 实现 17 个方法
+2. crowd/src/dialect/
+   → 再实现 getEventTable
+3. crowd/src/context.ts
+   → _resolveDialect 加 case
+</pre>
+        </div><div class="ccard tone-blue">
+          <span class="tag tone-blue">中等</span>
+          <h4>加一种条件入口</h4>
+          <p>枚举加值 → 写一个类 → 在两个 switch 里注册</p>
+          <pre>1. crowd/src/define.ts
+   → Entrepots 枚举加值
+2. crowd/src/entrepots/&lt;新文件&gt;.ts
+   → 实现 list / count
+3. crowd/src/entrepots/factory.ts
+   → 两个 switch 各加 case
+</pre>
+        </div><div class="ccard tone-blue">
+          <span class="tag tone-blue">容易</span>
+          <h4>加一个业务模块</h4>
+          <p>写一个类持有方言，在 <code>SqlContext</code> 构造函数里加一行</p>
+          
+        </div><div class="ccard tone-amber">
+          <span class="tag tone-amber">⚠ 有约束</span>
           <h4>加一个通用 SQL 能力</h4>
-          <p>加在 core。注意：<strong>不能出现任何业务词</strong>，否则两个包的边界就烂了</p>
+          <p>加在 core。<strong>注意：不能出现任何业务词</strong>，否则两个包的边界就烂了</p>
           
         </div></div><div class="callout tone-green">
       <span class="ic">✅</span>
-      <div><p>这套设计的可扩展性来自一个约束：<mark class="mk-blue">core 里不许出现业务词汇</mark>。
-只要守住这条，加数据库不用碰 crowd，加业务条件不用碰 core。</p>
+      <div><p><mark class="mk-blue">这张表说明了一件事：所有扩展点都在边上，没有一个需要动中间。</mark></p>
+<ul>
+<li>加数据库 → 只碰方言</li>
+<li>加条件类型 → 只碰 entrepot</li>
+<li>加业务场景 → 只碰 module</li>
+</ul>
+<p>这正是「core 不知道业务」这个约束换来的。</p>
 </div>
-    </div><h2 id="自测"><span class="num">14</span>自测</h2>
+    </div><h2 id="自测"><span class="num">09</span>自测</h2>
 <div class="quiz"><details>
-        <summary>画像和事件最本质的区别是什么？</summary>
-        <div class="a"><p>画像存的是<strong>当前状态</strong>，会被覆盖 —— 只回答「他现在是什么样」。
-事件存的是<strong>行为流水</strong>，只追加 —— 能回答「他做过什么、几次」。
-所以「最近 7 天加购了 3 次」只能查事件表，画像表里没有这个信息。</p>
+        <summary>「条件 A AND 条件 B」为什么不能用 SQL 的 AND 实现？</summary>
+        <div class="a"><p>因为每个条件查的是<strong>不同的表、不同的时间窗口</strong>，没法拼进一个 WHERE。
+实际实现是<strong>集合运算</strong>：把各条件的 uid 用 <code>UNION ALL</code> 堆在一起，
+再 <code>GROUP BY uid</code> + <code>HAVING count(uid) = N</code>。
+OR 就是不加 HAVING，自定义数量就是 <code>&gt;= N</code>。</p>
 </div>
       </details><details>
-        <summary>为什么事件条件的 SQL 里要 <code>left join</code> 画像表？</summary>
-        <div class="a"><p>因为两边用户列的名字不一样：画像表叫 <code>uid</code>，事件表叫 <code>$user_id</code>。
-而且事件条件是「按人算次数」——子查询里 <code>group by $user_id</code> 得到每个人的次数，
-再 join 回画像表才能输出统一的 <code>uid</code> 列。
-用 <code>left join</code> + <code>ifNull(cnt, 0)</code> 是为了让「一次都没做过」的人也能被算成 0 次。</p>
+        <summary>两次翻译分别是谁在做，各自关心什么？</summary>
+        <div class="a"><p><strong>第一次</strong>在 <code>crowd</code> 包里：业务词汇 → 数据词汇，关心「最近 3 天」是什么意思。
+<strong>第二次</strong>在 <code>core</code> + knex：数据词汇 → SQL 文本，关心反引号、占位符、方言。
+这样分层换来的是 <mark class="mk-blue">core 永远不知道「什么是相对时间」</mark>，换业务场景时一行不用改。</p>
 </div>
       </details><details>
-        <summary>条件树里的 AND，为什么不能直接写成 SQL 的 <code>WHERE A AND B</code>？</summary>
-        <div class="a"><p>因为每个条件查的是<strong>不同的表、不同的时间窗口</strong>，没法拼进同一个 WHERE。
-实际实现是集合运算：<code>UNION ALL</code> 把各条件的 uid 堆在一起，
-<code>GROUP BY uid</code> 计数，<code>HAVING count(uid) = N</code> 表示「N 个条件都命中」。</p>
+        <summary>方言是 <code>buildWhere</code> 调用的吗？</summary>
+        <div class="a"><p><strong>不是。</strong> <code>buildWhere</code> 是静态方法，签名里根本没有 dialect —— 它压根不知道方言存在。
+全部方言调用都在 <code>crowd</code> 包里，调用点是 <code>adapter()</code>。
+而且方言方法<strong>不生成 SQL</strong>，只返回「片段」或「表达式节点」，
+真正变成 SQL 的是 knex。</p>
 </div>
       </details><details>
-        <summary><code>Combination.combineSql</code> 里 OR 和 AND 的差别体现在哪一行？</summary>
-        <div class="a"><p>只差在要不要加 HAVING。
-AND 会执行 <code>query.having(havingCount(UID), Op.Eq, sqls.length)</code>；
-OR 不加 HAVING，<code>GROUP BY uid</code> 后任一子查询命中就保留。</p>
+        <summary>include / exclude 为什么必须单独一层，不能并进 AND / OR 里？</summary>
+        <div class="a"><p>因为<strong>运算性质不同<strong>：第一层（AND / OR）要</strong>计数</strong>（<code>HAVING count(uid) = N</code>），
+第二层（include / exclude）<strong>不计数</strong>，只关心在不在（<code>NOT IN</code> 就够）。
+这就是 <code>Combination</code> 和 <code>Pkg</code> 是两个类的原因。</p>
 </div>
       </details><details>
-        <summary>为什么 <code>Combination</code> 和 <code>Pkg</code> 是两个类？</summary>
-        <div class="a"><p>因为它们做的是两种运算：
-<code>Combination</code> 做<strong>集合运算</strong>（AND 要数 count，靠 HAVING）；
-<code>Pkg</code> 做<strong>集合增删</strong>（include 是并集，exclude 是 NOT IN，不需要计数）。
-混在一起会让「计数」这个语义变得含糊。</p>
+        <summary>工厂遇到未知的条件类型会怎样？为什么这样设计？</summary>
+        <div class="a"><p>直接 <code>throw</code>，不静默返回空。
+因为少一个条件的 SQL <strong>语法完全合法、能跑</strong>，只是圈出来的人多了一批 ——
+这种 bug 会跑到生产才被发现。宁可构建时就炸。</p>
 </div>
       </details><details>
-        <summary>为什么用 UNION ALL 而不是 UNION？</summary>
-        <div class="a"><p>两个原因：一是 <code>DB.unionAllRaws</code> 的注释写明<strong>网关只支持 union all</strong>；
-二是这里本来就要 <code>GROUP BY uid</code> 去重，UNION 的去重是多余的。</p>
-</div>
-      </details><details>
-        <summary>忘传 dialect 会发生什么？</summary>
-        <div class="a"><p><strong>不会报错。</strong> 每个条件类的构造函数都写着 <code>dialect ?? new BytehouseDialect()</code>，
-会静默按 ByteHouse 生成 SQL。Doris 场景下会生成语法能跑但结果不对的 SQL。</p>
-</div>
-      </details><details>
-        <summary>core 和 crowd 的边界靠什么维持？</summary>
-        <div class="a"><p>靠一条约束：<strong>core 里不出现任何业务词汇</strong>。
-core 不知道 portrait / crowd / event_v2 这些概念，
-所以加数据库不用改 crowd，加业务条件不用改 core。</p>
+        <summary>为什么加数据库不用改 core？</summary>
+        <div class="a"><p>因为 core 里的方言是<strong>接口</strong>，具体实现（ByteHouse / Doris）在各自的地方。
+加一种数据库只要实现接口 + 在 <code>SqlContext</code> 里加一个 case。
+更根本的原因是 <mark class="mk-blue">core 里不许出现任何业务词汇</mark> —— 守住这条边界，
+所有扩展点就都落在边上，没有一个需要动中间。</p>
 </div>
       </details></div>
 
     <footer>
-      <span>sql_builder_v2 架构</span>
-      <span>最后更新 2026-09-24 · 单文件可离线打开</span>
+      <span>sql_builder_v2 架构篇</span>
+      <span>最后更新 2026-09-26 · 单文件可离线打开</span>
     </footer>
   </main>
 </div>

@@ -821,6 +821,39 @@ npm run visual-check
 | 两个区域框重叠 | **每行独立居中** → 同组节点跨行会水平错位，两组包围盒几乎相接，框一往外扩就重叠 |
 | `cards` 里的 `<pre>` 撑破容器 | **grid item 默认 `min-width: auto`**，不会缩到内容宽度以下 |
 
+#### 第五次：archify 的共用 CSS 被削薄
+
+```callout
+tone: red
+icon: ⚠
+text: |
+  ==`assets/archify-embed.css` 是全站共用的，但它是**每次跑 archify 时重新导出**的。==
+
+  导出时会按「`assets/arch/` 下所有 SVG 用到的 class」筛规则。
+  一旦筛漏，图里的元素就掉样式 —— 而且**构建、visual-check 全是绿的**。
+```
+
+**真实事故**：CSS 丢了 `.a-dashed` / `.a-security`（少 `fill: none`），
+图里的虚线边被**填成黑色三角形**，压在节点上。
+
+| 症状 | 根因 |
+|---|---|
+| 图里出现大块黑色三角/色块 | `archify-embed.css` 缺了某个 class 的规则，`fill` 回退成黑色 |
+
+```callout
+tone: green
+icon: ✅
+text: |
+  **修法**：重跑任意一张图，它会按并集重新导出共用 CSS。
+
+  ```bash
+  node tools/archify.mjs archify/<名字>.json <名字>
+  ```
+
+  `npm run check` 有专门检查（对比 SVG 用到的 class 和 CSS 里定义的 class），
+  缺了会直接报出来并告诉你重跑哪条命令。
+```
+
 #### 三条硬规矩
 
 1. **改一条 CSS 规则就替换那一条，别用大区间。** 非要大改，改完 grep 一遍原来的选择器。

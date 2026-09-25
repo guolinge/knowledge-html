@@ -606,12 +606,58 @@ config:
 
 ---
 
-## 15. `arch` —— 内联复杂图
+## 15. `arch` —— 内联 archify 生成的图
 
-**什么时候用**：图**复杂到我们的积木画不好**时 —— 8 个节点以上、有交叉边、
-标签容易重叠、需要嵌套边界框。这时去调 `archify` skill 生成，再用这个积木嵌进来。
+**它不是一个兜底。** 容易把它读成「图太复杂、我们积木画不下时用它」—— 不是。
+archify 是一套完整的图渲染系统，它提供的是我们自己的积木**根本没有**的能力。
 
-> 完整流程见 SKILL.md 的「复杂图：调用 archify skill」。
+### 它给了什么
+
+| 能力 | 说明 |
+|---|---|
+| **语义类型** | 节点声明 `type`（backend / database / cloud / messagebus / security / external），自动带图标 + 配色 |
+| **自动图例** | 按用到的 `type` 自动汇总，不用手写 |
+| **精确区域框** | `boundaries` 自动包住成员，标签嵌在框线上 |
+| **真边路由** | 折线绕行，不是两点直连 |
+| **校验器** | ==量文字宽度、检测标签碰撞、给坐标级修复建议== —— 这是它最值钱的部分 |
+| 视觉预设 | `meta.visual_preset`：`classic` / `signal-flow` / `blueprint` / `editorial` |
+| 引导视图 | `meta.views`，最多 5 个聚焦不同节点子集的视图 |
+| 动画 | `meta.animation: "trace"`，SVG/CSS 流动 |
+
+### 它能画 5 种图
+
+由 spec 里的 `diagram_type` 决定（`tools/archify.mjs` 会自动读，不用在命令里传）：
+
+| diagram_type | 画什么 | 结构数组 |
+|---|---|---|
+| `architecture` | 系统组成、部署拓扑、依赖关系 | `components` · `boundaries` · `connections` |
+| `workflow` | 跨角色的流程 | `lanes` · `phases` · `mainPath` · `nodes` · `edges` |
+| `sequence` | 调用链、握手、时序 | `participants` · `messages` · `activations` |
+| `dataflow` | 数据流水线 | `stages` · `nodes` · `flows` |
+| `lifecycle` | 状态机、生命周期 | `lanes` · `states` · `transitions` |
+
+写法参考 `~/.agents/skills/archify/examples/*.<type>.json`。
+
+### 什么时候用
+
+==判据是「这张图需要什么」，不是「我们的积木行不行」。==
+
+| 用 `arch` | 用我们自己的积木 |
+|---|---|
+| 有**区域/边界**要表达归属 | 没有归属关系，就是一根轴或一列卡片 |
+| 节点有**语义类型**（这是数据库、那是队列） | 节点就是纯文字盒子 |
+| 需要**图例** | 不需要图例 |
+| 形状是 DAG / 状态机 / 泳道 / 时序 / 阶段流水线 | 形状是时间轴 / 状态对照 / 两列匹配 / 行列表 |
+| 要作为**独立图**交付、反复引用 | 图文混排成一节，要跟着页面换肤和重排 |
+
+### 它的硬边界（踩过）
+
+- **边不能穿过无关节点。** 直接报 `crosses component "xxx" (unrelated to this relationship)`，
+  ==它不会帮你绕过去==。遇到这种拓扑只能拆图、改布局、或手填 `route`/`via` 航点。
+- **组件尺寸是每个显式声明的**（默认 120×60），不随 `layout.cellW` 变。
+  标签长了要么裁文案，要么给它加 `size`。
+- **边有几何下限**：微段短于 8px、两条边挤在同一条走廊里，都会判失败。
+- 产出是**静态 SVG**，不跟着容器宽度重排（靠 viewBox 缩放）。
 
 ```arch
 svg: core-package
@@ -637,6 +683,8 @@ node tools/archify.mjs archify/<名字>.json <名字>
   否则别人 clone 后没有 archify 就构建不了。
 - `tools/archify.mjs` 会给 archify 的 CSS 变量加 `--af-` 前缀。
   ==archify 在 `:root` 定义了 32 个变量，名字和我们完全一样，不隔离会把整页变深色。==
+- `assets/archify-embed.css` 是**全站共用**的，按 `assets/arch/*.svg` 的 class **并集**生成 ——
+  所以多张图共存不会互相删样式，重复跑也不会变。
 - 两边都用 `data-theme` 属性，所以**深浅色天然同步**，不用额外处理。
 - 找不到 SVG 时**会直接报错并告诉你怎么生成**，不会静默画空白。
 

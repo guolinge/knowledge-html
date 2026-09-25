@@ -24,9 +24,11 @@ import { fileURLToPath } from 'node:url';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const ARCHIFY = process.env.ARCHIFY_DIR || path.join(os.homedir(), '.agents/skills/archify');
 
-const [specArg, name] = process.argv.slice(2);
+const [specArg, name, typeArg] = process.argv.slice(2);
 if (!specArg || !name) {
-  console.error('用法：node tools/archify.mjs <spec.json> <名字>');
+  console.error('用法：node tools/archify.mjs <spec.json> <名字> [diagram_type]');
+  console.error('  diagram_type 默认从 spec 的 diagram_type 字段读，读不到才当 architecture。');
+  console.error('  可选：architecture / workflow / sequence / dataflow / lifecycle');
   process.exit(1);
 }
 
@@ -36,14 +38,31 @@ if (!fs.existsSync(path.join(ARCHIFY, 'bin/archify.mjs'))) {
 }
 
 const spec = path.resolve(specArg);
+
+/* spec 本来就是自描述的（里面写着 diagram_type）。
+   以前这里写死成 architecture，等于把 archify 的 5 种图类型只暴露了 1 种 ——
+   workflow / sequence / dataflow / lifecycle 全用不了。现在从 spec 读。 */
+const TYPES = ['architecture', 'workflow', 'sequence', 'dataflow', 'lifecycle'];
+let TYPE = typeArg;
+if (!TYPE) {
+  try {
+    TYPE = JSON.parse(fs.readFileSync(spec, 'utf8')).diagram_type;
+  } catch { /* 读不到就走下面的兜底 */ }
+}
+TYPE = TYPE || 'architecture';
+if (!TYPES.includes(TYPE)) {
+  console.error(`  ✗ 未知的 diagram_type：${TYPE}\n    可选：${TYPES.join(' / ')}`);
+  process.exit(1);
+}
+
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'arch-'));
 const outHtml = path.join(tmp, 'out.html');
 
-console.log('  1/4  archify validate…');
+console.log(`  1/4  archify validate…（${TYPE}）`);
 try {
   execFileSync(
     process.execPath,
-    [path.join(ARCHIFY, 'bin/archify.mjs'), 'validate', 'architecture', spec, '--quality', 'showcase', '--json'],
+    [path.join(ARCHIFY, 'bin/archify.mjs'), 'validate', TYPE, spec, '--quality', 'showcase', '--json'],
     { stdio: 'pipe' },
   );
 } catch (e) {
@@ -58,7 +77,7 @@ try {
 console.log('  2/4  archify deliver…');
 execFileSync(
   process.execPath,
-  [path.join(ARCHIFY, 'bin/archify.mjs'), 'deliver', 'architecture', spec, outHtml, '--quality', 'showcase', '--json'],
+  [path.join(ARCHIFY, 'bin/archify.mjs'), 'deliver', TYPE, spec, outHtml, '--quality', 'showcase', '--json'],
   { stdio: 'pipe' },
 );
 
@@ -68,8 +87,6 @@ const svg = (html.match(/<svg[\s\S]*?<\/svg>/g) || []).sort((a, b) => b.length -
 if (!svg) { console.error('  ✗ 没抠到 SVG'); process.exit(1); }
 
 console.log('  3/4  抠 SVG + 相关 CSS，加 --af- 命名空间…');
-const classes = new Set();
-for (const m of svg.matchAll(/class="([^"]+)"/g)) m[1].split(/\s+/).forEach((c) => c && classes.add(c));
 
 // 顶层规则切分（处理 @media 嵌套）
 function splitRules(css) {
@@ -85,6 +102,25 @@ function splitRules(css) {
   return out;
 }
 
+const ns = (t) => t.replace(/(?<![\w-])--([a-z][a-z0-9-]*)/g, '--af-$1');
+
+const archDir = path.join(ROOT, 'assets/arch');
+fs.mkdirSync(archDir, { recursive: true });
+fs.writeFileSync(path.join(archDir, `${name}.svg`), ns(svg));
+
+/* archify-embed.css 是「全站共用」的，所以不能只按刚生成的这一张图筛 class ——
+   那样跑第二张图时，会把第一张图需要的 class 从共用 CSS 里删掉，
+   第一张图的节点就掉样式了（踩过：跑 core-package 删掉了 flink-cluster 要的 .c-messagebus）。
+   所以扫 assets/arch/ 下所有 SVG，取 class 的并集 —— 幂等，不会因为跑的顺序而变。 */
+const classes = new Set();
+for (const f of fs.readdirSync(archDir)) {
+  if (!f.endsWith('.svg')) continue;
+  const text = fs.readFileSync(path.join(archDir, f), 'utf8');
+  for (const m of text.matchAll(/class="([^"]+)"/g)) {
+    m[1].split(/\s+/).forEach((c) => c && classes.add(c));
+  }
+}
+
 const kept = splitRules(style).filter((rule) => {
   const sel = rule.split('{', 1)[0];
   // ① SVG 用到的 class ② 主题变量块（两边都用 data-theme，所以能同步）
@@ -93,12 +129,8 @@ const kept = splitRules(style).filter((rule) => {
   return hasCls || isTheme;
 });
 
-const ns = (t) => t.replace(/(?<![\w-])--([a-z][a-z0-9-]*)/g, '--af-$1');
-
-fs.mkdirSync(path.join(ROOT, 'assets/arch'), { recursive: true });
-fs.writeFileSync(path.join(ROOT, 'assets/arch', `${name}.svg`), ns(svg));
 fs.writeFileSync(path.join(ROOT, 'assets/archify-embed.css'), ns(kept.join('\n')));
 
 console.log('  4/4  写入');
-console.log(`     assets/arch/${name}.svg          ${(svg.length / 1024).toFixed(1)} KB`);
+console.log(`     assets/arch/${name}.svg          ${(svg.length / 1024).toFixed(1)} KB  （${TYPE}）`);
 console.log(`     assets/archify-embed.css         ${(kept.join('').length / 1024).toFixed(1)} KB（全站共用）`);

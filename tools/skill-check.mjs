@@ -152,6 +152,38 @@ for (let i = 0; i < heads.length; i++) {
   }
 }
 
+// 9. archify 的 SVG 用到的 class，必须在全站共用的 archify-embed.css 里有定义
+//    真实事故：CSS 丢了 .a-dashed / .a-security（少 fill:none），
+//    图里的边被填成黑色三角形，而构建、visual-check 全绿。
+const ARCH = path.join(ROOT, 'assets/arch');
+const ARCH_CSS = path.join(ROOT, 'assets/archify-embed.css');
+if (fs.existsSync(ARCH) && fs.existsSync(ARCH_CSS)) {
+  const css = read(ARCH_CSS);
+  const defined = new Set(
+    [...css.matchAll(/\.([a-z][\w-]*)\s*(?=[,{: ])/g)].map((m) => m[1]),
+  );
+  const used = new Map(); // class → 哪些 svg 用了
+  for (const f of fs.readdirSync(ARCH).filter((x) => x.endsWith('.svg'))) {
+    const svg = read(path.join(ARCH, f));
+    for (const m of svg.matchAll(/class="([^"]+)"/g)) {
+      for (const c of m[1].split(/\s+/)) {
+        if (!c || c.startsWith('semantic-sigil')) continue;
+        if (!used.has(c)) used.set(c, []);
+        if (!used.get(c).includes(f)) used.get(c).push(f);
+      }
+    }
+  }
+  const missing = [...used.entries()].filter(([c]) => !defined.has(c));
+  if (missing.length) {
+    const detail = missing.map(([c, fs_]) => `${c}（${fs_.join(', ')}）`).join(' · ');
+    note(
+      `assets/archify-embed.css 缺 ${missing.length} 个 class 定义：${detail}\n` +
+        `      → 图的样式会掉（踩过：.a-dashed 少了 fill:none，边被填成黑三角，构建却是绿的）\n` +
+        `      → 修法：重跑任意一张图 node tools/archify.mjs archify/<名字>.json <名字>`,
+    );
+  }
+}
+
 /* ─────────── 报告 ─────────── */
 
 if (problems.length === 0) {
