@@ -42,23 +42,53 @@ text: |
   和 **⑤**（递归展开）—— 其余都是「把东西往下传」。
 ```
 
-## 02 · 两次翻译，各管什么
+```callout
+tone: red
+icon: ⚠
+text: |
+  **但上面那张图是从 `Rule[]` 开始画的 —— 在它之前还有一步。**
+
+  ==条件树会先被**重写**一遍==（合并、转换、压缩），然后才进翻译。
+
+  那一步不在 core 里，在 `crowd` 的 `combi/utils.ts` 里。
+  展开在 [条件树重写](../sql-builder-v2-crowd-combi-optimizer/)。
+```
+
+## 02 · 先重写，再两次翻译
+
+完整的主干其实是**三步**，不是两步：
 
 ```flow
 grid: true
 nodes:
   - { id: biz, label: 业务条件, sub: "运营/产品能懂的语言", row: 0, kind: frontend }
-  - { id: rule, label: "Rule[]", sub: "core 能懂的语言", row: 1, tone: violet }
-  - { id: sql, label: SQL 字符串, sub: "数据库能懂的语言", row: 2, kind: database }
+  - { id: rw, label: 重写后的条件树, sub: "合并 / 转换 / 压缩", row: 1, tone: amber }
+  - { id: rule, label: "Rule[]", sub: "core 能懂的语言", row: 2, tone: violet }
+  - { id: sql, label: SQL 字符串, sub: "数据库能懂的语言", row: 3, kind: database }
 edges:
-  - { from: biz, to: rule, label: "边 ① adapter 翻译" }
+  - { from: biz, to: rw, label: "treeSimplifier 重写" }
+  - { from: rw, to: rule, label: "边 ① adapter 翻译" }
   - { from: rule, to: sql, label: "边 ⑤⑥⑦ 编译" }
+```
+
+```callout
+tone: amber
+icon: ⚠
+text: |
+  **第一步是「改写」，不是「翻译」。**
+
+  它把条件树**重写成更好翻译的形状** —— 比如把同一张表上的多个条件
+  合并成一个，避免生成 `UNION ALL`。
+
+  ==所以 `Rule[]` 和原始业务条件**不是一一对应的**。==
+  这是读代码时容易困惑的一点。
 ```
 
 ```compare
 first: 阶段
 head: [谁在做, 做什么, 关心什么]
 rows:
+  - 重写: ["`crowd` 的 combi 层", "把条件树改成**更好翻译的形状**", "能不能少一次 UNION ALL"]
   - 第一次翻译: ["`crowd` 包", "业务词汇 → 数据词汇", "「最近 3 天」是什么意思"]
   - 第二次翻译: ["`core` 包 + knex", "数据词汇 → SQL 文本", "反引号、占位符、方言"]
 ```

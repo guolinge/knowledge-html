@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-has-toc="1">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>sql_builder_v2 的条件树重写</title>
+<meta name="description" content="在翻译成 SQL 之前，条件树会先被重写一遍。它做两件相反的事——把同一张表上的条件合并、把人群包拆成组合结构，目标只有一个：减少没必要的 UNION ALL。" />
+<link rel="stylesheet" href="../../assets/theme.css" />
+  <link rel="stylesheet" href="../../assets/blocks.css" />
+  <link rel="stylesheet" href="../../assets/archify-embed.css" />
+</head>
+<body>
+<div id="progress"></div>
+<div id="tocScrim"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
+    <a class="brand" href="../../index.html"><span class="dot"></span>知识笔记</a>
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="toc" id="toc">
+      <p class="toc-title">目录</p>
+      <a href="../../index.html" class="sub">← 全部笔记</a>
+      <a href="#概念在翻译之前还有一步">概念：在翻译之前，还有一步</a>
+      <a href="#架构它做七件事">架构：它做七件事</a>
+      <a href="#核心该合的合该拆的拆">核心：该合的合，该拆的拆</a>
+      <a href="#画像合并因为查的是同一张表" class="sub">画像：合并（因为查的是同一张表）</a>
+      <a href="#人群包拆开因为每个-item-是一次独立查询" class="sub">人群包：拆开（因为每个 item 是一次独立查询）</a>
+      <a href="#细节三种情况它不优化">细节：三种情况它不优化</a>
+      <a href="#①-有自定义计数就整个跳过" class="sub">① 有「自定义计数」就整个跳过</a>
+      <a href="#②-有些-uid-条件不能转成画像" class="sub">② 有些 uid 条件不能转成画像</a>
+      <a href="#③-空树有兜底" class="sub">③ 空树有兜底</a>
+      <a href="#细节压缩-消掉只有一个孩子的节点">细节：压缩 —— 消掉只有一个孩子的节点</a>
+      <a href="#自测">自测</a>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow">● 从零理解 · 模块</span>
+      <h1>sql_builder_v2 的条件树重写</h1>
+      <p class="lede">在翻译成 SQL 之前，条件树会先被重写一遍。它做两件相反的事——把同一张表上的条件合并、把人群包拆成组合结构，目标只有一个：减少没必要的 UNION ALL。</p>
+    </div>
+
+    <div class="draft-banner">
+    <span>⚠</span>
+    <span>本页状态为 <b>draft</b>：内容尚未人工核对，引用前请自行验证。</span>
+  </div>
+<aside class="needs">
+      <p class="needs-title">读这篇之前，你需要先知道</p>
+      <a class="need" href="../sql-builder-v2-crowd/">← <b>9. crowd 篇</b><span>业务层：core 之上加了什么</span></a>
+    </aside>
+    <div class="provenance"><span><b>来源</b> sources/gitlab/sql_builder_v2 @ 2c500b2</span><span><b>生成</b> 2026-09-26</span><span><b>模型</b> deepseek-v4.1-flash</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">架构</span> <span class="tag tone-muted">SQL</span> <span class="tag tone-muted">TypeScript</span> <span class="tag tone-muted">圈人</span></span></div>
+
+<div class="callout tone-blue">
+      <span class="ic">🧭</span>
+      <div><p>前置是 <a href="../sql-builder-v2-crowd/">⑧ crowd 篇</a>。</p>
+<p>架构篇画的主干图是<strong>从 <code>Rule[]</code> 开始的</strong>。这篇讲它前面那一步 ——
+在翻译之前，条件树会先被<strong>重写</strong>一遍。</p>
+<p>读完你应该能说出：「<mark class="mk-blue">它同时做「合」和「拆」两件相反的事，目标只有一个：少一次 UNION ALL。</mark>」</p>
+</div>
+    </div><h2 id="概念在翻译之前还有一步"><span class="num">01</span>概念：在翻译之前，还有一步</h2>
+<div class="callout tone-red quote">
+      <span class="ic">⚠</span>
+      <div><p><mark class="mk-blue"><strong>完整的主干是三步，不是两步。</strong></mark></p>
+</div>
+    </div><p>业务条件
+↓ ① treeSimplifier 重写      ← 这篇
+重写后的条件树
+↓ ② adapter 翻译
+Rule[]
+↓ ③ buildWhere 编译
+SQL</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code></code></pre></div>
+<p><strong>它在代码里的位置</strong>：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">// crowd/src/combi/utils.ts · initMajorListSqlGen
+return (entrepot, decode = true) =&gt; {
+    const _entrepot = treeSimplifier(entrepot);        // ← 第一步就是它
+
+    if (isMultiEntrepot(_entrepot)) {
+        return decodeValue(_combinationInstance.list(_entrepot, decode));
+    }
+    if (isEntrepot(_entrepot)) {
+        return decodeValue(_entrepotListSqlGen(_entrepot, decode));
+    }
+    throw new Error('条件错误(判断单个模块 or 联合)');
+};
+</code></pre></div>
+<div class="callout tone-amber">
+      <span class="ic">⚠</span>
+      <div><p><strong>这意味着 <code>Rule[]</code> 和原始业务条件不是一一对应的。</strong></p>
+<p>原始条件有 3 个叶子，重写后可能变成 1 个（合并了），
+也可能变成 5 个（拆开了）。</p>
+<p><mark class="mk-blue">读代码时对不上号，往往就是漏了这一步。</mark></p>
+</div>
+    </div><h2 id="架构它做七件事"><span class="num">02</span>架构：它做七件事</h2>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">// combi/utils.ts · treeSimplifier()
+① checkHasCustomCountCombination  → 有「自定义计数」就整个跳过，不优化
+② cloneDeep                       → 不改调用方传进来的对象
+③ _checkAndConvertTreeNodeToPortraitEntrepot  → 把能转的节点转成画像
+④ _mergePortraitEntrepot          → 合并同一层的画像节点
+⑤ _partitionSpecialCondition      → 拆开特殊条件（人群包 / rawSql / 关系）
+⑥ _mainTreeMinimizer              → 压缩：去掉空节点、消掉单子节点
+⑦ 空了就兜底 → select `uid` from user_portrait
+</code></pre></div>
+<div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;in&quot;,&quot;to&quot;:&quot;q&quot;},{&quot;from&quot;:&quot;q&quot;,&quot;to&quot;:&quot;skip&quot;,&quot;label&quot;:&quot;是&quot;,&quot;dashed&quot;:true},{&quot;from&quot;:&quot;q&quot;,&quot;to&quot;:&quot;conv&quot;,&quot;label&quot;:&quot;否&quot;},{&quot;from&quot;:&quot;conv&quot;,&quot;to&quot;:&quot;merge&quot;},{&quot;from&quot;:&quot;merge&quot;,&quot;to&quot;:&quot;part&quot;},{&quot;from&quot;:&quot;part&quot;,&quot;to&quot;:&quot;mini&quot;},{&quot;from&quot;:&quot;mini&quot;,&quot;to&quot;:&quot;out&quot;}]">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-muted" data-id="in">
+              
+              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="3" width="11" height="8.5" rx="1.5"/><path d="M2.5 6h11"/></svg>
+              <b>业务条件树</b>
+              
+            </div></div><div class="flowd-row"><div class="fnode tone-amber shape-note" data-id="q">
+              
+              
+              <b>有自定义计数？</b>
+              
+            </div></div><div class="flowd-row"><div class="fnode tone-muted" data-id="skip">
+              
+              
+              <b>原样返回</b>
+              <small>不优化</small>
+            </div><div class="fnode tone-green" data-id="conv">
+              
+              
+              <b>③ 转换</b>
+              <small>uid → 画像</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="merge">
+              
+              
+              <b>④ 合并画像</b>
+              <small>同表的合成一个</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="part">
+              
+              
+              <b>⑤ 拆开特殊条件</b>
+              <small>人群包 / rawSql / 关系</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="mini">
+              
+              
+              <b>⑥ 压缩</b>
+              <small>去空节点、提单子节点</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="out">
+              
+              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5L3 8l3 4.5M10 3.5L13 8l-3 4.5"/></svg>
+              <b>重写后的条件树</b>
+              
+            </div></div></div>
+      
+    </div><div class="callout tone-violet">
+      <span class="ic">💡</span>
+      <div><p><mark class="mk-blue"><strong>看第 ④ 和第 ⑤ 步：它们是相反的动作。</strong></mark></p>
+<ul>
+<li><strong>④ 合并</strong> —— 把多个画像条件合成一个</li>
+<li><strong>⑤ 拆开</strong> —— 把一个人群包条件拆成多个</li>
+</ul>
+<p>看起来矛盾，其实同一个判断标准：<strong>能不能少一次 <code>UNION ALL</code>。</strong></p>
+</div>
+    </div><h2 id="核心该合的合该拆的拆"><span class="num">03</span>核心：该合的合，该拆的拆</h2>
+<h3 id="画像合并因为查的是同一张表">画像：合并（因为查的是同一张表）</h3>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">「城市是杭州 AND 城市是深圳」
+</code></pre></div>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>阶段</th><th>SQL</th><th>代价</th></tr></thead><tbody><tr><th>不优化</th><td data-label="SQL">两个子查询 <code>UNION ALL</code> + <code>GROUP BY</code> + <code>HAVING count = 2</code></td><td data-label="代价"><span class="tag tone-red">两次扫表</span></td></tr><tr><th>优化后</th><td data-label="SQL"><code>where city = '杭州' and city = '深圳'</code></td><td data-label="代价"><span class="tag tone-green">一次扫表</span></td></tr></tbody></table></div><p><strong>实现</strong>：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">// _mergePortraitEntrepot
+if (isPortraitEntrepotOnly(tree)) {
+    return integratePortraitEntrepot(tree);      // 整棵树全是画像 → 合成一个
+}
+// 否则把同一层的画像挑出来合并成一个节点，非画像的保持原样
+return {
+    logic: tree.logic,
+    conditions: [
+        ..._others,
+        { type: Entrepots.Portrait,
+          condition: { items: _portraits.map(p =&gt; p.condition), logic: tree.logic } }
+    ]
+};
+</code></pre></div>
+<h3 id="人群包拆开因为每个-item-是一次独立查询">人群包：拆开（因为每个 item 是一次独立查询）</h3>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">// _partitionSpecialCondition
+if (tree.type === Entrepots.Crowd) {
+    return CrowdEntrepotClass.partition(tree);
+}
+</code></pre></div>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">// crowd.ts · partitionCrowdTree
+const partitionCrowdTree = (tree, options) =&gt; {
+    if (isConditionNode(tree)) {
+        return { logic: tree.logic,
+                 conditions: tree.items.map((item) =&gt; partitionCrowdTree(item, options)) };
+    } else {
+        return { type: Entrepots.Crowd, condition: tree, options };
+    }
+};
+</code></pre></div>
+<div class="callout tone-violet">
+      <span class="ic">💡</span>
+      <div><p><strong>人群包为什么不能像画像那样合并？</strong></p>
+<p>因为一个人群包条件<strong>本身就是一次独立查询</strong> ——
+<code>select uid from crowds where crowd_id = 'C_888'</code>。</p>
+<p>「C_888 <strong>或</strong> C_999」没法写成一个 <code>where</code> ——
+它们是两行数据，不是两个字段值。</p>
+<p><mark class="mk-blue">所以只能拆成组合结构，交给组合层用 <code>UNION ALL</code> 处理。</mark></p>
+</div>
+    </div><div class="compare-wrap"><table class="compare"><thead><tr><th>条件</th><th>底层是什么</th><th>优化动作</th><th>为什么</th></tr></thead><tbody><tr><th>画像</th><td data-label="底层是什么">同一张表上的<strong>字段值</strong></td><td data-label="优化动作"><span class="tag tone-green">合并</span></td><td data-label="为什么">一个 <code>where</code> 能表达所有组合</td></tr><tr><th>人群包</th><td data-label="底层是什么"><strong>每一行</strong>都是一次独立查询</td><td data-label="优化动作"><span class="tag tone-violet">拆开</span></td><td data-label="为什么"><code>where</code> 表达不了「或」</td></tr></tbody></table></div><div class="callout tone-green quote">
+      <span class="ic">✅</span>
+      <div><p><mark class="mk-blue"><strong>这就是「该合的合、该拆的拆」的判据：</strong></mark></p>
+<p>问一句：<strong>这些条件能不能写进同一个 <code>WHERE</code>？</strong></p>
+<ul>
+<li>能 → 合并（画像）</li>
+<li>不能 → 拆成组合结构（人群包 / rawSql / 关系）</li>
+</ul>
+</div>
+    </div><h2 id="细节三种情况它不优化"><span class="num">04</span>细节：三种情况它不优化</h2>
+<h3 id="①-有自定义计数就整个跳过">① 有「自定义计数」就整个跳过</h3>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">// checkHasCustomCountCombination
+/**
+ * 判断是否有 &quot;自定义计数&quot; （unionCount） 的 combines
+ * 对于 &quot;自定义计数&quot; 的结构，需要保留 combines 的结构，不进行合并
+ * （比如，udp 有个场景：用一批 uid 去 union all 另外一批，
+ *   然后找到计数为 1 的 uid，把这批 uid 标记为无效的）
+ */
+</code></pre></div>
+<div class="callout tone-amber">
+      <span class="ic">⚠</span>
+      <div><p><strong>「自定义计数」是「至少命中 N 个条件」那种查询</strong> ——
+它<strong>依赖 UNION ALL 的结构</strong>（因为要数「命中了几次」）。</p>
+<p>一旦合并，计数就变了。所以这种情况<strong>整个优化跳过</strong>。</p>
+<p><mark class="mk-blue">宁可慢，不能错。</mark></p>
+</div>
+    </div><h3 id="②-有些-uid-条件不能转成画像">② 有些 uid 条件不能转成画像</h3>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">// uid.ts
+static checkCanBeConvertToPortraitEntrepot(condition) {
+    return !(condition.op === ScopeOp.In &amp;&amp; condition.ignoreNoExist !== true);
+}
+</code></pre></div>
+<div class="callout tone-red">
+      <span class="ic">⚠</span>
+      <div><p><strong>这个条件看着绕，语义很直白：</strong></p>
+<p>「给一批 uid」转成「查画像表 <code>where uid in (...)</code>」有个前提 ——
+<mark class="mk-blue">画像表里得有这些人。</mark></p>
+<ul>
+<li><strong>原始语义<strong>（<code>ignoreNoExist = false</code>）：这批人</strong>都要算上</strong></li>
+<li><strong>转成画像后</strong>：<code>where uid in (...)</code> 查不出不存在的人，<mark class="mk-blue">会静默丢掉</mark></li>
+</ul>
+<p>所以只有 <code>ignoreNoExist = true</code>（不存在就忽略）时才允许转。</p>
+</div>
+    </div><h3 id="③-空树有兜底">③ 空树有兜底</h3>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">// treeSimplifier 最后
+if (!mini) {
+    return createRawSqlEntrepot('select `uid` from user_portrait');
+}
+</code></pre></div>
+<div class="callout tone-violet">
+      <span class="ic">💡</span>
+      <div><p><strong>优化后整棵树可能是空的</strong>（所有节点都被压掉了）。</p>
+<p>这时候不能返回空 —— 那会生成一段没有 <code>WHERE</code> 的 SQL，等于「所有人」。</p>
+<p><mark class="mk-blue">兜底成「查画像表所有人」，语义明确。</mark></p>
+</div>
+    </div><h2 id="细节压缩-消掉只有一个孩子的节点"><span class="num">05</span>细节：压缩 —— 消掉只有一个孩子的节点</h2>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">// core/src/utils.ts · treeMinimizer
+export function treeMinimizer(tree, forkKey) {
+    let _subNodes = tree[forkKey];
+    if (_subNodes) {
+        _subNodes = _subNodes.map(递归).filter(非 null);
+
+        if (_subNodes.length === 0) return null;            // ① 全空 → 删掉这个节点
+        if (_subNodes.length === 1) return _subNodes[0];    // ② 单子节点 → 提上来
+        return { ...tree, [forkKey]: _subNodes };
+    } else {
+        return tree;                                        // 叶子
+    }
+}
+</code></pre></div>
+<p><strong>三条规则</strong>：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>情况</th><th>怎么做</th><th>效果</th></tr></thead><tbody><tr><th>子节点全被删了</th><td data-label="怎么做"><span class="tag tone-red">返回 null（自己也被删）</span></td><td data-label="效果">整枝消失</td></tr><tr><th>只剩一个子节点</th><td data-label="怎么做"><span class="tag tone-green">**返回那个子节点**</span></td><td data-label="效果">消掉一层树枝</td></tr><tr><th>还有多个</th><td data-label="怎么做">保留结构，递归处理过的子节点塞回去</td><td data-label="效果">结构不变</td></tr></tbody></table></div><div class="callout tone-violet">
+      <span class="ic">💡</span>
+      <div><p><strong>规则 ② 是关键：<code>AND( X )</code> 等价于 <code>X</code>。</strong></p>
+<p>一个只有单个孩子的组合节点是<strong>纯噪音</strong> ——
+它不改变语义，只让树更深、SQL 多一层括号。</p>
+<p><mark class="mk-blue">递归地做这件事，树会自动收敛到最简形状。</mark></p>
+</div>
+    </div><div class="callout tone-amber">
+      <span class="ic">⚠</span>
+      <div><p><strong>注意它的第二个参数 <code>forkKey</code>。</strong></p>
+<p>树的分支字段有两种名字：<code>items</code>（条件树用）和 <code>conditions</code>（组合树用）。
+所以压缩函数要知道自己在处理哪一种。</p>
+<p>这就是 <code>core/src/tree.ts</code> 里那 8 行的用途：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code>export type TreeForkKey = 'items' | 'conditions';
+</code></pre></div>
+</div>
+    </div><h2 id="自测"><span class="num">06</span>自测</h2>
+<div class="quiz"><details>
+        <summary>架构篇画的主干图，缺了哪一步？</summary>
+        <div class="a"><p>缺了<strong>重写</strong>那一步。完整的主干是三步：
+业务条件 →（treeSimplifier 重写）→ 重写后的条件树 →（adapter 翻译）→
+<code>Rule[]</code> →（buildWhere 编译）→ SQL。
+重写在 <code>crowd/src/combi/utils.ts</code> 里，不在 core。
+这也意味着 <mark class="mk-blue"><code>Rule[]</code> 和原始业务条件不是一一对应的</mark>。</p>
+</div>
+      </details><details>
+        <summary>优化器为什么要做「合并」和「拆开」两件相反的事？</summary>
+        <div class="a"><p>因为判据是同一个：<strong>这些条件能不能写进同一个 <code>WHERE</code>？</strong></p>
+<ul>
+<li>画像：同一张表上的字段值 → 能 → <strong>合并</strong>（省掉 UNION ALL）</li>
+<li>人群包：每一行都是一次独立查询 → 不能 → <strong>拆成组合结构</strong>
+<mark class="mk-blue">目标只有一个：少一次 UNION ALL。</mark></li>
+</ul>
+</div>
+      </details><details>
+        <summary>人群包为什么不能像画像那样合并？</summary>
+        <div class="a"><p>因为一个人群包条件<strong>本身就是一次独立查询</strong>
+（<code>select uid from crowds where crowd_id = 'C_888'</code>）。
+「C_888 <strong>或</strong> C_999」没法写成一个 <code>where</code> ——
+它们是两行数据，不是两个字段值。</p>
+</div>
+      </details><details>
+        <summary>什么情况下优化器会「整个跳过」？</summary>
+        <div class="a"><p>有「自定义计数」（<code>unionCount</code>）的时候。
+那种查询<strong>依赖 <code>UNION ALL</code> 的结构</strong>（要数「命中了几次」），
+一旦合并计数就变了。
+<mark class="mk-blue">宁可慢，不能错。</mark></p>
+</div>
+      </details><details>
+        <summary>为什么有些 uid 条件不能转成画像查询？</summary>
+        <div class="a"><p>因为「给一批 uid」和「查画像表 <code>where uid in (...)</code>」有个前提差异 ——
+画像表里得有这些人。
+如果有人不在画像表，转过去会<strong>静默丢掉</strong>他们，
+而原始语义（<code>ignoreNoExist = false</code>）是「这批人都要算上」。
+所以只有 <code>ignoreNoExist = true</code> 时才允许转。</p>
+</div>
+      </details><details>
+        <summary><code>treeMinimizer</code> 对「只有一个子节点」的树枝做了什么？</summary>
+        <div class="a"><p><strong>返回那个子节点</strong> —— 也就是把树枝提上来，消掉一层。
+因为 <code>AND( X )</code> 等价于 <code>X</code>，单孩子的组合节点是纯噪音：
+不改变语义，只让树更深、SQL 多一层括号。
+递归地做，树会自动收敛到最简形状。</p>
+</div>
+      </details></div>
+
+    <footer>
+      <span>sql_builder_v2 的条件树重写</span>
+      <span>最后更新 2026-09-26 · 单文件可离线打开</span>
+    </footer>
+  </main>
+</div>
+
+<script src="../../assets/app.js"></script>
+</body>
+</html>
