@@ -28,14 +28,22 @@
       <a href="../../index.html" class="sub">← 全部笔记</a>
       <a href="#一条流水线三段">一条流水线，三段</a>
       <a href="#source五种入口">Source：五种入口</a>
-      <a href="#transformation九个算子其实是五类">Transformation：九个算子，其实是五类</a>
+      <a href="#算子写在代码里的一张流程图">算子：写在代码里的一张流程图</a>
+      <a href="#九个算子其实是五类">九个算子，其实是五类</a>
       <a href="#亲手跑一遍同一批订单过不同算子">亲手跑一遍：同一批订单，过不同算子</a>
-      <a href="#keyby-到底做了什么" class="sub">keyBy 到底做了什么</a>
+      <a href="#keyby唯一一个不产出数据的算子">keyBy：唯一一个不产出数据的算子</a>
+      <a href="#为什么没有-keyby-就会算错" class="sub">为什么没有 keyBy 就会算错</a>
       <a href="#reduce-和-aggregate-差在哪" class="sub">reduce 和 aggregate 差在哪</a>
       <a href="#两个真正难的地方">两个真正难的地方</a>
       <a href="#流式-join两条数据不一定同时到" class="sub">流式 join：两条数据不一定同时到</a>
       <a href="#process需要等一会儿再检查时" class="sub">process：需要「等一会儿再检查」时</a>
       <a href="#sink结果写到哪">Sink：结果写到哪</a>
+      <a href="#为什么要设计这么多算子">为什么要设计这么多算子</a>
+      <a href="#原因一把大函数拆成可组合的小步骤" class="sub">原因一：把大函数拆成可组合的小步骤</a>
+      <a href="#原因二让-flink-知道该怎么并行" class="sub">原因二：让 Flink 知道该怎么并行</a>
+      <a href="#原因三让状态可管理可恢复" class="sub">原因三：让状态可管理、可恢复</a>
+      <a href="#原因四让-flink-有机会做性能优化" class="sub">原因四：让 Flink 有机会做性能优化</a>
+      <a href="#原因五一套模型同时处理批和流" class="sub">原因五：一套模型同时处理批和流</a>
       <a href="#连起来一个电商实时大盘">连起来：一个电商实时大盘</a>
       <a href="#一句话总结" class="sub">一句话总结</a>
       <a href="#自测">自测</a>
@@ -170,8 +178,63 @@
     </div><p>文件这类源有个特点值得单独记住：<strong>它有末尾</strong>。读到文件结束，数据就没了，任务可以退出。
 这在 Flink 的术语里叫<strong>有界流<strong>；而 Kafka 那种永远不会有「最后一条」的叫</strong>无界流</strong> ——
 两者怎么区分、怎么分别处理，见 <a href="../flink-bounded-vs-unbounded/">Flink 的有界流与无界流</a>。</p>
-<h2 id="transformation九个算子其实是五类"><span class="num">03</span>Transformation：九个算子，其实是五类</h2>
-<p>原文把九个算子平铺着讲了一遍。但它们不是并列的 —— 按「干什么活」分，只有五类：</p>
+<h2 id="算子写在代码里的一张流程图"><span class="num">03</span>算子：写在代码里的一张流程图</h2>
+<p>前面那个箭头图里的每一个处理站，就是一个<strong>算子（Operator）</strong>。</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">订单1 → 订单2 → 订单3 → 订单4 → ...
+              ↓
+   [算子 A] 做一种处理
+              ↓
+   [算子 B] 做下一种处理
+              ↓
+          输出结果
+</code></pre></div>
+<p>但这里有一个<strong>非常容易搞错</strong>的地方。你写下这样一串链式调用：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-java">DataStream&lt;UserAmount&gt; result = orderStream
+    .map(json -&gt; parseOrder(json))          // 算子 1：转格式
+    .filter(order -&gt; order.getAmount() &gt; 0) // 算子 2：过滤
+    .keyBy(order -&gt; order.getUserId())      // 算子 3：按用户分组
+    .map(order -&gt; new UserAmount(...));     // 算子 4：再转一次
+</code></pre></div>
+<p>看起来像在调四个普通 Java 方法。但 <mark class="mk-blue">这几行代码不会立刻处理任何数据</mark>。</p>
+<div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;code&quot;,&quot;to&quot;:&quot;graph&quot;,&quot;label&quot;:&quot;只是描述&quot;},{&quot;from&quot;:&quot;graph&quot;,&quot;to&quot;:&quot;run&quot;,&quot;label&quot;:&quot;提交&quot;}]">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-blue" data-id="code">
+              
+              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5L3 8l3 4.5M10 3.5L13 8l-3 4.5"/></svg>
+              <b>你写的链式调用</b>
+              <small>map → filter → keyBy → map</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="graph">
+              
+              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5L3 8l3 4.5M10 3.5L13 8l-3 4.5"/></svg>
+              <b>Flink 收集成一张执行图</b>
+              <small>Source → Map → Filter → KeyBy → Map → Sink</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="run">
+              
+              
+              <b>env.execute() 之后才真正跑</b>
+              <small>提交任务 · 开始消费 Kafka</small>
+            </div></div></div>
+      
+    </div><div class="callout tone-violet tinted">
+      <span class="ic">🧩</span>
+      <div><p>所以 <mark class="mk-blue">算子代码的含义不是「立刻执行这个函数」，而是「告诉 Flink 在这里加一个处理节点」</mark>。
+这跟写 SQL 是一个道理：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-sql">SELECT city, sum(amount) FROM orders WHERE status = 'PAID' GROUP BY city;
+</code></pre></div>
+<p>你写的是「我要怎么处理数据」，<strong>怎么执行由引擎决定</strong>。
+<code>env.execute(&quot;realtime-order-job&quot;)</code> 才是按下启动键的那一刻。</p>
+</div>
+    </div><h2 id="九个算子其实是五类"><span class="num">04</span>九个算子，其实是五类</h2>
+<p><mark class="mk-amber">先说清楚：这不是 Flink 官方的严格分类标准，而是一种「按解决什么问题来分」的功能分类。</mark></p>
+<p>它的用处是：拿到一个需求时，先判断该用哪一类。</p>
 <div class="cards" data-cols="3"><div class="ccard tone-blue">
           <span class="tag tone-blue">无状态</span>
           <h4>逐条处理</h4>
@@ -189,7 +252,7 @@
           
         </div><div class="ccard tone-violet">
           <span class="tag tone-violet">两条流</span>
-          <h4>多流合并</h4>
+          <h4>多流处理</h4>
           <p>union 只是合并不关联；join 才把两条流的数据拼起来</p>
           
         </div><div class="ccard tone-red">
@@ -269,7 +332,7 @@
       <div><p><mark class="mk-blue"><code>keyBy</code> 不产出数据。</mark> 它做的事只有一件：<strong>告诉 Flink「接下来的计算按这个 Key 分开算」</strong>。
 所以 <code>keyBy</code> 单独用是看不出任何效果的 —— 它必须跟着 reduce / aggregate / window / process 才有意义。</p>
 </div>
-    </div><h2 id="亲手跑一遍同一批订单过不同算子"><span class="num">04</span>亲手跑一遍：同一批订单，过不同算子</h2>
+    </div><h2 id="亲手跑一遍同一批订单过不同算子"><span class="num">05</span>亲手跑一遍：同一批订单，过不同算子</h2>
 <p>下面 6 条订单，点算子看产出。盯三件事：<strong>输入栏哪几条被划掉了<strong>、</strong>输出栏多了还是少了几行<strong>、</strong>输出到底是一条条记录还是一堆桶</strong>。</p>
 <div class="demo" data-widget="operator-lab">
       <div class="demo-head">
@@ -307,7 +370,7 @@
 <li><strong><code>flatMap</code> 让条数变多了</strong>：6 条订单拆成 7 条商品行。而订单 <code>1006</code> 一个商品都没有 —— <mark class="mk-blue">它一条也不产出</mark>，这就是 <code>flatMap</code> 的「1 → 0」。</li>
 <li><strong><code>keyBy</code> 的输出不是列表，是三个桶<strong>：6 条进、6 条出，</strong>一条没多一条没少</strong>，但数据被分成了 <code>u01 / u02 / u03</code> 三堆。这是全篇最该记住的一张图。</li>
 </ul>
-<h3 id="keyby-到底做了什么"><code>keyBy</code> 到底做了什么</h3>
+<h2 id="keyby唯一一个不产出数据的算子"><span class="num">06</span><code>keyBy</code>：唯一一个不产出数据的算子</h2>
 <p>它同时做了三件事，缺一不可：</p>
 <ol>
 <li><strong>路由</strong> —— 相同 Key 的数据被送到<strong>同一个并行实例</strong>上。<code>u01</code> 的三笔订单一定落在同一个 slot。</li>
@@ -316,7 +379,70 @@
 </ol>
 <p>上面交互里点 <code>keyBy + sum</code>，你会看到 <code>u01</code> 那三笔订单各自吐出一行「当前累计」（99 → 89 → 109）。
 那不是「最后算出一个数」，而是<strong>每来一条就更新一次</strong>。</p>
-<h3 id="reduce-和-aggregate-差在哪"><code>reduce</code> 和 <code>aggregate</code> 差在哪</h3>
+<h3 id="为什么没有-keyby-就会算错">为什么没有 <code>keyBy</code> 就会算错</h3>
+<p>Flink 是分布式的，一个作业通常开多个并行任务。假设并行度是 3，订单是这样被分下去的：</p>
+<div class="keyby-viz">
+  <div class="kb-case tone-red">
+    <div class="kb-label">
+      <span class="tag tone-red">没 keyBy</span>
+      <b>同一个 u01 的两笔订单，散落在两个 Task 上</b>
+      <small>每个 Task 只看得见自己手上那几条 —— 谁都不知道 u01 总共花了多少</small>
+    </div>
+    <div class="kb-tasks">
+      <div class="kb-task tone-red">
+        <div class="kb-head">Task 1</div>
+        <div class="kb-rec">u01 · 99 元</div>
+        <div class="kb-out wrong">以为 u01 累计 = 99</div>
+      </div>
+      <div class="kb-task tone-red">
+        <div class="kb-head">Task 2</div>
+        <div class="kb-rec">u01 · 20 元</div>
+        <div class="kb-out wrong">以为 u01 累计 = 20</div>
+      </div>
+      <div class="kb-task tone-muted">
+        <div class="kb-head">Task 3</div>
+        <div class="kb-rec">u02 · 50 元</div>
+        <div class="kb-out">u02 累计 = 50</div>
+      </div>
+    </div>
+  </div>
+  <div class="kb-shuffle">keyBy(userId) 重新洗牌</div>
+  <div class="kb-case tone-green">
+    <div class="kb-label">
+      <span class="tag tone-green">keyBy 之后</span>
+      <b>同一个 Key 全在同一个 Task</b>
+      <small>累计值就在自己手里，不用去问别人</small>
+    </div>
+    <div class="kb-tasks">
+      <div class="kb-task tone-green">
+        <div class="kb-head">Task 1 <small>负责 u01</small></div>
+        <div class="kb-rec">u01 · 99 元</div>
+        <div class="kb-rec">u01 · 20 元</div>
+        <div class="kb-out right">u01 累计 = 119</div>
+      </div>
+      <div class="kb-task tone-green">
+        <div class="kb-head">Task 2 <small>负责 u02</small></div>
+        <div class="kb-rec">u02 · 50 元</div>
+        <div class="kb-out right">u02 累计 = 50</div>
+      </div>
+    </div>
+  </div>
+</div>
+<p><mark class="mk-blue">同一个 <code>u01</code> 的两笔订单落在两个不同的 Task 上，那两个 Task 谁都算不出 <code>u01</code> 的真实累计。</mark>
+这不是精度问题，是<strong>根本算不出来</strong> —— 每个 Task 只看得到自己手上那几条。</p>
+<p><code>keyBy(userId)</code> 做的事情，就是把这些数据<strong>重新洗一遍牌</strong>：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">keyBy = 指定分组 Key  +  让相同 Key 的数据汇聚到同一处
+</code></pre></div>
+<p>这个过程叫 <strong>shuffle（洗牌）/ repartition（重分区）</strong> —— 数据要跨网络搬到别的 Task 上，是有成本的。</p>
+<div class="callout tone-amber">
+      <span class="ic">🔑</span>
+      <div><p>所以 <code>keyBy</code> 在 Flink 里是个<strong>分界线</strong>：
+<code>keyBy</code> 之前，数据可以在 Task 之间随便分配；
+<code>keyBy</code> 之后，<mark class="mk-blue">同一 Key 必须到同一个 Task</mark>。</p>
+<p>这也是 Flink 能做对「按用户累计」的前提，
+也是它能做对「按用户去重」「按用户超时提醒」的前提。</p>
+</div>
+    </div><h3 id="reduce-和-aggregate-差在哪"><code>reduce</code> 和 <code>aggregate</code> 差在哪</h3>
 <p>两个都是「同一个 Key 的多条数据不断合并成一个结果」，区别在<strong>输入、状态、输出是不是同一个类型</strong>：</p>
 <div class="compare-wrap"><table class="compare"><thead><tr><th>维度</th><th>reduce</th><th>aggregate</th></tr></thead><tbody><tr><th>输入 / 输出类型</th><td data-label="reduce">必须同类型（进来 Order，出去还得是 Order）</td><td data-label="aggregate">可以不同（进来 Order，出去 UserTotal）</td></tr><tr><th>中间状态</th><td data-label="reduce">就是上一条结果本身</td><td data-label="aggregate">自己定义累加器对象，想放几个字段放几个</td></tr><tr><th>适合</th><td data-label="reduce">简单的「两条同类型数据合并」，比如求和、取最大值</td><td data-label="aggregate">复杂统计，比如同时算总额 / 笔数 / 均值 / 最大值</td></tr><tr><th>例子</th><td data-label="reduce">keyBy(uid).sum(amount)</td><td data-label="aggregate">keyBy(uid).aggregate(new CitySalesAggregate())</td></tr></tbody></table></div><div class="callout tone-green">
       <span class="ic">✅</span>
@@ -324,7 +450,7 @@
 比如「总额 / 笔数 / 均值 / 最大值」四个指标，中间要同时维护四个数，最终只输出一个对象 ——
 这用 <code>reduce</code> 表达起来就很别扭。</p>
 </div>
-    </div><h2 id="两个真正难的地方"><span class="num">05</span>两个真正难的地方</h2>
+    </div><h2 id="两个真正难的地方"><span class="num">07</span>两个真正难的地方</h2>
 <h3 id="流式-join两条数据不一定同时到">流式 <code>join</code>：两条数据不一定同时到</h3>
 <p><code>join</code> 就是把数据库里那套 <code>JOIN</code> 思想搬到流上。但搬过去之后，最大的变化是<strong>时间</strong>：</p>
 <div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">10:00:01  订单先到    order_id=1001, user_id=u01, amount=99
@@ -382,7 +508,7 @@
             </div></div></div>
       
     </div><p>判断该不该用 <code>process</code>，看需求里有没有这两个信号：</p>
-<ul class="check warn"><li>需求里出现「等 N 分钟 / 等到某个时刻」—— 这是定时器，前面所有算子都没有</li><li>需求里出现「之前发生过什么」—— 这是状态，只有 reduce / aggregate / process 有</li><li>需求要输出不止一条流（主流 + 告警流）—— 这是侧输出，只有 process 有</li></ul><h2 id="sink结果写到哪"><span class="num">06</span>Sink：结果写到哪</h2>
+<ul class="check warn"><li>需求里出现「等 N 分钟 / 等到某个时刻」—— 这是定时器，前面所有算子都没有</li><li>需求里出现「之前发生过什么」—— 这是状态，只有 reduce / aggregate / process 有</li><li>需求要输出不止一条流（主流 + 告警流）—— 这是侧输出，只有 process 有</li></ul><h2 id="sink结果写到哪"><span class="num">08</span>Sink：结果写到哪</h2>
 <div class="cards" data-cols="3"><div class="ccard tone-blue">
           <span class="tag tone-blue">继续流转</span>
           <h4>Kafka</h4>
@@ -419,7 +545,100 @@
 下游要毫秒级点查 → Redis；要 SQL 分析 → ClickHouse；要全文检索 → ES；
 要长期存明细 → 数据湖；要给别人继续加工 → 回到 Kafka。</p>
 </div>
-    </div><h2 id="连起来一个电商实时大盘"><span class="num">07</span>连起来：一个电商实时大盘</h2>
+    </div><h2 id="为什么要设计这么多算子"><span class="num">09</span>为什么要设计这么多算子</h2>
+<p>核心原因是一句话：<strong>流式计算不是简单地「逐条执行 Java 代码」。</strong></p>
+<p>Flink 得同时应付：数据源源不断地来、数据量很大、任务要并行、同一个用户的数据得正确汇聚、
+任务挂了不能算错或丢数据、状态可能很大、数据可能乱序迟到、计算逻辑还得可组合可维护。</p>
+<div class="cards" data-cols="3"><div class="ccard tone-blue">
+          <span class="tag tone-blue">原因一</span>
+          <h4>拆成可组合的小步骤</h4>
+          <p>每个算子只管一件事，像 Unix 管道一样拼起来</p>
+          
+        </div><div class="ccard tone-amber">
+          <span class="tag tone-amber">原因二</span>
+          <h4>告诉 Flink 怎么并行</h4>
+          <p>不同算子的并行方式不同，keyBy 就是在说「这里必须按 Key 重分区」</p>
+          
+        </div><div class="ccard tone-green">
+          <span class="tag tone-green">原因三</span>
+          <h4>让状态可管理、可恢复</h4>
+          <p>状态交给 Flink 托管，才能做 Checkpoint 和故障恢复</p>
+          
+        </div><div class="ccard tone-violet">
+          <span class="tag tone-violet">原因四</span>
+          <h4>让 Flink 能做优化</h4>
+          <p>轻量的逐条算子可以被串成一个 Task，省掉网络传输</p>
+          
+        </div><div class="ccard tone-muted">
+          <span class="tag tone-muted">原因五</span>
+          <h4>统一批流</h4>
+          <p>有界流和无界流用同一套「数据流 + 算子」模型处理</p>
+          
+        </div></div><h3 id="原因一把大函数拆成可组合的小步骤">原因一：把大函数拆成可组合的小步骤</h3>
+<p>不用算子的话，很容易写成一个巨大的处理函数：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-java">handleEverything(message) {
+    // 解析 JSON
+    // 校验字段
+    // 过滤异常订单
+    // 按用户保存金额
+    // 判断是否超时
+    // 关联用户资料
+    // 写 ClickHouse
+}
+</code></pre></div>
+<p>问题很现实：逻辑混在一起，难测试、难复用、难定位问题、也难做并行优化。</p>
+<p>用算子之后，每一段的职责就清楚了：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">map       ：负责解析
+filter    ：负责清洗
+keyBy     ：负责分组
+aggregate ：负责统计
+process   ：负责复杂规则
+sink      ：负责写结果
+</code></pre></div>
+<p>这跟 Unix 管道是同一个思路：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-bash">cat access.log | grep ERROR | awk '{...}' | sort | uniq -c
+</code></pre></div>
+<p>每一步只做好一件事，再组合成完整流程。</p>
+<h3 id="原因二让-flink-知道该怎么并行">原因二：让 Flink 知道该怎么并行</h3>
+<p>这一条上一节已经讲透了：<code>map</code> / <code>filter</code> 里每条数据互不依赖，分到哪个 Task 都行；
+而 <code>keyBy + aggregate</code> 必须保证同一个 Key 到同一个 Task，否则累计结果就是错的。</p>
+<p><mark class="mk-blue">所以算子不只描述业务逻辑，它同时也在告诉 Flink 「这段该怎么并行」。</mark></p>
+<h3 id="原因三让状态可管理可恢复">原因三：让状态可管理、可恢复</h3>
+<p>如果你自己用 Java 的全局变量累计金额：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-java">Map&lt;String, Double&gt; userTotal = new HashMap&lt;&gt;();
+</code></pre></div>
+<p>程序一重启，内存里的数据就没了：<code>u01</code> 原本累计 169 元，宕机重启后变成 0。</p>
+<p>而 <code>keyBy</code> + 有状态算子会把状态交给 Flink 托管，Flink 就能通过 <strong>Checkpoint（检查点）</strong> 定期保存状态快照：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">定期把状态快照写下来
+        ↓
+      宕机重启
+        ↓
+从最近一次 Checkpoint 恢复状态  +  从 Kafka 对应位点重新消费
+        ↓
+      接着往下算
+</code></pre></div>
+<p>这样才能做到接近 <strong>Exactly-Once（精确一次）</strong> —— 尽量不丢数据、不重复统计。</p>
+<p><mark class="mk-amber">状态必须是「Flink 托管的」，自己塞在一个 <code>static</code> 变量里的东西，Checkpoint 管不到，也恢复不了。</mark></p>
+<h3 id="原因四让-flink-有机会做性能优化">原因四：让 Flink 有机会做性能优化</h3>
+<p>当你连着写 <code>map → filter → map</code>，这些通常是轻量、逐条、无状态的操作。
+Flink 可以把它们<strong>串成一个 Task（算子链 / Operator Chaining）</strong>，省掉中间的网络传输和序列化：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">代码里写的：
+Source → map → filter → map → keyBy → aggregate
+
+运行时实际跑的：
+Task 1: Source + map + filter + map      ← 串在一起，中间不落网络
+        ↓ shuffle（keyBy 必须重分区）
+Task 2: aggregate
+</code></pre></div>
+<p><mark class="mk-blue">算子把语义表达清楚了，Flink 才有机会自动优化执行计划。</mark></p>
+<h3 id="原因五一套模型同时处理批和流">原因五：一套模型同时处理批和流</h3>
+<p>Flink 既要处理 Kafka 那种持续到来的无界流，也要处理 CSV / HDFS 上的历史文件（有界流）。
+而两者的处理过程往往长得一样：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">读取 → map → filter → keyBy → 聚合 → 输出
+</code></pre></div>
+<p>所以 Flink 用统一的「数据流 + 算子」模型处理它们，区别只在<strong>数据会不会结束</strong> ——
+见 <a href="../flink-bounded-vs-unbounded/">Flink 的有界流与无界流</a>。</p>
+<h2 id="连起来一个电商实时大盘"><span class="num">10</span>连起来：一个电商实时大盘</h2>
 <p>需求：大盘每分钟展示订单数量、GMV、各城市销售额、销量 Top 10。</p>
 <div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;svc&quot;,&quot;to&quot;:&quot;mq&quot;,&quot;label&quot;:&quot;写消息&quot;},{&quot;from&quot;:&quot;mq&quot;,&quot;to&quot;:&quot;clean&quot;,&quot;label&quot;:&quot;Source 消费&quot;},{&quot;from&quot;:&quot;clean&quot;,&quot;to&quot;:&quot;agg&quot;,&quot;label&quot;:&quot;清洗后&quot;},{&quot;from&quot;:&quot;agg&quot;,&quot;to&quot;:&quot;ch&quot;,&quot;label&quot;:&quot;Sink 写入&quot;},{&quot;from&quot;:&quot;ch&quot;,&quot;to&quot;:&quot;bi&quot;,&quot;label&quot;:&quot;查询&quot;}]">
       <svg class="flowd-svg" aria-hidden="true">
@@ -497,11 +716,13 @@ DataStream&lt;CitySales&gt; citySales = orders
 // ④ Sink：写 ClickHouse
 citySales.sinkTo(clickHouseSink);
 </code></pre></div>
-<div class="summary">
+<p>最后用一张「需求 → 算子」的表收尾。看到需求先定位算子，再想代码怎么写：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>你想做什么</th><th>优先考虑什么算子</th></tr></thead><tbody><tr><th>修改每条数据的格式</th><td data-label="优先考虑什么算子"><code>map</code></td></tr><tr><th>过滤掉不需要的数据</th><td data-label="优先考虑什么算子"><code>filter</code></td></tr><tr><th>一条记录拆成多条</th><td data-label="优先考虑什么算子"><code>flatMap</code></td></tr><tr><th>按用户 / 商品 / 城市分组</th><td data-label="优先考虑什么算子"><code>keyBy</code></td></tr><tr><th>累计金额、计数、最大值</th><td data-label="优先考虑什么算子"><code>keyBy</code> + <code>reduce</code> / <code>aggregate</code></td></tr><tr><th>合并 App 和 Web 两条同类型流</th><td data-label="优先考虑什么算子"><code>union</code></td></tr><tr><th>订单流关联用户流 / 商品流</th><td data-label="优先考虑什么算子"><code>join</code></td></tr><tr><th>超时提醒、去重、定时检查、复杂状态机</th><td data-label="优先考虑什么算子"><code>process</code></td></tr></tbody></table></div><div class="summary">
       <h3 id="一句话总结">一句话总结</h3>
       <p><code>Source</code> 把数据接进来，<code>Transformation</code> 按业务规则实时加工，<code>Sink</code> 把结果写给下游。
 九个算子只分五类，<mark class="mk-blue">而 <code>keyBy</code> 是唯一一个「不产出数据」的算子</mark> —— 它的作用是让后续计算按 Key 分开算。
-剩下两个难点，本质上都是<strong>时间</strong>：<code>join</code> 要处理「对面还没到」，<code>process</code> 要处理「等一会儿再回头看」。</p>
+剩下两个难点，本质上都是<strong>时间</strong>：<code>join</code> 要处理「对面还没到」，<code>process</code> 要处理「等一会儿再回头看」。
+至于为什么要有这么多算子 —— <mark class="mk-blue">算子既描述业务逻辑，也告诉 Flink 怎么并行、状态存在哪、能不能串起来跑</mark>。</p>
 
     </div><h2 id="自测">自测</h2>
 <div class="quiz"><details>
@@ -515,6 +736,20 @@ citySales.sinkTo(clickHouseSink);
         <div class="a"><p>因为 <code>keyBy</code> 把相同 Key 的数据<strong>路由到同一个并行实例</strong>，
 Flink 才能按 Key 保存状态：<code>u01</code> 的累计值存在 <code>u01</code> 名下，<code>u02</code> 的存在 <code>u02</code> 名下，互不干扰。
 没有 <code>keyBy</code>，就没有「按 Key 的状态」可言。</p>
+</div>
+      </details><details>
+        <summary>写下 <code>stream.map(...).filter(...).keyBy(...)</code> 这几行之后，Flink 立刻就开始处理 Kafka 数据了吗？</summary>
+        <div class="a"><p>没有。<mark class="mk-blue">这几行只是在「描述一张数据处理流程图」</mark>，
+告诉 Flink「这里要加一个 map 节点、那里要加一个 filter 节点」。
+真正按下启动键的是 <code>env.execute()</code> —— 到那一步 Flink 才提交任务、开始消费 Kafka。
+跟写 SQL 是一个道理：你写「我要怎么处理」，引擎决定「怎么执行」。</p>
+</div>
+      </details><details>
+        <summary>并行度是 3，<code>u01</code> 的两笔订单被分到了 Task 1 和 Task 2，能算出 <code>u01</code> 的累计消费吗？</summary>
+        <div class="a"><p>不能，而且不是精度问题，是<strong>根本算不出来</strong> ——
+<mark class="mk-blue">每个 Task 只看得见自己手上那几条</mark>，Task 1 以为 u01 累计 99，Task 2 以为 20。
+<code>keyBy(userId)</code> 做的就是把这些数据重新洗牌（shuffle / repartition），
+保证同一个 Key 的数据落到同一个 Task 上，累计值才能算对。</p>
 </div>
       </details><details>
         <summary>流里的 <code>join</code> 比数据库里的 <code>JOIN</code> 难在哪？</summary>

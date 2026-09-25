@@ -20,11 +20,11 @@
 | `` `文字` `` | 术语 / 标识符 | 等宽 |
 
 ```text
-AND / OR 被实现成 ==对 uid 做集合运算==，而不是 SQL 的 AND / OR。
+HTTP 缓存 ==默认只按 URL 区分==，不看请求头。
 
-!!忘了传 dialect 不会报错，会静默按 ByteHouse 生成 SQL。!!
+!!`Cache-Control: no-cache` 不是「不缓存」，是「每次都要去校验」。!!
 
-++新加一种数据库：实现两个接口，core 完全不用改。++
+++要彻底不存用 `no-store`；要存但每次校验用 `no-cache`。++
 ```
 
 > **一屏之内不要超过 3 个 `==`。** 到处都是重点等于没有重点。
@@ -277,11 +277,11 @@ edges:
 ```seq
 participants:
   - { id: c, label: 客户端, tone: blue }
-  - { id: g, label: 数据网关, tone: violet }
-  - { id: d, label: ByteHouse, tone: green }
+  - { id: g, label: API 网关, tone: violet }
+  - { id: d, label: 数据库, tone: green }
 messages:
-  - { from: c, to: g, label: "POST /query", kind: sync, note: 1 }
-  - { from: g, to: d, label: "SELECT uid FROM ...", kind: sync, note: 2 }
+  - { from: c, to: g, label: "POST /orders", kind: sync, note: 1 }
+  - { from: g, to: d, label: "SELECT * FROM orders", kind: sync, note: 2 }
   - { from: d, to: g, label: 结果集, kind: reply, note: 3 }
   - { from: g, to: c, label: "200 OK", kind: reply, note: 4 }
   - { from: g, to: g, label: 重试, kind: self }
@@ -364,21 +364,26 @@ text: |
 > 横向缩进 + 肘形连接线。任意深度都不会挤，比纵向树紧凑得多。
 
 ```tree
-- label: DB
-  sub: core/src/db.ts
+- label: src
   tone: violet
-  note: 唯一直接碰 knex 的地方
+  note: 源码根目录
   children:
-    - label: getInstance
-      sub: "name?: string"
-      note: 两种入口，共享同一个 Builder.prototype
-    - label: buildWhere
-      sub: "(builder, rules, logic)"
-      note: 递归展开表达式树
+    - label: api
+      note: 对外接口层
       children:
-        - { label: isCondition, note: 有 logic 字段就是子树 }
-        - { label: isRawExpr, note: "whereRaw 片段" }
-    - { label: formatField, note: 反引号包裹列名 }
+        - { label: routes.ts, note: 路由定义 }
+        - { label: middleware.ts, note: 鉴权 / 日志 / 限流 }
+    - label: core
+      sub: 不依赖框架
+      note: 业务逻辑
+      children:
+        - { label: order.ts, note: 下单主流程 }
+        - { label: pricing.ts, note: 计价规则 }
+    - label: infra
+      note: 外部依赖的适配
+      children:
+        - { label: db.ts, note: 连接池 + 查询封装 }
+        - { label: cache.ts, note: Redis 封装 }
 ```
 
 | 键 | 说明 |
@@ -397,7 +402,7 @@ text: |
 
 ---
 
-## 9. `spec` —— 拆解卡
+## 10. `spec` —— 拆解卡
 
 **什么时候用**：要把一个东西按固定维度拆开讲透。
 
@@ -405,23 +410,26 @@ text: |
 维度不固定，但**同一页里的几张卡要用同一套维度**，否则没法横向对比。
 
 ```spec
-title: knex
-subtitle: SQL 查询构造器 · 被调用 43 处
+title: 连接池
+subtitle: 数据库连接复用 · 被调用 43 处
 tone: violet
 rows:
   - k: 输入
     v: |
-      链式调用累积出来的查询状态：表名 + 筛选条件 + 选取列。
+      一次查询请求：需要一个连接来执行 SQL。
   - k: 输出
-    v: 一段**可直接执行的 SQL 字符串**。
+    v: 一条**已建立的连接**，用完必须还回去。
   - k: 怎么调用
     code: |
-      DB.getInstance().select('uid').rawQuery();
+      const conn = await pool.acquire();
+      try { await conn.query('select 1'); }
+      finally { pool.release(conn); }
   - k: 为什么这么设计
     v: |
-      **① 为什么要加 `rawQuery()`？**
+      **① 为什么不是每次新建连接？**
 
-      因为 knex 原生的取值方式返回值结构不同，而这个库对外只交付字符串。
+      建连接要 TCP 握手 + 认证，几十毫秒；查询本身可能只要 1 毫秒。
+      连接池把这部分开销摊掉了。
 ```
 
 | 键 | 说明 |
@@ -441,7 +449,7 @@ rows:
 
 ---
 
-## 10. `callout` — 提示 / 陷阱 / 引用
+## 11. `callout` — 提示 / 陷阱 / 引用
 
 ```callout
 tone: amber
@@ -458,7 +466,7 @@ text: |
 
 ---
 
-## 11. `checklist` — 正例 / 反例
+## 12. `checklist` — 正例 / 反例
 
 ```checklist
 tone: cross
@@ -471,7 +479,7 @@ items:
 
 ---
 
-## 12. `quiz` — 自测
+## 13. `quiz` — 自测
 
 **每篇必带。**
 
@@ -487,7 +495,7 @@ items:
 
 ---
 
-## 13. `demo` — 可交互模拟
+## 14. `demo` — 可交互模拟
 
 **只在「静态图讲不清」时用。** 需要两步：
 
@@ -598,7 +606,43 @@ config:
 
 ---
 
-## 14. `summary` / `raw`
+## 15. `arch` —— 内联复杂图
+
+**什么时候用**：图**复杂到我们的积木画不好**时 —— 8 个节点以上、有交叉边、
+标签容易重叠、需要嵌套边界框。这时去调 `archify` skill 生成，再用这个积木嵌进来。
+
+> 完整流程见 SKILL.md 的「复杂图：调用 archify skill」。
+
+```arch
+svg: core-package
+caption: packages/core 的组成与数据流
+```
+
+| 键 | 说明 |
+|---|---|
+| `svg` | **必填**。对应 `assets/arch/<名字>.svg`，由 `tools/archify.mjs` 生成 |
+| `caption` | 图注（走行内 Markdown） |
+
+**生成步骤**：
+
+```bash
+# 1. 写 archify 的 JSON spec 放 archify/ 目录
+# 2. 生成并抠图（会顺便加 --af- 变量前缀）
+node tools/archify.mjs archify/<名字>.json <名字>
+```
+
+**要点**：
+
+- **SVG 是预先抠好提交进仓库的**，构建时不调 archify ——
+  否则别人 clone 后没有 archify 就构建不了。
+- `tools/archify.mjs` 会给 archify 的 CSS 变量加 `--af-` 前缀。
+  ==archify 在 `:root` 定义了 32 个变量，名字和我们完全一样，不隔离会把整页变深色。==
+- 两边都用 `data-theme` 属性，所以**深浅色天然同步**，不用额外处理。
+- 找不到 SVG 时**会直接报错并告诉你怎么生成**，不会静默画空白。
+
+---
+
+## 16. `summary` / `raw`
 
 ```summary
 title: 一句话总结

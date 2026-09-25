@@ -698,7 +698,7 @@ caption: packages/core 的组成与数据流 —— 由 archify skill 生成
   tone: amber
   note: 所有数据库差异都收在这里
   children:
-    - { label: interface.ts, sub: "SqlDialect", note: "14 个方法的接口" }
+    - { label: interface.ts, sub: "SqlDialect", note: "17 个方法的接口" }
     - { label: bytehouse.ts, note: "111 行" }
     - { label: doris.ts, note: "139 行" }
 - label: 工具集
@@ -758,7 +758,7 @@ text: |
 ```cards
 cols: 2
 items:
-  - { title: interface.ts, desc: "**SqlDialect 接口**，14 个方法：类型转换、JSON 数组、时间范围、多条件选择、正则匹配…", tag: 59 行, tone: violet }
+  - { title: interface.ts, desc: "**SqlDialect 接口**，17 个方法：类型转换、JSON 数组、时间范围、多条件选择、正则匹配…", tag: 59 行, tone: violet }
   - { title: bytehouse.ts, desc: ByteHouse 实现（`UNIX_TIMESTAMP(...) * 1000`、`DS_DATETIME_ADD`、`match()` 这类专属函数）, tag: 111 行, tone: blue }
   - { title: doris.ts, desc: Doris 实现（与 ByteHouse 同名方法，内部写法不同）, tag: 139 行, tone: blue }
   - { title: where-sql.ts, desc: "从完整 SELECT 里把 **WHERE 之后**的部分抠出来。用于「只想要 where 片段」的场景", tag: 32 行, tone: muted }
@@ -1401,7 +1401,7 @@ items:
 first: 我想改…
 head: [去这个文件, 找什么]
 rows:
-  - 加一种数据库: ["core/src/dialect/interface.ts", "先实现 SqlDialect 全部 14 个方法"]
+  - 加一种数据库: ["core/src/dialect/interface.ts", "先实现 SqlDialect 全部 17 个方法"]
   - 同上（事件表定位）: ["crowd/src/dialect/interface.ts + bytehouse.ts / doris.ts", "再实现 getEventTable"]
   - 同上（挂上去）: ["crowd/src/context.ts", "在 _resolveDialect 的 switch 加一个 case"]
   - 加一种条件类型: ["crowd/src/define.ts", "Entrepots 枚举加值"]
@@ -1500,7 +1500,7 @@ text: |
 - q: 要加一种新的数据库支持，一共要改几个文件？
   a: |
     至少三个：
-    1. `core/src/dialect/` 加一个实现 `SqlDialect`（14 个方法）
+    1. `core/src/dialect/` 加一个实现 `SqlDialect`（17 个方法）
     2. `crowd/src/dialect/` 加一个实现 `GroupSqlDialect`（多一个 `getEventTable`）
     3. `crowd/src/context.ts` 的 `_resolveDialect` switch 加 case
     **core 的业务逻辑完全不用改** —— 这就是两个包拆开的价值。

@@ -40,6 +40,7 @@ const CONTAINERS = [
   '.archfig',     // arch（内联 archify 的图）
   '.spec',        // spec
   '.streamshape', // streamshape（raw 写的）
+  '.keyby-viz',   // keyby-viz（raw 写的）
   '.demo',        // demo
 ];
 
@@ -156,9 +157,22 @@ for (const file of files) {
   const m = dom.match(/<pre id="vc-result">([\s\S]*?)<\/pre>/);
   if (!m) { console.error(`  ? ${slug}  探针没回数据`); continue; }
 
-  const problems = JSON.parse(
-    m[1].replace(/&quot;/g, '"').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>'),
-  );
+  /* 探针把诊断塞在 <pre> 的 textContent 里，读回来得先反转义。
+     这一步必须包住：解析失败时要报出「哪一篇、内容长什么样」，
+     不能让 pre-push 钩子丢一个没有上下文的 SyntaxError 出来。 */
+  let problems;
+  try {
+    problems = JSON.parse(
+      m[1]
+        .replace(/&quot;/g, '"')
+        .replace(/&amp;/g, '&')
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>'),
+    );
+  } catch {
+    console.error(`  ? ${slug}  探针返回的内容不是合法 JSON：${m[1].slice(0, 120)}`);
+    continue;
+  }
 
   if (problems.length) {
     console.error(`  ✗ ${slug}  ${problems.length} 处`);
@@ -170,7 +184,7 @@ for (const file of files) {
   }
 }
 
-fs.existsSync(tmp) && fs.unlinkSync(tmp);
+if (fs.existsSync(tmp)) fs.unlinkSync(tmp);
 
 if (total) {
   console.error(`\n  ${total} 处布局问题。构建通过不等于画对了 —— 去修。`);

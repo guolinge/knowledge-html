@@ -466,7 +466,7 @@ cols: 3
 items:
   - { title: Expression 表达式树, desc: "Normal / RawValue / RawColumn / Raw 四种形态，可递归嵌套 Condition", tone: green }
   - { title: DB.buildWhere, desc: 把表达式树递归展开成 knex 的 andWhere / orWhere 调用, tone: green }
-  - { title: SqlDialect 接口, desc: 14 个方法，覆盖类型转换、JSON 数组、时间范围、多条件选择, tone: green }
+  - { title: SqlDialect 接口, desc: 17 个方法，覆盖类型转换、JSON 数组、时间范围、多条件选择, tone: green }
   - { title: UID 编解码, desc: "encodeUid / decodeUid 包成网关函数 UID_ENCODE / UID_DECODE", tone: green }
   - { title: treeMinimizer, desc: 递归压掉只有一个子节点的组合结构, tone: green }
   - { title: 时间表达式, desc: "getTimeRules / generateLatestDaysRules 等，把「最近 7 天」转成 SQL 条件", tone: green }
@@ -691,7 +691,7 @@ export interface GroupSqlDialect extends SqlDialect {
 }
 ```
 
-而 `SqlDialect` 本身有 14 个方法，全是**「同一种语义在不同库怎么写」**：
+而 `SqlDialect` 本身有 17 个方法，全是**「同一种语义在不同库怎么写」**：
 
 ```cards
 cols: 4

@@ -79,9 +79,64 @@ text: |
 这在 Flink 的术语里叫**有界流**；而 Kafka 那种永远不会有「最后一条」的叫**无界流** ——
 两者怎么区分、怎么分别处理，见 [Flink 的有界流与无界流](../flink-bounded-vs-unbounded/)。
 
-## 03 · Transformation：九个算子，其实是五类
+## 03 · 算子：写在代码里的一张流程图
 
-原文把九个算子平铺着讲了一遍。但它们不是并列的 —— 按「干什么活」分，只有五类：
+前面那个箭头图里的每一个处理站，就是一个**算子（Operator）**。
+
+```text
+订单1 → 订单2 → 订单3 → 订单4 → ...
+              ↓
+   [算子 A] 做一种处理
+              ↓
+   [算子 B] 做下一种处理
+              ↓
+          输出结果
+```
+
+但这里有一个**非常容易搞错**的地方。你写下这样一串链式调用：
+
+```java
+DataStream<UserAmount> result = orderStream
+    .map(json -> parseOrder(json))          // 算子 1：转格式
+    .filter(order -> order.getAmount() > 0) // 算子 2：过滤
+    .keyBy(order -> order.getUserId())      // 算子 3：按用户分组
+    .map(order -> new UserAmount(...));     // 算子 4：再转一次
+```
+
+看起来像在调四个普通 Java 方法。但 ==这几行代码不会立刻处理任何数据==。
+
+```flow
+grid: true
+nodes:
+  - { id: code, label: 你写的链式调用, sub: "map → filter → keyBy → map", row: 0, kind: backend, tone: blue }
+  - { id: graph, label: Flink 收集成一张执行图, sub: "Source → Map → Filter → KeyBy → Map → Sink", row: 1, kind: backend, tone: violet }
+  - { id: run, label: env.execute() 之后才真正跑, sub: "提交任务 · 开始消费 Kafka", row: 2, tone: green }
+edges:
+  - { from: code, to: graph, label: 只是描述 }
+  - { from: graph, to: run, label: 提交 }
+```
+
+````callout
+tone: violet
+icon: 🧩
+tinted: true
+text: |
+  所以 ==算子代码的含义不是「立刻执行这个函数」，而是「告诉 Flink 在这里加一个处理节点」==。
+  这跟写 SQL 是一个道理：
+
+  ```sql
+  SELECT city, sum(amount) FROM orders WHERE status = 'PAID' GROUP BY city;
+  ```
+
+  你写的是「我要怎么处理数据」，**怎么执行由引擎决定**。
+  `env.execute("realtime-order-job")` 才是按下启动键的那一刻。
+````
+
+## 04 · 九个算子，其实是五类
+
+!!先说清楚：这不是 Flink 官方的严格分类标准，而是一种「按解决什么问题来分」的功能分类。!!
+
+它的用处是：拿到一个需求时，先判断该用哪一类。
 
 ```cards
 cols: 3
@@ -89,7 +144,7 @@ items:
   - { title: 逐条处理, desc: map / filter / flatMap。每条数据独立处理，不看别人脸色, tag: 无状态, tone: blue }
   - { title: 分组, desc: keyBy。不加工数据，也不改变条数，只决定后续计算以什么为单位, tag: 不产出, tone: amber }
   - { title: 有状态聚合, desc: reduce / aggregate。跟在 keyBy 后面，每个 key 各存一份状态, tag: 需要状态, tone: green }
-  - { title: 多流合并, desc: union 只是合并不关联；join 才把两条流的数据拼起来, tag: 两条流, tone: violet }
+  - { title: 多流处理, desc: union 只是合并不关联；join 才把两条流的数据拼起来, tag: 两条流, tone: violet }
   - { title: 底层逃生口, desc: process。能读写状态、注册定时器、处理迟到数据, tag: 什么都能干, tone: red }
 ```
 
@@ -116,7 +171,7 @@ text: |
   所以 `keyBy` 单独用是看不出任何效果的 —— 它必须跟着 reduce / aggregate / window / process 才有意义。
 ```
 
-## 04 · 亲手跑一遍：同一批订单，过不同算子
+## 05 · 亲手跑一遍：同一批订单，过不同算子
 
 下面 6 条订单，点算子看产出。盯三件事：**输入栏哪几条被划掉了**、**输出栏多了还是少了几行**、**输出到底是一条条记录还是一堆桶**。
 
@@ -156,7 +211,7 @@ html: |-
 - **`flatMap` 让条数变多了**：6 条订单拆成 7 条商品行。而订单 `1006` 一个商品都没有 —— ==它一条也不产出==，这就是 `flatMap` 的「1 → 0」。
 - **`keyBy` 的输出不是列表，是三个桶**：6 条进、6 条出，**一条没多一条没少**，但数据被分成了 `u01 / u02 / u03` 三堆。这是全篇最该记住的一张图。
 
-### `keyBy` 到底做了什么
+## 06 · `keyBy`：唯一一个不产出数据的算子
 
 它同时做了三件事，缺一不可：
 
@@ -166,6 +221,83 @@ html: |-
 
 上面交互里点 `keyBy + sum`，你会看到 `u01` 那三笔订单各自吐出一行「当前累计」（99 → 89 → 109）。
 那不是「最后算出一个数」，而是**每来一条就更新一次**。
+
+### 为什么没有 `keyBy` 就会算错
+
+Flink 是分布式的，一个作业通常开多个并行任务。假设并行度是 3，订单是这样被分下去的：
+
+```raw
+<div class="keyby-viz">
+  <div class="kb-case tone-red">
+    <div class="kb-label">
+      <span class="tag tone-red">没 keyBy</span>
+      <b>同一个 u01 的两笔订单，散落在两个 Task 上</b>
+      <small>每个 Task 只看得见自己手上那几条 —— 谁都不知道 u01 总共花了多少</small>
+    </div>
+    <div class="kb-tasks">
+      <div class="kb-task tone-red">
+        <div class="kb-head">Task 1</div>
+        <div class="kb-rec">u01 · 99 元</div>
+        <div class="kb-out wrong">以为 u01 累计 = 99</div>
+      </div>
+      <div class="kb-task tone-red">
+        <div class="kb-head">Task 2</div>
+        <div class="kb-rec">u01 · 20 元</div>
+        <div class="kb-out wrong">以为 u01 累计 = 20</div>
+      </div>
+      <div class="kb-task tone-muted">
+        <div class="kb-head">Task 3</div>
+        <div class="kb-rec">u02 · 50 元</div>
+        <div class="kb-out">u02 累计 = 50</div>
+      </div>
+    </div>
+  </div>
+  <div class="kb-shuffle">keyBy(userId) 重新洗牌</div>
+  <div class="kb-case tone-green">
+    <div class="kb-label">
+      <span class="tag tone-green">keyBy 之后</span>
+      <b>同一个 Key 全在同一个 Task</b>
+      <small>累计值就在自己手里，不用去问别人</small>
+    </div>
+    <div class="kb-tasks">
+      <div class="kb-task tone-green">
+        <div class="kb-head">Task 1 <small>负责 u01</small></div>
+        <div class="kb-rec">u01 · 99 元</div>
+        <div class="kb-rec">u01 · 20 元</div>
+        <div class="kb-out right">u01 累计 = 119</div>
+      </div>
+      <div class="kb-task tone-green">
+        <div class="kb-head">Task 2 <small>负责 u02</small></div>
+        <div class="kb-rec">u02 · 50 元</div>
+        <div class="kb-out right">u02 累计 = 50</div>
+      </div>
+    </div>
+  </div>
+</div>
+```
+
+==同一个 `u01` 的两笔订单落在两个不同的 Task 上，那两个 Task 谁都算不出 `u01` 的真实累计。==
+这不是精度问题，是**根本算不出来** —— 每个 Task 只看得到自己手上那几条。
+
+`keyBy(userId)` 做的事情，就是把这些数据**重新洗一遍牌**：
+
+```text
+keyBy = 指定分组 Key  +  让相同 Key 的数据汇聚到同一处
+```
+
+这个过程叫 **shuffle（洗牌）/ repartition（重分区）** —— 数据要跨网络搬到别的 Task 上，是有成本的。
+
+```callout
+tone: amber
+icon: 🔑
+text: |
+  所以 `keyBy` 在 Flink 里是个**分界线**：
+  `keyBy` 之前，数据可以在 Task 之间随便分配；
+  `keyBy` 之后，==同一 Key 必须到同一个 Task==。
+
+  这也是 Flink 能做对「按用户累计」的前提，
+  也是它能做对「按用户去重」「按用户超时提醒」的前提。
+```
 
 ### `reduce` 和 `aggregate` 差在哪
 
@@ -198,7 +330,7 @@ text: |
   这用 `reduce` 表达起来就很别扭。
 ```
 
-## 05 · 两个真正难的地方
+## 07 · 两个真正难的地方
 
 ### 流式 `join`：两条数据不一定同时到
 
@@ -268,7 +400,7 @@ items:
   - 需求要输出不止一条流（主流 + 告警流）—— 这是侧输出，只有 process 有
 ```
 
-## 06 · Sink：结果写到哪
+## 08 · Sink：结果写到哪
 
 ```cards
 cols: 3
@@ -290,7 +422,123 @@ text: |
   要长期存明细 → 数据湖；要给别人继续加工 → 回到 Kafka。
 ```
 
-## 07 · 连起来：一个电商实时大盘
+## 09 · 为什么要设计这么多算子
+
+核心原因是一句话：**流式计算不是简单地「逐条执行 Java 代码」。**
+
+Flink 得同时应付：数据源源不断地来、数据量很大、任务要并行、同一个用户的数据得正确汇聚、
+任务挂了不能算错或丢数据、状态可能很大、数据可能乱序迟到、计算逻辑还得可组合可维护。
+
+```cards
+cols: 3
+items:
+  - { title: 拆成可组合的小步骤, desc: 每个算子只管一件事，像 Unix 管道一样拼起来, tag: 原因一, tone: blue }
+  - { title: 告诉 Flink 怎么并行, desc: 不同算子的并行方式不同，keyBy 就是在说「这里必须按 Key 重分区」, tag: 原因二, tone: amber }
+  - { title: 让状态可管理、可恢复, desc: 状态交给 Flink 托管，才能做 Checkpoint 和故障恢复, tag: 原因三, tone: green }
+  - { title: 让 Flink 能做优化, desc: 轻量的逐条算子可以被串成一个 Task，省掉网络传输, tag: 原因四, tone: violet }
+  - { title: 统一批流, desc: 有界流和无界流用同一套「数据流 + 算子」模型处理, tag: 原因五, tone: muted }
+```
+
+### 原因一：把大函数拆成可组合的小步骤
+
+不用算子的话，很容易写成一个巨大的处理函数：
+
+```java
+handleEverything(message) {
+    // 解析 JSON
+    // 校验字段
+    // 过滤异常订单
+    // 按用户保存金额
+    // 判断是否超时
+    // 关联用户资料
+    // 写 ClickHouse
+}
+```
+
+问题很现实：逻辑混在一起，难测试、难复用、难定位问题、也难做并行优化。
+
+用算子之后，每一段的职责就清楚了：
+
+```text
+map       ：负责解析
+filter    ：负责清洗
+keyBy     ：负责分组
+aggregate ：负责统计
+process   ：负责复杂规则
+sink      ：负责写结果
+```
+
+这跟 Unix 管道是同一个思路：
+
+```bash
+cat access.log | grep ERROR | awk '{...}' | sort | uniq -c
+```
+
+每一步只做好一件事，再组合成完整流程。
+
+### 原因二：让 Flink 知道该怎么并行
+
+这一条上一节已经讲透了：`map` / `filter` 里每条数据互不依赖，分到哪个 Task 都行；
+而 `keyBy + aggregate` 必须保证同一个 Key 到同一个 Task，否则累计结果就是错的。
+
+==所以算子不只描述业务逻辑，它同时也在告诉 Flink 「这段该怎么并行」。==
+
+### 原因三：让状态可管理、可恢复
+
+如果你自己用 Java 的全局变量累计金额：
+
+```java
+Map<String, Double> userTotal = new HashMap<>();
+```
+
+程序一重启，内存里的数据就没了：`u01` 原本累计 169 元，宕机重启后变成 0。
+
+而 `keyBy` + 有状态算子会把状态交给 Flink 托管，Flink 就能通过 **Checkpoint（检查点）** 定期保存状态快照：
+
+```text
+定期把状态快照写下来
+        ↓
+      宕机重启
+        ↓
+从最近一次 Checkpoint 恢复状态  +  从 Kafka 对应位点重新消费
+        ↓
+      接着往下算
+```
+
+这样才能做到接近 **Exactly-Once（精确一次）** —— 尽量不丢数据、不重复统计。
+
+!!状态必须是「Flink 托管的」，自己塞在一个 `static` 变量里的东西，Checkpoint 管不到，也恢复不了。!!
+
+### 原因四：让 Flink 有机会做性能优化
+
+当你连着写 `map → filter → map`，这些通常是轻量、逐条、无状态的操作。
+Flink 可以把它们**串成一个 Task（算子链 / Operator Chaining）**，省掉中间的网络传输和序列化：
+
+```text
+代码里写的：
+Source → map → filter → map → keyBy → aggregate
+
+运行时实际跑的：
+Task 1: Source + map + filter + map      ← 串在一起，中间不落网络
+        ↓ shuffle（keyBy 必须重分区）
+Task 2: aggregate
+```
+
+==算子把语义表达清楚了，Flink 才有机会自动优化执行计划。==
+
+### 原因五：一套模型同时处理批和流
+
+Flink 既要处理 Kafka 那种持续到来的无界流，也要处理 CSV / HDFS 上的历史文件（有界流）。
+而两者的处理过程往往长得一样：
+
+```text
+读取 → map → filter → keyBy → 聚合 → 输出
+```
+
+所以 Flink 用统一的「数据流 + 算子」模型处理它们，区别只在**数据会不会结束** ——
+见 [Flink 的有界流与无界流](../flink-bounded-vs-unbounded/)。
+
+## 10 · 连起来：一个电商实时大盘
 
 需求：大盘每分钟展示订单数量、GMV、各城市销售额、销量 Top 10。
 
@@ -340,12 +588,37 @@ DataStream<CitySales> citySales = orders
 citySales.sinkTo(clickHouseSink);
 ```
 
+最后用一张「需求 → 算子」的表收尾。看到需求先定位算子，再想代码怎么写：
+
+```compare
+first: 你想做什么
+head: [优先考虑什么算子]
+rows:
+  - 修改每条数据的格式:
+      - "`map`"
+  - 过滤掉不需要的数据:
+      - "`filter`"
+  - 一条记录拆成多条:
+      - "`flatMap`"
+  - 按用户 / 商品 / 城市分组:
+      - "`keyBy`"
+  - 累计金额、计数、最大值:
+      - "`keyBy` + `reduce` / `aggregate`"
+  - 合并 App 和 Web 两条同类型流:
+      - "`union`"
+  - 订单流关联用户流 / 商品流:
+      - "`join`"
+  - 超时提醒、去重、定时检查、复杂状态机:
+      - "`process`"
+```
+
 ```summary
 title: 一句话总结
 text: |
   `Source` 把数据接进来，`Transformation` 按业务规则实时加工，`Sink` 把结果写给下游。
   九个算子只分五类，==而 `keyBy` 是唯一一个「不产出数据」的算子== —— 它的作用是让后续计算按 Key 分开算。
   剩下两个难点，本质上都是**时间**：`join` 要处理「对面还没到」，`process` 要处理「等一会儿再回头看」。
+  至于为什么要有这么多算子 —— ==算子既描述业务逻辑，也告诉 Flink 怎么并行、状态存在哪、能不能串起来跑==。
 ```
 
 ## 自测
@@ -361,6 +634,18 @@ text: |
     因为 `keyBy` 把相同 Key 的数据**路由到同一个并行实例**，
     Flink 才能按 Key 保存状态：`u01` 的累计值存在 `u01` 名下，`u02` 的存在 `u02` 名下，互不干扰。
     没有 `keyBy`，就没有「按 Key 的状态」可言。
+- q: 写下 `stream.map(...).filter(...).keyBy(...)` 这几行之后，Flink 立刻就开始处理 Kafka 数据了吗？
+  a: |
+    没有。==这几行只是在「描述一张数据处理流程图」==，
+    告诉 Flink「这里要加一个 map 节点、那里要加一个 filter 节点」。
+    真正按下启动键的是 `env.execute()` —— 到那一步 Flink 才提交任务、开始消费 Kafka。
+    跟写 SQL 是一个道理：你写「我要怎么处理」，引擎决定「怎么执行」。
+- q: 并行度是 3，`u01` 的两笔订单被分到了 Task 1 和 Task 2，能算出 `u01` 的累计消费吗？
+  a: |
+    不能，而且不是精度问题，是**根本算不出来** ——
+    ==每个 Task 只看得见自己手上那几条==，Task 1 以为 u01 累计 99，Task 2 以为 20。
+    `keyBy(userId)` 做的就是把这些数据重新洗牌（shuffle / repartition），
+    保证同一个 Key 的数据落到同一个 Task 上，累计值才能算对。
 - q: 流里的 `join` 比数据库里的 `JOIN` 难在哪？
   a: |
     数据库里两张表都是完整的，查询那一刻就配上了。
