@@ -41,6 +41,7 @@ const CONTAINERS = [
   '.spec',        // spec
   '.streamshape', // streamshape（raw 写的）
   '.keyby-viz',   // keyby-viz（raw 写的）
+  '.flarch',      // flarch（raw 写的）
   '.demo',        // demo
 ];
 

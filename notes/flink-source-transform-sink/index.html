@@ -4,7 +4,7 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Flink 的 Source / Transformation / Sink：一条数据加工流水线</title>
-<meta name="description" content="九个算子不是平铺的，它们只分五类；而 keyBy 是唯一一个「不产出数据」的算子。用同一批订单过一遍，看清每个算子到底做了什么。" />
+<meta name="description" content="九个算子不是平铺的，它们只分五类；keyBy 是唯一一个「不产出数据」的算子；而 Operator / Subtask / Task / TaskManager / Slot 这五个词各有各的位置。用同一批订单过一遍，看清每一层到底在做什么。" />
 <link rel="stylesheet" href="../../assets/theme.css" />
   <link rel="stylesheet" href="../../assets/blocks.css" />
   <link rel="stylesheet" href="../../assets/archify-embed.css" />
@@ -39,6 +39,9 @@
       <a href="#亲手跑一遍同一批订单过不同算子">亲手跑一遍：同一批订单，过不同算子</a>
       <a href="#keyby唯一一个不产出数据的算子">keyBy：唯一一个不产出数据的算子</a>
       <a href="#为什么没有-keyby-就会算错" class="sub">为什么没有 keyBy 就会算错</a>
+      <a href="#keyby-怎么决定去哪一个哈希函数" class="sub">keyBy 怎么决定「去哪」：一个哈希函数</a>
+      <a href="#同一个-key-到同一个-task这句话不够准确" class="sub">「同一个 Key 到同一个 Task」这句话不够准确</a>
+      <a href="#并行度-2-时整条链路长什么样" class="sub">并行度 = 2 时，整条链路长什么样</a>
       <a href="#reduce-和-aggregate-差在哪" class="sub">reduce 和 aggregate 差在哪</a>
       <a href="#两个真正难的地方">两个真正难的地方</a>
       <a href="#流式-join两条数据不一定同时到" class="sub">流式 join：两条数据不一定同时到</a>
@@ -59,7 +62,7 @@
     <div class="hero">
       <span class="eyebrow">● 流处理 · Flink 作业结构</span>
       <h1>Flink 的 Source / Transformation / Sink：一条数据加工流水线</h1>
-      <p class="lede">九个算子不是平铺的，它们只分五类；而 keyBy 是唯一一个「不产出数据」的算子。用同一批订单过一遍，看清每个算子到底做了什么。</p>
+      <p class="lede">九个算子不是平铺的，它们只分五类；keyBy 是唯一一个「不产出数据」的算子；而 Operator / Subtask / Task / TaskManager / Slot 这五个词各有各的位置。用同一批订单过一遍，看清每一层到底在做什么。</p>
     </div>
 
     <div class="draft-banner">
@@ -67,11 +70,12 @@
     <span>本页状态为 <b>draft</b>：内容尚未人工核对，引用前请自行验证。</span>
   </div>
 
-    <div class="provenance"><span><b>来源</b> 用户粘贴的《Flink Source / Transformation / Sink》讲解原文（AI 中台问答）</span><span><b>生成</b> 2026-09-26</span><span><b>模型</b> deepseek-v4.1-flash</span></div>
-    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">Flink</span> <span class="tag tone-muted">Source</span> <span class="tag tone-muted">Transformation</span> <span class="tag tone-muted">Sink</span> <span class="tag tone-muted">算子</span></span></div>
+    <div class="provenance"><span><b>来源</b> 用户粘贴的《Flink Source / Transformation / Sink》讲解原文（AI 中台问答） · 用户粘贴的《Flink 分布式 / Task / Slot》讲解原文（AI 中台问答）</span><span><b>生成</b> 2026-09-26</span><span><b>模型</b> deepseek-v4.1-flash</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">Flink</span> <span class="tag tone-muted">Source</span> <span class="tag tone-muted">Transformation</span> <span class="tag tone-muted">Sink</span> <span class="tag tone-muted">算子</span> <span class="tag tone-muted">并行度</span></span></div>
 
 <blockquote>
-<p>九个 Transformation 算子看起来是平铺的，其实只分五类；而 <mark class="mk-blue"><code>keyBy</code> 根本不产出数据</mark> —— 它只决定后续计算「以什么为单位」。这两条想通了，整条流水线就顺了。</p>
+<p>九个 Transformation 算子看起来是平铺的，其实只分五类；而 <mark class="mk-blue"><code>keyBy</code> 根本不产出数据</mark> —— 它只决定后续计算「以什么为单位」。
+再往上走一层，<code>Operator / Subtask / Task / TaskManager / Slot</code> 这五个词也各有各的位置。这几条想通了，整条流水线就顺了。</p>
 </blockquote>
 <h2 id="一条流水线三段"><span class="num">01</span>一条流水线，三段</h2>
 <p>Flink 作业的形状很像一座工厂：</p>
@@ -533,11 +537,74 @@ Task 2 = sum
       <span class="ic">🔑</span>
       <div><p>所以 <code>keyBy</code> 在 Flink 里是个<strong>分界线</strong>：
 <code>keyBy</code> 之前，数据可以在 Task 之间随便分配；
-<code>keyBy</code> 之后，<mark class="mk-blue">同一 Key 必须到同一个 Task</mark>。</p>
+<code>keyBy</code> 之后，<mark class="mk-blue">同一 Key 必须汇聚到同一个下游实例</mark>。</p>
 <p>这也是 Flink 能做对「按用户累计」的前提，
 也是它能做对「按用户去重」「按用户超时提醒」的前提。</p>
 </div>
-    </div><h3 id="reduce-和-aggregate-差在哪"><code>reduce</code> 和 <code>aggregate</code> 差在哪</h3>
+    </div><h3 id="keyby-怎么决定去哪一个哈希函数"><code>keyBy</code> 怎么决定「去哪」：一个哈希函数</h3>
+<p>规则简单到一行：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">hash(key) % 下游并行度  →  决定这条记录发给哪个下游 Subtask
+</code></pre></div>
+<p>下游并行度是 3 的时候，三个用户可能这样分：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">u01 → Aggregate Subtask 0
+u02 → Aggregate Subtask 2
+u03 → Aggregate Subtask 1
+</code></pre></div>
+<p>于是所有 <code>u01</code> 的订单都去 Subtask 0，它手里的累计值就能一路算对：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">Aggregate Subtask 0：
+u01: 99 → 119 → 149
+</code></pre></div>
+<p><mark class="mk-blue">这就是 Keyed State（按 Key 存储的状态）能工作的基础</mark> —— 不是 Flink 记住了 u01，
+而是<strong>哈希函数保证 u01 每次都落到同一个地方</strong>，所以那个地方攒的状态就是 u01 的。</p>
+<h3 id="同一个-key-到同一个-task这句话不够准确">「同一个 Key 到同一个 Task」这句话不够准确</h3>
+<p>前面为了好理解写的是「同一个 Key 到同一个 Task」，但严谨一点应该说：</p>
+<blockquote>
+<p>在<strong>同一次作业运行、同一个 <code>keyBy</code> 之后</strong>，相同 Key 的记录会稳定路由到同一个
+<strong>下游 Keyed Operator Subtask</strong>，而这个 Subtask 通常包含在某个实际执行的 Task 里。</p>
+</blockquote>
+<p>三个原因：</p>
+<ol>
+<li><strong>一个 Task 里可能链了多个算子</strong> —— Task 是执行单元，不是「Key 的归属单位」；</li>
+<li><strong>扩缩容、故障恢复后，Key 到并行实例的具体分配可能变</strong> —— 并行度从 3 改成 4，哈希取模的结果就全变了；</li>
+<li><strong>但 Flink 会处理状态重分配</strong>，保证恢复后计算仍然正确。</li>
+</ol>
+<p>所以正确的理解不是：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">u01 永远固定在某一台机器、某个 Task 上
+</code></pre></div>
+<p>而是：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">在当前运行拓扑中，同一个 Key 的数据一定汇聚到同一个负责该 Key 的下游实例，
+因此那个实例可以放心地维护这个 Key 的状态。
+</code></pre></div>
+<h3 id="并行度-2-时整条链路长什么样">并行度 = 2 时，整条链路长什么样</h3>
+<p>把前面几节的东西合起来看一遍：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-java">orders
+    .map(json -&gt; parseOrder(json))
+    .filter(order -&gt; order.getAmount() &gt; 0)
+    .keyBy(order -&gt; order.getUserId())
+    .sum(&quot;amount&quot;)
+    .sinkTo(clickHouseSink);
+</code></pre></div>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">上游 Task 0：Source Subtask 0 + Map Subtask 0 + Filter Subtask 0
+上游 Task 1：Source Subtask 1 + Map Subtask 1 + Filter Subtask 1
+                        │
+                        │  keyBy(userId) —— 网络 Shuffle
+                        ▼
+        ┌───────────────┴───────────────┐
+        ▼                               ▼
+下游 Task 0：Sum Subtask 0        下游 Task 1：Sum Subtask 1
+负责 u01、u03、u09 …             负责 u02、u04、u08 …
+        │                               │
+        └───────────────┬───────────────┘
+                        ▼
+                   Sink：把每个用户的统计结果写出
+</code></pre></div>
+<p>拆开看每一段在干嘛：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">Map / Filter ：每条数据可独立处理，所以很容易并行
+keyBy        ：按 userId 重分区（跨网络）
+Sum          ：按用户保存累计金额状态（Keyed State）
+Sink         ：把每个用户的统计结果写出去
+</code></pre></div>
+<h3 id="reduce-和-aggregate-差在哪"><code>reduce</code> 和 <code>aggregate</code> 差在哪</h3>
 <p>两个都是「同一个 Key 的多条数据不断合并成一个结果」，区别在<strong>输入、状态、输出是不是同一个类型</strong>：</p>
 <div class="compare-wrap"><table class="compare"><thead><tr><th>维度</th><th>reduce</th><th>aggregate</th></tr></thead><tbody><tr><th>输入 / 输出类型</th><td data-label="reduce">必须同类型（进来 Order，出去还得是 Order）</td><td data-label="aggregate">可以不同（进来 Order，出去 UserTotal）</td></tr><tr><th>中间状态</th><td data-label="reduce">就是上一条结果本身</td><td data-label="aggregate">自己定义累加器对象，想放几个字段放几个</td></tr><tr><th>适合</th><td data-label="reduce">简单的「两条同类型数据合并」，比如求和、取最大值</td><td data-label="aggregate">复杂统计，比如同时算总额 / 笔数 / 均值 / 最大值</td></tr><tr><th>例子</th><td data-label="reduce">keyBy(uid).sum(amount)</td><td data-label="aggregate">keyBy(uid).aggregate(new CitySalesAggregate())</td></tr></tbody></table></div><div class="callout tone-green">
       <span class="ic">✅</span>
@@ -545,7 +612,7 @@ Task 2 = sum
 比如「总额 / 笔数 / 均值 / 最大值」四个指标，中间要同时维护四个数，最终只输出一个对象 ——
 这用 <code>reduce</code> 表达起来就很别扭。</p>
 </div>
-    </div><h2 id="两个真正难的地方"><span class="num">07</span>两个真正难的地方</h2>
+    </div><h2 id="两个真正难的地方"><span class="num">08</span>两个真正难的地方</h2>
 <h3 id="流式-join两条数据不一定同时到">流式 <code>join</code>：两条数据不一定同时到</h3>
 <p><code>join</code> 就是把数据库里那套 <code>JOIN</code> 思想搬到流上。但搬过去之后，最大的变化是<strong>时间</strong>：</p>
 <div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">10:00:01  订单先到    order_id=1001, user_id=u01, amount=99
@@ -603,7 +670,7 @@ Task 2 = sum
             </div></div></div>
       
     </div><p>判断该不该用 <code>process</code>，看需求里有没有这两个信号：</p>
-<ul class="check warn"><li>需求里出现「等 N 分钟 / 等到某个时刻」—— 这是定时器，前面所有算子都没有</li><li>需求里出现「之前发生过什么」—— 这是状态，只有 reduce / aggregate / process 有</li><li>需求要输出不止一条流（主流 + 告警流）—— 这是侧输出，只有 process 有</li></ul><h2 id="sink结果写到哪"><span class="num">08</span>Sink：结果写到哪</h2>
+<ul class="check warn"><li>需求里出现「等 N 分钟 / 等到某个时刻」—— 这是定时器，前面所有算子都没有</li><li>需求里出现「之前发生过什么」—— 这是状态，只有 reduce / aggregate / process 有</li><li>需求要输出不止一条流（主流 + 告警流）—— 这是侧输出，只有 process 有</li></ul><h2 id="sink结果写到哪"><span class="num">09</span>Sink：结果写到哪</h2>
 <div class="cards" data-cols="3"><div class="ccard tone-blue">
           <span class="tag tone-blue">继续流转</span>
           <h4>Kafka</h4>
@@ -640,7 +707,7 @@ Task 2 = sum
 下游要毫秒级点查 → Redis；要 SQL 分析 → ClickHouse；要全文检索 → ES；
 要长期存明细 → 数据湖；要给别人继续加工 → 回到 Kafka。</p>
 </div>
-    </div><h2 id="为什么要设计这么多算子"><span class="num">09</span>为什么要设计这么多算子</h2>
+    </div><h2 id="为什么要设计这么多算子"><span class="num">10</span>为什么要设计这么多算子</h2>
 <p>核心原因是一句话：<strong>流式计算不是简单地「逐条执行 Java 代码」。</strong></p>
 <p>Flink 得同时应付：数据源源不断地来、数据量很大、任务要并行、同一个用户的数据得正确汇聚、
 任务挂了不能算错或丢数据、状态可能很大、数据可能乱序迟到、计算逻辑还得可组合可维护。</p>
@@ -715,17 +782,10 @@ sink      ：负责写结果
 <p>这样才能做到接近 <strong>Exactly-Once（精确一次）</strong> —— 尽量不丢数据、不重复统计。</p>
 <p><mark class="mk-amber">状态必须是「Flink 托管的」，自己塞在一个 <code>static</code> 变量里的东西，Checkpoint 管不到，也恢复不了。</mark></p>
 <h3 id="原因四让-flink-有机会做性能优化">原因四：让 Flink 有机会做性能优化</h3>
-<p>当你连着写 <code>map → filter → map</code>，这些通常是轻量、逐条、无状态的操作。
-Flink 可以把它们<strong>串成一个 Task（算子链 / Operator Chaining）</strong>，省掉中间的网络传输和序列化：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">代码里写的：
-Source → map → filter → map → keyBy → aggregate
-
-运行时实际跑的：
-Task 1: Source + map + filter + map      ← 串在一起，中间不落网络
-        ↓ shuffle（keyBy 必须重分区）
-Task 2: aggregate
-</code></pre></div>
+<p>这一条前面已经见过了：<code>map → filter → map</code> 这种轻量、逐条、无状态的算子，
+会被 Flink 串成一个 Task（算子链），省掉中间的网络传输和序列化。</p>
 <p><mark class="mk-blue">算子把语义表达清楚了，Flink 才有机会自动优化执行计划。</mark></p>
+<p>如果所有逻辑都写在一个大函数里，引擎能做的事就只剩「原样执行」。</p>
 <h3 id="原因五一套模型同时处理批和流">原因五：一套模型同时处理批和流</h3>
 <p>Flink 既要处理 Kafka 那种持续到来的无界流，也要处理 CSV / HDFS 上的历史文件（有界流）。
 而两者的处理过程往往长得一样：</p>
@@ -733,7 +793,7 @@ Task 2: aggregate
 </code></pre></div>
 <p>所以 Flink 用统一的「数据流 + 算子」模型处理它们，区别只在<strong>数据会不会结束</strong> ——
 见 <a href="../flink-bounded-vs-unbounded/">Flink 的有界流与无界流</a>。</p>
-<h2 id="连起来一个电商实时大盘"><span class="num">10</span>连起来：一个电商实时大盘</h2>
+<h2 id="连起来一个电商实时大盘"><span class="num">11</span>连起来：一个电商实时大盘</h2>
 <p>需求：大盘每分钟展示订单数量、GMV、各城市销售额、销量 Top 10。</p>
 <div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;svc&quot;,&quot;to&quot;:&quot;mq&quot;,&quot;label&quot;:&quot;写消息&quot;},{&quot;from&quot;:&quot;mq&quot;,&quot;to&quot;:&quot;clean&quot;,&quot;label&quot;:&quot;Source 消费&quot;},{&quot;from&quot;:&quot;clean&quot;,&quot;to&quot;:&quot;agg&quot;,&quot;label&quot;:&quot;清洗后&quot;},{&quot;from&quot;:&quot;agg&quot;,&quot;to&quot;:&quot;ch&quot;,&quot;label&quot;:&quot;Sink 写入&quot;},{&quot;from&quot;:&quot;ch&quot;,&quot;to&quot;:&quot;bi&quot;,&quot;label&quot;:&quot;查询&quot;}]">
       <svg class="flowd-svg" aria-hidden="true">
@@ -845,6 +905,29 @@ Flink 才能按 Key 保存状态：<code>u01</code> 的累计值存在 <code>u01
 <mark class="mk-blue">每个 Task 只看得见自己手上那几条</mark>，Task 1 以为 u01 累计 99，Task 2 以为 20。
 <code>keyBy(userId)</code> 做的就是把这些数据重新洗牌（shuffle / repartition），
 保证同一个 Key 的数据落到同一个 Task 上，累计值才能算对。</p>
+</div>
+      </details><details>
+        <summary><code>Operator</code>、<code>Subtask</code>、<code>Task</code>、<code>TaskManager</code>、<code>Slot</code> 这五个词，能按粒度从大到小排一遍吗？</summary>
+        <div class="a"><p><mark class="mk-blue"><code>TaskManager</code> ⊃ <code>Slot</code> ⊃ <code>Task</code> ⊃ <code>Subtask</code> ⊃ <code>Operator</code></mark>。
+TaskManager 是干活的进程（JVM），它划出一份份 Slot 作为资源配额；
+Slot 里跑 Task，而 Task 常常是<strong>一串链起来的算子</strong>；
+链上的每一个算子，各自又有自己的并行副本，就是 Subtask。
+最容易混的是 Task 和 TaskManager —— <strong>Task 是工作单元，TaskManager 是进程</strong>。</p>
+</div>
+      </details><details>
+        <summary>「同一个 Key 的数据一定到同一个 Task 上」，这句话严谨吗？</summary>
+        <div class="a"><p>作为入门理解可以，但严谨说法是「<strong>汇聚到同一个下游 Keyed Operator Subtask</strong>」。
+三个原因：① 一个 Task 里可能链了多个算子，Task 不是「Key 的归属单位」；
+② 扩缩容或故障恢复后，Key 到并行实例的分配可能变（并行度从 3 改成 4，哈希取模结果就全变了）；
+③ 但 Flink 会处理状态重分配，保证恢复后算得对。
+所以不是「u01 永远固定在某个 Task」，而是「当前拓扑下 u01 总是去同一个地方」。</p>
+</div>
+      </details><details>
+        <summary><code>keyBy</code> 凭什么能把同一个 Key 的数据聚到一起？</summary>
+        <div class="a"><p>一个哈希函数：<mark class="mk-blue"><code>hash(key) % 下游并行度</code></mark>。
+并行度是 3 时，<code>u01</code> 可能恒等于 <code>0</code>，于是它的每一笔订单都去 Aggregate Subtask 0。
+这不是 Flink「记住了 u01」，而是<strong>哈希函数保证 u01 每次都落到同一个地方</strong> ——
+所以那个地方攒的状态就是 u01 的。这就是 Keyed State 能工作的基础。</p>
 </div>
       </details><details>
         <summary>流里的 <code>join</code> 比数据库里的 <code>JOIN</code> 难在哪？</summary>

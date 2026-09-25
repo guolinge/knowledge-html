@@ -1,4 +1,5 @@
-> 九个 Transformation 算子看起来是平铺的，其实只分五类；而 ==`keyBy` 根本不产出数据== —— 它只决定后续计算「以什么为单位」。这两条想通了，整条流水线就顺了。
+> 九个 Transformation 算子看起来是平铺的，其实只分五类；而 ==`keyBy` 根本不产出数据== —— 它只决定后续计算「以什么为单位」。
+> 再往上走一层，`Operator / Subtask / Task / TaskManager / Slot` 这五个词也各有各的位置。这几条想通了，整条流水线就顺了。
 
 ## 01 · 一条流水线，三段
 
@@ -436,10 +437,100 @@ icon: 🔑
 text: |
   所以 `keyBy` 在 Flink 里是个**分界线**：
   `keyBy` 之前，数据可以在 Task 之间随便分配；
-  `keyBy` 之后，==同一 Key 必须到同一个 Task==。
+  `keyBy` 之后，==同一 Key 必须汇聚到同一个下游实例==。
 
   这也是 Flink 能做对「按用户累计」的前提，
   也是它能做对「按用户去重」「按用户超时提醒」的前提。
+```
+
+### `keyBy` 怎么决定「去哪」：一个哈希函数
+
+规则简单到一行：
+
+```text
+hash(key) % 下游并行度  →  决定这条记录发给哪个下游 Subtask
+```
+
+下游并行度是 3 的时候，三个用户可能这样分：
+
+```text
+u01 → Aggregate Subtask 0
+u02 → Aggregate Subtask 2
+u03 → Aggregate Subtask 1
+```
+
+于是所有 `u01` 的订单都去 Subtask 0，它手里的累计值就能一路算对：
+
+```text
+Aggregate Subtask 0：
+u01: 99 → 119 → 149
+```
+
+==这就是 Keyed State（按 Key 存储的状态）能工作的基础== —— 不是 Flink 记住了 u01，
+而是**哈希函数保证 u01 每次都落到同一个地方**，所以那个地方攒的状态就是 u01 的。
+
+### 「同一个 Key 到同一个 Task」这句话不够准确
+
+前面为了好理解写的是「同一个 Key 到同一个 Task」，但严谨一点应该说：
+
+> 在**同一次作业运行、同一个 `keyBy` 之后**，相同 Key 的记录会稳定路由到同一个
+> **下游 Keyed Operator Subtask**，而这个 Subtask 通常包含在某个实际执行的 Task 里。
+
+三个原因：
+
+1. **一个 Task 里可能链了多个算子** —— Task 是执行单元，不是「Key 的归属单位」；
+2. **扩缩容、故障恢复后，Key 到并行实例的具体分配可能变** —— 并行度从 3 改成 4，哈希取模的结果就全变了；
+3. **但 Flink 会处理状态重分配**，保证恢复后计算仍然正确。
+
+所以正确的理解不是：
+
+```text
+u01 永远固定在某一台机器、某个 Task 上
+```
+
+而是：
+
+```text
+在当前运行拓扑中，同一个 Key 的数据一定汇聚到同一个负责该 Key 的下游实例，
+因此那个实例可以放心地维护这个 Key 的状态。
+```
+
+### 并行度 = 2 时，整条链路长什么样
+
+把前面几节的东西合起来看一遍：
+
+```java
+orders
+    .map(json -> parseOrder(json))
+    .filter(order -> order.getAmount() > 0)
+    .keyBy(order -> order.getUserId())
+    .sum("amount")
+    .sinkTo(clickHouseSink);
+```
+
+```text
+上游 Task 0：Source Subtask 0 + Map Subtask 0 + Filter Subtask 0
+上游 Task 1：Source Subtask 1 + Map Subtask 1 + Filter Subtask 1
+                        │
+                        │  keyBy(userId) —— 网络 Shuffle
+                        ▼
+        ┌───────────────┴───────────────┐
+        ▼                               ▼
+下游 Task 0：Sum Subtask 0        下游 Task 1：Sum Subtask 1
+负责 u01、u03、u09 …             负责 u02、u04、u08 …
+        │                               │
+        └───────────────┬───────────────┘
+                        ▼
+                   Sink：把每个用户的统计结果写出
+```
+
+拆开看每一段在干嘛：
+
+```text
+Map / Filter ：每条数据可独立处理，所以很容易并行
+keyBy        ：按 userId 重分区（跨网络）
+Sum          ：按用户保存累计金额状态（Keyed State）
+Sink         ：把每个用户的统计结果写出去
 ```
 
 ### `reduce` 和 `aggregate` 差在哪
@@ -473,7 +564,7 @@ text: |
   这用 `reduce` 表达起来就很别扭。
 ```
 
-## 07 · 两个真正难的地方
+## 08 · 两个真正难的地方
 
 ### 流式 `join`：两条数据不一定同时到
 
@@ -543,7 +634,7 @@ items:
   - 需求要输出不止一条流（主流 + 告警流）—— 这是侧输出，只有 process 有
 ```
 
-## 08 · Sink：结果写到哪
+## 09 · Sink：结果写到哪
 
 ```cards
 cols: 3
@@ -565,7 +656,7 @@ text: |
   要长期存明细 → 数据湖；要给别人继续加工 → 回到 Kafka。
 ```
 
-## 09 · 为什么要设计这么多算子
+## 10 · 为什么要设计这么多算子
 
 核心原因是一句话：**流式计算不是简单地「逐条执行 Java 代码」。**
 
@@ -654,20 +745,12 @@ Map<String, Double> userTotal = new HashMap<>();
 
 ### 原因四：让 Flink 有机会做性能优化
 
-当你连着写 `map → filter → map`，这些通常是轻量、逐条、无状态的操作。
-Flink 可以把它们**串成一个 Task（算子链 / Operator Chaining）**，省掉中间的网络传输和序列化：
-
-```text
-代码里写的：
-Source → map → filter → map → keyBy → aggregate
-
-运行时实际跑的：
-Task 1: Source + map + filter + map      ← 串在一起，中间不落网络
-        ↓ shuffle（keyBy 必须重分区）
-Task 2: aggregate
-```
+这一条前面已经见过了：`map → filter → map` 这种轻量、逐条、无状态的算子，
+会被 Flink 串成一个 Task（算子链），省掉中间的网络传输和序列化。
 
 ==算子把语义表达清楚了，Flink 才有机会自动优化执行计划。==
+
+如果所有逻辑都写在一个大函数里，引擎能做的事就只剩「原样执行」。
 
 ### 原因五：一套模型同时处理批和流
 
@@ -681,7 +764,7 @@ Flink 既要处理 Kafka 那种持续到来的无界流，也要处理 CSV / HDF
 所以 Flink 用统一的「数据流 + 算子」模型处理它们，区别只在**数据会不会结束** ——
 见 [Flink 的有界流与无界流](../flink-bounded-vs-unbounded/)。
 
-## 10 · 连起来：一个电商实时大盘
+## 11 · 连起来：一个电商实时大盘
 
 需求：大盘每分钟展示订单数量、GMV、各城市销售额、销量 Top 10。
 
@@ -789,6 +872,26 @@ text: |
     ==每个 Task 只看得见自己手上那几条==，Task 1 以为 u01 累计 99，Task 2 以为 20。
     `keyBy(userId)` 做的就是把这些数据重新洗牌（shuffle / repartition），
     保证同一个 Key 的数据落到同一个 Task 上，累计值才能算对。
+- q: "`Operator`、`Subtask`、`Task`、`TaskManager`、`Slot` 这五个词，能按粒度从大到小排一遍吗？"
+  a: |
+    ==`TaskManager` ⊃ `Slot` ⊃ `Task` ⊃ `Subtask` ⊃ `Operator`==。
+    TaskManager 是干活的进程（JVM），它划出一份份 Slot 作为资源配额；
+    Slot 里跑 Task，而 Task 常常是**一串链起来的算子**；
+    链上的每一个算子，各自又有自己的并行副本，就是 Subtask。
+    最容易混的是 Task 和 TaskManager —— **Task 是工作单元，TaskManager 是进程**。
+- q: 「同一个 Key 的数据一定到同一个 Task 上」，这句话严谨吗？
+  a: |
+    作为入门理解可以，但严谨说法是「**汇聚到同一个下游 Keyed Operator Subtask**」。
+    三个原因：① 一个 Task 里可能链了多个算子，Task 不是「Key 的归属单位」；
+    ② 扩缩容或故障恢复后，Key 到并行实例的分配可能变（并行度从 3 改成 4，哈希取模结果就全变了）；
+    ③ 但 Flink 会处理状态重分配，保证恢复后算得对。
+    所以不是「u01 永远固定在某个 Task」，而是「当前拓扑下 u01 总是去同一个地方」。
+- q: "`keyBy` 凭什么能把同一个 Key 的数据聚到一起？"
+  a: |
+    一个哈希函数：==`hash(key) % 下游并行度`==。
+    并行度是 3 时，`u01` 可能恒等于 `0`，于是它的每一笔订单都去 Aggregate Subtask 0。
+    这不是 Flink「记住了 u01」，而是**哈希函数保证 u01 每次都落到同一个地方** ——
+    所以那个地方攒的状态就是 u01 的。这就是 Keyed State 能工作的基础。
 - q: 流里的 `join` 比数据库里的 `JOIN` 难在哪？
   a: |
     数据库里两张表都是完整的，查询那一刻就配上了。
