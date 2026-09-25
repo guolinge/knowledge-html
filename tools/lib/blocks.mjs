@@ -425,7 +425,9 @@ const KIND_TONE = {
         : '';
 
     const edgeData = esc(JSON.stringify(edges));
-    return `<div class="flowd${cfg.grid ? ' has-grid' : ''}" data-flow data-edges="${edgeData}">
+    return `<div class="flowd${cfg.grid ? ' has-grid' : ''}${
+      groupBoxes ? ' has-groups' : ''
+    }" data-flow data-edges="${edgeData}">
       <svg class="flowd-svg" aria-hidden="true">
         <defs>
           <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"

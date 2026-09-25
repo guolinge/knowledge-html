@@ -651,16 +651,23 @@
       let edges = [];
       try { edges = JSON.parse(root.getAttribute('data-edges') || '[]'); } catch { edges = []; }
 
-      // 用 offset* 而不是 getBoundingClientRect，避免页面缩放/滚动带来的误差
+      // ⚠️ 节点的 offsetTop/Left 是相对 .flowd-grid 的，
+      // 而 SVG 和区域框是相对 .flowd 定位的（inset:0 填的是 padding box）。
+      // 所以必须加上 grid 自身的偏移 —— 否则 .flowd 一有 padding 就会错位。
+      const gx = grid.offsetLeft;
+      const gy = grid.offsetTop;
+
       const nodes = {};
       root.querySelectorAll('.fnode').forEach((el) => {
+        const t = gy + el.offsetTop;
+        const l = gx + el.offsetLeft;
         nodes[el.getAttribute('data-id')] = {
-          cx: el.offsetLeft + el.offsetWidth / 2,
-          cy: el.offsetTop + el.offsetHeight / 2,
-          top: el.offsetTop,
-          bottom: el.offsetTop + el.offsetHeight,
-          left: el.offsetLeft,
-          right: el.offsetLeft + el.offsetWidth,
+          cx: l + el.offsetWidth / 2,
+          cy: t + el.offsetHeight / 2,
+          top: t,
+          bottom: t + el.offsetHeight,
+          left: l,
+          right: l + el.offsetWidth,
           h: el.offsetHeight,
         };
       });
@@ -672,21 +679,21 @@
         if (!members.length) { boxEl.hidden = true; return; }
         boxEl.hidden = false;
         const pad = 20;
-        const top = Math.min(...members.map((m) => m.offsetTop)) - pad - 8;
-        const left = Math.min(...members.map((m) => m.offsetLeft)) - pad;
-        const right = Math.max(...members.map((m) => m.offsetLeft + m.offsetWidth)) + pad;
-        const bottom = Math.max(...members.map((m) => m.offsetTop + m.offsetHeight)) + pad;
+        const top = Math.min(...members.map((m) => gy + m.offsetTop)) - pad - 8;
+        const left = Math.min(...members.map((m) => gx + m.offsetLeft)) - pad;
+        const right = Math.max(...members.map((m) => gx + m.offsetLeft + m.offsetWidth)) + pad;
+        const bottom = Math.max(...members.map((m) => gy + m.offsetTop + m.offsetHeight)) + pad;
         boxEl.style.top = `${top}px`;
         boxEl.style.left = `${left}px`;
         boxEl.style.width = `${right - left}px`;
         boxEl.style.height = `${bottom - top}px`;
       });
 
-      const W = grid.offsetWidth;
-      const H = grid.offsetHeight;
+      // viewBox 用 SVG 元素自身尺寸 —— 用 grid 的尺寸会让 preserveAspectRatio
+      // 做一次等比缩放+居中，和节点坐标对不上。
+      const W = svg.clientWidth || root.clientWidth;
+      const H = svg.clientHeight || root.clientHeight;
       svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
-      svg.setAttribute('width', W);
-      svg.setAttribute('height', H);
 
       // 同一对节点之间可能有多条边（或同一目标有多条汇入），
       // 给它们一个水平偏移，否则会完全重叠

@@ -877,7 +877,7 @@ mark.mk-green { background: var(--green-soft); color: var(--green); }
 /* 背景网格：给图「工程图纸」的质感，也让空白不那么飘 */
 .flowd.has-grid::before,
 .seqd.has-grid::before {
-  content: ''; position: absolute; inset: -8px; z-index: 0;
+  content: ''; position: absolute; inset: 0; z-index: 0;
   border-radius: 14px;
   background-image:
     linear-gradient(to right, var(--grid-line) 1px, transparent 1px),
@@ -902,11 +902,17 @@ mark.mk-green { background: var(--green-soft); color: var(--green); }
   background: var(--bg); padding: 2px 7px; border-radius: 4px;
 }
 
+/* 有区域框时，顶部要留出「框边 + 标签」的高度 ——
+   否则框会溢出到上面的段落里（框顶 = 首个节点 -28px）。 */
+.flowd.has-groups { padding-top: 38px; padding-bottom: 26px; }
+
 .flowd-grid {
   position: relative; z-index: 2;
   display: flex; flex-direction: column;
   gap: 58px;                    /* 行间距 = 连线的垂直空间 */
 }
+/* 自环画在节点上方，那一行要额外留空间 */
+.flowd-row.has-selfloop { margin-top: 58px; }
 .flowd-row {
   display: flex; justify-content: center;
   align-items: stretch; gap: 30px; flex-wrap: wrap;
@@ -3342,16 +3348,23 @@ DWS 是<strong>汇总</strong>：一行 = 一个统计口径（日期 + 城市 +
       let edges = [];
       try { edges = JSON.parse(root.getAttribute('data-edges') || '[]'); } catch { edges = []; }
 
-      // 用 offset* 而不是 getBoundingClientRect，避免页面缩放/滚动带来的误差
+      // ⚠️ 节点的 offsetTop/Left 是相对 .flowd-grid 的，
+      // 而 SVG 和区域框是相对 .flowd 定位的（inset:0 填的是 padding box）。
+      // 所以必须加上 grid 自身的偏移 —— 否则 .flowd 一有 padding 就会错位。
+      const gx = grid.offsetLeft;
+      const gy = grid.offsetTop;
+
       const nodes = {};
       root.querySelectorAll('.fnode').forEach((el) => {
+        const t = gy + el.offsetTop;
+        const l = gx + el.offsetLeft;
         nodes[el.getAttribute('data-id')] = {
-          cx: el.offsetLeft + el.offsetWidth / 2,
-          cy: el.offsetTop + el.offsetHeight / 2,
-          top: el.offsetTop,
-          bottom: el.offsetTop + el.offsetHeight,
-          left: el.offsetLeft,
-          right: el.offsetLeft + el.offsetWidth,
+          cx: l + el.offsetWidth / 2,
+          cy: t + el.offsetHeight / 2,
+          top: t,
+          bottom: t + el.offsetHeight,
+          left: l,
+          right: l + el.offsetWidth,
           h: el.offsetHeight,
         };
       });
@@ -3363,21 +3376,21 @@ DWS 是<strong>汇总</strong>：一行 = 一个统计口径（日期 + 城市 +
         if (!members.length) { boxEl.hidden = true; return; }
         boxEl.hidden = false;
         const pad = 20;
-        const top = Math.min(...members.map((m) => m.offsetTop)) - pad - 8;
-        const left = Math.min(...members.map((m) => m.offsetLeft)) - pad;
-        const right = Math.max(...members.map((m) => m.offsetLeft + m.offsetWidth)) + pad;
-        const bottom = Math.max(...members.map((m) => m.offsetTop + m.offsetHeight)) + pad;
+        const top = Math.min(...members.map((m) => gy + m.offsetTop)) - pad - 8;
+        const left = Math.min(...members.map((m) => gx + m.offsetLeft)) - pad;
+        const right = Math.max(...members.map((m) => gx + m.offsetLeft + m.offsetWidth)) + pad;
+        const bottom = Math.max(...members.map((m) => gy + m.offsetTop + m.offsetHeight)) + pad;
         boxEl.style.top = `${top}px`;
         boxEl.style.left = `${left}px`;
         boxEl.style.width = `${right - left}px`;
         boxEl.style.height = `${bottom - top}px`;
       });
 
-      const W = grid.offsetWidth;
-      const H = grid.offsetHeight;
+      // viewBox 用 SVG 元素自身尺寸 —— 用 grid 的尺寸会让 preserveAspectRatio
+      // 做一次等比缩放+居中，和节点坐标对不上。
+      const W = svg.clientWidth || root.clientWidth;
+      const H = svg.clientHeight || root.clientHeight;
       svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
-      svg.setAttribute('width', W);
-      svg.setAttribute('height', H);
 
       // 同一对节点之间可能有多条边（或同一目标有多条汇入），
       // 给它们一个水平偏移，否则会完全重叠
