@@ -28,7 +28,8 @@ function provenance(meta) {
   if (meta.generated) bits.push(`<span><b>生成</b> ${esc(meta.generated)}</span>`);
   if (meta.model) bits.push(`<span><b>模型</b> ${esc(meta.model)}</span>`);
   if (meta.verified) bits.push(`<span><b>核对</b> ${esc(meta.verified)}</span>`);
-  return `<div class="provenance">${bits.join('')}</div>`;
+  // 没有任何溯源信息时不要输出空 div —— 它会渲染成一条莫名的灰色空条
+  return bits.length ? `<div class="provenance">${bits.join('')}</div>` : '';
 }
 
 function draftBanner(meta) {

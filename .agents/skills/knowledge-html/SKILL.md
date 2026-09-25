@@ -635,9 +635,9 @@ node tools/archify.mjs archify/<名字>.json <名字>
 # 3. 在 note.md 里用 arch 积木
 ```
 
-```arch
-svg: <名字>
-caption: 这张图说明什么
+```text
+svg: <名字>              # 必填，对应 assets/arch/<名字>.svg
+caption: 这张图说明什么    # 可选，图注
 ```
 
 **`tools/archify.mjs` 做了三件事**（这三件事不做会踩坑）：
