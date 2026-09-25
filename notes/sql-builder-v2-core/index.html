@@ -1,0 +1,525 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-has-toc="1">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>sql_builder_v2 的 core 包</title>
+<meta name="description" content="不懂业务的通用翻译器：它由哪几块组成、一条 Rule 怎么变成 SQL、db.ts 里三件容易被忽略的事，以及两个和注入有关的安全处理。" />
+<link rel="stylesheet" href="../../assets/theme.css" />
+  <link rel="stylesheet" href="../../assets/blocks.css" />
+  <link rel="stylesheet" href="../../assets/archify-embed.css" />
+</head>
+<body>
+<div id="progress"></div>
+<div id="tocScrim"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
+    <a class="brand" href="../../index.html"><span class="dot"></span>知识笔记</a>
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="toc" id="toc">
+      <p class="toc-title">目录</p>
+      <a href="../../index.html" class="sub">← 全部笔记</a>
+      <a href="#它是什么一个不懂业务的翻译器">它是什么：一个不懂业务的翻译器</a>
+      <a href="#验证它不懂业务的方法" class="sub">验证它「不懂业务」的方法</a>
+      <a href="#但它服务两个消费者" class="sub">但它服务两个消费者</a>
+      <a href="#组织coresrc-里有什么">组织：core/src 里有什么</a>
+      <a href="#骨架文件有多小" class="sub">骨架文件有多小</a>
+      <a href="#架构一条-rule-进去sql-出来">架构：一条 Rule 进去，SQL 出来</a>
+      <a href="#四种形态各落到哪" class="sub">四种形态各落到哪</a>
+      <a href="#细节dbts-里的三件小事">细节：db.ts 里的三件小事</a>
+      <a href="#①-rawquery-是挂在-knex-原型上的" class="sub">① rawQuery() 是挂在 knex 原型上的</a>
+      <a href="#②-一个被注释掉的历史处理" class="sub">② 一个被注释掉的历史处理</a>
+      <a href="#③-dbgetinstance-有两种入口" class="sub">③ DB.getInstance() 有两种入口</a>
+      <a href="#细节两个和注入有关的安全处理">细节：两个和注入有关的安全处理</a>
+      <a href="#encodevalue-避免-和-knex-占位符冲突" class="sub">encodeValue —— 避免 ? 和 knex 占位符冲突</a>
+      <a href="#assertsqlsafearrayvalues-数组值不能有单引号" class="sub">assertSqlSafeArrayValues —— 数组值不能有单引号</a>
+      <a href="#取舍为什么方言只返回片段">取舍：为什么方言只返回片段</a>
+      <a href="#自测">自测</a>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow">● 从零理解 · 模块</span>
+      <h1>sql_builder_v2 的 core 包</h1>
+      <p class="lede">不懂业务的通用翻译器：它由哪几块组成、一条 Rule 怎么变成 SQL、db.ts 里三件容易被忽略的事，以及两个和注入有关的安全处理。</p>
+    </div>
+
+    <div class="draft-banner">
+    <span>⚠</span>
+    <span>本页状态为 <b>draft</b>：内容尚未人工核对，引用前请自行验证。</span>
+  </div>
+<aside class="needs">
+      <p class="needs-title">读这篇之前，你需要先知道</p>
+      <a class="need" href="../sql-builder-v2-organization/">← <b>2. 组织</b><span>仓库形状、三个包的分工、改哪里速查</span></a><a class="need" href="../sql-builder-v2-architecture/">← <b>3. 架构</b><span>主干 7 条边 + 四条机制 + 设计取舍</span></a>
+    </aside>
+    <div class="provenance"><span><b>来源</b> sources/gitlab/sql_builder_v2 @ 2c500b2</span><span><b>生成</b> 2026-09-26</span><span><b>模型</b> deepseek-v4.1-flash</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">架构</span> <span class="tag tone-muted">SQL</span> <span class="tag tone-muted">TypeScript</span> <span class="tag tone-muted">圈人</span></span></div>
+
+<div class="callout tone-blue">
+      <span class="ic">🧭</span>
+      <div><p>前置是 <a href="../sql-builder-v2-organization/">② 组织篇</a> 和 <a href="../sql-builder-v2-architecture/">③ 架构篇</a>。</p>
+<p>架构篇讲的是整条链路。这篇<strong>钻进 <code>packages/core</code> 里面</strong>，按同样的六层走一遍。</p>
+<p>读完你应该能说出：「<mark class="mk-blue">它是个不懂业务的翻译器，而且被两个互不依赖的包各自用着不同的部分。</mark>」</p>
+</div>
+    </div><h2 id="它是什么一个不懂业务的翻译器"><span class="num">01</span>它是什么：一个不懂业务的翻译器</h2>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>维度</th><th>core</th><th>crowd</th></tr></thead><tbody><tr><th>认识的输入</th><td data-label="core"><code>Rule[]</code> —— 一棵纯数据的表达式树</td><td data-label="crowd">六种业务条件</td></tr><tr><th>认识业务词吗</th><td data-label="core"><span class="tag tone-green">一个都不认识</span></td><td data-label="crowd">认识，且有 45 行业务枚举</td></tr><tr><th>干的活</th><td data-label="core">把表达式树<strong>编译成 SQL</strong></td><td data-label="crowd">把业务条件<strong>翻译成</strong>表达式树</td></tr><tr><th>依赖谁</th><td data-label="core"><span class="tag tone-green">只有 knex</span></td><td data-label="crowd">core + lodash + murmurhash</td></tr><tr><th>代码量</th><td data-label="core">1347 行 / 13 文件</td><td data-label="crowd">4475 行 / 27 文件</td></tr></tbody></table></div><h3 id="验证它不懂业务的方法">验证它「不懂业务」的方法</h3>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-bash"># 在 core 里搜业务词，一个都搜不到
+grep -rn 'portrait\|event_v2\|crowd\|加购' packages/core/src/
+# → 空
+</code></pre></div>
+<div class="callout tone-green">
+      <span class="ic">✅</span>
+      <div><p><mark class="mk-blue">这条边界是整个架构可扩展性的来源。</mark></p>
+<p>守住它，加一种数据库不用碰 crowd，加一种业务条件不用碰 core。
+（架构篇第 07 节讲过。）</p>
+</div>
+    </div><h3 id="但它服务两个消费者">但它服务两个消费者</h3>
+<div class="callout tone-violet quote">
+      <span class="ic">💡</span>
+      <div><p><mark class="mk-blue"><strong><code>core</code> 不只为 <code>crowd</code> 服务。</strong></mark></p>
+<p>还记得组织篇讲的吗 —— <code>crowd</code> 和 <code>goods</code> <strong>互不依赖</strong>，但都依赖 <code>core</code>。
+所以 core 的通用性是被<strong>验证过</strong>的，不是设计者的一厢情愿。</p>
+</div>
+    </div><div class="compare-wrap"><table class="compare"><thead><tr><th>包</th><th>从 core 导入了几个名字</th><th>用的是哪些能力</th></tr></thead><tbody><tr><th>crowd</th><td data-label="从 core 导入了几个名字"><span class="tag tone-blue">41 个</span></td><td data-label="用的是哪些能力">方言、操作符枚举、时间表达式、uid 编解码、树压缩 —— <strong>几乎全套</strong></td></tr><tr><th>goods</th><td data-label="从 core 导入了几个名字"><span class="tag tone-green">6 个</span></td><td data-label="用的是哪些能力"><code>DB</code> / <code>Logic</code> / <code>Op</code> / <code>Rule</code> + 两个数组条件辅助</td></tr></tbody></table></div><div class="callout tone-amber">
+      <span class="ic">⚠</span>
+      <div><p><strong>两个消费者用的能力几乎不重叠。</strong></p>
+<p>goods 只拿 <code>DB</code> 和几个枚举，再用两个专门给它准备的函数
+（<code>buildWhereSqlFromRules</code> / <code>buildArrayContainsScalarRules</code>）——
+这两个函数 <strong>crowd 一次都没用过</strong>。</p>
+<p><mark class="mk-blue">所以它们虽然是「通用层」的代码，实际只服务一个消费者。</mark>
+这是边界上一处温和的渗漏。</p>
+</div>
+    </div><h2 id="组织coresrc-里有什么"><span class="num">02</span>组织：<code>core/src</code> 里有什么</h2>
+<p>13 个文件、1347 行。按职责分六块：</p>
+<div class="pipe"><div class="lane tone-green">
+        <div class="lane-meta">
+          
+          <b>表达式模型 + 翻译器</b>
+          <small>唯一的「核心」，235 行</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>db.ts</b>
+        <small>四种形态 + buildWhere + knex 扩展</small>
+        
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">工具集<span class="note">675 行，其实是个杂物抽屉</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-muted">
+        <div class="lane-meta">
+          
+          <b>工具集</b>
+          <small>时间 / uid / 树压缩 / 标签表</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>utils.ts</b>
+        <small>675 行 · 最大的一块</small>
+        
+      </div><div class="pnode">
+        <b>utils/</b>
+        <small>两个小函数：编码值 / 防注入</small>
+        
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">方言<span class="note">所有库差异都收在这里</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-amber">
+        <div class="lane-meta">
+          
+          <b>方言</b>
+          <small>接口 + 两个实现 + 两个辅助</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>interface.ts</b>
+        <small>59 行 · 17 个方法</small>
+        
+      </div><div class="pnode">
+        <b>bytehouse.ts</b>
+        <small>111 行</small>
+        
+      </div><div class="pnode">
+        <b>doris.ts</b>
+        <small>139 行</small>
+        
+      </div><div class="pnode">
+        <b>spark-array-contains / where-sql</b>
+        <small>两个独立辅助</small>
+        
+      </div></div>
+      </div><div class="lane tone-muted">
+        <div class="lane-meta">
+          
+          <b>骨架</b>
+          <small>类型和枚举，加起来 27 行</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>index.ts</b>
+        <small>13 行 · 出口</small>
+        
+      </div><div class="pnode">
+        <b>tree.ts</b>
+        <small>8 行 · 一个类型</small>
+        
+      </div><div class="pnode">
+        <b>define.ts</b>
+        <small>6 行 · 一个枚举</small>
+        
+      </div></div>
+      </div></div><div class="callout tone-amber">
+      <span class="ic">⚠</span>
+      <div><p><strong><code>utils.ts</code> 是个杂物抽屉。</strong> 675 行里塞了四类互不相关的东西：</p>
+<table>
+<thead>
+<tr>
+<th>内容</th>
+<th>大概行数</th>
+<th>谁在用</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>时间表达式</td>
+<td>~300 行</td>
+<td>crowd 的三种条件</td>
+</tr>
+<tr>
+<td>uid 编解码</td>
+<td>~80 行</td>
+<td>crowd 全部条件</td>
+</tr>
+<tr>
+<td>树压缩 <code>treeMinimizer</code></td>
+<td>~50 行</td>
+<td>crowd 的 combi</td>
+</tr>
+<tr>
+<td>标签表 <code>buildLabelTable</code></td>
+<td>剩下的</td>
+<td><strong>只有 crowd 的 segmentation</strong></td>
+</tr>
+</tbody>
+</table>
+<p><mark class="mk-blue">最后一项严格说不属于「通用层」</mark> —— 它是分群专用的。</p>
+</div>
+    </div><h3 id="骨架文件有多小">骨架文件有多小</h3>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">// tree.ts（全文 8 行）
+export type TreeForkKey = 'items' | 'conditions';
+export interface GeneralTree {
+    items?: GeneralTree[];
+    conditions?: GeneralTree[];
+    [key: string]: any;
+}
+</code></pre></div>
+<div class="callout tone-violet">
+      <span class="ic">💡</span>
+      <div><p><strong>8 行，但它解决了一个真问题。</strong></p>
+<p>树的分支字段有两种名字：<code>items</code>（条件树用）和 <code>conditions</code>（组合树用）。
+树压缩函数要对两种都工作，所以需要这个类型把「两种都算树」这件事表达出来。</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">// combi/combination.ts
+treeMinimizer(tree, 'conditions')
+// combi/utils.ts
+treeMinimizer(tree, 'items')
+</code></pre></div>
+</div>
+    </div><p><mark class="mk-blue">第二个参数就是 <code>TreeForkKey</code>。</mark></p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code>
+```text
+// define.ts（全文 6 行）
+export enum DbType {
+    MySql = 'mysql',      // 作为历史枚举值保留，仅在 getStringArrayRule() 和
+                          // buildDetailWhereClause() 中使用
+    Bytehouse = 'bytehouse',
+    Doris = 'doris'
+}
+</code></pre></div>
+<div class="callout tone-amber">
+      <span class="ic">⚠</span>
+      <div><p><mark class="mk-blue">注意注释里那句话：「作为<strong>历史枚举值</strong>保留」。</mark></p>
+<p><code>MySql</code> 已经不是一等公民了 —— 它只在两个函数里被分支判断。
+这是「曾经支持三个库，现在只用两个」留下的痕迹。</p>
+<p>看到这种注释，就知道<strong>别在它上面加新功能</strong>。</p>
+</div>
+    </div><h2 id="架构一条-rule-进去sql-出来"><span class="num">03</span>架构：一条 <code>Rule</code> 进去，SQL 出来</h2>
+<p><code>core</code> 的主干只有一个函数：<code>DB.buildWhere</code>。</p>
+<div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;in&quot;,&quot;to&quot;:&quot;loop&quot;},{&quot;from&quot;:&quot;loop&quot;,&quot;to&quot;:&quot;q&quot;},{&quot;from&quot;:&quot;q&quot;,&quot;to&quot;:&quot;sub&quot;,&quot;label&quot;:&quot;是&quot;},{&quot;from&quot;:&quot;q&quot;,&quot;to&quot;:&quot;expr&quot;,&quot;label&quot;:&quot;否&quot;},{&quot;from&quot;:&quot;q&quot;,&quot;to&quot;:&quot;bad&quot;,&quot;label&quot;:&quot;都不是&quot;,&quot;dashed&quot;:true},{&quot;from&quot;:&quot;sub&quot;,&quot;to&quot;:&quot;out&quot;},{&quot;from&quot;:&quot;expr&quot;,&quot;to&quot;:&quot;out&quot;}]">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-green" data-id="in">
+              
+              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5L3 8l3 4.5M10 3.5L13 8l-3 4.5"/></svg>
+              <b>buildWhere(builder, rules, logic)</b>
+              <small>一棵 Rule 数组</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="loop">
+              
+              
+              <b>遍历每条 rule</b>
+              
+            </div></div><div class="flowd-row"><div class="fnode tone-amber shape-note" data-id="q">
+              
+              
+              <b>有 'logic'？</b>
+              <small>是树枝还是叶子</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="sub">
+              
+              
+              <b>whereFn(sub =&gt; 递归)</b>
+              <small>建一层括号往下钻</small>
+            </div><div class="fnode tone-green" data-id="expr">
+              
+              
+              <b>whereFn(column, op, value)</b>
+              <small>挂到 knex 上</small>
+            </div><div class="fnode tone-red" data-id="bad">
+              
+              
+              <b>throw</b>
+              <small>结构错误</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="out">
+              
+              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="8" cy="4.2" rx="5" ry="1.9"/><path d="M3 4.2v7.6c0 1.05 2.24 1.9 5 1.9s5-.85 5-1.9V4.2"/></svg>
+              <b>knex builder</b>
+              
+            </div></div></div>
+      
+    </div><p><strong>AND / OR 的实现就是「选哪个方法名」</strong>：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">function getWhereFn(builder, logic) {
+    switch (logic) {
+        case Logic.And: return builder.andWhere.bind(builder);
+        case Logic.Or:  return builder.orWhere.bind(builder);
+        default: throw new Error(`getWhereFn: 条件错误：&quot;logic: ${logic}&quot;`);
+    }
+}
+</code></pre></div>
+<div class="callout tone-violet">
+      <span class="ic">💡</span>
+      <div><p><mark class="mk-blue"><strong>没有别的魔法。</strong></mark> <code>AND</code> 就是 <code>andWhere</code>，<code>OR</code> 就是 <code>orWhere</code>。</p>
+<p>嵌套靠的是 <code>whereFn(sub =&gt; DB.buildWhere(sub, rule.items, rule.logic))</code> ——
+传一个回调进去，knex 会把它包成括号。</p>
+</div>
+    </div><h3 id="四种形态各落到哪">四种形态各落到哪</h3>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>形态</th><th>列名怎么来</th><th>值怎么来</th><th>落到 knex 的</th></tr></thead><tbody><tr><th>Normal</th><td data-label="列名怎么来"><code>DB.raw(formatField(column))</code> 包反引号</td><td data-label="值怎么来"><code>encodeValue(value)</code></td><td data-label="落到 knex 的"><code>whereFn(列, op, 值)</code></td></tr><tr><th>RawValue</th><td data-label="列名怎么来">同上</td><td data-label="值怎么来"><code>DB.raw(rawValue)</code></td><td data-label="落到 knex 的">同上</td></tr><tr><th>RawColumn</th><td data-label="列名怎么来"><code>DB.raw(rawColumn)</code></td><td data-label="值怎么来"><code>encodeValue(value)</code></td><td data-label="落到 knex 的">同上</td></tr><tr><th>Raw</th><td data-label="列名怎么来">—</td><td data-label="值怎么来"><code>encodeValue(value)</code> 透传绑定</td><td data-label="落到 knex 的"><code>whereRaw(raw, value)</code></td></tr></tbody></table></div><div class="callout tone-amber">
+      <span class="ic">⚠</span>
+      <div><p><strong>四种形态的展开在 <a href="../sql-builder-v2-core-rule/">⑤ Rule[] 篇</a>。</strong></p>
+<p>这篇只需要知道：<code>buildWhere</code> 是<strong>一个递归函数 + 一张判别表</strong>，
+<mark class="mk-blue">没有别的复杂度。</mark></p>
+</div>
+    </div><h2 id="细节dbts-里的三件小事"><span class="num">04</span>细节：<code>db.ts</code> 里的三件小事</h2>
+<h3 id="①-rawquery-是挂在-knex-原型上的">① <code>rawQuery()</code> 是挂在 knex 原型上的</h3>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">Object.assign(mysql.queryBuilder().constructor.prototype, {
+    rawQuery() {
+        return this.toString().trim();
+    }
+});
+</code></pre></div>
+<p>代码注释解释了<strong>为什么不用官方的扩展方式</strong>：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">Q: 为什么不用 knex.QueryBuilder.extend?
+A: 因为 extend 的方法的返回值必须是 builder 实例
+
+注: mysql(name) 与 mysql.queryBuilder() 共享同一个 Builder.prototype，
+    因此挂载一次即可被两种入口创建的实例访问到。
+</code></pre></div>
+<div class="callout tone-violet">
+      <span class="ic">💡</span>
+      <div><p><strong>为什么不直接用 <code>toString()</code>，要包一层 <code>rawQuery()</code>？</strong></p>
+<p>因为 <code>toString()</code> 在别的地方也有意义，而这个库对外只交付<strong>字符串</strong>。
+包一层等于给这个约定一个名字。</p>
+<p><mark class="mk-blue">代价是 TypeScript 不认识它，得手写声明 —— 就是 <code>typings/knex.d.ts</code>。</mark>
+（组织篇讲过 <code>typings/</code> 和 <code>types/</code> 的区别。）</p>
+</div>
+    </div><h3 id="②-一个被注释掉的历史处理">② 一个被注释掉的历史处理</h3>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">rawQuery() {
+    // 移除多余的括号的处理，因为逻辑为对 str 直接处理，
+    // 可能在外出传入内容包含括号的时候出现 bug
+    // 后续如果确实想要处理多余括号，可能要走 sql 解析的方式
+    // -- 2026-01-19 修改
+    // return removeSQLExcessiveBrackets(this.toString()).trim();
+    return this.toString().trim();
+}
+</code></pre></div>
+<div class="callout tone-amber">
+      <span class="ic">⚠</span>
+      <div><p><mark class="mk-blue"><strong>这段注释比代码值钱。</strong></mark></p>
+<p>它记录了：曾经有个「去掉多余括号」的处理，但因为<strong>字符串处理会误伤</strong>
+（用户传进来的内容里本来就有括号），所以撤掉了。</p>
+<p>还写了「后续如果确实想要处理多余括号，可能要走 SQL 解析的方式」——
+等于给未来的人留了方向。</p>
+<p><mark class="mk-blue">看到带日期的注释，先读一遍再动手。</mark></p>
+</div>
+    </div><h3 id="③-dbgetinstance-有两种入口">③ <code>DB.getInstance()</code> 有两种入口</h3>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">static getInstance(name?: string) {
+    return name ? mysql(name) : mysql.queryBuilder();
+}
+</code></pre></div>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>调用</th><th>返回什么</th><th>谁在用</th></tr></thead><tbody><tr><th><code>DB.getInstance()</code></th><td data-label="返回什么">一个<strong>空白</strong> builder，从零开始拼</td><td data-label="谁在用">组合层（拼 UNION ALL）</td></tr><tr><th><code>DB.getInstance('user_portrait')</code></th><td data-label="返回什么">一个<strong>已指定表</strong>的 builder</td><td data-label="谁在用">条件实现（查某张表）</td></tr></tbody></table></div><h2 id="细节两个和注入有关的安全处理"><span class="num">05</span>细节：两个和注入有关的安全处理</h2>
+<p><code>utils/</code> 目录下只有两个文件，加起来 31 行 —— <strong>但都和 SQL 注入有关</strong>。</p>
+<h3 id="encodevalue-避免-和-knex-占位符冲突"><code>encodeValue</code> —— 避免 <code>?</code> 和 knex 占位符冲突</h3>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">const sqlBuilderQuestionMark = 'SQL_BUILDER_QUESTION_MARK';
+
+/** 与 sql-builder 一致：避免绑定串中的 `?` 与 knex 占位冲突 */
+export function encodeValue(value) {
+    if (typeof value === 'string' &amp;&amp; value.includes('?')) {
+        return value.replace(/\?/g, sqlBuilderQuestionMark);
+    }
+    return value;
+}
+</code></pre></div>
+<div class="callout tone-red">
+      <span class="ic">⚠</span>
+      <div><p><mark class="mk-blue"><strong>这不是转义，是「换一个字符」。</strong></mark></p>
+<p>knex 用 <code>?</code> 当参数占位符。如果一个<strong>值</strong>里带 <code>?</code>（比如用户搜 <code>&quot;什么?&quot;</code>），
+knex 会把它当成占位符，绑定参数的数量就对不上了 —— SQL 直接报错。</p>
+<p>所以这里把值里的 <code>?</code> 替换成一个不会撞车的长字符串。</p>
+<p><mark class="mk-blue">真正的转义是 knex 的参数绑定做的，不是这个函数。</mark></p>
+</div>
+    </div><h3 id="assertsqlsafearrayvalues-数组值不能有单引号"><code>assertSqlSafeArrayValues</code> —— 数组值不能有单引号</h3>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">/**
+ * 校验将被直接拼进 SQL 字符串字面量的数组值，含单引号则抛错。
+ *
+ * 背景：stringArray 的值会被拼进 SQL 字符串字面量（如 JSONExtract('[...]')、
+ * CAST('[...]')），而 gateway 不支持 array() 等参数绑定写法、
+ * 也无法解析反斜杠双写转义。在拼接前拦截含单引号的值，
+ * 避免破坏 SQL 边界（注入 / 语法错误）。
+ */
+export function assertSqlSafeArrayValues(values) {
+    const invalidValue = values.find((v) =&gt; v.includes(&quot;'&quot;));
+    if (invalidValue !== undefined) {
+        throw new Error(`SQL 数组值不允许包含单引号：${invalidValue}`);
+    }
+}
+</code></pre></div>
+<div class="callout tone-red quote">
+      <span class="ic">⚠</span>
+      <div><p><mark class="mk-blue"><strong>这段注释把「为什么参数绑定不够用」讲清楚了。</strong></mark></p>
+<p>正常情况下，值都走参数绑定（<code>?</code>），不会注入。
+但<strong>数组类型的值是个例外</strong> —— 它要拼进字符串字面量：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code>JSONExtract('[{&quot;a&quot;:1}]')     ← 整个数组是一个字符串
+</code></pre></div>
+<p>而 gateway <strong>不支持数组的参数绑定<strong>，也</strong>解析不了反斜杠转义</strong>。</p>
+<p><mark class="mk-blue">于是只剩一条路：拼之前检查，有单引号就拒绝。</mark></p>
+</div>
+    </div><div class="callout tone-green">
+      <span class="ic">✅</span>
+      <div><p><strong>这是「纵深防御」的典型写法。</strong></p>
+<p>它不是主防线（主防线是参数绑定），而是<strong>在一条不得不拼接的路径上加一道闸</strong>。</p>
+<p>而且它选择了 <strong>throw 而不是转义</strong> ——
+因为转义方式依赖 gateway 的解析能力，说不准就漏。
+<mark class="mk-blue">拒绝比「猜怎么转义」安全。</mark></p>
+</div>
+    </div><h2 id="取舍为什么方言只返回片段"><span class="num">06</span>取舍：为什么方言只返回片段</h2>
+<p>架构篇讲过这个结论，这里从 <strong>core 的视角</strong>再讲一遍。</p>
+<div class="callout tone-red quote">
+      <span class="ic">⚠</span>
+      <div><p><mark class="mk-blue"><strong>方言方法不生成 SQL，只返回「片段」或「表达式节点」。</strong></mark></p>
+<p>真正把表达式树变成 SQL 的，是 <code>buildWhere</code> + knex。</p>
+</div>
+    </div><p><strong>为什么这么设计</strong>：</p>
+<div class="cards" data-cols="2"><div class="ccard tone-red">
+          <span class="tag tone-red">反事实</span>
+          <h4>如果方言生成 SQL</h4>
+          <p>那每个方言方法都要知道：怎么包反引号、怎么处理绑定、
+怎么处理嵌套括号 —— 也就是<strong>重新实现一遍 buildWhere</strong>。
+
+而且两个实现要各写一遍，很容易不一致。</p>
+          
+          <pre>方言方法的签名会变成：
+  buildWhere(rules, logic) =&gt; string
+而不是：
+  mapPropertyAccess(...) =&gt; string
+</pre>
+        </div><div class="ccard tone-green">
+          <span class="tag tone-green">实际</span>
+          <h4>现在的做法</h4>
+          <p>方言只回答「<strong>这一种语义在你们库怎么写</strong>」，
+剩下的组装交给唯一的翻译器。
+
+<strong>差异被压缩成 17 个小问题的答案。</strong></p>
+          
+          <pre>mapPropertyAccess(mapColumn, key)
+  ByteHouse → mapElement(`x`, 'a')
+  Doris     → ELEMENT_AT(`x`, 'a')
+</pre>
+        </div></div><div class="callout tone-violet">
+      <span class="ic">💡</span>
+      <div><p><strong>这个设计的代价是：调用方要自己把片段组装起来。</strong></p>
+<p>所以 <code>crowd</code> 里到处是这种代码：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code>timeExprs = this._dialect.getRelativeTimestampRules({...});
+const timeRules = addHackRules(rule.name, rule.op, timeExprs);
+result.push({ logic: Logic.And, items: timeRules });
+</code></pre></div>
+<p><mark class="mk-blue">方言给了原料，<code>crowd</code> 负责炒。</mark> 这是架构篇说的「裂缝」的另一面 ——
+它让 core 保持了干净，但让 crowd 多了点组装工作。</p>
+</div>
+    </div><h2 id="自测"><span class="num">07</span>自测</h2>
+<div class="quiz"><details>
+        <summary>怎么验证 core 真的「不懂业务」？</summary>
+        <div class="a"><p>在 <code>packages/core/src/</code> 里搜业务词（<code>portrait</code> / <code>event_v2</code> / <code>crowd</code> / 加购），
+一个都搜不到。
+这条边界是整个架构可扩展性的来源 —— 守住它，
+加一种数据库不用碰 crowd，加一种业务条件不用碰 core。</p>
+</div>
+      </details><details>
+        <summary>core 只服务 crowd 吗？</summary>
+        <div class="a"><p><strong>不是。</strong> <code>crowd</code> 和 <code>goods</code> 互不依赖，但都依赖 core。
+crowd 从 core 导入 41 个名字（方言、操作符、时间、uid、树压缩，几乎全套），
+goods 只导入 6 个（<code>DB</code> / <code>Logic</code> / <code>Op</code> / <code>Rule</code> + 两个数组条件辅助）。
+<mark class="mk-blue">两个消费者用的能力几乎不重叠</mark>，所以 core 的通用性是被验证过的。</p>
+</div>
+      </details><details>
+        <summary><code>encodeValue</code> 是在做 SQL 转义吗？</summary>
+        <div class="a"><p><strong>不是。</strong> 它只是把值里的 <code>?</code> 替换成一个不会撞车的长字符串。
+因为 knex 用 <code>?</code> 当参数占位符，值里带 <code>?</code>（比如用户搜「什么?」）
+会让 knex 把绑定参数数量算错，SQL 直接报错。
+<mark class="mk-blue">真正的转义是 knex 的参数绑定做的。</mark></p>
+</div>
+      </details><details>
+        <summary>为什么数组值需要 <code>assertSqlSafeArrayValues</code> 单独拦一道？</summary>
+        <div class="a"><p>正常情况下值都走参数绑定，不会注入。但<strong>数组类型的值是个例外</strong> ——
+它要拼进字符串字面量（<code>JSONExtract('[...]')</code>），
+而 gateway <strong>不支持数组的参数绑定<strong>，也</strong>解析不了反斜杠转义</strong>。
+所以只剩一条路：拼之前检查，有单引号就 throw。
+选 throw 而不是转义，是因为转义方式依赖 gateway 的解析能力，说不准就漏。</p>
+</div>
+      </details><details>
+        <summary><code>tree.ts</code> 只有 8 行，它解决什么问题？</summary>
+        <div class="a"><p>树的分支字段有两种名字：<code>items</code>（条件树用）和 <code>conditions</code>（组合树用）。
+树压缩函数要对两种都工作，所以需要 <code>TreeForkKey</code> 这个类型
+把「两种都算树」表达出来。
+调用时第二个参数就是它：<code>treeMinimizer(tree, 'conditions')</code>。</p>
+</div>
+      </details><details>
+        <summary>为什么方言方法不直接生成 SQL？</summary>
+        <div class="a"><p>如果方言生成 SQL，每个方法都要知道怎么包反引号、怎么处理绑定、
+怎么处理嵌套括号 —— 等于<strong>重新实现一遍 <code>buildWhere</code></strong>，而且两个实现各写一遍。
+现在的做法是：方言只回答「这一种语义在你们库怎么写」，
+组装交给唯一的翻译器。
+<mark class="mk-blue">差异被压缩成 17 个小问题的答案。</mark>
+代价是调用方要自己把片段组装起来（crowd 里到处是这种代码）。</p>
+</div>
+      </details></div>
+
+    <footer>
+      <span>sql_builder_v2 的 core 包</span>
+      <span>最后更新 2026-09-26 · 单文件可离线打开</span>
+    </footer>
+  </main>
+</div>
+
+<script src="../../assets/app.js"></script>
+</body>
+</html>
