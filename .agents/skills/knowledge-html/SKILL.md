@@ -1012,6 +1012,46 @@ text: |
 - tools/visual-check.mjs（加 .keyby-viz 容器 + JSON 解析错误上下文）
 ```
 
+### 构建和提交之间的竞态（真实踩过）
+
+```callout
+tone: red
+icon: ⚠
+text: |
+  **`npm run build` 和 `git add` 之间，别人的文件可能又变了。**
+
+  于是你提交的是「**源是新的、产物是旧的**」——
+  pre-push 钩子一重建就发现对不上，直接拦下。
+```
+
+**时间线**（真实发生）：
+
+```text
+① 我 npm run build:standalone   → 从 note.md 的版本 A 构建出产物 A
+② 我 git add -A && commit       → 期间别人保存了版本 B
+                                  结果提交的是：源 B + 产物 A   ← 不一致
+③ pre-push 重建                 → 从 B 构建出产物 B ≠ 产物 A → 拦下
+```
+
+**修法**：源已经提交了，只是产物过期 —— 重建后 amend：
+
+```bash
+npm run build:standalone
+git add -A
+git commit --amend --no-edit
+git push
+```
+
+```callout
+tone: amber
+icon: ⚠
+text: |
+  ==如果这样还反复被拦，说明别人正在持续编辑。==
+
+  那就别再重试了 —— **停下来问用户**，等对方告一段落。
+  反复 amend 只会把你的提交变成「别人半成品的快照」。
+```
+
 ### 冲突处理
 
 | 冲突的文件 | 怎么办 |
