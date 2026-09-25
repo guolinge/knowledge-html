@@ -631,7 +631,7 @@ text: |
 | `checklist` | 正例 / 反例 |
 | `quiz` | 自测 |
 | `demo` | 可交互模拟 |
-| `arch` | 内联 archify 生成的复杂图 |
+| `arch` | 内联 archify 生成的图（5 种类型：架构 / 流程 / 时序 / 数据流 / 状态机） |
 | `summary` | 小结 |
 | `raw` | 直接写 HTML |
 
@@ -650,7 +650,7 @@ text: |
 ### 加新积木时的两条硬要求
 
 1. **`flow` 的能力边界要记住**：它是「测量 + 直连」，没有边路由。
-   稠密图会翻车，翻车就拆图、用表格、或调 archify。
+   稠密图会翻车 —— 翻车就拆图、改用 `compare` 列表格、或换 `arch`。
 2. **响应式目前按视口宽度写（`@media`）**。如果积木可能被放进窄容器
    （比如并排两栏），应该改用 **container queries**（Chrome 105 / FF 110 / Safari 16，
    已广泛可用）。当前所有积木都还没改。
@@ -694,7 +694,7 @@ text: |
   它的图值得当参照 —— 需要更复杂的图时，可以去读它的 SKILL.md 和 examples。
 ```
 
-### 复杂图：调用 archify skill
+### 结构化图：调用 archify skill
 
 ==不要把 archify 当兜底。== 容易把它读成「图太复杂、我们积木画不下时用它」—— 不是。
 它是一套完整的图渲染系统，提供的是我们自己的积木**根本没有**的能力：
@@ -744,7 +744,7 @@ text: |
 
 ```bash
 # 1. 写 archify 的 JSON spec 放 archify/ 目录
-#    参考 ~/.agents/skills/archify/examples/*.architecture.json
+#    参考 ~/.agents/skills/archify/examples/*.<type>.json（5 种类型都有例子）
 # 2. 生成并抠图
 node tools/archify.mjs archify/<名字>.json <名字>
 # 3. 在 note.md 里用 arch 积木
