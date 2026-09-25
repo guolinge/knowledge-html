@@ -76,20 +76,39 @@ const classify = (p) => RULES.find((r) => r.test(p)) ?? { key: 'other', label: '
 
 /* ── 收集 ───────────────────────────────────────────────── */
 
-const raw = git('status', '--porcelain=v1', '-z');
+/* --cached：只看**已 stage** 的内容。
+   写提交信息前必须再看一遍 —— 因为第一次跑 status（分类看清）的输出，
+   到这时已经过期了：中间隔了一次构建，别人可能又改了文件。
+   踩过：status 提示了 3 个别人的文件，写提交信息时没再看，结果一个字没提。 */
+const CACHED = process.argv.includes('--cached');
+
 const entries = [];
 
-// -z 用 \0 分隔，重命名会有两个路径（R 后面跟旧路径和新路径）
-const parts = raw.split('\0').filter(Boolean);
-for (let i = 0; i < parts.length; i++) {
-  const line = parts[i];
-  const code = line.slice(0, 2).trim() || '?';
-  const file = line.slice(3);
-  if (code === 'R' || code === 'C') {
-    const to = parts[++i];
-    entries.push({ code, file: to, from: file });
-  } else {
-    entries.push({ code, file });
+if (CACHED) {
+  // git diff --cached --name-status -z → "M\0path\0" / "R100\0old\0new\0"
+  const parts = git('diff', '--cached', '--name-status', '-z').split('\0').filter(Boolean);
+  for (let i = 0; i < parts.length; i++) {
+    const code = parts[i][0];
+    if (code === 'R' || code === 'C') {
+      const from = parts[++i];
+      const to = parts[++i];
+      entries.push({ code, file: to, from });
+    } else {
+      entries.push({ code, file: parts[++i] });
+    }
+  }
+} else {
+  const parts = git('status', '--porcelain=v1', '-z').split('\0').filter(Boolean);
+  for (let i = 0; i < parts.length; i++) {
+    const line = parts[i];
+    const code = line.slice(0, 2).trim() || '?';
+    const file = line.slice(3);
+    if (code === 'R' || code === 'C') {
+      const to = parts[++i];
+      entries.push({ code, file: to, from: file });
+    } else {
+      entries.push({ code, file });
+    }
   }
 }
 
@@ -117,8 +136,11 @@ const ago = (f) => {
 };
 
 console.log('');
+if (CACHED) console.log('  已 stage 的内容（这次提交真正会进去的东西）\n');
 if (!entries.length) {
-  console.log('  ✓ 工作区干净，没有未提交的改动。\n');
+  console.log(
+    CACHED ? '  ✓ 没有已 stage 的改动。\n' : '  ✓ 工作区干净，没有未提交的改动。\n',
+  );
   process.exit(0);
 }
 
@@ -156,5 +178,10 @@ if (slugs.length) {
   console.log('    · 明显是半成品 → 停下来问用户，别替别人改\n');
 }
 
-console.log('  提交前：npm run check && npm run build:standalone && npm run visual-check');
+console.log(
+    CACHED
+      ? '  把这些写进提交信息（哪些是自己的、哪些是别人的）'
+      : '  提交前：npm run check && npm run build:standalone && npm run visual-check',
+  );
 console.log('  推送前：pre-push 钩子会重建 + 量图；产物和源不一致会直接拦下\n');
+// test
