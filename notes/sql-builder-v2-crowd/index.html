@@ -1,0 +1,545 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-has-toc="1">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>sql_builder_v2 的 crowd 包</title>
+<meta name="description" content="业务主体这一层：core 之上加了什么。五个目录各装什么、业务条件怎么变成 Rule[]、时间条件为什么会膨胀成一棵子树，以及三个反直觉的设计取舍。" />
+<link rel="stylesheet" href="../../assets/theme.css" />
+  <link rel="stylesheet" href="../../assets/blocks.css" />
+  <link rel="stylesheet" href="../../assets/archify-embed.css" />
+</head>
+<body>
+<div id="progress"></div>
+<div id="tocScrim"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
+    <a class="brand" href="../../index.html"><span class="dot"></span>知识笔记</a>
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="toc" id="toc">
+      <p class="toc-title">目录</p>
+      <a href="../../index.html" class="sub">← 全部笔记</a>
+      <a href="#它是什么core-之上加了什么">它是什么：core 之上加了什么</a>
+      <a href="#具体加了哪三件事" class="sub">具体加了哪三件事</a>
+      <a href="#组织五个目录的分工">组织：五个目录的分工</a>
+      <a href="#组织根文件与业务词汇表">组织：根文件与业务词汇表</a>
+      <a href="#架构业务条件进来rule-出去">架构：业务条件进来，Rule[] 出去</a>
+      <a href="#先更正一个容易搞错的地方" class="sub">先更正一个容易搞错的地方</a>
+      <a href="#翻译长什么样以画像为例" class="sub">翻译长什么样：以画像为例</a>
+      <a href="#架构时间条件为什么会膨胀">架构：时间条件为什么会「膨胀」</a>
+      <a href="#取舍三个为什么">取舍：三个「为什么」</a>
+      <a href="#为什么时间条件要强制包一层-and" class="sub">为什么时间条件要强制包一层 AND</a>
+      <a href="#为什么没有一个统一的-adapter" class="sub">为什么没有一个统一的 adapter</a>
+      <a href="#为什么方言调用散在这一层" class="sub">为什么方言调用散在这一层</a>
+      <a href="#自测">自测</a>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow">● 从零理解 · 模块</span>
+      <h1>sql_builder_v2 的 crowd 包</h1>
+      <p class="lede">业务主体这一层：core 之上加了什么。五个目录各装什么、业务条件怎么变成 Rule[]、时间条件为什么会膨胀成一棵子树，以及三个反直觉的设计取舍。</p>
+    </div>
+
+    <div class="draft-banner">
+    <span>⚠</span>
+    <span>本页状态为 <b>draft</b>：内容尚未人工核对，引用前请自行验证。</span>
+  </div>
+<aside class="needs">
+      <p class="needs-title">读这篇之前，你需要先知道</p>
+      <a class="need" href="../sql-builder-v2-organization/">← <b>2. 组织</b><span>仓库形状、三个包的分工、改哪里速查</span></a><a class="need" href="../sql-builder-v2-architecture/">← <b>3. 架构</b><span>主干 7 条边 + 四条机制 + 设计取舍</span></a>
+    </aside>
+    <div class="provenance"><span><b>来源</b> sources/gitlab/sql_builder_v2 @ 2c500b2</span><span><b>生成</b> 2026-09-26</span><span><b>模型</b> deepseek-v4.1-flash</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">架构</span> <span class="tag tone-muted">SQL</span> <span class="tag tone-muted">TypeScript</span> <span class="tag tone-muted">圈人</span></span></div>
+
+<div class="callout tone-blue">
+      <span class="ic">🧭</span>
+      <div><p>前置是 <a href="../sql-builder-v2-organization/">② 组织篇</a> 和 <a href="../sql-builder-v2-architecture/">③ 架构篇</a>。</p>
+<p>架构篇讲的是「整条链路怎么走」。这篇<strong>钻进 <code>packages/crowd</code> 里面</strong>，
+按同样的六层走一遍：它是什么 / 由什么组成 / 怎么工作 / 为什么这么设计。</p>
+<p>读完你应该能说出：「<mark class="mk-blue">core 只认 <code>Rule[]</code>，crowd 认识六种业务条件，中间那层翻译是每种条件自己做的。</mark>」</p>
+</div>
+    </div><h2 id="它是什么core-之上加了什么"><span class="num">01</span>它是什么：core 之上加了什么</h2>
+<p>先看两个包的分工差在哪：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>维度</th><th>core</th><th>crowd</th></tr></thead><tbody><tr><th>认识的输入</th><td data-label="core"><code>Rule[]</code> —— 一棵纯数据的表达式树</td><td data-label="crowd"><strong>六种业务条件</strong> —— 画像 / 事件 / 关系 / 人群包 / uid / rawSql</td></tr><tr><th>认识业务词吗</th><td data-label="core"><span class="tag tone-green">一个都不认识</span></td><td data-label="crowd">认识，且有 45 行业务枚举</td></tr><tr><th>干的活</th><td data-label="core">把表达式树编译成 SQL</td><td data-label="crowd">把业务条件<strong>翻译成</strong>表达式树，再拼成集合运算</td></tr><tr><th>依赖谁</th><td data-label="core">knex</td><td data-label="crowd">core + lodash + murmurhash</td></tr><tr><th>代码量</th><td data-label="core">1347 行 / 13 文件</td><td data-label="crowd">4475 行 / 27 文件</td></tr></tbody></table></div><div class="callout tone-violet quote">
+      <span class="ic">💡</span>
+      <div><p><mark class="mk-blue">crowd 干的事，用一句话说就是：</mark></p>
+<p><strong>把「运营说的那句话」，变成 core 能吃的 <code>Rule[]</code>。</strong></p>
+<p>这中间隔着两个世界的距离：业务世界说「最近 7 天加购过」，
+core 只认「一个列、一个操作符、一个值」。</p>
+</div>
+    </div><h3 id="具体加了哪三件事">具体加了哪三件事</h3>
+<div class="cards" data-cols="3"><div class="ccard tone-green">
+          <span class="tag tone-green">翻译</span>
+          <h4>认识业务条件</h4>
+          <p>六种条件各有各的语义，各有各的表。
+
+<strong>每种条件自己知道自己该查哪张表、怎么写查询</strong> ——
+这部分 core 完全不管。</p>
+          <pre>画像 → 查画像表
+事件 → 查事件表 + 按人算次数
+人群包 → 查人群包表
+</pre>
+        </div><div class="ccard tone-violet">
+          <span class="tag tone-violet">组合</span>
+          <h4>做集合运算</h4>
+          <p>架构篇讲的 AND / OR = <code>UNION ALL + GROUP BY + HAVING</code>。
+
+还有第二层 include / exclude 的增删。</p>
+          <pre>AND → HAVING count(uid) = N
+OR  → 不加 HAVING
+include → UNION ALL
+exclude → NOT IN
+</pre>
+        </div><div class="ccard tone-amber">
+          <span class="tag tone-amber">方言</span>
+          <h4>处理库差异</h4>
+          <p><strong>方言的调用全在这一层。</strong> core 的 <code>buildWhere</code> 是静态方法，
+签名里根本没有 dialect。
+
+这是架构的一条裂缝（架构篇第 06 节讲过）。</p>
+          <pre>crowd/src/dialect/
+  getEventTable()  ← core 没有这个
+</pre>
+        </div></div><h2 id="组织五个目录的分工"><span class="num">02</span>组织：五个目录的分工</h2>
+<div class="pipe"><div class="lane tone-green">
+        <div class="lane-meta">
+          
+          <b>对外</b>
+          <small>调用方只看这两个</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>index.ts</b>
+        <small>63 行 · 统一出口</small>
+        
+      </div><div class="pnode">
+        <b>context.ts</b>
+        <small>48 行 · SqlContext —— 唯一入口</small>
+        
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">模块层<span class="note">按业务场景分</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-blue">
+        <div class="lane-meta">
+          
+          <b>modules/</b>
+          <small>三个模块，各管一类业务场景</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>segmentation.ts</b>
+        <small>324 行 · 分群，最复杂</small>
+        
+      </div><div class="pnode">
+        <b>tag.ts</b>
+        <small>105 行 · 标签</small>
+        
+      </div><div class="pnode">
+        <b>crowd.ts</b>
+        <small>59 行 · 人群包</small>
+        
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">组合层<span class="note">把条件拼起来</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-violet">
+        <div class="lane-meta">
+          
+          <b>combi/</b>
+          <small>组合 + 二次加工 + 树结构修正</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>utils.ts</b>
+        <small>381 行 · 树修正与入口</small>
+        
+      </div><div class="pnode">
+        <b>combination.ts</b>
+        <small>165 行 · AND / OR</small>
+        
+      </div><div class="pnode">
+        <b>pkg.ts</b>
+        <small>123 行 · include / exclude</small>
+        
+      </div><div class="pnode">
+        <b>interface.ts</b>
+        <small>63 行 · 结构类型</small>
+        
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">条件实现<span class="note">六种叶子</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-violet">
+        <div class="lane-meta">
+          
+          <b>entrepots/</b>
+          <small>六种条件各自的实现 + 工厂</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>event.ts</b>
+        <small>906 行 · 最复杂</small>
+        
+      </div><div class="pnode">
+        <b>relation.ts</b>
+        <small>715 行</small>
+        
+      </div><div class="pnode">
+        <b>portrait.ts</b>
+        <small>233 行</small>
+        
+      </div><div class="pnode">
+        <b>factory.ts</b>
+        <small>192 行 · 工厂与分发</small>
+        
+      </div><div class="pnode">
+        <b>uid / crowd / rawSql</b>
+        <small>141 / 134 / 107 行</small>
+        
+      </div></div>
+      </div><div class="lane tone-amber">
+        <div class="lane-meta">
+          
+          <b>dialect/ + ast/</b>
+          <small>方言扩展；另一套独立的 AST</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>dialect/</b>
+        <small>比 core 多一个 getEventTable</small>
+        
+      </div><div class="pnode">
+        <b>ast/</b>
+        <small>信号 DAG，独立体系</small>
+        
+      </div></div>
+      </div></div><div class="callout tone-amber">
+      <span class="ic">⚠</span>
+      <div><p><strong><code>combi/utils.ts</code> 有 381 行、导出 8 个函数，是第二难读的文件。</strong></p>
+<p>里面有一半是<strong>历史包袱</strong>：<code>isOldUidAdditionalStruct</code> / <code>isOldCrowdAdditionalStruct</code> /
+<code>optionCorrector</code> 都是给旧结构做兼容的，注释里直接写着「后续线上没有这个结构可以删除」。</p>
+<p><mark class="mk-blue">读的时候可以先跳过这些。</mark></p>
+</div>
+    </div><h2 id="组织根文件与业务词汇表"><span class="num">03</span>组织：根文件与业务词汇表</h2>
+<p><code>src/</code> 根下只有三个文件：</p>
+<div class="cards" data-cols="3"><div class="ccard tone-blue">
+          <span class="tag tone-blue">43 行 · 起点</span>
+          <h4>define.ts</h4>
+          <p><strong>所有业务枚举</strong>：Entrepots / Tables / Modules / UidFields /
+CombineType / DimensionType / IntervalType / DbName。
+
+<mark class="mk-blue">想知道「系统认识哪些表、哪些条件类型」，看这一个文件就够了。</mark></p>
+          <pre>export enum Entrepots {
+  Portrait = 'portrait',
+  Event    = 'event',
+  Relation = 'relation',
+  Crowd    = 'crowd',
+  Uid      = 'uid',
+  RawSql   = 'rawSql',
+}
+</pre>
+        </div><div class="ccard tone-green">
+          <span class="tag tone-green">48 行 · 唯一入口</span>
+          <h4>context.ts</h4>
+          <p><strong>SqlContext</strong>。选方言、构造三个模块，之后一路传下去。
+
+它把方言<strong>注入</strong>三个模块，模块持有方言实例。</p>
+          <pre>SqlContext.create(DbType.Doris, { eventTableMap })
+</pre>
+        </div><div class="ccard tone-muted">
+          <span class="tag tone-muted">63 行 · 出口</span>
+          <h4>index.ts</h4>
+          <p>统一出口。还聚合了一个 <code>utils</code> 对象，
+把零散工具打包给外部用。</p>
+          
+        </div></div><div class="callout tone-green">
+      <span class="ic">✅</span>
+      <div><p><mark class="mk-blue">读 crowd 包，从 <code>define.ts</code> 开始。</mark></p>
+<p>43 行，但它是<strong>整个业务词汇表</strong>。看完你就知道：
+系统认识哪六种条件、有哪几个模块、查哪些表。</p>
+<p>然后再去看 <code>context.ts</code>（入口），最后才进 <code>entrepots/</code>（实现）。</p>
+</div>
+    </div><h2 id="架构业务条件进来rule-出去"><span class="num">04</span>架构：业务条件进来，<code>Rule[]</code> 出去</h2>
+<h3 id="先更正一个容易搞错的地方">先更正一个容易搞错的地方</h3>
+<div class="callout tone-red quote">
+      <span class="ic">⚠</span>
+      <div><p><mark class="mk-blue"><strong>没有统一的 <code>adapter</code> 层。</strong></mark></p>
+<p>业务条件 → <code>Rule[]</code> 的翻译，是<strong>每种条件自己做的</strong> ——
+六种实现各写各的，没有一个公共的翻译函数。</p>
+</div>
+    </div><div class="compare-wrap"><table class="compare"><thead><tr><th>条件</th><th>它内部的转换方法</th><th>代码量</th></tr></thead><tbody><tr><th>画像</th><td data-label="它内部的转换方法"><code>adapter()</code>（私有）+ <code>addHackRules()</code></td><td data-label="代码量">233 行</td></tr><tr><th>事件</th><td data-label="它内部的转换方法"><code>getPropRules</code> / <code>getBaseRules</code> / <code>buildTimeRangRules</code> / <code>createMapPropRule</code> …（十几个）</td><td data-label="代码量">906 行</td></tr><tr><th>关系</th><td data-label="它内部的转换方法"><code>getDetailBaseRule</code> / <code>getPropRules</code> / <code>buildDetailSql</code> / <code>addHackRules</code> …</td><td data-label="代码量">715 行</td></tr><tr><th>uid / 人群包 / rawSql</th><td data-label="它内部的转换方法"><span class="tag tone-muted">没有 —— 太简单，直接用</span></td><td data-label="代码量">141 / 134 / 107 行</td></tr></tbody></table></div><div class="callout tone-amber">
+      <span class="ic">⚠</span>
+      <div><p><strong><code>addHackRules</code> 在 <code>portrait.ts</code> 和 <code>relation.ts</code> 里各有一份，逐字节相同。</strong></p>
+<p>这是复制粘贴的重复代码 —— 改一处不会同步另一处。
+<mark class="mk-blue">看到「这里的行为不对」时，记得两份都要改。</mark></p>
+</div>
+    </div><h3 id="翻译长什么样以画像为例">翻译长什么样：以画像为例</h3>
+<p><code>portrait.ts</code> 里的 <code>adapter()</code> 是<strong>递归函数</strong>，处理一棵条件树：</p>
+<div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;in&quot;,&quot;to&quot;:&quot;loop&quot;},{&quot;from&quot;:&quot;loop&quot;,&quot;to&quot;:&quot;q1&quot;,&quot;label&quot;:&quot;是&quot;},{&quot;from&quot;:&quot;q1&quot;,&quot;to&quot;:&quot;rec&quot;,&quot;label&quot;:&quot;是&quot;},{&quot;from&quot;:&quot;q1&quot;,&quot;to&quot;:&quot;q2&quot;,&quot;label&quot;:&quot;否&quot;,&quot;dashed&quot;:true},{&quot;from&quot;:&quot;q2&quot;,&quot;to&quot;:&quot;q3&quot;,&quot;label&quot;:&quot;是&quot;},{&quot;from&quot;:&quot;q2&quot;,&quot;to&quot;:&quot;bad&quot;,&quot;label&quot;:&quot;否&quot;,&quot;dashed&quot;:true},{&quot;from&quot;:&quot;q3&quot;,&quot;to&quot;:&quot;plain&quot;,&quot;label&quot;:&quot;否&quot;},{&quot;from&quot;:&quot;q3&quot;,&quot;to&quot;:&quot;time&quot;,&quot;label&quot;:&quot;是&quot;}]">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-green" data-id="in">
+              
+              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5L3 8l3 4.5M10 3.5L13 8l-3 4.5"/></svg>
+              <b>adapter(rules)</b>
+              <small>单个条件或数组</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="loop">
+              
+              
+              <b>遍历每个 rule</b>
+              
+            </div></div><div class="flowd-row"><div class="fnode tone-amber shape-note" data-id="q1">
+              
+              
+              <b>有 'logic'？</b>
+              <small>是树</small>
+            </div><div class="fnode tone-amber shape-note" data-id="q2">
+              
+              
+              <b>有 'op'？</b>
+              <small>是叶子</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="rec">
+              
+              
+              <b>递归 adapter(items)</b>
+              <small>保持 logic 不变</small>
+            </div><div class="fnode tone-amber shape-note" data-id="q3">
+              
+              
+              <b>有 'dateType'？</b>
+              <small>时间条件</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="plain">
+              
+              
+              <b>直接改名</b>
+              <small>name → column</small>
+            </div><div class="fnode tone-red" data-id="time">
+              
+              
+              <b>展开成 AND 子树</b>
+              <small>调方言或 utils</small>
+            </div><div class="fnode tone-red" data-id="bad">
+              
+              
+              <b>throw</b>
+              <small>条件错误</small>
+            </div></div></div>
+      
+    </div><p><strong>五个出口各产出什么</strong>：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>分支</th><th>产出</th><th>真实数据</th></tr></thead><tbody><tr><th>有 <code>logic</code></th><td data-label="产出"><strong>递归</strong>，结构不变</td><td data-label="真实数据"><code>{ logic: 'OR', items: [...] }</code> → 递归后塞回去</td></tr><tr><th>有 <code>dateType</code>\n且是相对时间戳</th><td data-label="产出"><strong>调方言</strong>，展开成 AND 子树</td><td data-label="真实数据"><code>{ op: Gte, name: '..._time', value: 30 }</code> → <code>{ logic: AND, items: [3 个 Expression] }</code></td></tr><tr><th>有 <code>dateType</code>\n其它时间</th><td data-label="产出"><strong>调 utils</strong>，展开成 AND 子树</td><td data-label="真实数据">同上，但生成的是通用 Rule</td></tr><tr><th>有 <code>rawValue</code></th><td data-label="产出">改名 + 透传</td><td data-label="真实数据"><code>{ op: Eq, name: 'c', rawValue: 'a+b' }</code> → <code>{ column: 'c', op: Eq, rawValue: 'a+b' }</code></td></tr><tr><th>普通条件</th><td data-label="产出"><strong>只改名</strong></td><td data-label="真实数据"><code>{ op: IN, name: 'city', value: ['杭州'] }</code> → <code>{ column: 'city', op: IN, value: ['杭州'] }</code></td></tr><tr><th>都不是</th><td data-label="产出"><span class="tag tone-red">throw</span></td><td data-label="真实数据"><code>portrait adapter: 条件错误: {...}</code></td></tr></tbody></table></div><div class="callout tone-violet">
+      <span class="ic">💡</span>
+      <div><p><strong>看第 4 和第 5 行 —— 大部分条件其实只做了一件事：把 <code>name</code> 改成 <code>column</code>。</strong></p>
+<p>真正有分量的只有<strong>时间条件那一支</strong>（展开成一棵子树）。
+<mark class="mk-blue">翻译之所以「轻」，是因为两套词汇用的是同一个树形结构。</mark></p>
+</div>
+    </div><h2 id="架构时间条件为什么会膨胀"><span class="num">05</span>架构：时间条件为什么会「膨胀」</h2>
+<p><strong>一个输入条件，变成一棵子树。</strong> 这是整个翻译里最有内容的一步。</p>
+<div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-muted">输入</span>
+            <span class="name">业务条件</span>
+            <span class="spacer"></span>
+            <span class="tag tone-muted">1 行</span>
+          </div>
+          
+          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>{ op: 'Gte', name: '..._opened_time',
+  dateType: 'Relative', value: 30 }
+</pre></div>
+          <p class="jnote">业务侧说的是一句话：「开户时间在<strong>最近 30 天</strong>内」。</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">adapter<span class="note">遇到 dateType 分支</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-violet">展开</span>
+            <span class="name">时间表达式</span>
+            <span class="spacer"></span>
+            <span class="tag tone-violet">变成两个</span>
+          </div>
+          
+          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>{ op: 'Gte', column: '..._opened_time', value: 开始 }
+{ op: 'Lte', column: '..._opened_time', value: 结束 }
+</pre></div>
+          <p class="jnote"><mark class="mk-blue">因为「最近 30 天」在 SQL 里必须写成「&gt;= 开始 AND &lt;= 结束」。</mark>
+一个语义，两个条件。</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">补丁<span class="note">某些操作符还要再加一个</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-amber">补丁</span>
+            <span class="name">addHackRules</span>
+            <span class="spacer"></span>
+            <span class="tag tone-amber">再加一个条件</span>
+          </div>
+          
+          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>如果是 '&lt;' 或 '&lt;='
+  → 再加 { op: 'Gt', column: '...', value: 0 }
+</pre></div>
+          <p class="jnote">代码注释写着原因：
+
+&gt; 对于 <code>&lt;</code> 和 <code>&lt;=</code> 的时间范围，需要加上 <code>&gt; 0</code> 的限制条件，
+&gt; 否则会筛选出值为 0 的数据。
+
+<mark class="mk-blue">「值为 0」在时间戳语义里代表「从没发生过」</mark>，
+不加会被当成「很久以前发生过」。</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">包一层<span class="note">强制 AND</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-green">输出</span>
+            <span class="name">Rule[]</span>
+            <span class="spacer"></span>
+            <span class="tag tone-green">一棵子树</span>
+          </div>
+          
+          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>{ logic: 'AND', items: [ 3 个 Expression ] }
+</pre></div>
+          <p class="jnote"><strong>外面强制包一层 <code>logic: 'AND'</code>。</strong> 见下一节。</p>
+        </div><div class="callout tone-violet">
+      <span class="ic">💡</span>
+      <div><p><strong>这一支还暴露了架构的一条裂缝。</strong></p>
+<p>上面写着「调方言<strong>或</strong> utils」—— 因为：</p>
+<ul>
+<li>相对时间 + <strong>时间戳</strong>格式 → 调<strong>方言</strong>（两个库的包装不一样）</li>
+<li>其它时间 → 调 <strong>core 的 utils</strong>（<code>getTimeRules</code>，通用逻辑）</li>
+</ul>
+<p><mark class="mk-blue">同一件事分了两条路，取决于属性格式。</mark>
+而 <code>getTimeRules</code> 本身被<strong>三个文件</strong>调用：<code>portrait</code> / <code>event</code> / <code>relation</code>。</p>
+</div>
+    </div><h2 id="取舍三个为什么"><span class="num">06</span>取舍：三个「为什么」</h2>
+<h3 id="为什么时间条件要强制包一层-and">为什么时间条件要强制包一层 <code>AND</code></h3>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">// portrait.ts · adapter()
+const timeRules = addHackRules(rule.name, rule.op, timeExprs);
+// 这里包装一层，因为 timeRules 必须是 And 的关系
+// 而 result 这一层的关系可能是 Or
+result.push({ logic: Logic.And, items: timeRules });
+</code></pre></div>
+<p><strong>代码注释直接给了答案。</strong> 具体会错在哪：</p>
+<div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-muted">假设</span>
+            <span class="name">用户说的是</span>
+            <span class="spacer"></span>
+            
+          </div>
+          
+          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>「最近 3 天加购过，或者是 VIP」
+</pre></div>
+          <p class="jnote">顶层是 <code>OR</code>，左边是时间条件，右边是画像条件。</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">不包 <span class="en">展开</span><span class="note">直接塞进去</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-red">不包会怎样</span>
+            <span class="name">三个条件平铺在 OR 里</span>
+            <span class="spacer"></span>
+            
+          </div>
+          
+          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>&gt;= 开始   OR   &lt;= 结束   OR   是 VIP
+</pre></div>
+          <p class="jnote"><mark class="mk-blue">语义完全错了。</mark>
+
+任何时间都满足「&gt;= 开始」，所以左边这一支<strong>永远为真</strong> ——
+等于「所有人都要」。</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">包一层<span class="note">把三个绑成一个</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-green">包一层</span>
+            <span class="name">三个变成一个整体</span>
+            <span class="spacer"></span>
+            
+          </div>
+          
+          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>(&gt;= 开始 AND &lt;= 结束)   OR   是 VIP
+</pre></div>
+          <p class="jnote">外层是 <code>AND</code>，把三个条件绑成一个节点，
+再参与上层的 <code>OR</code>。<mark class="mk-blue">语义就对了。</mark></p>
+        </div><div class="callout tone-green">
+      <span class="ic">✅</span>
+      <div><p><mark class="mk-blue">这就是「展开」必须配「包一层」的原因。</mark></p>
+<p>展开把一个条件变成三个 —— 但它们在语义上<strong>仍然是同一个条件</strong>。
+如果不包，上层逻辑会把它们当成三个独立的判断。</p>
+</div>
+    </div><h3 id="为什么没有一个统一的-adapter">为什么没有一个统一的 <code>adapter</code></h3>
+<p><strong>因为六种条件的翻译逻辑差得太远。</strong></p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>条件</th><th>翻译的难点</th></tr></thead><tbody><tr><th>画像</th><td data-label="翻译的难点">时间条件要展开、要补 hack 规则</td></tr><tr><th>事件</th><td data-label="翻译的难点">事件名 + 时间范围 + 属性过滤 + 次数阈值，四件事都要处理</td></tr><tr><th>关系</th><td data-label="翻译的难点">分 DETAIL / TIMES 两种形态，要判分区</td></tr><tr><th>uid / 人群包 / rawSql</th><td data-label="翻译的难点"><span class="tag tone-muted">基本没有难点，直接用</span></td></tr></tbody></table></div><p>硬抽一个公共层，只会得到一堆「参数不一样、分支不一样」的 if。
+<mark class="mk-blue">所以它选了「各写各的」，代价是 <code>addHackRules</code> 这种重复。</mark></p>
+<h3 id="为什么方言调用散在这一层">为什么方言调用散在这一层</h3>
+<p><strong>因为方言是「业务条件遇到的具体问题」，不是「表达式树的通用问题」。</strong></p>
+<div class="callout tone-amber">
+      <span class="ic">⚠</span>
+      <div><p>core 的 <code>buildWhere</code> 是<strong>静态方法</strong>，签名里没有 dialect —— 它不知道方言存在。</p>
+<p>所以所有方言调用都落在 <code>crowd</code> 里，散在 <code>portrait</code> / <code>event</code> / <code>relation</code> 各自的分支里。</p>
+<p><mark class="mk-blue">这是一条真实的架构裂缝。</mark> 好在它有边界：
+方言方法都只返回「片段」或「表达式节点」，不生成 SQL（架构篇第 06 节）。</p>
+</div>
+    </div><h2 id="自测"><span class="num">07</span>自测</h2>
+<div class="quiz"><details>
+        <summary>crowd 包在 core 之上加了哪三件事？</summary>
+        <div class="a"><p>① <strong>认识六种业务条件</strong> —— 每种自己知道该查哪张表；
+② <strong>做集合运算</strong> —— AND / OR（<code>UNION ALL + GROUP BY + HAVING</code>）和 include / exclude；
+③ <strong>处理库差异</strong> —— 所有方言调用都在这一层，core 的 <code>buildWhere</code> 根本不知道方言存在。</p>
+</div>
+      </details><details>
+        <summary>有没有一个统一的 adapter 把业务条件翻译成 Rule[]？</summary>
+        <div class="a"><p><strong>没有。</strong> 翻译是<strong>每种条件自己做的</strong> —— 六种实现各写各的，没有公共的翻译函数。
+画像有私有的 <code>adapter()</code>，事件有十几个 <code>getPropRules</code> / <code>getBaseRules</code> 之类的函数，
+uid / 人群包 / rawSql 基本没有转换逻辑。
+代价是 <code>addHackRules</code> 在 portrait 和 relation 里各有一份，逐字节相同。</p>
+</div>
+      </details><details>
+        <summary>「最近 30 天」这一个条件，为什么最后变成了三个条件？</summary>
+        <div class="a"><p>因为它在 SQL 里必须写成 <code>&gt;= 开始 AND &lt;= 结束</code> —— 一个语义，两个条件。
+某些操作符（<code>&lt;</code> / <code>&lt;=</code>）还要再加一个 <code>&gt; 0</code>，否则会把「值为 0」
+误当成「很久以前发生过」（0 在时间戳语义里代表「从没发生过」）。</p>
+</div>
+      </details><details>
+        <summary>时间条件展开后，为什么要强制在外面包一层 logic: AND？</summary>
+        <div class="a"><p>因为展开出来的三个条件在语义上<strong>仍然是同一个条件</strong>，但上层逻辑可能是个 <code>OR</code>。
+不包的话，「最近 3 天 <strong>或</strong> 是 VIP」会变成
+「<code>&gt;= 开始</code> <strong>或</strong> <code>&lt;= 结束</code> <strong>或</strong> 是 VIP」——
+任何时间都满足「&gt;= 开始」，左边这支永远为真，<mark class="mk-blue">等于所有人都要</mark>。</p>
+</div>
+      </details><details>
+        <summary>读 crowd 包应该从哪个文件开始？</summary>
+        <div class="a"><p><code>src/define.ts</code>（43 行）。它是<strong>整个业务词汇表</strong> ——
+系统认识哪六种条件、有哪几个模块、查哪些表，全在这里。
+然后再看 <code>context.ts</code>（入口），最后才进 <code>entrepots/</code>（实现）。</p>
+</div>
+      </details></div>
+
+    <footer>
+      <span>sql_builder_v2 的 crowd 包</span>
+      <span>最后更新 2026-09-26 · 单文件可离线打开</span>
+    </footer>
+  </main>
+</div>
+
+<script src="../../assets/app.js"></script>
+</body>
+</html>
