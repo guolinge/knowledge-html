@@ -480,45 +480,26 @@ caption: packages/core 的组成与数据流 —— 由 archify skill 生成
 
 ### 按架构图的每条边走一遍
 
-上面那张图有 **8 个框、7 条边**。这一节一条都不跳 —— 每条边在处理什么数据，都摊开看。
+上面那张图有 **8 个框、7 条边**，每条边都带编号。
 
-```lane-stack
-- badge: 边 ①
-  title: crowd 条件实现 → Rule[]
-  desc: adapter 把业务条件改写成表达式模型
-  tone: blue
-  nodes:
-    - { title: 字段改名, sub: "业务叫 name → 模型叫 column" }
-  next: "边 ② :: :: utils 也在这里产出 Rule"
-
-- badge: 边 ③
-  title: crowd 条件实现 → SqlDialect
-  desc: 遇到特殊属性类型时才调方言
-  tone: red
-  nodes:
-    - { title: 时间 / map / JSON 数组, sub: "普通条件根本不碰方言" }
-  next: "边 ④ :: :: 接口落到具体实现"
-
-- badge: 边 ⑤
-  title: Rule[] → DB.buildWhere
-  desc: 递归展开成 knex 调用
-  tone: violet
-  nodes:
-    - { title: 是树就钻, sub: "建子查询" }
-    - { title: 是叶子就挂, sub: "whereFn(column, op, value)" }
-  next: "边 ⑥ :: :: 落到 knex"
-
-- badge: 边 ⑦
-  title: knex → SQL 字符串
-  desc: 链式累积，取值时才编译
-  tone: green
-  nodes:
-    - { title: 加反引号 + 值变占位符, sub: "toString() 触发" }
+```compare
+first: 边
+head: [从 → 到, 这一步在干什么]
+rows:
+  - "①": ["`crowd 条件实现` → `Rule[]`", "adapter 改写：字段改名 + 展开特殊条件"]
+  - "②": ["`utils.ts` → `Rule[]`", "时间条件展开成一棵 AND 子树"]
+  - "③": ["`crowd 条件实现` → `SqlDialect`", "属性类型特殊时才调方言"]
+  - "④": ["`SqlDialect` → `Bytehouse` / `Doris`", "接口落到具体实现"]
+  - "⑤": ["`Rule[]` → `DB.buildWhere`", "递归展开成 knex 调用"]
+  - "⑥": ["`DB.buildWhere` → `knex`", "五种表达式形态各落到哪个方法"]
+  - "⑦": ["`knex` → `SQL 字符串`", "链式累积，取值时才编译"]
 ```
+
+下面按编号一条条走。
 
 #### 边 ① `crowd → Rule[]`：adapter 在干什么
 
-**这一步我之前完全没讲。** 业务条件不是直接就是 `Rule[]` 的，中间有个改写。
+业务条件不是天然就长成 `Rule[]` 的，中间有一次**改写**。
 
 拿画像条件举例。业务侧写的是：
 
@@ -565,7 +546,7 @@ caption: packages/core 的组成与数据流 —— 由 archify skill 生成
 tone: amber
 icon: ⚠
 text: |
-  **注意最后一条**：时间条件**不是**变成一个叶子，而是变成**一棵 AND 子树**。
+  时间条件**不是**变成一个叶子，而是变成**一棵 AND 子树**。
 
   因为「最近 3 天」在 SQL 里得写成 `>= 开始 AND <= 结束` —— 一个条件拆成两个。
 ```
@@ -627,14 +608,13 @@ tone: red
 icon: ⚠
 tinted: true
 text: |
-  **这张图我第一版画错了。** 原来那条边是从 `DB.buildWhere` 出去的，
-  写着「遇到方言差异」。
+  **方言不是 `buildWhere` 调的。** `buildWhere` 是静态方法，签名里根本没有 dialect
+  —— 它压根不知道方言存在。
 
-  实际上 ==`buildWhere` 是静态方法，签名里根本没有 dialect== ——
-  它压根不知道方言存在。全部方言调用都在 `crowd/src/` 里。
+  ==全部方言调用都在 `crowd/src/` 里==，调用点是 `adapter()`。
 ```
 
-真实的调用点在 `adapter()` 里。触发条件是**属性类型特殊**：
+触发条件是**属性类型特殊**：
 
 | 属性类型 | 调哪个方言方法 | 返回什么 |
 |---|---|---|
