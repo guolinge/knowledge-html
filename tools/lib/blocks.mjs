@@ -548,7 +548,11 @@ const KIND_TONE = {
           const tone = n.tone || (depth === 0 ? 'violet' : 'muted');
           return `<li${kids.length ? ' class="has-kids"' : ''}>
             <div class="tnode tone-${tone}" data-tree-node>
-              ${kids.length ? '<span class="tcaret" aria-hidden="true"></span>' : ''}
+              ${
+                kids.length
+                  ? '<span class="tcaret" aria-hidden="true"></span>'
+                  : '<span class="tdot" aria-hidden="true"></span>'
+              }
               <b>${inline(n.label)}</b>
               ${n.sub ? `<code>${esc(n.sub)}</code>` : ''}
               ${n.note ? `<span class="tnote">${inline(n.note)}</span>` : ''}
