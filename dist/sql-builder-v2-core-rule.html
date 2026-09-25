@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>sql_builder_v2 的核心抽象</title>
-<meta name="description" content="为什么需要「条件」这个抽象、六种条件入口各是什么、表达式模型为什么是四种形态、方言怎么隔离库差异 —— 按「概念 → 组织 → 架构」讲设计理由，不重复文件地图和整体架构那两篇。" />
+<title>sql_builder_v2 的表达式模型 Rule[]</title>
+<meta name="description" content="core 唯一认识的输入格式。三种类型的关系、四种形态为什么是「数据 vs 代码」的 2×2 组合、怎么判别和分派，以及鸭子类型换来的代价。" />
 <style>
 /* ============================================================
    theme.css — 设计 token 与页面骨架
@@ -2466,141 +2466,62 @@ svg[data-preset="blueprint"] .c-security-group,
   <aside class="toc" id="toc">
       <p class="toc-title">目录</p>
       <a href="../../index.html" class="sub">← 全部笔记</a>
-      <a href="#需求为什么需要条件这个抽象">需求：为什么需要「条件」这个抽象</a>
-      <a href="#一个条件由什么构成">一个条件由什么构成</a>
-      <a href="#为什么条件要能嵌套" class="sub">为什么条件要能嵌套</a>
-      <a href="#六种条件入口entrepot">六种条件入口（entrepot）</a>
-      <a href="#一个容易忽略的差异五种能嵌套一种不能" class="sub">一个容易忽略的差异：五种能嵌套，一种不能</a>
-      <a href="#表达式模型四种形态">表达式模型：四种形态</a>
-      <a href="#为什么不能直接用-sql-字符串" class="sub">为什么不能直接用 SQL 字符串</a>
-      <a href="#四种形态-两个维度的组合" class="sub">四种形态 = 两个维度的组合</a>
+      <a href="#概念三个类型一个比一个窄">概念：三个类型，一个比一个窄</a>
+      <a href="#为什么要有这三个层次" class="sub">为什么要有这三个层次</a>
+      <a href="#概念为什么不能直接用-sql-字符串">概念：为什么不能直接用 SQL 字符串</a>
+      <a href="#组织四种形态是-22-加一个兜底">组织：四种形态是 2×2 加一个兜底</a>
+      <a href="#四种形态各是什么样" class="sub">四种形态各是什么样</a>
+      <a href="#边界情况raw-的-value-是可选的" class="sub">边界情况：Raw 的 value 是可选的</a>
+      <a href="#架构怎么判别怎么分派">架构：怎么判别、怎么分派</a>
       <a href="#判别靠哪个字段存在" class="sub">判别靠「哪个字段存在」</a>
-      <a href="#组织条件怎么组合成树">组织：条件怎么组合成树</a>
-      <a href="#组织两套词汇两次翻译">组织：两套词汇，两次翻译</a>
-      <a href="#架构以画像为例看条件怎么翻译">架构：以画像为例，看条件怎么翻译</a>
-      <a href="#它是个递归函数" class="sub">它是个递归函数</a>
-      <a href="#五个出口各产出什么" class="sub">五个出口各产出什么</a>
-      <a href="#重点时间条件为什么会膨胀" class="sub">重点：时间条件为什么会「膨胀」</a>
-      <a href="#架构entrepot-六种实现怎么组织">架构：entrepot 六种实现怎么组织</a>
-      <a href="#每种条件是一个类" class="sub">每种条件是一个类</a>
-      <a href="#工厂负责分发" class="sub">工厂负责分发</a>
-      <a href="#架构方言怎么隔离库差异">架构：方言怎么隔离库差异</a>
-      <a href="#为什么需要方言" class="sub">为什么需要方言</a>
-      <a href="#17-个方法覆盖所有差异点" class="sub">17 个方法，覆盖所有差异点</a>
-      <a href="#什么时候调方言" class="sub">什么时候调方言</a>
-      <a href="#一个具体的例子时间戳为什么必须走方言" class="sub">一个具体的例子：时间戳为什么必须走方言</a>
+      <a href="#分派and-or-就是选方法名" class="sub">分派：AND / OR 就是选方法名</a>
+      <a href="#取舍鸭子类型的代价">取舍：鸭子类型的代价</a>
       <a href="#自测">自测</a>
   </aside>
 
   <main>
     <div class="hero">
-      <span class="eyebrow">● 代码架构 · 设计取舍</span>
-      <h1>sql_builder_v2 的核心抽象</h1>
-      <p class="lede">为什么需要「条件」这个抽象、六种条件入口各是什么、表达式模型为什么是四种形态、方言怎么隔离库差异 —— 按「概念 → 组织 → 架构」讲设计理由，不重复文件地图和整体架构那两篇。</p>
+      <span class="eyebrow">● 从零理解 · 概念</span>
+      <h1>sql_builder_v2 的表达式模型 Rule[]</h1>
+      <p class="lede">core 唯一认识的输入格式。三种类型的关系、四种形态为什么是「数据 vs 代码」的 2×2 组合、怎么判别和分派，以及鸭子类型换来的代价。</p>
     </div>
 
     <div class="draft-banner">
     <span>⚠</span>
     <span>本页状态为 <b>draft</b>：内容尚未人工核对，引用前请自行验证。</span>
   </div>
-
-    <div class="provenance"><span><b>来源</b> sources/gitlab/sql_builder_v2 @ 2c500b2</span><span><b>生成</b> 2026-09-25</span><span><b>模型</b> deepseek-v4.1-flash</span></div>
-    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">架构</span> <span class="tag tone-muted">SQL</span> <span class="tag tone-muted">TypeScript</span> <span class="tag tone-muted">圈人</span> <span class="tag tone-muted">设计</span></span></div>
+<aside class="needs">
+      <p class="needs-title">读这篇之前，你需要先知道</p>
+      <a class="need" href="../sql-builder-v2-core/">← <b>4. core 篇</b><span>通用层：递归六层讲一遍</span></a>
+    </aside>
+    <div class="provenance"><span><b>来源</b> sources/gitlab/sql_builder_v2 @ 2c500b2</span><span><b>生成</b> 2026-09-26</span><span><b>模型</b> deepseek-v4.1-flash</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">架构</span> <span class="tag tone-muted">SQL</span> <span class="tag tone-muted">TypeScript</span> <span class="tag tone-muted">圈人</span></span></div>
 
 <div class="callout tone-blue">
       <span class="ic">🧭</span>
-      <div><p>这篇讲<strong>设计</strong>：这个库为什么要有「条件」「表达式」「方言」这几个抽象，
-它们各自解决什么问题。</p>
-<p>想看文件在哪 → <a href="../sql-builder-v2-code-map/">代码地图</a>；
-想看整体分层 → <a href="../sql-builder-v2-architecture/">架构</a>。</p>
+      <div><p>前置是 <a href="../sql-builder-v2-core/">④ core 篇</a>。</p>
+<p>前面几篇一直在说「业务条件变成 <code>Rule[]</code>」「core 只认 <code>Rule[]</code>」，
+但没讲 <code>Rule[]</code> 到底是什么。</p>
+<p>读完你应该能说出：「<mark class="mk-blue">四种形态是「列名要不要处理」×「值要不要处理」的 2×2 组合。</mark>」</p>
 </div>
-    </div><div class="cards" data-cols="3"><div class="ccard tone-green">
-          <span class="tag tone-green">01 ~ 04</span>
-          <h4>概念</h4>
-          <p>为什么需要「条件」这个抽象；一个条件由什么构成；六种条件入口；四种表达式形态</p>
-          
-          
-        </div><div class="ccard tone-blue">
-          <span class="tag tone-blue">05 ~ 06</span>
-          <h4>组织</h4>
-          <p>条件怎么组合成树；两套词汇怎么分工；两次翻译各做什么</p>
-          
-          
-        </div><div class="ccard tone-violet">
-          <span class="tag tone-violet">07 ~ 09</span>
-          <h4>架构</h4>
-          <p>条件怎么翻译成 Rule[]；六种实现怎么组织；方言怎么隔离库差异</p>
-          
-          
-        </div></div><h2 id="需求为什么需要条件这个抽象"><span class="num">01</span>需求：为什么需要「条件」这个抽象</h2>
-<p>先看一个真实场景。</p>
-<blockquote>
-<p>运营要发一张优惠券，<strong>只发给「最近 7 天加购过、并且是 VIP」的用户</strong>。</p>
-</blockquote>
-<p>要落地，得回答「这批人是谁」。而这些数据散在两个地方：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">「加购过」  →  在事件表（行为流水）
-「是 VIP」  →  在画像表（静态属性）
+    </div><h2 id="概念三个类型一个比一个窄"><span class="num">01</span>概念：三个类型，一个比一个窄</h2>
+<p>先把这个名字拆开。源码里其实有<strong>三个</strong>类型：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">// core/src/db.ts
+
+export type Expression =                     // 叶子：四种形态之一
+    | NormalExpression
+    | RawValueExpression
+    | RawExpression
+    | RawColumnExpression;
+
+export type Condition = {                    // 树枝：有 logic 和 items
+    logic: Logic;
+    items: (Condition | Expression)[];
+};
+
+export type Rule = Condition | Expression;   // 单个「树枝或叶子」
 </code></pre></div>
-<p>最直接的做法：<strong>让运营写 SQL</strong>。</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-sql">SELECT uid FROM event_v2      WHERE event_type = '加购' AND event_time &gt; ...
-INTERSECT
-SELECT uid FROM user_portrait WHERE vip_level &gt;= 3
-</code></pre></div>
-<p>这条路走不通，有四个原因：</p>
-<div class="cards" data-cols="2"><div class="ccard tone-amber">
-          
-          <h4>运营不会写 SQL</h4>
-          <p>业务侧的人是产品和运营，不是工程师</p>
-          
-          
-        </div><div class="ccard tone-amber">
-          
-          <h4>口径要复用</h4>
-          <p>同一批人明天还要圈一次，不能每次重写</p>
-          
-          
-        </div><div class="ccard tone-red">
-          
-          <h4>要防注入</h4>
-          <p>条件里的值是外部传进来的，直接拼字符串会被注入</p>
-          
-          
-        </div><div class="ccard tone-red">
-          
-          <h4>要跑在两个库上</h4>
-          <p>同一句话，Doris 和 ByteHouse 的 SQL 写法不一样</p>
-          
-          
-        </div></div><div class="callout tone-violet quote">
-      <span class="ic">🎯</span>
-      <div><p>所以需要一层中间物：<strong>用业务语言描述「要什么人」，由它生成 SQL。</strong>
-<mark class="mk-blue">「条件」就是这层描述的基本单位。</mark></p>
-</div>
-    </div><h2 id="一个条件由什么构成"><span class="num">02</span>一个条件由什么构成</h2>
-<p>把「最近 7 天加购过」和「是 VIP」拆开看，它们其实是同一种结构：</p>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>拆开看</th><th>「最近 7 天加购过」</th><th>「是 VIP」</th></tr></thead><tbody><tr><th>判断对象</th><td data-label="「最近 7 天加购过」">事件「加购」</td><td data-label="「是 VIP」">画像属性 <code>vip_level</code></td></tr><tr><th>判断方式</th><td data-label="「最近 7 天加购过」">次数 &gt; 0</td><td data-label="「是 VIP」"><code>&gt;=</code></td></tr><tr><th>判断值</th><td data-label="「最近 7 天加购过」">—</td><td data-label="「是 VIP」">3</td></tr><tr><th>额外限定</th><td data-label="「最近 7 天加购过」">最近 7 天</td><td data-label="「是 VIP」">—</td></tr></tbody></table></div><p><strong>共同点<strong>：都是「</strong>对某个东西做一个判断</strong>」。</p>
-<div class="cards" data-cols="2"><div class="ccard tone-green">
-          <span class="tag tone-green">一个判断</span>
-          <h4>叶子条件</h4>
-          <p>最小单位。对某个东西做一次判断</p>
-          
-          <pre>{ op: 'IN', name: 'city', value: ['杭州'] }
-</pre>
-        </div><div class="ccard tone-violet">
-          <span class="tag tone-violet">组合</span>
-          <h4>树枝条件</h4>
-          <p>用 AND / OR 把条件串起来。<strong>业务说的「并且」「或者」就是它</strong></p>
-          
-          <pre>{ logic: 'AND', items: [ ... ] }
-</pre>
-        </div></div><h3 id="为什么条件要能嵌套">为什么条件要能嵌套</h3>
-<p>因为业务说的是：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">「最近 7 天加购过，并且是 VIP」          → AND(叶子, 叶子)
-「最近 7 天加购过，或者是 VIP」          → OR(叶子, 叶子)
-「（加购过 或 下单过）并且是 VIP」        → AND(OR(叶子,叶子), 叶子)
-</code></pre></div>
-<p><strong>最后一个例子说明为什么必须是树，不能是列表</strong> —— 「或者」可以出现在「并且」里面。</p>
-<div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;and&quot;,&quot;to&quot;:&quot;or&quot;,&quot;label&quot;:&quot;左边&quot;},{&quot;from&quot;:&quot;and&quot;,&quot;to&quot;:&quot;vip&quot;,&quot;label&quot;:&quot;右边&quot;},{&quot;from&quot;:&quot;or&quot;,&quot;to&quot;:&quot;cart&quot;},{&quot;from&quot;:&quot;or&quot;,&quot;to&quot;:&quot;order&quot;}]">
+<div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;rule&quot;,&quot;to&quot;:&quot;cond&quot;,&quot;label&quot;:&quot;是其中一种&quot;},{&quot;from&quot;:&quot;rule&quot;,&quot;to&quot;:&quot;expr&quot;,&quot;label&quot;:&quot;或是另一种&quot;},{&quot;from&quot;:&quot;expr&quot;,&quot;to&quot;:&quot;forms&quot;}]">
       <svg class="flowd-svg" aria-hidden="true">
         <defs>
           <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
@@ -2610,232 +2531,158 @@ SELECT uid FROM user_portrait WHERE vip_level &gt;= 3
         </defs>
       </svg>
       <div class="flowd-groups"></div>
-      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-violet" data-id="and">
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-violet" data-id="rule">
               
               
-              <b>AND</b>
-              <small>顶层</small>
-            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="or">
+              <b>Rule</b>
+              <small>一个节点：树枝或叶子</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="cond">
               
               
-              <b>OR</b>
-              <small>子树枝</small>
-            </div><div class="fnode tone-green" data-id="vip">
+              <b>Condition</b>
+              <small>树枝：logic + items</small>
+            </div><div class="fnode tone-green" data-id="expr">
               
               
-              <b>是 VIP</b>
-              <small>叶子</small>
-            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="cart">
+              <b>Expression</b>
+              <small>叶子：四种形态</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="forms">
               
               
-              <b>加购过</b>
-              <small>叶子</small>
-            </div><div class="fnode tone-green" data-id="order">
-              
-              
-              <b>下单过</b>
-              <small>叶子</small>
+              <b>四种形态</b>
+              <small>Normal / RawValue / RawColumn / Raw</small>
             </div></div></div>
       
-    </div><h2 id="六种条件入口entrepot"><span class="num">03</span>六种条件入口（entrepot）</h2>
-<p><strong>为什么是六种？</strong> 因为「判断对象」的来源只有六类。</p>
-<div class="cards" data-cols="2"><div class="ccard tone-green">
-          <span class="tag tone-green">静态属性</span>
-          <h4>portrait</h4>
-          <p>用户的<strong>属性</strong>。查 <code>user_portrait</code> 表，一行 = 一个人</p>
-          
-          <pre>{ op: 'IN', name: 'city', value: ['杭州'] }
-→ WHERE city IN ('杭州')
-</pre>
-        </div><div class="ccard tone-violet">
-          <span class="tag tone-violet">行为</span>
-          <h4>event</h4>
-          <p>用户<strong>做过什么、几次</strong>。查 <code>event_v2</code>，要 join 回画像表</p>
-          
-          <pre>{ eventName: '加购', timeRange: '最近3天',
-  formula: { op: 'Gt', value: 3 } }
-→ 子查询 group by $user_id having count &gt; 3
-</pre>
-        </div><div class="ccard tone-blue">
-          <span class="tag tone-blue">预先算好</span>
-          <h4>crowd</h4>
-          <p>已经圈好存下来的<strong>一批人</strong>。查 <code>crowds</code> 表</p>
-          
-          <pre>{ op: 'IN', items: [
-    { crowdId: 'C_888', crowdVersion: 'v3' }
-]}
-</pre>
-        </div><div class="ccard tone-muted">
-          <span class="tag tone-muted">直接给</span>
-          <h4>uid</h4>
-          <p>直接给一批用户 ID，<strong>不查表</strong>。最简单的一种</p>
-          
-          <pre>{ op: 'IN', value: ['111','222'],
-  hasEncoded: false }
-</pre>
-        </div><div class="ccard tone-amber">
-          <span class="tag tone-amber">和对象的关系</span>
-          <h4>relation</h4>
-          <p>用户和某个<strong>对象</strong>的关系。查业务明细表</p>
-          
-          <pre>{ formulaType: 'DETAIL', op: 'IN',
-  relationName: 'niuniu_user_coupon_receive_last',
-  value: ['coupon001'] }
-</pre>
-        </div><div class="ccard tone-red">
-          <span class="tag tone-red">兜底</span>
-          <h4>rawSql</h4>
-          <p>直接塞一段 SQL。<strong>前五种表达不了时用</strong></p>
-          
-          <pre>'select uid from some_table where ...'
-</pre>
-        </div></div><div class="callout tone-amber">
+    </div><div class="callout tone-amber">
       <span class="ic">⚠</span>
-      <div><p><strong>为什么叫「入口」（entrepot）？</strong></p>
-<p>因为它是一个条件<strong>进入 SQL 世界的入口</strong> ——
-<mark class="mk-blue">每种条件都知道自己该去哪张表、该怎么写 WHERE</mark>。</p>
-<p>「条件」是业务视角的说法，「入口」是实现视角的说法。同一件事。</p>
+      <div><p><mark class="mk-blue"><strong>注意 <code>Rule[]</code> 是</strong>数组<strong>，不是类型名。</strong></mark></p>
+<p><code>buildWhere(builder, rules: Rule[], logic?)</code> 收的是<strong>一组</strong> Rule。
+架构图上写的 <code>Rule[]</code> 指的是「core 的输入格式」—— 一整个数组。</p>
+<p>而 <code>Rule</code>（不带方括号）是<strong>数组里的一个元素</strong>。
+<mark class="mk-blue">说「一个 Rule」和「一个 Rule[]」是两件不同的事。</mark></p>
 </div>
-    </div><h3 id="一个容易忽略的差异五种能嵌套一种不能">一个容易忽略的差异：五种能嵌套，一种不能</h3>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>类型</th><th>能不能嵌套成树</th><th>为什么</th></tr></thead><tbody><tr><th>portrait / event / relation</th><td data-label="能不能嵌套成树"><span class="tag tone-green">能</span></td><td data-label="为什么">它们的判断对象本身可以再组合，比如「城市是杭州 或 深圳」</td></tr><tr><th>crowd / rawSql</th><td data-label="能不能嵌套成树"><span class="tag tone-green">能</span></td><td data-label="为什么">同样支持 AND / OR 组合多个</td></tr><tr><th>uid</th><td data-label="能不能嵌套成树"><span class="tag tone-red">不能</span></td><td data-label="为什么">它就是一个 ID 列表，<strong>没有可组合的语义</strong></td></tr></tbody></table></div><h2 id="表达式模型四种形态"><span class="num">04</span>表达式模型：四种形态</h2>
-<h3 id="为什么不能直接用-sql-字符串">为什么不能直接用 SQL 字符串</h3>
-<p>因为一条 SQL 里，<strong>「数据」和「代码」是两种东西</strong>：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-sql">SELECT uid FROM user_portrait WHERE city = '杭州'
+    </div><h3 id="为什么要有这三个层次">为什么要有这三个层次</h3>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>类型</th><th>回答什么问题</th><th>有多少种可能</th></tr></thead><tbody><tr><th>Rule</th><td data-label="回答什么问题">这是一个树枝还是叶子</td><td data-label="有多少种可能">2</td></tr><tr><th>Condition</th><td data-label="回答什么问题">这一层怎么连（AND / OR）</td><td data-label="有多少种可能">1 种形状，但可以无限嵌套</td></tr><tr><th>Expression</th><td data-label="回答什么问题">这个叶子怎么写进 WHERE</td><td data-label="有多少种可能">4</td></tr></tbody></table></div><div class="callout tone-violet">
+      <span class="ic">💡</span>
+      <div><p><strong>整个模型只有两层结构：树枝和叶子。</strong></p>
+<p>树枝只有一种形状（<code>logic</code> + <code>items</code>），叶子有四种写法。
+<mark class="mk-blue"><code>Rule[]</code> 的全部复杂度就是「树枝能套树枝」+「叶子有四种写法」。</mark></p>
+</div>
+    </div><h2 id="概念为什么不能直接用-sql-字符串"><span class="num">02</span>概念：为什么不能直接用 SQL 字符串</h2>
+<p>如果只需要「生成一段 SQL」，为什么不干脆存字符串？</p>
+<p>因为一条 SQL 里，<strong>「数据」和「代码」是两种东西</strong>，处理方式完全不同：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">SELECT uid FROM user_portrait WHERE city = '杭州'
        ↑                        ↑   ↑      ↑
-     标识符                   标识符 数据  数据
+    标识符                    标识符 数据  数据
 </code></pre></div>
-<ul>
-<li><strong>标识符</strong>（表名、列名）→ 要包反引号：<code>`city`</code></li>
-<li><strong>数据<strong>（值）→ 要</strong>参数绑定</strong>，不能直接拼进去（否则被注入）</li>
-</ul>
-<p>但如果写成 <code>JSONExtract(properties, 'a')</code> —— 这段是<strong>代码</strong>，不能包反引号。</p>
-<div class="callout tone-red quote">
+<div class="compare-wrap"><table class="compare"><thead><tr><th>成分</th><th>例子</th><th>怎么处理</th><th>处理错了会怎样</th></tr></thead><tbody><tr><th>标识符</th><td data-label="例子"><code>city</code> / <code>user_portrait</code></td><td data-label="怎么处理">包反引号：<code>`city`</code></td><td data-label="处理错了会怎样"><span class="tag tone-amber">语法错或歧义</span></td></tr><tr><th>数据</th><td data-label="例子"><code>'杭州'</code></td><td data-label="怎么处理"><strong>参数绑定</strong>（交给 knex）</td><td data-label="处理错了会怎样"><span class="tag tone-red">**注入漏洞**</span></td></tr><tr><th>表达式</th><td data-label="例子"><code>JSONExtract(props, 'a')</code></td><td data-label="怎么处理"><strong>原样</strong>，不能包反引号</td><td data-label="处理错了会怎样"><span class="tag tone-amber">语法错</span></td></tr></tbody></table></div><div class="callout tone-red quote">
       <span class="ic">⚠</span>
-      <div><p>把「数据」当成「代码」处理，或者反过来，<mark class="mk-blue">就是注入漏洞</mark>。</p>
+      <div><p><mark class="mk-blue">把「数据」当成「代码」处理，或者反过来，就是注入漏洞。</mark></p>
+<p>所以<strong>必须有一个数据结构，能把这三类成分精确区分开</strong> ——
+这就是四种形态存在的理由。</p>
 </div>
-    </div><h3 id="四种形态-两个维度的组合">四种形态 = 两个维度的组合</h3>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>形态</th><th>列名怎么处理</th><th>值怎么处理</th></tr></thead><tbody><tr><th>NormalExpression</th><td data-label="列名怎么处理">包反引号 <code>formatField</code></td><td data-label="值怎么处理">参数绑定 <code>encodeValue</code></td></tr><tr><th>RawValueExpression</th><td data-label="列名怎么处理">包反引号</td><td data-label="值怎么处理"><span class="tag tone-amber">原样（已经是 SQL）</span></td></tr><tr><th>RawColumnExpression</th><td data-label="列名怎么处理"><span class="tag tone-amber">原样（是表达式）</span></td><td data-label="值怎么处理">参数绑定</td></tr><tr><th>RawExpression</th><td data-label="列名怎么处理"><span class="tag tone-amber">整段透传 `whereRaw`</span></td><td data-label="值怎么处理">—</td></tr></tbody></table></div><div class="cards" data-cols="2"><div class="ccard tone-green">
+    </div><h2 id="组织四种形态是-22-加一个兜底"><span class="num">03</span>组织：四种形态是 2×2 加一个兜底</h2>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>形态</th><th>列名怎么处理</th><th>值怎么处理</th></tr></thead><tbody><tr><th>NormalExpression</th><td data-label="列名怎么处理">包反引号</td><td data-label="值怎么处理">参数绑定</td></tr><tr><th>RawValueExpression</th><td data-label="列名怎么处理">包反引号</td><td data-label="值怎么处理"><span class="tag tone-amber">**原样**（值本身是 SQL）</span></td></tr><tr><th>RawColumnExpression</th><td data-label="列名怎么处理"><span class="tag tone-amber">**原样**（列名本身是表达式）</span></td><td data-label="值怎么处理">参数绑定</td></tr><tr><th>RawExpression</th><td data-label="列名怎么处理"><span class="tag tone-red">整段透传 `whereRaw`</span></td><td data-label="值怎么处理">（可选）绑定值</td></tr></tbody></table></div><div class="callout tone-violet">
+      <span class="ic">💡</span>
+      <div><p><mark class="mk-blue">看出来了吗？<strong>四种形态就是「列名要不要处理」×「值要不要处理」的 2×2 组合</strong>，
+再加一个「整段都别处理」的兜底。</mark></p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>值：正常</th>
+<th>值：原样</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>列名：正常</strong></td>
+<td>Normal</td>
+<td>RawValue</td>
+</tr>
+<tr>
+<td><strong>列名：原样</strong></td>
+<td>RawColumn</td>
+<td>（归到 Raw）</td>
+</tr>
+</tbody>
+</table>
+</div>
+    </div><h3 id="四种形态各是什么样">四种形态各是什么样</h3>
+<div class="cards" data-cols="2"><div class="ccard tone-green">
           <span class="tag tone-green">最常用</span>
           <h4>NormalExpression</h4>
-          <p>列名和值都是普通数据。<strong>99% 的条件都是这一种</strong></p>
+          <p>列名和值都是普通数据。<mark class="mk-blue">99% 的条件都是这一种。</mark></p>
           
           <pre>{ op: 'IN', column: 'city', value: ['杭州'] }
-→ WHERE `city` IN (?)     bindings: ['杭州']
+
+→ WHERE `city` IN (?)
+  bindings: ['杭州']
 </pre>
         </div><div class="ccard tone-amber">
           <span class="tag tone-amber">值是 SQL</span>
           <h4>RawValueExpression</h4>
-          <p>列名是普通的，但<strong>值本身是一段 SQL</strong>（比如子查询）</p>
+          <p>列名普通，但<strong>值本身是一段 SQL</strong>（比如子查询）。
+
+注意字段名是 <code>rawValue</code> 而不是 <code>value</code>。</p>
           
-          <pre>{ op: 'Gt', column: 'cnt', rawValue: '(select avg(x) from t)' }
+          <pre>{ op: 'Gt', column: 'cnt',
+  rawValue: '(select avg(x) from t)' }
+
 → WHERE `cnt` &gt; (select avg(x) from t)
 </pre>
         </div><div class="ccard tone-amber">
           <span class="tag tone-amber">列名是 SQL</span>
           <h4>RawColumnExpression</h4>
-          <p>值普通，但<strong>列名是一段表达式</strong>（比如 JSON 取值）</p>
+          <p>值普通，但<strong>列名是一段表达式</strong>。
+
+典型场景：从 JSON / map 列里取值。</p>
           
           <pre>{ op: 'Eq', rawColumn: &quot;JSONExtract(props, 'a')&quot;, value: 1 }
+
 → WHERE JSONExtract(props, 'a') = ?
 </pre>
         </div><div class="ccard tone-red">
           <span class="tag tone-red">整段透传</span>
           <h4>RawExpression</h4>
-          <p>整条 where 都是 SQL。<strong>方言方法返回的就是它</strong></p>
+          <p>整条 where 都是 SQL。<strong>方言方法返回的就是它。</strong>
+
+<code>value</code> 是<strong>可选</strong>的 —— 有就透传成 knex 绑定。</p>
           
           <pre>{ raw: &quot;CASE WHEN `x` REGEXP ? THEN 1 ELSE 0 END = 1&quot;,
   value: '^abc' }
 </pre>
-        </div></div><div class="callout tone-violet">
-      <span class="ic">💡</span>
-      <div><p>看出来了吗？<mark class="mk-blue">四种形态是「列名要不要处理」×「值要不要处理」的 2×2 组合</mark>，
-再加一个「整段都别处理」的兜底。</p>
-<p>为什么要分这么细：因为<strong>「哪些部分是用户数据、哪些部分是 SQL 代码」必须精确区分</strong>。
-这个区分做错了，就是注入漏洞。</p>
-</div>
-    </div><h3 id="判别靠哪个字段存在">判别靠「哪个字段存在」</h3>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-ts">export const isCondition      = (rule) =&gt; 'logic' in rule;
-export const isRawValueExpr   = (rule) =&gt; 'rawValue' in rule;
-export const isRawColumnExpr  = (rule) =&gt; 'rawColumn' in rule;
-export const isRawExpr        = (rule) =&gt; 'raw' in rule;
+        </div></div><h3 id="边界情况raw-的-value-是可选的">边界情况：<code>Raw</code> 的 value 是可选的</h3>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">if (rule.value === undefined) {
+    this.whereRaw(rule.raw);
+} else {
+    this.whereRaw(rule.raw, encodeValue(rule.value) as Knex.RawBinding);
+}
 </code></pre></div>
 <div class="callout tone-amber">
       <span class="ic">⚠</span>
-      <div><p><strong>这是鸭子类型。</strong> 好处是不用建 class、JSON 直接可用、跨进程传输天然友好。</p>
-<p>代价是<mark class="mk-blue">拼错字段名不会报错</mark> —— 会掉进「都不是」那个分支抛异常。</p>
+      <div><p><mark class="mk-blue"><strong><code>Raw</code> 是唯一一个「值可选」的形态。</strong></mark></p>
+<p>这是它和另外三种的关键差别：另外三种<strong>必须有值</strong>（或者有 <code>rawValue</code>），
+而 <code>Raw</code> 可以只是一段不带参数的 SQL 片段。</p>
+<p>为什么要这样：因为方言方法经常生成「纯结构」的片段
+（比如 <code>isNull(\</code>x`)`），里面根本没有绑定参数。</p>
 </div>
-    </div><h2 id="组织条件怎么组合成树"><span class="num">05</span>组织：条件怎么组合成树</h2>
-<p>一棵条件树，从业务侧看是这样：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">AND
-├── 事件：加购，最近 7 天，至少 1 次
-└── OR
-    ├── 画像：vip_level &gt;= 3
-    └── 画像：channel = 'APP'
+    </div><h2 id="架构怎么判别怎么分派"><span class="num">04</span>架构：怎么判别、怎么分派</h2>
+<h3 id="判别靠哪个字段存在">判别靠「哪个字段存在」</h3>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">export const isCondition     = (rule) =&gt; 'logic'    in rule;
+export const isRawValueExpr  = (rule) =&gt; 'rawValue' in rule;
+export const isRawColumnExpr = (rule) =&gt; 'rawColumn' in rule;
+export const isRawExpr       = (rule) =&gt; 'raw'      in rule;
+export const isNormalExpr    = (rule) =&gt; 'value' in rule &amp;&amp; 'column' in rule;
 </code></pre></div>
-<p>换成 JSON：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">{ logic: 'AND', items: [
-    { eventName: '加购', timeRange: '最近7天', ... },
-    { logic: 'OR', items: [
-        { op: 'Gte', name: 'vip_level', value: 3 },
-        { op: 'Eq',  name: 'channel',   value: 'APP' }
-    ]}
-]}
-</code></pre></div>
-<div class="callout tone-violet">
-      <span class="ic">💡</span>
-      <div><p><strong>树只有两种节点</strong>：<code>logic + items</code>（树枝）和叶子。
-<mark class="mk-blue">所有复杂度都来自「树枝可以套树枝」，没有别的。</mark></p>
-</div>
-    </div><h2 id="组织两套词汇两次翻译"><span class="num">06</span>组织：两套词汇，两次翻译</h2>
-<p>这是全篇最容易懵的地方：<strong>同一棵树，业务侧和 core 用两套词汇描述。</strong></p>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>同一个条件</th><th>业务条件（crowd 的输入）</th><th>Rule[]（core 的输入）</th></tr></thead><tbody><tr><th>属性名</th><td data-label="业务条件（crowd 的输入）"><code>name</code></td><td data-label="Rule[]（core 的输入）"><code>column</code></td></tr><tr><th>例子</th><td data-label="业务条件（crowd 的输入）"><code>{ op: 'IN', name: 'city', value: ['杭州'] }</code></td><td data-label="Rule[]（core 的输入）"><code>{ op: 'IN', column: 'city', value: ['杭州'] }</code></td></tr><tr><th>时间条件</th><td data-label="业务条件（crowd 的输入）">用 <code>dateType</code> 描述，如「最近 3 天」</td><td data-label="Rule[]（core 的输入）"><strong>展开成多个条件</strong>（见第 07 节）</td></tr><tr><th>逻辑组合</th><td data-label="业务条件（crowd 的输入）"><code>logic</code> + <code>items</code></td><td data-label="Rule[]（core 的输入）"><code>logic</code> + <code>items</code>（<strong>一样</strong>）</td></tr></tbody></table></div><div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;biz&quot;,&quot;to&quot;:&quot;rule&quot;,&quot;label&quot;:&quot;adapter 翻译&quot;,&quot;tone&quot;:&quot;amber&quot;},{&quot;from&quot;:&quot;rule&quot;,&quot;to&quot;:&quot;sql&quot;,&quot;label&quot;:&quot;knex 编译&quot;,&quot;tone&quot;:&quot;green&quot;}]">
-      <svg class="flowd-svg" aria-hidden="true">
-        <defs>
-          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
-                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
-            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
-          </marker>
-        </defs>
-      </svg>
-      <div class="flowd-groups"></div>
-      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-amber" data-id="biz">
-              
-              
-              <b>业务条件</b>
-              <small>运营/产品能懂的语言</small>
-            </div></div><div class="flowd-row"><div class="fnode tone-blue" data-id="rule">
-              
-              
-              <b>Rule[]</b>
-              <small>core 能懂的语言</small>
-            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="sql">
-              
-              
-              <b>SQL 字符串</b>
-              <small>数据库能懂的语言</small>
-            </div></div></div>
-      
-    </div><div class="callout tone-green">
-      <span class="ic">✅</span>
-      <div><p><strong>两次翻译，各管一件事：</strong></p>
-<ul>
-<li><strong>adapter</strong>（在 <code>crowd</code> 包里）：业务词汇 → 数据词汇</li>
-<li><strong>knex</strong>（在 <code>core</code> 底层）：数据词汇 → SQL 字符串</li>
-</ul>
-<p><mark class="mk-blue"><code>core</code> 永远不知道「什么是相对时间」「什么是画像属性」。</mark></p>
-</div>
-    </div><h2 id="架构以画像为例看条件怎么翻译"><span class="num">07</span>架构：以画像为例，看条件怎么翻译</h2>
-<div class="callout tone-red">
+<div class="callout tone-amber quote">
       <span class="ic">⚠</span>
-      <div><p><mark class="mk-blue"><strong>先更正一个容易搞错的地方：没有统一的 <code>adapter</code>。</strong></mark></p>
-<p>翻译是<strong>每种条件自己做的</strong> —— 六种实现各写各的，没有一个公共的翻译函数。</p>
-<p>这一节讲的 <code>adapter()</code> 是 <strong><code>portrait.ts</code> 的私有方法</strong>，只是因为它写得最清楚，
-拿它当例子。事件和关系各有自己的一堆函数（<code>getPropRules</code> / <code>getBaseRules</code> /
-<code>buildTimeRangRules</code> …），uid / 人群包 / rawSql 则基本没有转换逻辑。</p>
-<p><mark class="mk-blue">展开讲在 <a href="../sql-builder-v2-crowd/">⑧ crowd 篇</a>。</mark></p>
+      <div><p><mark class="mk-blue"><strong>这是鸭子类型（duck typing），不是 class。</strong></mark></p>
+<p>没有 <code>class NormalExpression</code>，只有一堆 <code>type</code> 定义 + 五个 <code>in</code> 判断。
+数据就是<strong>普通 JSON 对象</strong>。</p>
 </div>
-    </div><h3 id="它是个递归函数">它是个递归函数</h3>
-<div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;in&quot;,&quot;to&quot;:&quot;loop&quot;},{&quot;from&quot;:&quot;loop&quot;,&quot;to&quot;:&quot;q1&quot;,&quot;label&quot;:&quot;是&quot;},{&quot;from&quot;:&quot;q1&quot;,&quot;to&quot;:&quot;rec&quot;,&quot;label&quot;:&quot;是&quot;},{&quot;from&quot;:&quot;q1&quot;,&quot;to&quot;:&quot;q2&quot;,&quot;label&quot;:&quot;否&quot;,&quot;dashed&quot;:true},{&quot;from&quot;:&quot;q2&quot;,&quot;to&quot;:&quot;q3&quot;,&quot;label&quot;:&quot;是&quot;},{&quot;from&quot;:&quot;q2&quot;,&quot;to&quot;:&quot;bad&quot;,&quot;label&quot;:&quot;否&quot;,&quot;dashed&quot;:true},{&quot;from&quot;:&quot;q3&quot;,&quot;to&quot;:&quot;plain&quot;,&quot;label&quot;:&quot;否&quot;},{&quot;from&quot;:&quot;q3&quot;,&quot;to&quot;:&quot;time&quot;,&quot;label&quot;:&quot;是&quot;}]">
+    </div><p><strong>判别顺序有意义</strong>：</p>
+<div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;in&quot;,&quot;to&quot;:&quot;c&quot;},{&quot;from&quot;:&quot;c&quot;,&quot;to&quot;:&quot;sub&quot;,&quot;label&quot;:&quot;是&quot;},{&quot;from&quot;:&quot;c&quot;,&quot;to&quot;:&quot;rv&quot;,&quot;label&quot;:&quot;否&quot;,&quot;dashed&quot;:true},{&quot;from&quot;:&quot;rv&quot;,&quot;to&quot;:&quot;expr&quot;,&quot;label&quot;:&quot;是&quot;},{&quot;from&quot;:&quot;rv&quot;,&quot;to&quot;:&quot;rc&quot;,&quot;label&quot;:&quot;否&quot;,&quot;dashed&quot;:true},{&quot;from&quot;:&quot;rc&quot;,&quot;to&quot;:&quot;expr&quot;,&quot;label&quot;:&quot;是&quot;},{&quot;from&quot;:&quot;rc&quot;,&quot;to&quot;:&quot;r&quot;,&quot;label&quot;:&quot;否&quot;,&quot;dashed&quot;:true},{&quot;from&quot;:&quot;r&quot;,&quot;to&quot;:&quot;expr&quot;,&quot;label&quot;:&quot;是&quot;},{&quot;from&quot;:&quot;r&quot;,&quot;to&quot;:&quot;n&quot;,&quot;label&quot;:&quot;否&quot;,&quot;dashed&quot;:true},{&quot;from&quot;:&quot;n&quot;,&quot;to&quot;:&quot;expr&quot;,&quot;label&quot;:&quot;是&quot;},{&quot;from&quot;:&quot;n&quot;,&quot;to&quot;:&quot;bad&quot;,&quot;label&quot;:&quot;否&quot;,&quot;dashed&quot;:true}]">
       <svg class="flowd-svg" aria-hidden="true">
         <defs>
           <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
@@ -2848,390 +2695,184 @@ export const isRawExpr        = (rule) =&gt; 'raw' in rule;
       <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-green" data-id="in">
               
               <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5L3 8l3 4.5M10 3.5L13 8l-3 4.5"/></svg>
-              <b>adapter(rules)</b>
-              <small>单个条件或数组</small>
-            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="loop">
+              <b>一个 rule 对象</b>
               
-              
-              <b>遍历每个 rule</b>
-              
-            </div></div><div class="flowd-row"><div class="fnode tone-amber shape-note" data-id="q1">
+            </div></div><div class="flowd-row"><div class="fnode tone-violet shape-note" data-id="c">
               
               
               <b>有 'logic'？</b>
-              <small>是树</small>
-            </div><div class="fnode tone-amber shape-note" data-id="q2">
+              
+            </div><div class="fnode tone-violet" data-id="sub">
               
               
-              <b>有 'op'？</b>
-              <small>是叶子</small>
-            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="rec">
+              <b>递归 buildWhere</b>
+              <small>建括号往下钻</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-amber shape-note" data-id="rv">
               
               
-              <b>递归 adapter(items)</b>
-              <small>保持 logic 不变</small>
-            </div><div class="fnode tone-amber shape-note" data-id="q3">
+              <b>有 'rawValue'？</b>
+              
+            </div></div><div class="flowd-row"><div class="fnode tone-amber shape-note" data-id="rc">
               
               
-              <b>有 'dateType'？</b>
-              <small>时间条件</small>
-            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="plain">
+              <b>有 'rawColumn'？</b>
+              
+            </div></div><div class="flowd-row"><div class="fnode tone-amber shape-note" data-id="r">
               
               
-              <b>直接改名</b>
-              <small>name → column</small>
-            </div><div class="fnode tone-red" data-id="time">
+              <b>有 'raw'？</b>
+              
+            </div></div><div class="flowd-row"><div class="fnode tone-green shape-note" data-id="n">
               
               
-              <b>展开成 AND 子树</b>
-              <small>调方言或 utils</small>
-            </div><div class="fnode tone-red" data-id="bad">
+              <b>有 'value' + 'column'？</b>
+              
+            </div><div class="fnode tone-green" data-id="expr">
+              
+              
+              <b>挂到 knex</b>
+              
+            </div></div><div class="flowd-row"><div class="fnode tone-red" data-id="bad">
               
               
               <b>throw</b>
-              <small>条件错误</small>
+              <small>都不是</small>
             </div></div></div>
       
-    </div><h3 id="五个出口各产出什么">五个出口各产出什么</h3>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>分支</th><th>产出</th><th>真实数据</th></tr></thead><tbody><tr><th>有 <code>logic</code></th><td data-label="产出"><strong>递归</strong>，结构不变</td><td data-label="真实数据">{ logic: 'OR', items: [...] }
-→ { logic: 'OR', items: [递归结果] }</td></tr><tr><th>有 <code>dateType</code>\n且是相对时间戳</th><td data-label="产出"><strong>调方言</strong>，展开成 AND 子树</td><td data-label="真实数据">{ op: Gte, name: '..._time', value: 3 }
-→ { logic: AND, items: [3 个 Expression] }</td></tr><tr><th>有 <code>dateType</code>\n其它时间</th><td data-label="产出"><strong>调 utils</strong>，展开成 AND 子树</td><td data-label="真实数据">同上，但生成的是通用 Rule</td></tr><tr><th>有 <code>rawValue</code></th><td data-label="产出">改名 + 透传</td><td data-label="真实数据">{ op: Eq, name: 'c', rawValue: 'a+b' }
-→ { column: 'c', op: Eq, rawValue: 'a+b' }</td></tr><tr><th>普通条件</th><td data-label="产出"><strong>只改名</strong></td><td data-label="真实数据">{ op: IN, name: 'city', value: ['杭州'] }
-→ { column: 'city', op: IN, value: ['杭州'] }</td></tr><tr><th>都不是</th><td data-label="产出">throw</td><td data-label="真实数据">条件错误: {...}</td></tr></tbody></table></div><h3 id="重点时间条件为什么会膨胀">重点：时间条件为什么会「膨胀」</h3>
-<p><strong>一个输入条件，变成一棵子树。</strong></p>
+    </div><h3 id="分派and-or-就是选方法名">分派：AND / OR 就是选方法名</h3>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">function getWhereFn(builder, logic) {
+    switch (logic) {
+        case Logic.And: return builder.andWhere.bind(builder);
+        case Logic.Or:  return builder.orWhere.bind(builder);
+        default: throw new Error(`getWhereFn: 条件错误：&quot;logic: ${logic}&quot;`);
+    }
+}
+</code></pre></div>
+<p><strong>四种形态落到 knex 的方法</strong>：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>形态</th><th>列名</th><th>值</th><th>落到 knex 的</th></tr></thead><tbody><tr><th>Normal</th><td data-label="列名"><code>DB.raw(formatField(column))</code></td><td data-label="值"><code>encodeValue(value)</code></td><td data-label="落到 knex 的"><code>whereFn(列, op, 值)</code></td></tr><tr><th>RawValue</th><td data-label="列名">同上</td><td data-label="值"><code>DB.raw(rawValue)</code></td><td data-label="落到 knex 的">同上</td></tr><tr><th>RawColumn</th><td data-label="列名"><code>DB.raw(rawColumn)</code></td><td data-label="值"><code>encodeValue(value)</code></td><td data-label="落到 knex 的">同上</td></tr><tr><th>Raw</th><td data-label="列名">—</td><td data-label="值"><code>encodeValue(value)</code></td><td data-label="落到 knex 的"><code>whereRaw(raw, value)</code></td></tr></tbody></table></div><div class="callout tone-violet">
+      <span class="ic">💡</span>
+      <div><p><mark class="mk-blue"><strong>看第三列：前三种都落到同一个 <code>whereFn</code>。</strong></mark></p>
+<p>区别只在「列名怎么来」和「值怎么来」——
+到了 knex 那一层，它们<strong>长得完全一样</strong>。</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code>whereFn(column, op, value)
+</code></pre></div>
+<p><mark class="mk-blue">所以四种形态的差异，在分派时就消解掉了。</mark></p>
+</div>
+    </div><h2 id="取舍鸭子类型的代价"><span class="num">05</span>取舍：鸭子类型的代价</h2>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>维度</th><th>鸭子类型（现在）</th><th>class（如果改成）</th></tr></thead><tbody><tr><th>定义</th><td data-label="鸭子类型（现在）">一个 <code>type</code> + 五个 <code>in</code> 判断</td><td data-label="class（如果改成）">四个 class + <code>instanceof</code></td></tr><tr><th>JSON 直接用</th><td data-label="鸭子类型（现在）"><span class="tag tone-green">✅ 天然可用</span></td><td data-label="class（如果改成）">❌ 要反序列化成实例</td></tr><tr><th>跨进程传输</th><td data-label="鸭子类型（现在）"><span class="tag tone-green">✅ 就是普通对象</span></td><td data-label="class（如果改成）">❌ 要序列化协议</td></tr><tr><th>拼错字段名</th><td data-label="鸭子类型（现在）"><span class="tag tone-red">❌ **不报错**，运行到才炸</span></td><td data-label="class（如果改成）">✅ 构造时就报错</td></tr><tr><th>代码量</th><td data-label="鸭子类型（现在）"><span class="tag tone-green">极少</span></td><td data-label="class（如果改成）">多很多</td></tr></tbody></table></div><div class="callout tone-red quote">
+      <span class="ic">⚠</span>
+      <div><p><mark class="mk-blue"><strong>代价就是最后那一行：拼错字段名不会在编译期报错。</strong></mark></p>
+<p>这个库的输入来自<strong>外部 JSON</strong>（网关、配置、前端提交），
+所以「JSON 直接用」这条优势是决定性的 —— 值得换那个代价。</p>
+</div>
+    </div><p><strong>拼错会发生什么</strong>：</p>
 <div class="jcard">
           <div class="jcard-head">
-            <span class="tag tone-muted">输入</span>
-            <span class="name">业务条件</span>
+            <span class="tag tone-muted">假设</span>
+            <span class="name">调用方传了个错字段</span>
             <span class="spacer"></span>
-            <span class="tag tone-muted">1 行</span>
+            
           </div>
           
-          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>{ op: 'Gte', name: '..._opened_time',
-  dateType: 'Relative', value: 30 }
+          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>{ op: 'IN', colum: 'city', value: ['杭州'] }
+          ↑ 少了个 n
 </pre></div>
-          <p class="jnote">业务侧说的是一句话：「开户时间在<strong>最近 30 天</strong>内」。</p>
+          <p class="jnote">注意：这是外部传进来的 JSON，<strong>TypeScript 管不到它</strong>。</p>
         </div><div class="conn">
       <span class="stem"></span>
-      <span class="pill">adapter<span class="note">遇到 dateType 分支</span></span>
+      <span class="pill">判别<span class="note">五个 in 全不中</span></span>
       <span class="stem"></span><span class="head"></span>
     </div><div class="jcard">
           <div class="jcard-head">
-            <span class="tag tone-violet">展开</span>
-            <span class="name">时间表达式</span>
+            <span class="tag tone-amber">判别</span>
+            <span class="name">五个判断都不通过</span>
             <span class="spacer"></span>
-            <span class="tag tone-violet">变成两个</span>
+            
           </div>
           
-          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>{ op: 'Gte', column: '..._opened_time', value: 开始 }
-{ op: 'Lte', column: '..._opened_time', value: 结束 }
+          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>isCondition     → 'logic' in rule        → false
+isRawValueExpr  → 'rawValue' in rule     → false
+isRawColumnExpr → 'rawColumn' in rule    → false
+isRawExpr       → 'raw' in rule          → false
+isNormalExpr    → 'value' in rule &amp;&amp; 'column' in rule
+                                           ↑ 'colum' 不是 'column'
+                                         → false
 </pre></div>
-          <p class="jnote"><mark class="mk-blue">因为「最近 30 天」在 SQL 里必须写成「&gt;= 开始 AND &lt;= 结束」。</mark>
-一个语义，两个条件。</p>
+          <p class="jnote"><mark class="mk-blue">全部落空。</mark></p>
         </div><div class="conn">
       <span class="stem"></span>
-      <span class="pill">补丁<span class="note">某些操作符还要再加一个</span></span>
+      <span class="pill">抛异常<span class="note">至少是响了</span></span>
       <span class="stem"></span><span class="head"></span>
     </div><div class="jcard">
           <div class="jcard-head">
-            <span class="tag tone-amber">补丁</span>
-            <span class="name">addHackRules</span>
+            <span class="tag tone-red">结果</span>
+            <span class="name">buildWhere 抛错</span>
             <span class="spacer"></span>
-            <span class="tag tone-amber">再加一个条件</span>
+            
           </div>
           
-          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>如果是 '&lt;' 或 '&lt;='
-  → 再加 { op: 'Gt', column: '...', value: 0 }
+          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>throw new Error(`条件结构错误：${JSON.stringify(rule)}`);
 </pre></div>
-          <p class="jnote">代码注释写着原因：
+          <p class="jnote"><strong>好消息：它 throw 了，而且把原始对象打进错误信息。</strong>
 
-&gt; 对于 <code>&lt;</code> 和 <code>&lt;=</code> 的时间范围，需要加上 <code>&gt; 0</code> 的限制条件，
-&gt; 否则会筛选出值为 0 的数据。
-
-<mark class="mk-blue">「值为 0」在时间戳语义里代表「从没发生过」</mark>，不加会被当成「很久以前发生过」。</p>
-        </div><div class="conn">
-      <span class="stem"></span>
-      <span class="pill">包一层<span class="note">强制 AND</span></span>
-      <span class="stem"></span><span class="head"></span>
-    </div><div class="jcard">
-          <div class="jcard-head">
-            <span class="tag tone-green">输出</span>
-            <span class="name">Rule[]</span>
-            <span class="spacer"></span>
-            <span class="tag tone-green">一棵子树</span>
-          </div>
-          
-          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>{ logic: 'AND', items: [ 3 个 Expression ] }
-</pre></div>
-          <p class="jnote"><strong>外面强制包一层 <code>logic: 'AND'</code>。</strong> 代码注释解释了原因：
-
-&gt; 这里包装一层，因为 timeRules 必须是 And 的关系，
-&gt; 而 result 这一层的关系可能是 Or
-
-不包的话，「最近 3 天 <strong>或</strong> 是 VIP」会被解析成
-「<code>&gt;= 开始</code> <strong>或</strong> <code>&lt;= 结束</code> <strong>或</strong> 是 VIP」—— <mark class="mk-blue">语义就错了。</mark></p>
-        </div><h2 id="架构entrepot-六种实现怎么组织"><span class="num">08</span>架构：entrepot 六种实现怎么组织</h2>
-<h3 id="每种条件是一个类">每种条件是一个类</h3>
-<div class="tree" data-tree><ul class="tlist"><li class="has-kids">
-            <div class="tnode tone-violet" data-tree-node>
-              <span class="tcaret" aria-hidden="true"></span>
-              <b>Entrepot</b>
-              <code>六个类，共同的形状</code>
-              <span class="tnote">每种条件一个类，都实现 list / count</span>
-            </div>
-            <ul class="tlist"><li>
-            <div class="tnode tone-muted" data-tree-node>
-              <span class="tdot" aria-hidden="true"></span>
-              <b>Portrait</b>
-              <code>portrait.ts · 233 行</code>
-              <span class="tnote">查 user_portrait</span>
-            </div>
-            
-          </li><li>
-            <div class="tnode tone-muted" data-tree-node>
-              <span class="tdot" aria-hidden="true"></span>
-              <b>Event</b>
-              <code>event.ts · 906 行</code>
-              <span class="tnote">最复杂：事件名 + 时间 + 属性 + 次数</span>
-            </div>
-            
-          </li><li>
-            <div class="tnode tone-muted" data-tree-node>
-              <span class="tdot" aria-hidden="true"></span>
-              <b>Relation</b>
-              <code>relation.ts · 715 行</code>
-              <span class="tnote">和对象的关系</span>
-            </div>
-            
-          </li><li>
-            <div class="tnode tone-muted" data-tree-node>
-              <span class="tdot" aria-hidden="true"></span>
-              <b>Crowd</b>
-              <code>crowd.ts · 134 行</code>
-              <span class="tnote">查 crowds</span>
-            </div>
-            
-          </li><li>
-            <div class="tnode tone-muted" data-tree-node>
-              <span class="tdot" aria-hidden="true"></span>
-              <b>Uid</b>
-              <code>uid.ts · 141 行</code>
-              <span class="tnote">不查表</span>
-            </div>
-            
-          </li><li>
-            <div class="tnode tone-muted" data-tree-node>
-              <span class="tdot" aria-hidden="true"></span>
-              <b>RawSql</b>
-              <code>rawSql.ts · 107 行</code>
-              <span class="tnote">透传</span>
-            </div>
-            
-          </li></ul>
-          </li></ul></div><div class="callout tone-violet">
-      <span class="ic">💡</span>
-      <div><p><strong>每个类只有两个公开方法：<code>list()</code> 和 <code>count()</code>。</strong></p>
-<ul>
-<li><code>list(condition, decode)</code> → 一段能查出 uid 列表的 SQL</li>
-<li><code>count(condition)</code> → 一段能数出人数的 SQL</li>
-</ul>
-<p><mark class="mk-blue">接口小得可怜，但这就是全部。</mark></p>
+坏消息：这是<strong>运行时</strong>才炸 —— 如果这条路径没被测试覆盖，
+就跑到生产了。</p>
+        </div><div class="callout tone-green">
+      <span class="ic">✅</span>
+      <div><p><strong>所以这里的设计是「宁可炸，不要静默」。</strong></p>
+<p>对比另一种可能：如果不 throw，而是<strong>当成空条件跳过</strong> ——
+那 SQL 就少了一个筛选条件，<mark class="mk-blue">圈出来的人会多一批，而且没人知道</mark>。</p>
+<p>和工厂遇到未知类型直接 throw 是同一个取舍。</p>
 </div>
-    </div><h3 id="工厂负责分发">工厂负责分发</h3>
-<div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;in&quot;,&quot;to&quot;:&quot;sw&quot;},{&quot;from&quot;:&quot;sw&quot;,&quot;to&quot;:&quot;p&quot;,&quot;label&quot;:&quot;portrait&quot;},{&quot;from&quot;:&quot;sw&quot;,&quot;to&quot;:&quot;e&quot;,&quot;label&quot;:&quot;event&quot;},{&quot;from&quot;:&quot;sw&quot;,&quot;to&quot;:&quot;o&quot;,&quot;label&quot;:&quot;...&quot;},{&quot;from&quot;:&quot;sw&quot;,&quot;to&quot;:&quot;err&quot;,&quot;label&quot;:&quot;其它&quot;,&quot;dashed&quot;:true},{&quot;from&quot;:&quot;p&quot;,&quot;to&quot;:&quot;out&quot;},{&quot;from&quot;:&quot;e&quot;,&quot;to&quot;:&quot;out&quot;},{&quot;from&quot;:&quot;o&quot;,&quot;to&quot;:&quot;out&quot;}]">
-      <svg class="flowd-svg" aria-hidden="true">
-        <defs>
-          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
-                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
-            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
-          </marker>
-        </defs>
-      </svg>
-      <div class="flowd-groups"></div>
-      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-green" data-id="in">
-              
-              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5L3 8l3 4.5M10 3.5L13 8l-3 4.5"/></svg>
-              <b>EntrepotStruct</b>
-              <small>{ type, condition, options }</small>
-            </div></div><div class="flowd-row"><div class="fnode tone-amber shape-note" data-id="sw">
-              
-              
-              <b>switch (condition.type)</b>
-              <small>工厂里的分发</small>
-            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="p">
-              
-              
-              <b>Portrait</b>
-              
-            </div><div class="fnode tone-violet" data-id="e">
-              
-              
-              <b>Event</b>
-              
-            </div><div class="fnode tone-muted" data-id="o">
-              
-              
-              <b>其余四种</b>
-              
-            </div><div class="fnode tone-red" data-id="err">
-              
-              
-              <b>throw</b>
-              <small>未知类型</small>
-            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="out">
-              
-              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="8" cy="4.2" rx="5" ry="1.9"/><path d="M3 4.2v7.6c0 1.05 2.24 1.9 5 1.9s5-.85 5-1.9V4.2"/></svg>
-              <b>SQL 字符串</b>
-              
-            </div></div></div>
-      
-    </div><div class="callout tone-amber">
-      <span class="ic">⚠</span>
-      <div><p><strong>未知类型直接 <code>throw</code>，不静默返回空。</strong></p>
-<p>这个选择很重要：<mark class="mk-blue">静默失败会让 bug 跑到生产才被发现</mark> ——
-生成的 SQL 少了一个条件，圈出来的人就多了一批。</p>
-</div>
-    </div><h2 id="架构方言怎么隔离库差异"><span class="num">09</span>架构：方言怎么隔离库差异</h2>
-<h3 id="为什么需要方言">为什么需要方言</h3>
-<p>同一句业务话，两个数据库的 SQL 完全不一样：</p>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>要做的事</th><th>ByteHouse 写法</th><th>Doris 写法</th></tr></thead><tbody><tr><th>map 取 key</th><td data-label="ByteHouse 写法"><code>mapElement(\</code>name`, 'a')`</td><td data-label="Doris 写法"><code>ELEMENT_AT(\</code>name`, 'a')`</td></tr><tr><th>判空</th><td data-label="ByteHouse 写法"><code>isNull(\</code>x`)`</td><td data-label="Doris 写法"><code>\</code>x` IS NULL`</td></tr><tr><th>转整数</th><td data-label="ByteHouse 写法"><code>toInt64(\</code>x`)`</td><td data-label="Doris 写法"><code>CAST(\</code>x` AS SIGNED)`</td></tr><tr><th>JSON 数组包含</th><td data-label="ByteHouse 写法"><code>hasAny(assumeNotNull(JSONExtract(...)), ...)</code></td><td data-label="Doris 写法"><code>JSON_CONTAINS(CAST(... AS JSON), ...)</code></td></tr><tr><th>相对时间戳</th><td data-label="ByteHouse 写法">要 <code>UNIX_TIMESTAMP(...) * 1000</code> 包装</td><td data-label="Doris 写法">不要包装（event_time 是 DATETIME）</td></tr></tbody></table></div><h3 id="17-个方法覆盖所有差异点">17 个方法，覆盖所有差异点</h3>
-<div class="cards" data-cols="3"><div class="ccard tone-amber">
-          
-          <h4>属性取值</h4>
-          <p><code>mapPropertyAccess</code></p>
-          
-          
-        </div><div class="ccard tone-amber">
-          
-          <h4>判空</h4>
-          <p><code>isNullCheck</code> / <code>isNotNullCheck</code></p>
-          
-          
-        </div><div class="ccard tone-amber">
-          
-          <h4>空值兜底</h4>
-          <p><code>ifNullWrap</code></p>
-          
-          
-        </div><div class="ccard tone-amber">
-          
-          <h4>类型转换</h4>
-          <p><code>castToInt</code> / <code>castToFloat</code> / <code>castBoolToInt</code></p>
-          
-          
-        </div><div class="ccard tone-amber">
-          
-          <h4>正则</h4>
-          <p><code>regexpMatchExpr</code> / <code>regexpNotMatchExpr</code></p>
-          
-          
-        </div><div class="ccard tone-amber">
-          
-          <h4>JSON 数组</h4>
-          <p><code>jsonArrayContainsRule</code> / <code>NotContains</code> / <code>Equals</code></p>
-          
-          
-        </div><div class="ccard tone-amber">
-          
-          <h4>多条件选择</h4>
-          <p><code>multiIf</code></p>
-          
-          
-        </div><div class="ccard tone-amber">
-          
-          <h4>数组展开</h4>
-          <p><code>arrayExpandSql</code></p>
-          
-          
-        </div><div class="ccard tone-amber">
-          
-          <h4>按天分组</h4>
-          <p><code>groupByEventTime</code></p>
-          
-          
-        </div><div class="ccard tone-amber">
-          
-          <h4>相对时间</h4>
-          <p><code>getRelativeTimestampRules</code></p>
-          
-          
-        </div><div class="ccard tone-amber">
-          
-          <h4>绝对时间</h4>
-          <p><code>getAbsoluteTimestampRules</code></p>
-          
-          
-        </div></div><div class="callout tone-red tinted">
-      <span class="ic">⚠</span>
-      <div><p><strong>方言方法没有一个是直接产出 SQL 的。</strong></p>
-<p>它们返回两种东西：<strong>SQL 片段字符串</strong>（被拼进 <code>Expression.raw</code>），
-或者<strong>完整的 Expression / Rule</strong>（直接进表达式树）。</p>
-<p><mark class="mk-blue">真正把表达式树变成 SQL 的是 knex，不是方言。</mark></p>
-</div>
-    </div><h3 id="什么时候调方言">什么时候调方言</h3>
-<p><strong>只有属性类型特殊时才调</strong> —— 普通条件（<code>=</code>、<code>&gt;</code>、<code>IN</code>）根本不碰方言。</p>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>属性类型</th><th>调哪个方法</th><th>返回什么</th></tr></thead><tbody><tr><th>相对时间 + 时间戳</th><td data-label="调哪个方法"><code>getRelativeTimestampRules()</code></td><td data-label="返回什么"><code>Expression[]</code></td></tr><tr><th>正则匹配</th><td data-label="调哪个方法"><code>regexpMatchExpr()</code></td><td data-label="返回什么"><code>Expression</code></td></tr><tr><th>JSON 数组</th><td data-label="调哪个方法"><code>jsonArrayContainsRule()</code></td><td data-label="返回什么"><code>Rule</code></td></tr><tr><th>bool</th><td data-label="调哪个方法"><code>castBoolToInt()</code></td><td data-label="返回什么"><code>string</code></td></tr><tr><th>map 取值</th><td data-label="调哪个方法"><code>mapPropertyAccess()</code></td><td data-label="返回什么"><code>string</code></td></tr><tr><th>NULL 判断</th><td data-label="调哪个方法"><code>isNullCheck()</code></td><td data-label="返回什么"><code>string</code></td></tr></tbody></table></div><h3 id="一个具体的例子时间戳为什么必须走方言">一个具体的例子：时间戳为什么必须走方言</h3>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>库</th><th>实现方式</th><th>生成的 SQL 形态</th></tr></thead><tbody><tr><th>ByteHouse</th><td data-label="实现方式"><strong>薄壳</strong> —— 直接转发给 <code>utils.getTimestampRules()</code></td><td data-label="生成的 SQL 形态"><code>..._time</code> &gt;= UNIX_TIMESTAMP(
-DS_DATETIME_ADD('day', -3, NOW())
-) * 1000</td></tr><tr><th>Doris</th><td data-label="实现方式"><strong>自己实现</strong> —— 因为 Doris 的 event_time 是 DATETIME</td><td data-label="生成的 SQL 形态"><code>..._time</code> &gt;= DS_DATETIME_ADD('day', -3,
-FROM_UNIXTIME(UNIX_TIMESTAMP(), '%Y-%m-%d 00:00:00')
-)</td></tr></tbody></table></div><div class="callout tone-amber">
-      <span class="ic">⚠</span>
-      <div><p><strong>差别在于要不要 <code>UNIX_TIMESTAMP(...) * 1000</code> 那层包装。</strong></p>
-<p>ByteHouse 的 <code>event_time</code> 是<strong>毫秒时间戳</strong>（数字），要把日期转成毫秒再比。
-Doris 的 <code>event_time</code> 是 <strong>DATETIME</strong>（日期类型），直接比就行。</p>
-<p><mark class="mk-blue">所以「时间戳必须走方言」不是风格差异，是<strong>列的数据类型不同</strong>。</mark></p>
-</div>
-    </div><h2 id="自测"><span class="num">10</span>自测</h2>
+    </div><h2 id="自测"><span class="num">06</span>自测</h2>
 <div class="quiz"><details>
-        <summary>为什么条件必须是「树」，不能是一个平铺的列表？</summary>
-        <div class="a"><p>因为「或者」可以出现在「并且」里面。
-「（加购过 或 下单过）并且是 VIP」这种语义，平铺列表表达不了。
-树只有两种节点：<code>logic + items</code>（树枝）和叶子，树枝可以套树枝。</p>
+        <summary><code>Rule</code>、<code>Condition</code>、<code>Expression</code> 三个类型是什么关系？</summary>
+        <div class="a"><p><code>Rule = Condition | Expression</code> —— 它是<strong>一个节点</strong>（树枝或叶子）。
+<code>Condition</code> 是树枝（<code>logic</code> + <code>items</code>），<code>Expression</code> 是叶子的四种形态。
+而 <mark class="mk-blue"><code>Rule[]</code> 是数组</mark>，指整个输入格式 —— 说「一个 Rule」和「一个 Rule[]」
+是两件不同的事。</p>
 </div>
       </details><details>
-        <summary>六种条件入口为什么是六种？</summary>
-        <div class="a"><p>因为「判断对象」的来源只有六类：用户的<strong>属性</strong>（portrait）、
-<strong>行为<strong>（event）、</strong>预先算好的人群<strong>（crowd）、</strong>直接给的 ID</strong>（uid）、
-<strong>和对象的关系<strong>（relation），以及</strong>兜底</strong>（rawSql）。
-每种都知道自己该去哪张表。</p>
+        <summary>为什么要分四种形态？不能统一成一种吗？</summary>
+        <div class="a"><p>因为一条 SQL 里「数据」和「代码」是两种东西，处理方式完全不同：
+标识符要包反引号、数据要走参数绑定、表达式不能包反引号。
+四种形态就是「列名要不要处理」×「值要不要处理」的 2×2 组合，
+再加一个「整段都别处理」的兜底。
+<mark class="mk-blue">把数据当代码处理，或者反过来，就是注入漏洞。</mark></p>
 </div>
       </details><details>
-        <summary>Expression 为什么要有四种形态？</summary>
-        <div class="a"><p>因为一条 SQL 里「数据」和「代码」是两种东西，处理方式不同：
-标识符要包反引号，数据要走参数绑定，但表达式不能包反引号。
-四种形态是「列名要不要处理」×「值要不要处理」的 2×2 组合，
-再加一个「整段都别处理」的兜底。<strong>混了就是注入漏洞。</strong></p>
+        <summary><code>RawExpression</code> 和另外三种最大的差别是什么？</summary>
+        <div class="a"><p>它的 <code>value</code> 是<strong>可选</strong>的 —— 可以只是一段不带参数的 SQL 片段。
+另外三种必须有值（或 <code>rawValue</code>）。
+因为方言方法经常生成「纯结构」的片段（比如 <code>isNull(\</code>x`)`），
+里面根本没有绑定参数。</p>
 </div>
       </details><details>
-        <summary>「最近 3 天」这一个条件，为什么最后变成了一棵子树？</summary>
-        <div class="a"><p>因为「最近 3 天」在 SQL 里必须写成 <code>&gt;= 开始 AND &lt;= 结束</code> —— 一个语义、两个条件。
-某些操作符还要再加一个 <code>&gt; 0</code>（否则会把「值为 0」误当成「很久以前发生过」）。
-最后外面强制包一层 <code>logic: 'AND'</code>，否则和同一层的 <code>OR</code> 混在一起语义就错了。</p>
+        <summary>四种形态到了 knex 那一层，长得一样吗？</summary>
+        <div class="a"><p><strong>前三种一样。</strong> 它们都落到同一个 <code>whereFn(column, op, value)</code>，
+区别只在「列名怎么来」和「值怎么来」—— 到了 knex 那层差异就消解了。
+只有 <code>Raw</code> 不同，它落到 <code>whereRaw(raw, value)</code>。</p>
 </div>
       </details><details>
-        <summary>方言方法是直接生成 SQL 的吗？</summary>
-        <div class="a"><p><strong>不是。</strong> 它们返回 SQL 片段字符串（被拼进 <code>Expression.raw</code>），
-或者完整的 Expression / Rule（直接进表达式树）。
-真正把表达式树变成 SQL 的是 <strong>knex</strong>，不是方言。</p>
+        <summary>判别用的是鸭子类型还是 class？代价是什么？</summary>
+        <div class="a"><p>鸭子类型 —— 五个 <code>'xxx' in rule</code> 判断，没有 class。
+好处是 JSON 直接可用、跨进程传输天然友好（这个库的输入来自外部 JSON，
+所以这条优势是决定性的）。
+代价是 <mark class="mk-blue">拼错字段名不会在编译期报错</mark> —— 五个判断全落空，
+走到最后 throw「条件结构错误」。
+但 throw 比静默跳过好：静默会让 SQL 少一个条件，圈出来的人多一批。</p>
 </div>
       </details><details>
-        <summary>相对时间戳为什么必须走方言，而不能用通用实现？</summary>
-        <div class="a"><p>因为两个库的 <code>event_time</code> 列<strong>数据类型不同</strong>：
-ByteHouse 是毫秒时间戳（数字），要 <code>UNIX_TIMESTAMP(...) * 1000</code> 包装；
-Doris 是 DATETIME，直接比就行。<strong>不是风格差异，是数据类型差异。</strong></p>
-</div>
-      </details><details>
-        <summary>工厂遇到未知的 <code>condition.type</code> 会怎样？</summary>
-        <div class="a"><p>直接 <code>throw</code>，不静默返回空。
-静默失败会让 bug 跑到生产才被发现 —— 生成的 SQL 少了一个条件，
-圈出来的人就多了一批。</p>
+        <summary><code>getWhereFn</code> 里 AND / OR 是怎么实现的？</summary>
+        <div class="a"><p>一个 switch 选方法名：<code>Logic.And → builder.andWhere</code>，<code>Logic.Or → builder.orWhere</code>。
+<mark class="mk-blue">没有别的魔法。</mark> 嵌套靠 <code>whereFn(sub =&gt; DB.buildWhere(sub, rule.items, rule.logic))</code> ——
+传个回调进去，knex 会把它包成括号。</p>
 </div>
       </details></div>
 
     <footer>
-      <span>sql_builder_v2 的核心抽象</span>
-      <span>最后更新 2026-09-25 · 单文件可离线打开</span>
+      <span>sql_builder_v2 的表达式模型 Rule[]</span>
+      <span>最后更新 2026-09-26 · 单文件可离线打开</span>
     </footer>
   </main>
 </div>

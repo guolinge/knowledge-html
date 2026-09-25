@@ -1,0 +1,442 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-has-toc="1">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>sql_builder_v2 的表达式模型 Rule[]</title>
+<meta name="description" content="core 唯一认识的输入格式。三种类型的关系、四种形态为什么是「数据 vs 代码」的 2×2 组合、怎么判别和分派，以及鸭子类型换来的代价。" />
+<link rel="stylesheet" href="../../assets/theme.css" />
+  <link rel="stylesheet" href="../../assets/blocks.css" />
+  <link rel="stylesheet" href="../../assets/archify-embed.css" />
+</head>
+<body>
+<div id="progress"></div>
+<div id="tocScrim"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
+    <a class="brand" href="../../index.html"><span class="dot"></span>知识笔记</a>
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="toc" id="toc">
+      <p class="toc-title">目录</p>
+      <a href="../../index.html" class="sub">← 全部笔记</a>
+      <a href="#概念三个类型一个比一个窄">概念：三个类型，一个比一个窄</a>
+      <a href="#为什么要有这三个层次" class="sub">为什么要有这三个层次</a>
+      <a href="#概念为什么不能直接用-sql-字符串">概念：为什么不能直接用 SQL 字符串</a>
+      <a href="#组织四种形态是-22-加一个兜底">组织：四种形态是 2×2 加一个兜底</a>
+      <a href="#四种形态各是什么样" class="sub">四种形态各是什么样</a>
+      <a href="#边界情况raw-的-value-是可选的" class="sub">边界情况：Raw 的 value 是可选的</a>
+      <a href="#架构怎么判别怎么分派">架构：怎么判别、怎么分派</a>
+      <a href="#判别靠哪个字段存在" class="sub">判别靠「哪个字段存在」</a>
+      <a href="#分派and-or-就是选方法名" class="sub">分派：AND / OR 就是选方法名</a>
+      <a href="#取舍鸭子类型的代价">取舍：鸭子类型的代价</a>
+      <a href="#自测">自测</a>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow">● 从零理解 · 概念</span>
+      <h1>sql_builder_v2 的表达式模型 Rule[]</h1>
+      <p class="lede">core 唯一认识的输入格式。三种类型的关系、四种形态为什么是「数据 vs 代码」的 2×2 组合、怎么判别和分派，以及鸭子类型换来的代价。</p>
+    </div>
+
+    <div class="draft-banner">
+    <span>⚠</span>
+    <span>本页状态为 <b>draft</b>：内容尚未人工核对，引用前请自行验证。</span>
+  </div>
+<aside class="needs">
+      <p class="needs-title">读这篇之前，你需要先知道</p>
+      <a class="need" href="../sql-builder-v2-core/">← <b>4. core 篇</b><span>通用层：递归六层讲一遍</span></a>
+    </aside>
+    <div class="provenance"><span><b>来源</b> sources/gitlab/sql_builder_v2 @ 2c500b2</span><span><b>生成</b> 2026-09-26</span><span><b>模型</b> deepseek-v4.1-flash</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">架构</span> <span class="tag tone-muted">SQL</span> <span class="tag tone-muted">TypeScript</span> <span class="tag tone-muted">圈人</span></span></div>
+
+<div class="callout tone-blue">
+      <span class="ic">🧭</span>
+      <div><p>前置是 <a href="../sql-builder-v2-core/">④ core 篇</a>。</p>
+<p>前面几篇一直在说「业务条件变成 <code>Rule[]</code>」「core 只认 <code>Rule[]</code>」，
+但没讲 <code>Rule[]</code> 到底是什么。</p>
+<p>读完你应该能说出：「<mark class="mk-blue">四种形态是「列名要不要处理」×「值要不要处理」的 2×2 组合。</mark>」</p>
+</div>
+    </div><h2 id="概念三个类型一个比一个窄"><span class="num">01</span>概念：三个类型，一个比一个窄</h2>
+<p>先把这个名字拆开。源码里其实有<strong>三个</strong>类型：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">// core/src/db.ts
+
+export type Expression =                     // 叶子：四种形态之一
+    | NormalExpression
+    | RawValueExpression
+    | RawExpression
+    | RawColumnExpression;
+
+export type Condition = {                    // 树枝：有 logic 和 items
+    logic: Logic;
+    items: (Condition | Expression)[];
+};
+
+export type Rule = Condition | Expression;   // 单个「树枝或叶子」
+</code></pre></div>
+<div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;rule&quot;,&quot;to&quot;:&quot;cond&quot;,&quot;label&quot;:&quot;是其中一种&quot;},{&quot;from&quot;:&quot;rule&quot;,&quot;to&quot;:&quot;expr&quot;,&quot;label&quot;:&quot;或是另一种&quot;},{&quot;from&quot;:&quot;expr&quot;,&quot;to&quot;:&quot;forms&quot;}]">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-violet" data-id="rule">
+              
+              
+              <b>Rule</b>
+              <small>一个节点：树枝或叶子</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="cond">
+              
+              
+              <b>Condition</b>
+              <small>树枝：logic + items</small>
+            </div><div class="fnode tone-green" data-id="expr">
+              
+              
+              <b>Expression</b>
+              <small>叶子：四种形态</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="forms">
+              
+              
+              <b>四种形态</b>
+              <small>Normal / RawValue / RawColumn / Raw</small>
+            </div></div></div>
+      
+    </div><div class="callout tone-amber">
+      <span class="ic">⚠</span>
+      <div><p><mark class="mk-blue"><strong>注意 <code>Rule[]</code> 是</strong>数组<strong>，不是类型名。</strong></mark></p>
+<p><code>buildWhere(builder, rules: Rule[], logic?)</code> 收的是<strong>一组</strong> Rule。
+架构图上写的 <code>Rule[]</code> 指的是「core 的输入格式」—— 一整个数组。</p>
+<p>而 <code>Rule</code>（不带方括号）是<strong>数组里的一个元素</strong>。
+<mark class="mk-blue">说「一个 Rule」和「一个 Rule[]」是两件不同的事。</mark></p>
+</div>
+    </div><h3 id="为什么要有这三个层次">为什么要有这三个层次</h3>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>类型</th><th>回答什么问题</th><th>有多少种可能</th></tr></thead><tbody><tr><th>Rule</th><td data-label="回答什么问题">这是一个树枝还是叶子</td><td data-label="有多少种可能">2</td></tr><tr><th>Condition</th><td data-label="回答什么问题">这一层怎么连（AND / OR）</td><td data-label="有多少种可能">1 种形状，但可以无限嵌套</td></tr><tr><th>Expression</th><td data-label="回答什么问题">这个叶子怎么写进 WHERE</td><td data-label="有多少种可能">4</td></tr></tbody></table></div><div class="callout tone-violet">
+      <span class="ic">💡</span>
+      <div><p><strong>整个模型只有两层结构：树枝和叶子。</strong></p>
+<p>树枝只有一种形状（<code>logic</code> + <code>items</code>），叶子有四种写法。
+<mark class="mk-blue"><code>Rule[]</code> 的全部复杂度就是「树枝能套树枝」+「叶子有四种写法」。</mark></p>
+</div>
+    </div><h2 id="概念为什么不能直接用-sql-字符串"><span class="num">02</span>概念：为什么不能直接用 SQL 字符串</h2>
+<p>如果只需要「生成一段 SQL」，为什么不干脆存字符串？</p>
+<p>因为一条 SQL 里，<strong>「数据」和「代码」是两种东西</strong>，处理方式完全不同：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">SELECT uid FROM user_portrait WHERE city = '杭州'
+       ↑                        ↑   ↑      ↑
+    标识符                    标识符 数据  数据
+</code></pre></div>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>成分</th><th>例子</th><th>怎么处理</th><th>处理错了会怎样</th></tr></thead><tbody><tr><th>标识符</th><td data-label="例子"><code>city</code> / <code>user_portrait</code></td><td data-label="怎么处理">包反引号：<code>`city`</code></td><td data-label="处理错了会怎样"><span class="tag tone-amber">语法错或歧义</span></td></tr><tr><th>数据</th><td data-label="例子"><code>'杭州'</code></td><td data-label="怎么处理"><strong>参数绑定</strong>（交给 knex）</td><td data-label="处理错了会怎样"><span class="tag tone-red">**注入漏洞**</span></td></tr><tr><th>表达式</th><td data-label="例子"><code>JSONExtract(props, 'a')</code></td><td data-label="怎么处理"><strong>原样</strong>，不能包反引号</td><td data-label="处理错了会怎样"><span class="tag tone-amber">语法错</span></td></tr></tbody></table></div><div class="callout tone-red quote">
+      <span class="ic">⚠</span>
+      <div><p><mark class="mk-blue">把「数据」当成「代码」处理，或者反过来，就是注入漏洞。</mark></p>
+<p>所以<strong>必须有一个数据结构，能把这三类成分精确区分开</strong> ——
+这就是四种形态存在的理由。</p>
+</div>
+    </div><h2 id="组织四种形态是-22-加一个兜底"><span class="num">03</span>组织：四种形态是 2×2 加一个兜底</h2>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>形态</th><th>列名怎么处理</th><th>值怎么处理</th></tr></thead><tbody><tr><th>NormalExpression</th><td data-label="列名怎么处理">包反引号</td><td data-label="值怎么处理">参数绑定</td></tr><tr><th>RawValueExpression</th><td data-label="列名怎么处理">包反引号</td><td data-label="值怎么处理"><span class="tag tone-amber">**原样**（值本身是 SQL）</span></td></tr><tr><th>RawColumnExpression</th><td data-label="列名怎么处理"><span class="tag tone-amber">**原样**（列名本身是表达式）</span></td><td data-label="值怎么处理">参数绑定</td></tr><tr><th>RawExpression</th><td data-label="列名怎么处理"><span class="tag tone-red">整段透传 `whereRaw`</span></td><td data-label="值怎么处理">（可选）绑定值</td></tr></tbody></table></div><div class="callout tone-violet">
+      <span class="ic">💡</span>
+      <div><p><mark class="mk-blue">看出来了吗？<strong>四种形态就是「列名要不要处理」×「值要不要处理」的 2×2 组合</strong>，
+再加一个「整段都别处理」的兜底。</mark></p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>值：正常</th>
+<th>值：原样</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>列名：正常</strong></td>
+<td>Normal</td>
+<td>RawValue</td>
+</tr>
+<tr>
+<td><strong>列名：原样</strong></td>
+<td>RawColumn</td>
+<td>（归到 Raw）</td>
+</tr>
+</tbody>
+</table>
+</div>
+    </div><h3 id="四种形态各是什么样">四种形态各是什么样</h3>
+<div class="cards" data-cols="2"><div class="ccard tone-green">
+          <span class="tag tone-green">最常用</span>
+          <h4>NormalExpression</h4>
+          <p>列名和值都是普通数据。<mark class="mk-blue">99% 的条件都是这一种。</mark></p>
+          
+          <pre>{ op: 'IN', column: 'city', value: ['杭州'] }
+
+→ WHERE `city` IN (?)
+  bindings: ['杭州']
+</pre>
+        </div><div class="ccard tone-amber">
+          <span class="tag tone-amber">值是 SQL</span>
+          <h4>RawValueExpression</h4>
+          <p>列名普通，但<strong>值本身是一段 SQL</strong>（比如子查询）。
+
+注意字段名是 <code>rawValue</code> 而不是 <code>value</code>。</p>
+          
+          <pre>{ op: 'Gt', column: 'cnt',
+  rawValue: '(select avg(x) from t)' }
+
+→ WHERE `cnt` &gt; (select avg(x) from t)
+</pre>
+        </div><div class="ccard tone-amber">
+          <span class="tag tone-amber">列名是 SQL</span>
+          <h4>RawColumnExpression</h4>
+          <p>值普通，但<strong>列名是一段表达式</strong>。
+
+典型场景：从 JSON / map 列里取值。</p>
+          
+          <pre>{ op: 'Eq', rawColumn: &quot;JSONExtract(props, 'a')&quot;, value: 1 }
+
+→ WHERE JSONExtract(props, 'a') = ?
+</pre>
+        </div><div class="ccard tone-red">
+          <span class="tag tone-red">整段透传</span>
+          <h4>RawExpression</h4>
+          <p>整条 where 都是 SQL。<strong>方言方法返回的就是它。</strong>
+
+<code>value</code> 是<strong>可选</strong>的 —— 有就透传成 knex 绑定。</p>
+          
+          <pre>{ raw: &quot;CASE WHEN `x` REGEXP ? THEN 1 ELSE 0 END = 1&quot;,
+  value: '^abc' }
+</pre>
+        </div></div><h3 id="边界情况raw-的-value-是可选的">边界情况：<code>Raw</code> 的 value 是可选的</h3>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">if (rule.value === undefined) {
+    this.whereRaw(rule.raw);
+} else {
+    this.whereRaw(rule.raw, encodeValue(rule.value) as Knex.RawBinding);
+}
+</code></pre></div>
+<div class="callout tone-amber">
+      <span class="ic">⚠</span>
+      <div><p><mark class="mk-blue"><strong><code>Raw</code> 是唯一一个「值可选」的形态。</strong></mark></p>
+<p>这是它和另外三种的关键差别：另外三种<strong>必须有值</strong>（或者有 <code>rawValue</code>），
+而 <code>Raw</code> 可以只是一段不带参数的 SQL 片段。</p>
+<p>为什么要这样：因为方言方法经常生成「纯结构」的片段
+（比如 <code>isNull(\</code>x`)`），里面根本没有绑定参数。</p>
+</div>
+    </div><h2 id="架构怎么判别怎么分派"><span class="num">04</span>架构：怎么判别、怎么分派</h2>
+<h3 id="判别靠哪个字段存在">判别靠「哪个字段存在」</h3>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">export const isCondition     = (rule) =&gt; 'logic'    in rule;
+export const isRawValueExpr  = (rule) =&gt; 'rawValue' in rule;
+export const isRawColumnExpr = (rule) =&gt; 'rawColumn' in rule;
+export const isRawExpr       = (rule) =&gt; 'raw'      in rule;
+export const isNormalExpr    = (rule) =&gt; 'value' in rule &amp;&amp; 'column' in rule;
+</code></pre></div>
+<div class="callout tone-amber quote">
+      <span class="ic">⚠</span>
+      <div><p><mark class="mk-blue"><strong>这是鸭子类型（duck typing），不是 class。</strong></mark></p>
+<p>没有 <code>class NormalExpression</code>，只有一堆 <code>type</code> 定义 + 五个 <code>in</code> 判断。
+数据就是<strong>普通 JSON 对象</strong>。</p>
+</div>
+    </div><p><strong>判别顺序有意义</strong>：</p>
+<div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;in&quot;,&quot;to&quot;:&quot;c&quot;},{&quot;from&quot;:&quot;c&quot;,&quot;to&quot;:&quot;sub&quot;,&quot;label&quot;:&quot;是&quot;},{&quot;from&quot;:&quot;c&quot;,&quot;to&quot;:&quot;rv&quot;,&quot;label&quot;:&quot;否&quot;,&quot;dashed&quot;:true},{&quot;from&quot;:&quot;rv&quot;,&quot;to&quot;:&quot;expr&quot;,&quot;label&quot;:&quot;是&quot;},{&quot;from&quot;:&quot;rv&quot;,&quot;to&quot;:&quot;rc&quot;,&quot;label&quot;:&quot;否&quot;,&quot;dashed&quot;:true},{&quot;from&quot;:&quot;rc&quot;,&quot;to&quot;:&quot;expr&quot;,&quot;label&quot;:&quot;是&quot;},{&quot;from&quot;:&quot;rc&quot;,&quot;to&quot;:&quot;r&quot;,&quot;label&quot;:&quot;否&quot;,&quot;dashed&quot;:true},{&quot;from&quot;:&quot;r&quot;,&quot;to&quot;:&quot;expr&quot;,&quot;label&quot;:&quot;是&quot;},{&quot;from&quot;:&quot;r&quot;,&quot;to&quot;:&quot;n&quot;,&quot;label&quot;:&quot;否&quot;,&quot;dashed&quot;:true},{&quot;from&quot;:&quot;n&quot;,&quot;to&quot;:&quot;expr&quot;,&quot;label&quot;:&quot;是&quot;},{&quot;from&quot;:&quot;n&quot;,&quot;to&quot;:&quot;bad&quot;,&quot;label&quot;:&quot;否&quot;,&quot;dashed&quot;:true}]">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-green" data-id="in">
+              
+              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5L3 8l3 4.5M10 3.5L13 8l-3 4.5"/></svg>
+              <b>一个 rule 对象</b>
+              
+            </div></div><div class="flowd-row"><div class="fnode tone-violet shape-note" data-id="c">
+              
+              
+              <b>有 'logic'？</b>
+              
+            </div><div class="fnode tone-violet" data-id="sub">
+              
+              
+              <b>递归 buildWhere</b>
+              <small>建括号往下钻</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-amber shape-note" data-id="rv">
+              
+              
+              <b>有 'rawValue'？</b>
+              
+            </div></div><div class="flowd-row"><div class="fnode tone-amber shape-note" data-id="rc">
+              
+              
+              <b>有 'rawColumn'？</b>
+              
+            </div></div><div class="flowd-row"><div class="fnode tone-amber shape-note" data-id="r">
+              
+              
+              <b>有 'raw'？</b>
+              
+            </div></div><div class="flowd-row"><div class="fnode tone-green shape-note" data-id="n">
+              
+              
+              <b>有 'value' + 'column'？</b>
+              
+            </div><div class="fnode tone-green" data-id="expr">
+              
+              
+              <b>挂到 knex</b>
+              
+            </div></div><div class="flowd-row"><div class="fnode tone-red" data-id="bad">
+              
+              
+              <b>throw</b>
+              <small>都不是</small>
+            </div></div></div>
+      
+    </div><h3 id="分派and-or-就是选方法名">分派：AND / OR 就是选方法名</h3>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">function getWhereFn(builder, logic) {
+    switch (logic) {
+        case Logic.And: return builder.andWhere.bind(builder);
+        case Logic.Or:  return builder.orWhere.bind(builder);
+        default: throw new Error(`getWhereFn: 条件错误：&quot;logic: ${logic}&quot;`);
+    }
+}
+</code></pre></div>
+<p><strong>四种形态落到 knex 的方法</strong>：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>形态</th><th>列名</th><th>值</th><th>落到 knex 的</th></tr></thead><tbody><tr><th>Normal</th><td data-label="列名"><code>DB.raw(formatField(column))</code></td><td data-label="值"><code>encodeValue(value)</code></td><td data-label="落到 knex 的"><code>whereFn(列, op, 值)</code></td></tr><tr><th>RawValue</th><td data-label="列名">同上</td><td data-label="值"><code>DB.raw(rawValue)</code></td><td data-label="落到 knex 的">同上</td></tr><tr><th>RawColumn</th><td data-label="列名"><code>DB.raw(rawColumn)</code></td><td data-label="值"><code>encodeValue(value)</code></td><td data-label="落到 knex 的">同上</td></tr><tr><th>Raw</th><td data-label="列名">—</td><td data-label="值"><code>encodeValue(value)</code></td><td data-label="落到 knex 的"><code>whereRaw(raw, value)</code></td></tr></tbody></table></div><div class="callout tone-violet">
+      <span class="ic">💡</span>
+      <div><p><mark class="mk-blue"><strong>看第三列：前三种都落到同一个 <code>whereFn</code>。</strong></mark></p>
+<p>区别只在「列名怎么来」和「值怎么来」——
+到了 knex 那一层，它们<strong>长得完全一样</strong>。</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code>whereFn(column, op, value)
+</code></pre></div>
+<p><mark class="mk-blue">所以四种形态的差异，在分派时就消解掉了。</mark></p>
+</div>
+    </div><h2 id="取舍鸭子类型的代价"><span class="num">05</span>取舍：鸭子类型的代价</h2>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>维度</th><th>鸭子类型（现在）</th><th>class（如果改成）</th></tr></thead><tbody><tr><th>定义</th><td data-label="鸭子类型（现在）">一个 <code>type</code> + 五个 <code>in</code> 判断</td><td data-label="class（如果改成）">四个 class + <code>instanceof</code></td></tr><tr><th>JSON 直接用</th><td data-label="鸭子类型（现在）"><span class="tag tone-green">✅ 天然可用</span></td><td data-label="class（如果改成）">❌ 要反序列化成实例</td></tr><tr><th>跨进程传输</th><td data-label="鸭子类型（现在）"><span class="tag tone-green">✅ 就是普通对象</span></td><td data-label="class（如果改成）">❌ 要序列化协议</td></tr><tr><th>拼错字段名</th><td data-label="鸭子类型（现在）"><span class="tag tone-red">❌ **不报错**，运行到才炸</span></td><td data-label="class（如果改成）">✅ 构造时就报错</td></tr><tr><th>代码量</th><td data-label="鸭子类型（现在）"><span class="tag tone-green">极少</span></td><td data-label="class（如果改成）">多很多</td></tr></tbody></table></div><div class="callout tone-red quote">
+      <span class="ic">⚠</span>
+      <div><p><mark class="mk-blue"><strong>代价就是最后那一行：拼错字段名不会在编译期报错。</strong></mark></p>
+<p>这个库的输入来自<strong>外部 JSON</strong>（网关、配置、前端提交），
+所以「JSON 直接用」这条优势是决定性的 —— 值得换那个代价。</p>
+</div>
+    </div><p><strong>拼错会发生什么</strong>：</p>
+<div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-muted">假设</span>
+            <span class="name">调用方传了个错字段</span>
+            <span class="spacer"></span>
+            
+          </div>
+          
+          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>{ op: 'IN', colum: 'city', value: ['杭州'] }
+          ↑ 少了个 n
+</pre></div>
+          <p class="jnote">注意：这是外部传进来的 JSON，<strong>TypeScript 管不到它</strong>。</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">判别<span class="note">五个 in 全不中</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-amber">判别</span>
+            <span class="name">五个判断都不通过</span>
+            <span class="spacer"></span>
+            
+          </div>
+          
+          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>isCondition     → 'logic' in rule        → false
+isRawValueExpr  → 'rawValue' in rule     → false
+isRawColumnExpr → 'rawColumn' in rule    → false
+isRawExpr       → 'raw' in rule          → false
+isNormalExpr    → 'value' in rule &amp;&amp; 'column' in rule
+                                           ↑ 'colum' 不是 'column'
+                                         → false
+</pre></div>
+          <p class="jnote"><mark class="mk-blue">全部落空。</mark></p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">抛异常<span class="note">至少是响了</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-red">结果</span>
+            <span class="name">buildWhere 抛错</span>
+            <span class="spacer"></span>
+            
+          </div>
+          
+          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>throw new Error(`条件结构错误：${JSON.stringify(rule)}`);
+</pre></div>
+          <p class="jnote"><strong>好消息：它 throw 了，而且把原始对象打进错误信息。</strong>
+
+坏消息：这是<strong>运行时</strong>才炸 —— 如果这条路径没被测试覆盖，
+就跑到生产了。</p>
+        </div><div class="callout tone-green">
+      <span class="ic">✅</span>
+      <div><p><strong>所以这里的设计是「宁可炸，不要静默」。</strong></p>
+<p>对比另一种可能：如果不 throw，而是<strong>当成空条件跳过</strong> ——
+那 SQL 就少了一个筛选条件，<mark class="mk-blue">圈出来的人会多一批，而且没人知道</mark>。</p>
+<p>和工厂遇到未知类型直接 throw 是同一个取舍。</p>
+</div>
+    </div><h2 id="自测"><span class="num">06</span>自测</h2>
+<div class="quiz"><details>
+        <summary><code>Rule</code>、<code>Condition</code>、<code>Expression</code> 三个类型是什么关系？</summary>
+        <div class="a"><p><code>Rule = Condition | Expression</code> —— 它是<strong>一个节点</strong>（树枝或叶子）。
+<code>Condition</code> 是树枝（<code>logic</code> + <code>items</code>），<code>Expression</code> 是叶子的四种形态。
+而 <mark class="mk-blue"><code>Rule[]</code> 是数组</mark>，指整个输入格式 —— 说「一个 Rule」和「一个 Rule[]」
+是两件不同的事。</p>
+</div>
+      </details><details>
+        <summary>为什么要分四种形态？不能统一成一种吗？</summary>
+        <div class="a"><p>因为一条 SQL 里「数据」和「代码」是两种东西，处理方式完全不同：
+标识符要包反引号、数据要走参数绑定、表达式不能包反引号。
+四种形态就是「列名要不要处理」×「值要不要处理」的 2×2 组合，
+再加一个「整段都别处理」的兜底。
+<mark class="mk-blue">把数据当代码处理，或者反过来，就是注入漏洞。</mark></p>
+</div>
+      </details><details>
+        <summary><code>RawExpression</code> 和另外三种最大的差别是什么？</summary>
+        <div class="a"><p>它的 <code>value</code> 是<strong>可选</strong>的 —— 可以只是一段不带参数的 SQL 片段。
+另外三种必须有值（或 <code>rawValue</code>）。
+因为方言方法经常生成「纯结构」的片段（比如 <code>isNull(\</code>x`)`），
+里面根本没有绑定参数。</p>
+</div>
+      </details><details>
+        <summary>四种形态到了 knex 那一层，长得一样吗？</summary>
+        <div class="a"><p><strong>前三种一样。</strong> 它们都落到同一个 <code>whereFn(column, op, value)</code>，
+区别只在「列名怎么来」和「值怎么来」—— 到了 knex 那层差异就消解了。
+只有 <code>Raw</code> 不同，它落到 <code>whereRaw(raw, value)</code>。</p>
+</div>
+      </details><details>
+        <summary>判别用的是鸭子类型还是 class？代价是什么？</summary>
+        <div class="a"><p>鸭子类型 —— 五个 <code>'xxx' in rule</code> 判断，没有 class。
+好处是 JSON 直接可用、跨进程传输天然友好（这个库的输入来自外部 JSON，
+所以这条优势是决定性的）。
+代价是 <mark class="mk-blue">拼错字段名不会在编译期报错</mark> —— 五个判断全落空，
+走到最后 throw「条件结构错误」。
+但 throw 比静默跳过好：静默会让 SQL 少一个条件，圈出来的人多一批。</p>
+</div>
+      </details><details>
+        <summary><code>getWhereFn</code> 里 AND / OR 是怎么实现的？</summary>
+        <div class="a"><p>一个 switch 选方法名：<code>Logic.And → builder.andWhere</code>，<code>Logic.Or → builder.orWhere</code>。
+<mark class="mk-blue">没有别的魔法。</mark> 嵌套靠 <code>whereFn(sub =&gt; DB.buildWhere(sub, rule.items, rule.logic))</code> ——
+传个回调进去，knex 会把它包成括号。</p>
+</div>
+      </details></div>
+
+    <footer>
+      <span>sql_builder_v2 的表达式模型 Rule[]</span>
+      <span>最后更新 2026-09-26 · 单文件可离线打开</span>
+    </footer>
+  </main>
+</div>
+
+<script src="../../assets/app.js"></script>
+</body>
+</html>

@@ -103,8 +103,9 @@ const indent = (s, n) =>
  * 信号：一个**没有语言标注**的代码块，内容里却出现了 markdown 强调标记。
  * 正常写的代码示例不会这样（已全站扫描确认无例外）。
  */
-function lintFences(html) {
+function lintFences(html, src = '') {
   const issues = [];
+  const srcLines = src ? src.split('\n') : [];
   for (const m of html.matchAll(/<pre><code>([^<]*)<\/code><\/pre>/g)) {
     const text = m[1]
       .replace(/&quot;/g, '"')
@@ -112,11 +113,21 @@ function lintFences(html) {
       .replace(/&lt;/g, '<')
       .replace(/&gt;/g, '>');
     if (/(==|!!|\+\+|(?<!\*)\*\*[^\s*])/.test(text)) {
-      const first = text.split('\n').find((l) => l.trim()) || '';
+      const first = (text.split('\n').find((l) => l.trim()) || '').trim();
+
+      /* 拿第一个内容行回源码里找位置 —— 只说「第一个内容行是什么」不够用，
+         连犯三次之后发现：得直接告诉人在哪一行。 */
+      let where = '';
+      if (srcLines.length) {
+        const needle = first.slice(0, 30);
+        const hit = srcLines.findIndex((l) => l.trim() && needle && l.includes(needle));
+        if (hit >= 0) where = `note.md:${hit + 1} 附近 → `;
+      }
+
       issues.push(
-        `有 markdown 被困在代码块里（第一个内容行：${first.trim().slice(0, 40)}）—— ` +
-          `多半是「围栏里嵌围栏」：外层 \`\`\` 被内层的裸 \`\`\` 提前闭合了。` +
-          `把外层换成四个反引号 \`\`\`\``,
+        `${where}有 markdown 被困在代码块里（第一个内容行：${first.slice(0, 40)}）—— ` +
+          `多半是「围栏里嵌围栏」：外层 \`\`\` 被内层的裸 \`\`\` 提前闭合了。\n` +
+          `      → 把那个外层围栏换成四个反引号 \`\`\`\``,
       );
     }
   }
@@ -188,7 +199,7 @@ function main() {
       continue;
     }
 
-    const issues = [...lintNote(meta, src, env.warnings), ...lintFences(anchored)];
+    const issues = [...lintNote(meta, src, env.warnings), ...lintFences(anchored, src)];
     for (const it of issues) console.warn(`  ⚠ ${slug}: ${it}`);
     warnings += issues.length;
 
