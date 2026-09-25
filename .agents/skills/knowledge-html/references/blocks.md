@@ -181,8 +181,12 @@ items:
 > `lane-stack` 只能画直线。需要「分两路再合起来」「中途有判断」时用这个。
 
 ```flow
+grid: true
+legend: true
+groups:
+  - { id: aws, label: "AWS Region: us-east-1", tone: amber }
 nodes:
-  - { id: in,   label: 内部状态, sub: "{ table: 'user_portrait' }", row: 0, tone: violet }
+  - { id: in,   label: 内部状态, sub: "{ table: 'user_portrait' }", row: 0, kind: backend, group: aws }
   - { id: id1,  label: 标识符加反引号, sub: "表名 → `表名`", row: 1, tone: amber }
   - { id: id2,  label: 值变占位符, sub: "[1,2,3] → ?", row: 1, tone: amber }
   - { id: out,  label: 一段 SQL, sub: "带反引号、值待填", row: 2, tone: green }
@@ -200,6 +204,8 @@ edges:
 | `nodes[].row` | 第几行。不写就按数组顺序。**同一 row 的节点并排** |
 | `nodes[].label` / `sub` | 主文字 / 等宽小字 |
 | `nodes[].tone` | 节点配色 |
+| `nodes[].kind` | **语义类型**，同时决定图标和配色。见下表 |
+| `nodes[].group` | 归属的区域框 id |
 | `nodes[].shape` | `pill`（状态机用）/ `note`（判定节点，虚线框）。不写是普通方框 |
 | `nodes[].initial` | `true` 时左侧加一个实心圆点，表示初始状态 |
 | `edges[].from` / `to` | 两端节点的 id |
@@ -210,6 +216,28 @@ edges:
 | `edges[].both` | 双向箭头 |
 | `edges[].self` | 自环（`from` 和 `to` 相同也会自动识别）。状态机的「状态不变但有事件」 |
 | `edges[].on` | 同 `label`。状态机里写触发条件 |
+
+**顶层键**：
+
+| 键 | 说明 |
+|---|---|
+| `groups` | 区域框声明：`[{ id, label, tone }]`。位置由 app.js 算成员节点的包围盒 |
+| `grid: true` | 背景网格（给图「工程图纸」的质感，也让空白不飘） |
+| `legend: true` | 按 `kind` 自动汇总图例，作者不用手写 |
+
+**`kind` 语义类型**（有图标，配色自动）：
+
+| kind | 图标 | 配色 | 用在哪 |
+|---|---|---|---|
+| `frontend` | 窗口 | 灰 | 浏览器、App |
+| `backend` | `<>` | 绿 | 服务、API |
+| `database` | 圆柱 | 紫 | 数据库、缓存 |
+| `cloud` | 云 | 橙 | CDN、负载均衡、云服务 |
+| `security` | 盾牌 | 红 | 认证、网关 |
+| `messagebus` | 队列 | 橙 | MQ、异步 |
+| `external` | 外链框 | 灰 | 第三方、用户 |
+
+`tone` 显式写了会覆盖 `kind` 的默认配色。
 
 **要点**：
 
@@ -263,11 +291,15 @@ messages:
 |---|---|
 | `participants[].id` | 唯一标识，消息靠它引用 |
 | `participants[].label` / `sub` | 参与者名字 / 等宽小字（窄屏会隐藏 `sub`） |
-| `participants[].tone` | 配色 |
+| `participants[].tone` | 配色（显式写了会覆盖 `kind` 的默认色） |
+| `participants[].kind` | 同 `flow` 的语义类型，带图标 |
 | `messages[].from` / `to` | 两端参与者。**相同就是自调用** |
 | `messages[].label` | 消息文字 |
 | `messages[].note` | 序号或旁注，画在箭头上方 |
 | `messages[].kind` | 箭头样式，见下 |
+| `messages[].tone` | 消息着色（箭头和标签一起变色） |
+
+顶层加 `grid: true` 会有背景网格。
 
 **箭头样式（`kind`）**：
 

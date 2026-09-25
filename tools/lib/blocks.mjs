@@ -328,6 +328,23 @@ export function blocksPlugin(md) {
     </div>`;
   }
 
+/* ---------- 语义节点类型 ----------
+   kind 同时决定图标和配色，让图有「结构感」而不只是文字盒子。
+   （学自 archify 的 component types：frontend/backend/database/cloud/security/messagebus/external） */
+const KIND_ICONS = {
+  frontend:   '<rect x="2.5" y="3" width="11" height="8.5" rx="1.5"/><path d="M2.5 6h11"/>',
+  backend:    '<path d="M6 3.5L3 8l3 4.5M10 3.5L13 8l-3 4.5"/>',
+  database:   '<ellipse cx="8" cy="4.2" rx="5" ry="1.9"/><path d="M3 4.2v7.6c0 1.05 2.24 1.9 5 1.9s5-.85 5-1.9V4.2"/>',
+  cloud:      '<path d="M4.8 12.2a2.6 2.6 0 0 1 .2-5.18 3.6 3.6 0 0 1 6.9-.8 2.5 2.5 0 0 1-.4 5.98z"/>',
+  security:   '<path d="M8 2.2l4.8 1.9v4c0 2.9-2.1 4.8-4.8 5.7-2.7-.9-4.8-2.8-4.8-5.7v-4z"/>',
+  messagebus: '<path d="M3 5h10M3 8h10M3 11h6"/>',
+  external:   '<rect x="2.5" y="2.5" width="7.5" height="7.5" rx="1"/><path d="M8.5 9.5l4.5 4.5M13 9.8V13H9.8"/>',
+};
+const KIND_TONE = {
+  frontend: 'muted', backend: 'green', database: 'violet',
+  cloud: 'amber', security: 'red', messagebus: 'amber', external: 'muted',
+};
+
   /* ===== 积木 12 · flow =====
      带分支/汇合的流程图。lane-stack 只能画直线，这个能画图。
      节点按 row 分行，列位置自动均分；连线由 app.js 测量后画成 SVG 路径。 */
@@ -348,16 +365,28 @@ export function blocksPlugin(md) {
       edges.filter((e) => e.self || e.from === e.to).map((e) => e.from),
     );
 
+    // kind 决定图标和配色；显式 tone 优先
+    const toneOf = (n) => n.tone || KIND_TONE[n.kind] || 'muted';
+    const iconOf = (n) =>
+      KIND_ICONS[n.kind]
+        ? `<svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor"` +
+          ` stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round">` +
+          `${KIND_ICONS[n.kind]}</svg>`
+        : '';
+
     const grid = rows
       .map(
         (row) => `<div class="flowd-row${
           (row || []).some((n) => selfLoopIds.has(n.id)) ? ' has-selfloop' : ''
         }">${(row || [])
           .map(
-            (n) => `<div class="fnode tone-${n.tone || 'muted'}${
+            (n) => `<div class="fnode tone-${toneOf(n)}${
               n.shape ? ` shape-${n.shape}` : ''
-            }${n.initial ? ' is-initial' : ''}" data-id="${esc(n.id)}">
+            }${n.initial ? ' is-initial' : ''}" data-id="${esc(n.id)}"${
+              n.group ? ` data-group="${esc(n.group)}"` : ''
+            }>
               ${n.initial ? '<span class="finit" title="初始状态"></span>' : ''}
+              ${iconOf(n)}
               <b>${inline(n.label)}</b>
               ${n.sub ? `<small>${inline(n.sub)}</small>` : ''}
             </div>`,
@@ -366,17 +395,43 @@ export function blocksPlugin(md) {
       )
       .join('');
 
+    // 区域框：节点用 group 引用，这里只声明框本身（位置由 app.js 算包围盒）
+    const groupBoxes = (cfg.groups || [])
+      .map(
+        (g) => `<div class="fgroup tone-${g.tone || 'muted'}" data-group-box="${esc(g.id)}">
+          <span class="fgroup-label">${inline(g.label)}</span>
+        </div>`,
+      )
+      .join('');
+
+    // 图例：按 kind 自动汇总，作者不用手写
+    const kinds = [...new Set(nodes.map((n) => n.kind).filter(Boolean))];
+    const legend =
+      cfg.legend && kinds.length
+        ? `<div class="flegend">${kinds
+            .map((k) => {
+              const c = nodes.filter((n) => n.kind === k).length;
+              return `<span class="fleg-item tone-${KIND_TONE[k] || 'muted'}">
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"
+                     stroke-linecap="round" stroke-linejoin="round">${KIND_ICONS[k] || ''}</svg>
+                ${esc(k)} <em>${c}</em></span>`;
+            })
+            .join('')}</div>`
+        : '';
+
     const edgeData = esc(JSON.stringify(edges));
-    return `<div class="flowd" data-flow data-edges="${edgeData}">
+    return `<div class="flowd${cfg.grid ? ' has-grid' : ''}" data-flow data-edges="${edgeData}">
       <svg class="flowd-svg" aria-hidden="true">
         <defs>
           <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
-                  markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
             <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
           </marker>
         </defs>
       </svg>
+      <div class="flowd-groups">${groupBoxes}</div>
       <div class="flowd-grid">${grid}</div>
+      ${legend}
     </div>`;
   }
 
@@ -391,13 +446,19 @@ export function blocksPlugin(md) {
     const n = parts.length || 1;
 
     const head = parts
-      .map(
-        (p) => `<div class="scell"><div class="spart tone-${p.tone || 'muted'}" data-id="${esc(
-          p.id,
-        )}">
-          <b>${inline(p.label)}</b>${p.sub ? `<small>${esc(p.sub)}</small>` : ''}
-        </div></div>`,
-      )
+      .map((p) => {
+        const tone = p.tone || KIND_TONE[p.kind] || 'muted';
+        const icon = KIND_ICONS[p.kind]
+          ? `<svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor"` +
+            ` stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round">` +
+            `${KIND_ICONS[p.kind]}</svg>`
+          : '';
+        return `<div class="scell"><div class="spart tone-${tone}${
+          icon ? ' has-icon' : ''
+        }" data-id="${esc(p.id)}">
+          ${icon}<b>${inline(p.label)}</b>${p.sub ? `<small>${esc(p.sub)}</small>` : ''}
+        </div></div>`;
+      })
       .join('');
 
     const rows = msgs
@@ -405,12 +466,14 @@ export function blocksPlugin(md) {
         (m) => `<div class="smsg${m.from === m.to ? ' is-self' : ''}" data-from="${esc(
           m.from,
         )}" data-to="${esc(m.to)}" data-kind="${esc(m.kind || 'sync')}"${
-          m.note ? ` data-note="${esc(m.note)}"` : ''
-        }>${m.label ? `<span class="slabel">${inline(m.label)}</span>` : ''}</div>`,
+          m.tone ? ` data-tone="${esc(m.tone)}"` : ''
+        }${m.note ? ` data-note="${esc(m.note)}"` : ''}>${
+          m.label ? `<span class="slabel">${inline(m.label)}</span>` : ''
+        }</div>`,
       )
       .join('');
 
-    return `<div class="seqd" data-seq data-n="${n}">
+    return `<div class="seqd${cfg.grid ? ' has-grid' : ''}" data-seq data-n="${n}">
       <svg class="seqd-svg" aria-hidden="true">
         <defs>
           <marker id="s-fill" viewBox="0 0 10 10" refX="9" refY="5"

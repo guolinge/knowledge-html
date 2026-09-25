@@ -70,33 +70,38 @@
 适合：流程有**分支或汇合**。`lane-stack` 只能画直线，这个能画图。
 
 ```flow
+grid: true
+legend: true
+groups:
+  - { id: aws, label: "AWS Region: us-east-1", tone: amber }
 nodes:
-  - { id: in,  label: 内部状态, sub: "{ table: 'user_portrait' }", row: 0, tone: violet }
-  - { id: id1, label: 标识符加反引号, sub: "表名 → `表名`", row: 1, tone: amber }
-  - { id: id2, label: 值变占位符, sub: "[1,2,3] → ?", row: 1, tone: amber }
-  - { id: out, label: 一段 SQL, sub: "带反引号、值待填", row: 2, tone: green }
+  - { id: u,   label: 用户, sub: "Browser", row: 0, kind: external }
+  - { id: api, label: API Server, sub: "FastAPI :8000", row: 1, kind: backend, group: aws }
+  - { id: pg,  label: PostgreSQL, sub: "primary :5432", row: 2, kind: database, group: aws }
 edges:
-  - { from: in, to: id1 }
-  - { from: in, to: id2 }
-  - { from: id1, to: out }
-  - { from: id2, to: out, anim: true }
+  - { from: u, to: api, label: HTTPS, tone: green }
+  - { from: api, to: pg, label: SQL }
 ```
 
 要点：
 
 - **不用写坐标。** 节点 flex 排版，连线由 `app.js` 测量后画成 SVG，换行/窄屏自动重算。
-- `row` 相同的节点并排；`edges[].dashed` 表示弱关系，`anim` 让线流动起来。
-- 连线走节点背后，不用手动算边框交点。
+- `kind` 给节点语义类型（`backend`/`database`/`cloud`/`security`/`messagebus`/`external`/`frontend`），
+  自动带图标和配色。
+- `groups` 画区域框 —— **这是「结构不单一」的关键**，能表达「这几个属于同一个 VPC」。
+- `grid: true` 背景网格，`legend: true` 自动图例。
+- `row` 相同的节点并排；`edges[].dashed` 弱关系，`anim` 让线流动起来。
 
 ## 04 · seq —— 时序图
 
 适合：**调用链** —— 谁在什么时候调谁、等不等回复、返回什么。
 
 ```seq
+grid: true
 participants:
-  - { id: c, label: 客户端, tone: blue }
-  - { id: g, label: 数据网关, tone: violet }
-  - { id: d, label: ByteHouse, tone: green }
+  - { id: c, label: 客户端, sub: browser session, kind: frontend }
+  - { id: g, label: 数据网关, sub: request handler, kind: backend }
+  - { id: d, label: ByteHouse, sub: source of truth, kind: database }
 messages:
   - { from: c, to: g, label: "POST /query", kind: sync, note: 1 }
   - { from: g, to: d, label: "SELECT uid FROM ...", kind: sync, note: 2 }

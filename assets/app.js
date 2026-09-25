@@ -665,6 +665,23 @@
         };
       });
 
+      // 区域框：算成员节点的包围盒，把框画在它们外面
+      root.querySelectorAll('[data-group-box]').forEach((boxEl) => {
+        const gid = boxEl.getAttribute('data-group-box');
+        const members = Array.from(root.querySelectorAll(`.fnode[data-group="${gid}"]`));
+        if (!members.length) { boxEl.hidden = true; return; }
+        boxEl.hidden = false;
+        const pad = 20;
+        const top = Math.min(...members.map((m) => m.offsetTop)) - pad - 8;
+        const left = Math.min(...members.map((m) => m.offsetLeft)) - pad;
+        const right = Math.max(...members.map((m) => m.offsetLeft + m.offsetWidth)) + pad;
+        const bottom = Math.max(...members.map((m) => m.offsetTop + m.offsetHeight)) + pad;
+        boxEl.style.top = `${top}px`;
+        boxEl.style.left = `${left}px`;
+        boxEl.style.width = `${right - left}px`;
+        boxEl.style.height = `${bottom - top}px`;
+      });
+
       const W = grid.offsetWidth;
       const H = grid.offsetHeight;
       svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
@@ -893,6 +910,8 @@
         const to = row.getAttribute('data-to');
         const kind = row.getAttribute('data-kind') || 'sync';
         const note = row.getAttribute('data-note');
+        const tone = row.getAttribute('data-tone');
+        const toneAttr = tone ? ` style="color:var(--${tone})"` : '';
         const x1 = cx[from];
         const x2 = cx[to];
         if (x1 === undefined || x2 === undefined) return;
@@ -904,15 +923,18 @@
           row.style.setProperty('--lx', `${x1}px`);
           const r = 34;
           parts.push(
-            `<path class="msg self" d="M ${x1 + 6} ${y - 11} L ${x1 + r} ${y - 11} ` +
-              `L ${x1 + r} ${y + 11} L ${x1 + 8} ${y + 11}"/>`,
+            `<path class="msg self"${toneAttr} d="M ${x1 + 6} ${y - 11} L ${x1 + r} ${
+              y - 11
+            } ` + `L ${x1 + r} ${y + 11} L ${x1 + 8} ${y + 11}"/>`,
           );
         } else {
           const dir = x2 > x1 ? 1 : -1;
           // 留出箭头位置，别被标签盖住
           const pad = 8;
           parts.push(
-            `<path class="msg ${kind}" d="M ${x1 + dir * pad} ${y} L ${x2 - dir * pad} ${y}"/>`,
+            `<path class="msg ${kind}"${toneAttr} d="M ${x1 + dir * pad} ${y} L ${
+              x2 - dir * pad
+            } ${y}"/>`,
           );
         }
 
