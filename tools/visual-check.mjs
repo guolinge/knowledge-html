@@ -78,7 +78,27 @@ setTimeout(function () {
     });
   });
 
-  // ③ 整页横向滚动
+  // ③ 区域框之间有没有重叠 / 有没有盖住非成员节点
+  document.querySelectorAll('[data-flow]').forEach(function (root, i) {
+    var boxes = Array.from(root.querySelectorAll('[data-group-box]')).filter(function (b) { return !b.hidden; });
+    if (boxes.length < 2) return;
+    var where = '[data-flow][' + i + ']';
+    for (var a = 0; a < boxes.length; a++) {
+      for (var b = a + 1; b < boxes.length; b++) {
+        var ra = boxes[a].getBoundingClientRect();
+        var rb2 = boxes[b].getBoundingClientRect();
+        var ox = Math.min(ra.right, rb2.right) - Math.max(ra.left, rb2.left);
+        var oy = Math.min(ra.bottom, rb2.bottom) - Math.max(ra.top, rb2.top);
+        if (ox > TOL && oy > TOL) {
+          problems.push(where + ' 区域框重叠：' +
+            boxes[a].getAttribute('data-group-box') + ' ↔ ' + boxes[b].getAttribute('data-group-box') +
+            '（重叠 ' + Math.round(Math.min(ox, oy)) + 'px）');
+        }
+      }
+    }
+  });
+
+  // ④ 整页横向滚动
   var de = document.documentElement;
   if (de.scrollWidth > window.innerWidth + 1) {
     problems.push('整页横向滚动 ' + (de.scrollWidth - window.innerWidth) + 'px');

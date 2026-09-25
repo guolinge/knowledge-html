@@ -911,6 +911,9 @@ mark.mk-green { background: var(--green-soft); color: var(--green); }
 /* 有区域框时，顶部要留出「框边 + 标签」的高度 ——
    否则框会溢出到上面的段落里（框顶 = 首个节点 -28px）。 */
 .flowd.has-groups { padding-top: 38px; padding-bottom: 26px; }
+/* 有分组时，行内间距要足够大 —— 否则两组节点的包围盒会几乎相接，
+   区域框一往外扩就重叠（每行独立居中，同组节点跨行会错位）。 */
+.flowd.has-groups .flowd-row { gap: 72px; }
 
 .flowd-grid {
   position: relative; z-index: 2;
@@ -3563,21 +3566,55 @@ core 不知道 portrait / crowd / event_v2 这些概念，
         };
       });
 
-      // 区域框：算成员节点的包围盒，把框画在它们外面
+      // ---- 区域框 ----
+      // 先算每个框的「成员包围盒」（不含 padding），再统一决定水平留白。
+      //
+      // 为什么不能直接用固定 padding：
+      //   .flowd-row 是「每行独立居中」，所以同一组的节点跨行时会水平错位
+      //   （行总宽不同 → 居中起点不同）。结果两组的包围盒可能只差 2px，
+      //   而框要往外扩 20px → 必然重叠。
+      // 所以这里先按名义留白算，检测到重叠就整体收缩，直到不重叠。
+      const PAD_Y = 20;      // 上下留白（放标签 + 呼吸）
+      const PAD_X_MAX = 18;  // 左右名义留白
+
+      const boxes = [];
       root.querySelectorAll('[data-group-box]').forEach((boxEl) => {
         const gid = boxEl.getAttribute('data-group-box');
         const members = Array.from(root.querySelectorAll(`.fnode[data-group="${gid}"]`));
         if (!members.length) { boxEl.hidden = true; return; }
         boxEl.hidden = false;
-        const pad = 20;
-        const top = Math.min(...members.map((m) => gy + m.offsetTop)) - pad - 8;
-        const left = Math.min(...members.map((m) => gx + m.offsetLeft)) - pad;
-        const right = Math.max(...members.map((m) => gx + m.offsetLeft + m.offsetWidth)) + pad;
-        const bottom = Math.max(...members.map((m) => gy + m.offsetTop + m.offsetHeight)) + pad;
-        boxEl.style.top = `${top}px`;
-        boxEl.style.left = `${left}px`;
-        boxEl.style.width = `${right - left}px`;
-        boxEl.style.height = `${bottom - top}px`;
+        boxes.push({
+          el: boxEl,
+          minL: Math.min(...members.map((m) => gx + m.offsetLeft)),
+          maxR: Math.max(...members.map((m) => gx + m.offsetLeft + m.offsetWidth)),
+          minT: Math.min(...members.map((m) => gy + m.offsetTop)),
+          maxB: Math.max(...members.map((m) => gy + m.offsetTop + m.offsetHeight)),
+        });
+      });
+
+      // 水平留白自适应：找到让所有框互不重叠的最大值
+      let padX = PAD_X_MAX;
+      const overlaps = (p) => {
+        for (let i = 0; i < boxes.length; i++) {
+          for (let j = i + 1; j < boxes.length; j++) {
+            const a = boxes[i];
+            const b = boxes[j];
+            if (a.minL - p < b.maxR + p && b.minL - p < a.maxR + p) return true;
+          }
+        }
+        return false;
+      };
+      while (padX > 0 && overlaps(padX)) padX -= 2;
+
+      boxes.forEach((b) => {
+        const top = b.minT - PAD_Y - 8;
+        const left = b.minL - padX;
+        const right = b.maxR + padX;
+        const bottom = b.maxB + PAD_Y;
+        b.el.style.top = `${top}px`;
+        b.el.style.left = `${left}px`;
+        b.el.style.width = `${right - left}px`;
+        b.el.style.height = `${bottom - top}px`;
       });
 
       // viewBox 用 SVG 元素自身尺寸 —— 用 grid 的尺寸会让 preserveAspectRatio
