@@ -112,6 +112,15 @@ for (const f of ['references/blocks.md', 'references/extend.md']) {
   }
 }
 
+// 6b. SKILL.md 里提到的 npm run <script> 必须真的存在
+const pkgScripts = Object.keys(JSON.parse(read(path.join(ROOT, 'package.json'))).scripts);
+for (const f of ['SKILL.md', 'references/blocks.md', 'references/extend.md']) {
+  const src = f === 'SKILL.md' ? skillSrc : read(path.join(SKILL_DIR, f));
+  for (const m of src.matchAll(/npm run ([a-z][a-z0-9:-]*)/g)) {
+    if (!pkgScripts.includes(m[1])) note(`${f} 引用了不存在的脚本：npm run ${m[1]}`);
+  }
+}
+
 // 7. SKILL.md 的「第 N 步」编号必须从 0 开始且连续
 const steps = [...skillSrc.matchAll(/^### 第 (\d+) 步/gm)].map((m) => Number(m[1]));
 if (steps.length) {
