@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-has-toc="1">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>sql_builder_v2 的方言层</title>
+<meta name="description" content="17 个方法、两个实现。哪些只是命名不同、哪些背后藏着引擎限制和真实的 bug 修复；以及一处「两套机制并存」的架构裂缝。" />
+<link rel="stylesheet" href="../../assets/theme.css" />
+  <link rel="stylesheet" href="../../assets/blocks.css" />
+  <link rel="stylesheet" href="../../assets/archify-embed.css" />
+</head>
+<body>
+<div id="progress"></div>
+<div id="tocScrim"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
+    <a class="brand" href="../../index.html"><span class="dot"></span>知识笔记</a>
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="toc" id="toc">
+      <p class="toc-title">目录</p>
+      <a href="../../index.html" class="sub">← 全部笔记</a>
+      <a href="#概念为什么需要方言">概念：为什么需要方言</a>
+      <a href="#但方言不生成-sql" class="sub">但方言不生成 SQL</a>
+      <a href="#组织17-个方法分五类">组织：17 个方法，分五类</a>
+      <a href="#细节命名差异-七个一眼就懂的">细节：命名差异 —— 七个一眼就懂的</a>
+      <a href="#细节三个需要读注释的">细节：三个需要读注释的</a>
+      <a href="#①-castbooltoint-一个引擎报错" class="sub">① castBoolToInt —— 一个引擎报错</a>
+      <a href="#②-regexpmatchexpr-一段不会被执行的代码" class="sub">② regexpMatchExpr —— 一段不会被执行的代码</a>
+      <a href="#③-jsonarraycontainsrule-一个有参数绑定一个没有" class="sub">③ jsonArrayContainsRule —— 一个有参数绑定、一个没有</a>
+      <a href="#但它不是唯一的路">但它不是唯一的路</a>
+      <a href="#自测">自测</a>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow">● 从零理解 · 模块</span>
+      <h1>sql_builder_v2 的方言层</h1>
+      <p class="lede">17 个方法、两个实现。哪些只是命名不同、哪些背后藏着引擎限制和真实的 bug 修复；以及一处「两套机制并存」的架构裂缝。</p>
+    </div>
+
+    <div class="draft-banner">
+    <span>⚠</span>
+    <span>本页状态为 <b>draft</b>：内容尚未人工核对，引用前请自行验证。</span>
+  </div>
+<aside class="needs">
+      <p class="needs-title">读这篇之前，你需要先知道</p>
+      <a class="need" href="../sql-builder-v2-core/">← <b>4. core 篇</b><span>通用层：递归六层讲一遍</span></a>
+    </aside>
+    <div class="provenance"><span><b>来源</b> sources/gitlab/sql_builder_v2 @ 2c500b2</span><span><b>生成</b> 2026-09-26</span><span><b>模型</b> deepseek-v4.1-flash</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">架构</span> <span class="tag tone-muted">SQL</span> <span class="tag tone-muted">TypeScript</span> <span class="tag tone-muted">圈人</span></span></div>
+
+<div class="callout tone-blue">
+      <span class="ic">🧭</span>
+      <div><p>前置是 <a href="../sql-builder-v2-core/">④ core 篇</a>。</p>
+<p>架构篇讲过结论：「方言不生成 SQL，只返回片段或节点」。
+这篇<strong>把 17 个方法逐个拆开</strong>，看哪些只是命名不同、哪些背后藏着真问题。</p>
+<p>读完你应该能说出：「<mark class="mk-blue">大部分只是换个函数名，但有三四个背后是引擎限制和真实的 bug 修复。</mark>」</p>
+</div>
+    </div><h2 id="概念为什么需要方言"><span class="num">01</span>概念：为什么需要方言</h2>
+<p>同一句业务话，两个数据库的写法<strong>完全不一样</strong>：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>要做的事</th><th>ByteHouse</th><th>Doris</th></tr></thead><tbody><tr><th>从 map 里取一个 key</th><td data-label="ByteHouse"><code>mapElement(\</code>name`, 'a')`</td><td data-label="Doris"><code>ELEMENT_AT(\</code>name`, 'a')`</td></tr><tr><th>判断是不是 NULL</th><td data-label="ByteHouse"><code>isNull(\</code>x`)`</td><td data-label="Doris"><code>\</code>x` IS NULL`</td></tr><tr><th>转成整数</th><td data-label="ByteHouse"><code>toInt64(\</code>x`)`</td><td data-label="Doris"><code>CAST(\</code>x` AS SIGNED)`</td></tr><tr><th>按天分组</th><td data-label="ByteHouse"><code>FROM_UNIXTIME(\</code>t`/1000, '%Y-%m-%d')`</td><td data-label="Doris"><code>DATE_FORMAT(\</code>t`, '%Y-%m-%d')`</td></tr></tbody></table></div><p><strong>如果不用方言</strong>，那 <code>crowd</code> 里每个条件都要写一遍这种分支：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">// ❌ 没有方言会变成这样（假想）
+const field = dbType === 'bytehouse'
+  ? `mapElement(${col}, '${key}')`
+  : `ELEMENT_AT(${col}, '${key}')`;
+</code></pre></div>
+<div class="callout tone-violet quote">
+      <span class="ic">💡</span>
+      <div><p><mark class="mk-blue"><strong>方言层做的事：把这些 if/else 收拢到一处。</strong></mark></p>
+<p>17 个方法 = 17 个「两个库写法不同」的地方。
+调用方只写 <code>dialect.mapPropertyAccess(col, key)</code>，不关心背后是谁。</p>
+</div>
+    </div><h3 id="但方言不生成-sql">但方言<strong>不生成 SQL</strong></h3>
+<div class="callout tone-red quote">
+      <span class="ic">⚠</span>
+      <div><p><mark class="mk-blue">方言方法没有一个是直接产出 SQL 的。</mark></p>
+<p>它们只返回两种东西：</p>
+<ul>
+<li><strong>SQL 片段字符串</strong> —— 被拼进 <code>Expression.raw</code></li>
+<li><strong>完整的 Expression / Rule</strong> —— 直接进表达式树</li>
+</ul>
+<p>真正把表达式树变成 SQL 的，是 <code>buildWhere</code> + knex。
+（这个取舍的理由在 <a href="../sql-builder-v2-core/">④ core 篇</a> 第 06 节。）</p>
+</div>
+    </div><h2 id="组织17-个方法分五类"><span class="num">02</span>组织：17 个方法，分五类</h2>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>类别</th><th>方法</th><th>有几个</th></tr></thead><tbody><tr><th>属性取值</th><td data-label="方法"><code>mapPropertyAccess</code></td><td data-label="有几个">1</td></tr><tr><th>判空与兜底</th><td data-label="方法"><code>isNullCheck</code> / <code>isNotNullCheck</code> / <code>ifNullWrap</code></td><td data-label="有几个">3</td></tr><tr><th>类型转换</th><td data-label="方法"><code>castToInt</code> / <code>castToFloat</code> / <code>castBoolToInt</code></td><td data-label="有几个">3</td></tr><tr><th>数组与正则</th><td data-label="方法"><code>jsonArrayContainsRule</code> / <code>NotContains</code> / <code>Equals</code> / <code>regexpMatchExpr</code> / <code>regexpNotMatchExpr</code></td><td data-label="有几个">5</td></tr><tr><th>时间</th><td data-label="方法"><code>groupByEventTime</code> / <code>getRelativeTimestampRules</code> / <code>getAbsoluteTimestampRules</code></td><td data-label="有几个">3</td></tr><tr><th>其它</th><td data-label="方法"><code>multiIf</code> / <code>arrayExpandSql</code></td><td data-label="有几个">2</td></tr></tbody></table></div><div class="callout tone-violet">
+      <span class="ic">💡</span>
+      <div><p><strong>看返回类型，就知道这个方法有多复杂：</strong></p>
+<table>
+<thead>
+<tr>
+<th>返回</th>
+<th>方法</th>
+<th>意味着</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>string</code></td>
+<td>11 个</td>
+<td>只是拼个片段，最简单</td>
+</tr>
+<tr>
+<td><code>Expression</code> / <code>Rule</code></td>
+<td>5 个</td>
+<td>要构造表达式节点</td>
+</tr>
+<tr>
+<td><code>Expression[]</code></td>
+<td>2 个</td>
+<td>要生成<strong>多个</strong>条件（时间范围）</td>
+</tr>
+</tbody>
+</table>
+<p><mark class="mk-blue">返回数组的那两个，是整层里最重的。</mark></p>
+</div>
+    </div><h2 id="细节命名差异-七个一眼就懂的"><span class="num">03</span>细节：命名差异 —— 七个一眼就懂的</h2>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>方法</th><th>ByteHouse</th><th>Doris</th><th>差异性质</th></tr></thead><tbody><tr><th><code>mapPropertyAccess</code></th><td data-label="ByteHouse"><code>mapElement(c, 'k')</code></td><td data-label="Doris"><code>ELEMENT_AT(c, 'k')</code></td><td data-label="差异性质"><span class="tag tone-green">换个函数名</span></td></tr><tr><th><code>isNullCheck</code></th><td data-label="ByteHouse"><code>isNull(f)</code></td><td data-label="Doris"><code>f IS NULL</code></td><td data-label="差异性质"><span class="tag tone-green">函数 vs 运算符</span></td></tr><tr><th><code>isNotNullCheck</code></th><td data-label="ByteHouse"><code>isNotNull(f)</code></td><td data-label="Doris"><code>f IS NOT NULL</code></td><td data-label="差异性质"><span class="tag tone-green">同上</span></td></tr><tr><th><code>ifNullWrap</code></th><td data-label="ByteHouse"><code>ifNull(f, d)</code></td><td data-label="Doris"><code>IFNULL(f, d)</code></td><td data-label="差异性质"><span class="tag tone-green">只是大小写</span></td></tr><tr><th><code>castToInt</code></th><td data-label="ByteHouse"><code>toInt64(f)</code></td><td data-label="Doris"><code>CAST(f AS SIGNED)</code></td><td data-label="差异性质"><span class="tag tone-green">换个函数名</span></td></tr><tr><th><code>castToFloat</code></th><td data-label="ByteHouse"><code>toFloat64(f)</code></td><td data-label="Doris"><code>CAST(f AS DOUBLE)</code></td><td data-label="差异性质"><span class="tag tone-green">同上</span></td></tr><tr><th><code>multiIf</code></th><td data-label="ByteHouse"><code>multiIf(c1,v1,c2,v2,default)</code></td><td data-label="Doris"><code>CASE WHEN c1 THEN v1 ... ELSE default END</code></td><td data-label="差异性质"><span class="tag tone-green">两种语法</span></td></tr></tbody></table></div><div class="callout tone-green">
+      <span class="ic">✅</span>
+      <div><p><strong>这七个不需要动脑子</strong> —— 查一下两边函数名就行。</p>
+<p>但<strong>别以为 17 个都这么简单</strong>。下面三个要读注释才懂。</p>
+</div>
+    </div><h2 id="细节三个需要读注释的"><span class="num">04</span>细节：三个需要读注释的</h2>
+<h3 id="①-castbooltoint-一个引擎报错">① <code>castBoolToInt</code> —— 一个引擎报错</h3>
+<p><strong>ByteHouse 的实现只有一行：直接复用 <code>castToInt</code>。</strong></p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">castBoolToInt(field: string): string {
+    // ByteHouse 中 properties 是 Map(String,String)，mapElement 取出为 Nullable(String)。
+    // bool 属性存的是字符串 &quot;1&quot;/&quot;0&quot;，右侧比较值是数字字面量（UInt8），
+    // 若左侧裸用 mapElement 会触发 &quot;no supertype for types String, UInt8&quot; 引擎报错。
+    // 与迁移前 bytehouse 链路语义对齐：旧库 isBool 不生效、按 type='long' 走 toInt64，
+    // 这里同样把左侧强转 Int64，使 String &quot;1&quot;→1 可与 UInt8 比较。
+    return this.castToInt(field);
+}
+</code></pre></div>
+<p><strong>Doris 的实现完全不同：</strong></p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">castBoolToInt(field: string): string {
+    // ds_gateway 的 pingcap/parser 不支持 CAST AS BOOLEAN；直接 = true 比较，
+    // Doris 对字符串'true'/整数1/布尔true 均判为真，语义与旧 CAST AS BOOLEAN 一致
+    return `CASE WHEN ${field} = true THEN 1 ELSE 0 END`;
+}
+</code></pre></div>
+<div class="callout tone-red">
+      <span class="ic">⚠</span>
+      <div><p><mark class="mk-blue"><strong>两个注释讲的是两件不同的事，但都指向同一个约束：类型系统不让你随便比。</strong></mark></p>
+<ul>
+<li><strong>ByteHouse<strong>：<code>Map(String,String)</code> 取出来是</strong>字符串</strong>，右边是数字 → 引擎拒绝比较</li>
+<li><strong>Doris<strong>：gateway 的解析器</strong>不支持</strong> <code>CAST AS BOOLEAN</code> → 只能换个写法</li>
+</ul>
+<p><mark class="mk-blue">注意 <code>castBoolToInt</code> 在 ByteHouse 里「其实没做 bool 转换」</mark> ——
+它是为了「跟旧行为对齐」而故意这么写的。</p>
+</div>
+    </div><h3 id="②-regexpmatchexpr-一段不会被执行的代码">② <code>regexpMatchExpr</code> —— 一段<strong>不会被执行</strong>的代码</h3>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">/**
+ * ! 这里目前实测 ds_gateway 的 TiDB Parser 不支持 match()，
+ *   udp 后台目前条件也是不支持正则的，实际不会触发到这里
+ */
+regexpMatchExpr(field: string, value: string): Expression {
+    return { raw: `match(${field}, ?) = 1`, value };
+}
+</code></pre></div>
+<div class="callout tone-amber">
+      <span class="ic">⚠</span>
+      <div><p><strong>这段注释说的是：「写了，但用不到」。</strong></p>
+<p>两个原因叠加：
+① gateway 的解析器<strong>不支持</strong> <code>match()</code>
+② 后台的条件配置里<strong>根本没有正则这个选项</strong></p>
+<p><mark class="mk-blue">所以这段代码是死路 —— 但它是接口要求必须实现的，不能删。</mark>
+看到这种注释，就知道<strong>别在这上面花时间</strong>。</p>
+</div>
+    </div><h3 id="③-jsonarraycontainsrule-一个有参数绑定一个没有">③ <code>jsonArrayContainsRule</code> —— 一个有参数绑定、一个没有</h3>
+<p><strong>这一对是整层里最值得看的。</strong></p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>库</th><th>怎么拼数组</th><th>值怎么处理</th><th>要不要手动检查</th></tr></thead><tbody><tr><th>ByteHouse</th><td data-label="怎么拼数组"><code>JSONExtract('[...]', 'Array(String)')</code> <strong>直接拼字符串</strong></td><td data-label="值怎么处理"><span class="tag tone-amber">拼进 SQL 字面量</span></td><td data-label="要不要手动检查"><span class="tag tone-red">✅ 要 `assertSqlSafeArrayValues`</span></td></tr><tr><th>Doris</th><td data-label="怎么拼数组"><code>CAST(? AS JSON)</code> <strong>参数绑定</strong></td><td data-label="值怎么处理"><span class="tag tone-green">走 `?` 绑定</span></td><td data-label="要不要手动检查"><span class="tag tone-green">❌ 不需要</span></td></tr></tbody></table></div><div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">// ByteHouse —— 把整个数组 JSON.stringify 后拼进 SQL
+const valueRaw = `JSONExtract('${JSON.stringify(values)}', 'Array(String)')`;
+assertSqlSafeArrayValues(values);   // ← 所以要先检查单引号
+return { raw: `hasAny(${convertedField}, ${valueRaw}) = 1` };
+
+// Doris —— 每个值走参数绑定
+const parts = values.map((v) =&gt;
+    DB.raw(`JSON_CONTAINS(${castExpr}, CAST(? AS JSON))`, [JSON.stringify(v)]).toQuery()
+);
+return { raw: `(${parts.join(' OR ')})` };   // ← 不需要检查
+</code></pre></div>
+<div class="callout tone-red quote">
+      <span class="ic">⚠</span>
+      <div><p><mark class="mk-blue"><strong>同一个方法，一个需要防注入检查，一个不需要。</strong></mark></p>
+<p>ByteHouse 没有「把数组当参数绑定」的写法，只能把整个 JSON 拼进字符串 ——
+所以必须<strong>在拼接前拦一道</strong>（<code>assertSqlSafeArrayValues</code>）。</p>
+<p>Doris 可以逐个值绑定 <code>?</code>，天然安全。</p>
+<p><mark class="mk-blue">这不是谁好谁坏，是两边能力不同。</mark> 方言层的作用就是把这种差异<strong>关在里面</strong>，
+让上层调用方不用关心。</p>
+</div>
+    </div><h2 id="但它不是唯一的路"><span class="num">05</span>但它不是唯一的路</h2>
+<div class="callout tone-red quote">
+      <span class="ic">⚠</span>
+      <div><p><mark class="mk-blue"><strong>除了 <code>SqlDialect</code> 接口，还有另一条路处理数组条件。</strong></mark></p>
+<p>它在 <code>core/src/utils.ts</code> 里，<strong>按 <code>dbType</code> if/else 分支</strong> ——
+而不是走接口。这是架构的一条裂缝。</p>
+<p>展开在 <a href="../sql-builder-v2-core-dialect-array/">数组条件的两种路径</a>。</p>
+</div>
+    </div><div class="callout tone-violet">
+      <span class="ic">💡</span>
+      <div><p><strong>这里只提一句，因为那是个独立的问题：</strong></p>
+<ul>
+<li>这一篇讲「方言接口怎么设计的」</li>
+<li>那一篇讲「为什么还有一个东西不走接口」</li>
+</ul>
+<p><mark class="mk-blue">如果你在读代码时遇到 <code>getStringArrayRule</code>，去那一篇。</mark></p>
+</div>
+    </div><h2 id="自测"><span class="num">06</span>自测</h2>
+<div class="quiz"><details>
+        <summary>方言方法会直接生成 SQL 吗？</summary>
+        <div class="a"><p><strong>不会。</strong> 它们只返回两种东西：SQL 片段字符串（拼进 <code>Expression.raw</code>），
+或者完整的 Expression / Rule（直接进表达式树）。
+真正把表达式树变成 SQL 的是 <code>buildWhere</code> + knex。
+这么设计是为了避免每个方言方法都重新实现一遍 <code>buildWhere</code>。</p>
+</div>
+      </details><details>
+        <summary>17 个方法里，大部分只是换个函数名吗？</summary>
+        <div class="a"><p>大部分是，但<strong>不是全部</strong>。
+七个是纯命名差异（<code>mapElement</code> vs <code>ELEMENT_AT</code>、<code>toInt64</code> vs <code>CAST AS SIGNED</code>）。
+但 <code>castBoolToInt</code> / <code>regexpMatchExpr</code> / <code>jsonArrayContainsRule</code> 这几个，
+背后是<strong>引擎限制、gateway 解析器限制、和真实的 bug 修复</strong>。</p>
+</div>
+      </details><details>
+        <summary>为什么 <code>jsonArrayContainsRule</code> 在 ByteHouse 里要手动检查单引号，Doris 里不用？</summary>
+        <div class="a"><p>因为<strong>两边能力不同</strong>：
+ByteHouse 没有「把数组当参数绑定」的写法，只能把整个 JSON 拼进字符串字面量
+（<code>JSONExtract('[...]', 'Array(String)')</code>）—— 所以必须拼之前拦一道。
+Doris 可以逐个值绑定 <code>?</code>（<code>CAST(? AS JSON)</code>），天然安全。
+方言层的作用就是把这种差异关在里面，让上层不用关心。</p>
+</div>
+      </details><details>
+        <summary><code>castBoolToInt</code> 在 ByteHouse 里其实没做 bool 转换，为什么？</summary>
+        <div class="a"><p>注释说得很清楚：<code>properties</code> 是 <code>Map(String,String)</code>，<code>mapElement</code> 取出来是
+<code>Nullable(String)</code>，而 bool 属性存的是字符串 &quot;1&quot;/&quot;0&quot;，
+右侧比较值是数字字面量（UInt8）—— 裸用会触发
+「no supertype for types String, UInt8」引擎报错。
+所以强转 Int64。而且注释还写了「与迁移前语义对齐」——
+<mark class="mk-blue">它是为了跟旧行为一致才故意这么写的。</mark></p>
+</div>
+      </details><details>
+        <summary><code>getStringArrayRule</code> 为什么说是「架构裂缝」？</summary>
+        <div class="a"><p>因为同一类需求（字符串数组的包含判断）有<strong>两套实现</strong>：
+走 <code>SqlDialect</code> 接口的，和在 <code>utils.ts</code> 里按 <code>dbType</code> if/else 的。
+后者<strong>违反了方言层的初衷</strong> —— 把 if/else 又搬回来了，
+而且还要调用方额外传 <code>columnType</code>。
+它只在 <code>relation.ts</code> 一处被调用，<code>dbType</code> 是当参数传进去的，
+<code>columnType</code> 还硬编码成 <code>'string'</code>。</p>
+</div>
+      </details><details>
+        <summary>看到 <code>getStringArrayRule</code> 里有 MySql 分支，说明什么？</summary>
+        <div class="a"><p>说明它<strong>写于「还支持三个库」的年代</strong>。
+而 <code>SqlDialect</code> 里根本没有 MySql 实现（<code>DbType.MySql</code> 的注释写着
+「作为历史枚举值保留」）。
+<mark class="mk-blue">新老两套并存是真实代码库的常态</mark>，看到时别急着统一 ——
+先确认两边行为真的一样再合并。</p>
+</div>
+      </details></div>
+
+    <footer>
+      <span>sql_builder_v2 的方言层</span>
+      <span>最后更新 2026-09-26 · 单文件可离线打开</span>
+    </footer>
+  </main>
+</div>
+
+<script src="../../assets/app.js"></script>
+</body>
+</html>
