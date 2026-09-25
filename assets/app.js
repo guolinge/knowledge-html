@@ -1218,6 +1218,180 @@
     });
   })();
 
+  /* —— 控件：stream-modes ——
+     同一条订单流，三种跑法。三种模式共用同一份事件、同一段业务逻辑，
+     只在「源有没有末尾」和「任务什么时候结束」上不同。
+       有界·一次读完   —— 输入栏一直涨，输出栏一直是空的，最后只吐一行
+       无界·持续累计   —— 每来一条就更新一次当前结果
+       无界·每分钟窗口 —— 窗口关闭才结算，而最后一个窗口永远等不到关闭 */
+  WIDGETS['stream-modes'] = (root) => {
+    var EVENTS = [
+      { t: '10:00:01', u: 'u01', amt: 99 },
+      { t: '10:00:03', u: 'u02', amt: 50 },
+      { t: '10:00:05', u: 'u03', amt: 120 },
+      { t: '10:00:08', u: 'u01', amt: 20 },
+      { t: '10:00:10', u: 'u04', amt: 88 },
+      { t: '10:00:14', u: 'u02', amt: 66 },
+      { t: '10:01:02', u: 'u05', amt: 150 },
+      { t: '10:01:05', u: 'u01', amt: 30 },
+      { t: '10:01:09', u: 'u03', amt: 45 },
+      { t: '10:01:15', u: 'u06', amt: 200 },
+      { t: '10:02:01', u: 'u02', amt: 77 },
+      { t: '10:02:04', u: 'u05', amt: 33 },
+    ];
+    var TOTAL = EVENTS.reduce((s, e) => s + e.amt, 0);
+
+    var MODES = [
+      {
+        id: 'batch', label: '有界 · 一次读完', tone: 'green', step: 180,
+        rule: '源是文件，有末尾。全部读完 → 一个最终结果 → 任务结束。',
+      },
+      {
+        id: 'cum', label: '无界 · 持续累计', tone: 'blue', step: 420,
+        rule: '源是 Kafka，没有末尾。每来一条就更新一次当前结果，任务永不结束。',
+      },
+      {
+        id: 'win', label: '无界 · 每分钟窗口', tone: 'violet', step: 420,
+        rule: '把永不结束的流按分钟切段。窗口关闭才结算 —— 而最后一个窗口永远等不到关闭。',
+      },
+    ];
+
+    var modesBox = root.querySelector('[data-sm-modes]');
+    var ruleEl = root.querySelector('[data-sm-rule]');
+    var inBox = root.querySelector('[data-log="in"]');
+    var outBox = root.querySelector('[data-log="out"]');
+    var countEl = root.querySelector('[data-sm-count]');
+    var taskEl = root.querySelector('[data-sm-task]');
+    var statusEl = root.querySelector('[data-status]');
+    var runBtn = root.querySelector('[data-run]');
+    var resetBtn = root.querySelector('[data-reset]');
+
+    var mode = 'batch';
+    var timers = [];
+
+    function addLine(box, badge, tone, time, text, cls) {
+      box.appendChild(h('div', { cls: 'line' + (cls ? ' ' + cls : '') }, [
+        badge ? h('span', { cls: 'badge tone-' + tone, text: badge }) : null,
+        time ? h('span', { cls: 'time', text: time }) : null,
+        h('span', { cls: 'txt', text: text }),
+      ]));
+      box.scrollTop = box.scrollHeight;
+    }
+    /** 输入栏里的窗口分界线 */
+    function addDivider(box, text) {
+      box.appendChild(h('div', { cls: 'line divider' }, [h('span', { cls: 'txt', text: text })]));
+      box.scrollTop = box.scrollHeight;
+    }
+    function setTask(label, tone, note) {
+      taskEl.className = 'sm-task tone-' + tone;
+      fill(taskEl, [
+        h('span', { text: '任务状态：' }),
+        h('b', { text: label }),
+        h('span', { text: note }),
+      ]);
+    }
+    function clearTimers() { timers.forEach(clearTimeout); timers = []; }
+
+    function reset() {
+      clearTimers();
+      fill(inBox, []); fill(outBox, []);
+      countEl.textContent = '0 / ' + EVENTS.length + ' 条';
+      setTask('未开始', 'muted', '点「开始模拟」跑一遍');
+      statusEl.textContent = '未开始';
+      runBtn.disabled = false;
+      runBtn.textContent = '▶ 开始模拟';
+    }
+
+    function play() {
+      reset();
+      var cfg = MODES.filter((m) => m.id === mode)[0];
+      var step = cfg.step;
+      runBtn.disabled = true;
+      runBtn.textContent = '模拟中…';
+      setTask('运行中', 'blue', '正在接收事件');
+      statusEl.textContent = '已到达 0 / ' + EVENTS.length + ' 条';
+
+      var cum = 0, win = null, winSum = 0, winCount = 0;
+
+      if (mode === 'batch') {
+        addLine(inBox, 'FILE', 'muted', '', '打开 orders_2026-09-23.csv');
+      }
+
+      EVENTS.forEach((e, i) => {
+        timers.push(setTimeout(() => {
+          // 窗口模式：分钟一变，先把上一个窗口结算掉
+          if (mode === 'win') {
+            var w = e.t.slice(0, 5);
+            if (win && w !== win) {
+              addLine(outBox, 'WINDOW', 'green', win,
+                win + ' 窗口关闭 → ' + winCount + ' 笔 · ' + winSum + ' 元');
+              addDivider(inBox, win + ' 窗口关闭');
+            }
+            if (w !== win) { win = w; winSum = 0; winCount = 0; }
+            winSum += e.amt; winCount++;
+          }
+
+          addLine(inBox, 'EVENT', 'blue', e.t, e.u + ' 下单 ' + e.amt + ' 元');
+          countEl.textContent = (i + 1) + ' / ' + EVENTS.length + ' 条';
+          cum += e.amt;
+
+          if (mode === 'cum') {
+            addLine(outBox, 'UPDATE', 'blue', e.t, '当前累计销售额 = ' + cum + ' 元');
+            statusEl.textContent = '已到达 ' + (i + 1) + ' / ' + EVENTS.length + ' 条 · 当前累计 ' + cum + ' 元';
+          } else if (mode === 'win') {
+            statusEl.textContent = win + ' 窗口攒到 ' + winCount + ' 笔 · ' + winSum + ' 元';
+          } else {
+            statusEl.textContent = '正在读取文件 … ' + (i + 1) + ' / ' + EVENTS.length;
+          }
+        }, i * step + 60));
+      });
+
+      timers.push(setTimeout(() => {
+        if (mode === 'batch') {
+          addLine(inBox, 'EOF', 'green', '', '文件末尾 —— 没有更多数据了', 'eof');
+          addLine(outBox, 'FINAL', 'green', '', '总销售额 = ' + TOTAL + ' 元 · 共 ' + EVENTS.length + ' 笔');
+          addLine(outBox, 'DONE', 'green', '', '任务结束 ✓');
+          setTask('已结束', 'green', '批任务：读完就退出');
+          statusEl.textContent = '任务已结束 · 这个结果是最终答案，不会再变';
+        } else if (mode === 'cum') {
+          addLine(inBox, '…', 'muted', '', '还在等下一条 —— 不知道什么时候来，也不知道有没有最后一条');
+          setTask('持续运行中', 'blue', '流任务：不会自己退出');
+          statusEl.textContent = '任务不会结束 · 每来一条就更新一次结果';
+        } else {
+          addLine(outBox, 'OPEN', 'amber', win,
+            win + ' 窗口还在攒（' + winCount + ' 笔 · ' + winSum + ' 元）', 'warn');
+          addLine(outBox, 'WAIT', 'amber', '', '要等 10:03 的第一条数据到来，这个窗口才会结算', 'warn');
+          setTask('持续运行中', 'amber', '最后一个窗口还开着');
+          statusEl.textContent = '任务不会结束 · 最后一个窗口永远等不到关闭';
+        }
+        runBtn.disabled = false;
+        runBtn.textContent = '▶ 再跑一次';
+      }, EVENTS.length * step + 480));
+    }
+
+    function setMode(id) {
+      mode = id;
+      var cfg = MODES.filter((m) => m.id === id)[0];
+      Array.prototype.forEach.call(modesBox.children, (b) =>
+        b.classList.toggle('on', b.getAttribute('data-sm-mode') === id));
+      ruleEl.className = 'seg-rule tone-' + cfg.tone;
+      ruleEl.textContent = cfg.rule;
+      play();
+    }
+
+    MODES.forEach((m) => {
+      var b = h('button', { cls: 'tone-' + m.tone, text: m.label, attrs: { 'data-sm-mode': m.id } });
+      b.type = 'button';
+      b.addEventListener('click', () => setMode(m.id));
+      modesBox.appendChild(b);
+    });
+    runBtn.addEventListener('click', play);
+    if (resetBtn) resetBtn.addEventListener('click', reset);
+
+    reset();
+    setMode('batch');
+  };
+
   /* ---------- 挂载 ---------- */
   document.querySelectorAll('[data-widget]').forEach((root) => {
     var name = root.getAttribute('data-widget');

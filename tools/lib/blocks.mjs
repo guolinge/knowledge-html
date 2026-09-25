@@ -627,6 +627,21 @@ const KIND_TONE = {
     const render = RENDERERS[lang];
 
     if (render) {
+      // YAML 预检：裸标量以保留字符开头是最常见的坑，而 YAML 自己的报错很难懂
+      // 同时覆盖块式（行首 key:）和流式（{ key: ... } 里）两种写法
+      const badLine = token.content
+        .split('\n')
+        .findIndex((l) => /(?:^|[{,]\s*)[\w."'-]+:\s+[*&!%@]/.test(l));
+      if (badLine >= 0) {
+        const at = `${env?.file || 'note.md'}${line ? ':' + (line + badLine) : ''}`;
+        throw new Error(
+          `${at} 积木 \`${lang}\` 的 YAML 有裸标量以保留字符开头\n` +
+            `  ${token.content.split('\n')[badLine].trim()}\n` +
+            `  💡 \`*\` \`&\` \`!\` 在 YAML 里是别名/锚点/标签的起始符。给这个值加双引号：\n` +
+            `     desc: "**加粗**开头也要加引号"\n`,
+        );
+      }
+
       try {
         return render(token.content);
       } catch (e) {

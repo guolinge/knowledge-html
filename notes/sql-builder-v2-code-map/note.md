@@ -86,7 +86,207 @@ text: |
   自定义方法，TypeScript 不认识，得手工补一条声明。
 ```
 
-## 02 · 三个包分别管什么
+## 02 · 先搞清几个词
+
+这篇笔记会反复用到下面这些词。**每个词都配一个真实例子** ——
+看不懂定义就看例子，例子比定义清楚。
+
+### 圈人用的原料
+
+```cards
+cols: 2
+items:
+  - title: uid
+    tag: 最基础
+    tone: muted
+    desc: 用户的唯一标识。一串代表「一个人」的编号，系统里到处用它串数据。**存储时是加密的**
+    code: |
+      1001
+  - title: 画像 portrait
+    tag: 会被覆盖
+    tone: green
+    desc: 用户的**静态属性**。存在 `user_portrait` 表，一行 = 一个人。只存当前值，改了就覆盖
+    code: |
+      uid  | city | vip_level | 开户时间
+      1001 | 杭州 | 3         | 2020-01-01
+      1002 | 深圳 | 5         | 2021-06-15
+  - title: 事件 event
+    tag: 只追加
+    tone: violet
+    desc: 用户的**行为流水**。只追加不覆盖，所以能回答「**做了几次**」
+    code: |
+      $user_id | event_type | event_time | 商品
+      1001     | 加购       | 10:03:12   | A001
+      1001     | 加购       | 15:20:41   | B007
+      1001     | 下单       | 15:31:08   | B007
+  - title: 人群包 crowd
+    tag: 可复用
+    tone: blue
+    desc: 预先算好存下来的一批人。给个编号 + 版本，下次直接复用
+    code: |
+      crowd_id | crowd_version | uid
+      C_888    | v3            | 1001
+      C_888    | v3            | 1002
+```
+
+### 怎么表达「要哪些人」
+
+```cards
+cols: 2
+items:
+  - title: 条件 condition
+    tag: 叶子节点
+    tone: green
+    desc: 一个判断，比如「城市是杭州」。**这就是最小的条件单元**
+    code: |
+      { op: 'IN', name: 'city', value: ['杭州'] }
+  - title: 条件树
+    tag: 整体结构
+    tone: violet
+    desc: 用 `AND` / `OR` 把条件串起来的树，**可以无限嵌套**
+    code: |
+      { logic: 'AND', items: [
+          { op: 'IN',  name: 'city',      value: ['杭州'] },
+          { logic: 'OR', items: [
+              { op: 'Gte', name: 'vip_level', value: 3 },
+              { op: 'Eq',  name: 'channel',   value: 'APP' }
+          ]}
+      ]}
+```
+
+### 同一棵树，两套写法
+
+**这是全篇最容易懵的地方**：业务侧和 core 用**两套词汇**描述同一件事。
+
+```compare
+first: 同一个条件
+head: [业务条件（crowd 的输入）, "Rule[]（core 的输入）"]
+rows:
+  - 属性名: ["`name`", "`column`"]
+  - 例子: ["`{ op: 'IN', name: 'city', value: ['杭州'] }`", "`{ op: 'IN', column: 'city', value: ['杭州'] }`"]
+  - 时间条件: ["用 `dateType` 描述，如「最近 3 天」", "**展开成多个条件**，见边 ①"]
+  - 逻辑组合: ["`logic` + `items`", "`logic` + `items`（**一样**）"]
+```
+
+```cards
+cols: 2
+items:
+  - title: 业务条件
+    tag: crowd 的输入
+    tone: amber
+    desc: "**业务侧写的**条件树。用业务词汇：属性叫 `name`，时间用 `dateType` 描述"
+    code: |
+      { logic: 'AND', items: [
+          { op: 'IN', name: 'city', value: ['杭州'] }
+      ]}
+  - title: "Rule[]"
+    tag: core 的输入
+    tone: blue
+    desc: "**表达式模型**。core 只认这个。用 SQL 词汇：属性叫 `column`。叫 `Rule[]` 是因为**它是个数组**"
+    code: |
+      [
+        { logic: 'AND', items: [
+            { op: 'IN', column: 'city', value: ['杭州'] }
+        ]}
+      ]
+```
+
+```callout
+tone: violet
+icon: 💡
+text: |
+  看出来了吗？==两套写法长得几乎一样，只有属性名不同（`name` → `column`）。==
+
+  这不是巧合：**它们用的是同一个树形结构**，只是词汇表不同。
+  所以翻译起来很轻 —— 大部分节点直接透传，只有业务独有的词汇需要改写。
+```
+
+### 中间的三样东西
+
+```cards
+cols: 2
+items:
+  - title: adapter
+    tag: 翻译器
+    tone: amber
+    desc: 把**业务条件**翻译成 **Rule[]** 的那个函数。它在 `crowd` 包里，**不在 core**
+    code: |
+      输入: { op: 'IN', name: 'city', ... }
+      输出: { op: 'IN', column: 'city', ... }
+  - title: entrepot
+    tag: 六种
+    tone: violet
+    desc: 「条件入口」。**六种条件各有一个实现**，每种知道自己查哪张表
+    code: |
+      portrait  → user_portrait 表
+      event     → event_v2 表
+      crowd     → crowds 表
+      uid       → 不查表，直接给
+      relation  → 业务明细表
+      rawSql    → 透传
+  - title: 表达式模型
+    tag: 纯数据
+    tone: blue
+    desc: core 内部的数据结构。**只有字段，没有方法** —— 它不是对象，是数据
+    code: |
+      Expression 的四种形态之一：
+      { op: 'IN', column: 'city', value: ['杭州'] }
+  - title: 方言 dialect
+    tag: 策略
+    tone: red
+    desc: 同一个语义在不同数据库怎么写。core 定义接口，两个实现
+    code: |
+      map 取值：
+        ByteHouse → mapElement(`name`, 'a')
+        Doris     → ELEMENT_AT(`name`, 'a')
+```
+
+### 最后两个
+
+```cards
+cols: 2
+items:
+  - title: ByteHouse / Doris
+    tag: 两个数据库
+    tone: cloud
+    desc: 这套代码要同时在两个数据库上跑。**同名函数写法不同**，这就是「方言」存在的原因
+    code: |
+      ByteHouse: 事件表按 murmurhash 分 8 张
+      Doris:     事件表由调用方传入
+  - title: SqlContext
+    tag: 唯一入口
+    tone: green
+    desc: 调用方接触到的**唯一入口**。选方言、构造模块，之后一路传下去
+    code: |
+      SqlContext.create(DbType.Doris, { eventTableMap })
+```
+
+```callout
+tone: amber
+icon: ⚠
+text: |
+  **`crowd` 这个词有两个意思，很容易混：**
+
+  - `packages/crowd` —— **包名**，指整个用户域业务包
+  - `Entrepots.Crowd` —— **一种条件类型**，指上面那个「人群包」
+
+  看到 `crowd` 先看上下文：说包的时候是前者，说条件类型的时候是后者。
+```
+
+```callout
+tone: violet
+icon: 💡
+text: |
+  **一句话把上面所有词串起来：**
+
+  运营想圈一批人 → 写下一棵**条件树**（用**画像**、**事件**、**人群包**这些条件）
+  → `crowd` 包用 **adapter** 把它翻译成 **Rule[]**
+  → `core` 把 **Rule[]** 翻译成 **SQL**（中途遇到 **ByteHouse** / **Doris** 的差异就调**方言**）
+```
+
+---
+
+## 03 · 三个包分别管什么
 
 ```compare
 first: 维度
@@ -116,231 +316,7 @@ text: |
   lodash 给骨架，剩下三个合并成一张表。
 ```
 
-### knex —— 从零理解它的工作原理
-
-```callout
-tone: blue
-icon: 📖
-text: |
-  下面从**五个概念**开始，每个概念配一张图。概念讲完了，knex 的原理就清楚了。
-```
-
-#### 概念 ①：数据库只认「一段文本」
-
-你在代码里写的东西，数据库一个都看不懂。**它只接受一段 SQL 文本。**
-
-```flow
-grid: true
-legend: true
-nodes:
-  - { id: app, label: 你的代码, sub: "想查一批用户", row: 0, kind: frontend }
-  - { id: str, label: 一段文本, sub: "SELECT uid FROM user_portrait WHERE ...", row: 1, tone: violet }
-  - { id: db, label: 数据库, sub: "不认对象，不认函数，只认文本", row: 2, kind: database }
-edges:
-  - { from: app, to: str, label: 拼出来 }
-  - { from: str, to: db, label: 发过去 }
-```
-
-所以「操作数据库」这件事，本质上就是 **把想干的事翻译成一段文本**。
-
-#### 概念 ②：但手写文本会出事
-
-最直接的做法是拼字符串：
-
-```js
-const sql = "SELECT uid FROM user_portrait WHERE city = '" + city + "'";
-```
-
-问题在于：`city` 是外部传进来的。如果它的值是：
-
-```text
-杭州' OR '1'='1
-```
-
-拼出来的 SQL 就变成了 `WHERE city = '杭州' OR '1'='1'` —— **条件被改写了**。这就是 SQL 注入。
-
-```flow
-grid: true
-groups:
-  - { id: naive, label: "手写拼接这条路", tone: red }
-  - { id: safe,  label: "构造器这条路", tone: green }
-nodes:
-  - { id: a, label: 手写拼接, sub: "值直接嵌进字符串", row: 0, tone: red, group: naive }
-  - { id: b, label: 构造器, sub: "值单独放，不混进 SQL", row: 0, tone: green, group: safe }
-  - { id: r1, label: 注入风险, sub: "值里带引号就出事", row: 1, tone: red, group: naive }
-  - { id: r2, label: 自动转义, sub: "转义交给库", row: 1, tone: green, group: safe }
-edges:
-  - { from: a, to: r1, dashed: true }
-  - { from: b, to: r2 }
-```
-
-==knex 就是「构造器」这一类东西：你用 JS 方法描述要干什么，它负责生成安全的 SQL。==
-
-#### 概念 ③：链式调用 = 每个方法都返回自己
-
-knex 的用法长这样：
-
-```js
-DB.getInstance().select('uid').from('user_portrait').where(...)
-```
-
-为什么能一直点下去？因为**每个方法执行完，返回的还是这个对象本身**。
-
-```flow
-grid: true
-nodes:
-  - { id: o, label: 一个查询对象, sub: "像一张空白表单", row: 0, tone: violet }
-  - { id: m1, label: ".select('uid')", sub: "填「要查哪些列」", row: 1, tone: blue }
-  - { id: m2, label: ".from('...')", sub: "填「查哪张表」", row: 2, tone: blue }
-  - { id: m3, label: ".where(...)", sub: "填「筛选条件」", row: 3, tone: blue }
-edges:
-  - { from: o, to: m1, label: 点第一个方法 }
-  - { from: m1, to: m2, label: 返回同一个对象 }
-  - { from: m2, to: m3, label: 返回同一个对象 }
-```
-
-==每一步返回的都是同一个对象，所以能无限点下去。这叫「链式调用」。==
-
-#### 概念 ④：链式调用**不生成 SQL**，只往对象上记东西
-
-这是最反直觉的一点。上面那串调用跑完，**一条 SQL 都没有产生** ——
-它只是把「要查哪些列、哪张表、什么条件」记在了那个对象上。
-
-```flow
-grid: true
-groups:
-  - { id: acc, label: "这一整段都只是在记东西 —— 一条 SQL 都没生成", tone: violet }
-nodes:
-  - { id: s0, label: 空对象, sub: "{}", row: 0, tone: muted, group: acc }
-  - { id: s1, label: 记下列, sub: "{ columns: ['uid'] }", row: 1, tone: violet, group: acc }
-  - { id: s2, label: 记下表, sub: "+ { table: 'user_portrait' }", row: 2, tone: violet, group: acc }
-  - { id: s3, label: 记下条件, sub: "+ { where: [...] }", row: 3, tone: violet, group: acc }
-  - { id: sql, label: 编译成 SQL, sub: "还没发生", row: 4, tone: amber }
-edges:
-  - { from: s0, to: s1, label: ".select('uid')" }
-  - { from: s1, to: s2, label: ".from(...)" }
-  - { from: s2, to: s3, label: ".where(...)" }
-  - { from: s3, to: sql, label: "要主动触发", dashed: true }
-```
-
-**自己点一下试试** —— 看状态怎么攒起来、什么时候才真的生成 SQL：
-
-```demo
-widget: knex-chain
-title: 链式调用到底在干什么
-hint: 攒状态中
-actions: false
-html: |
-  <div class="kc">
-    <div class="kc-btns">
-      <button data-kc-step="select">.select('uid')</button>
-      <button data-kc-step="from">.from('user_portrait')</button>
-      <button data-kc-step="where">.where('uid', 'in', [1, 2, 3])</button>
-      <button data-kc-step="raw" class="kc-final">.rawQuery()</button>
-    </div>
-    <div class="kc-panes">
-      <div class="kc-pane"><h5>对象内部状态</h5><pre data-kc-state></pre></div>
-      <div class="kc-pane"><h5>生成的 SQL</h5><pre data-kc-sql></pre></div>
-    </div>
-    <div class="kc-hint" data-kc-hint></div>
-  </div>
-```
-
-#### 概念 ⑤：取值时才编译 —— 编译做了两件事
-
-「取值」在 knex 里就是调 `.toString()` 或 `.toQuery()`。这一刻它才把内部状态翻成 SQL，做两件事：
-
-```flow
-grid: true
-nodes:
-  - { id: in, label: 内部状态, sub: "{ table: 'user_portrait', where: [uid in [1,2,3]] }", row: 0, tone: violet }
-  - { id: id1, label: 标识符加反引号, sub: "user_portrait → `user_portrait`", row: 1, tone: amber }
-  - { id: id2, label: 值变占位符, sub: "[1, 2, 3] → ?", row: 1, tone: amber }
-  - { id: out, label: 一段 SQL, sub: "select `uid` from `user_portrait` where `uid` in (?)", row: 2, tone: green }
-edges:
-  - { from: in, to: id1 }
-  - { from: in, to: id2 }
-  - { from: id1, to: out }
-  - { from: id2, to: out }
-```
-
-```callout
-tone: violet
-icon: 💡
-text: |
-  **为什么要留 `?` 不直接写值？**
-
-  因为 `?` 是**占位符** —— 真正的值放在一个单独的参数数组里，由数据库驱动去填充。
-  这样值永远不会被当成 SQL 语法解析，==注入就不可能发生==。
-
-  这个机制叫**参数绑定**，是概念②里那个问题的真正解法。
-```
-
-**为什么叫「惰性」**：链式调用只记状态，编译推迟到取值那一刻。好处是——
-你可以在中途根据条件决定要不要再加一个 `.where()`，反正还没编译。
-
-#### 现在看这个库做了什么
-
-knex 原生给了 `.toString()` 和 `.toQuery()`。这个库只加了一个 `.rawQuery()`：
-
-```text
-rawQuery() { return this.toString().trim(); }   // ← 就这么一行
-```
-
-**为什么要加**：knex 原生的取值方式返回值结构不统一，而这个库对外只交付**一段字符串**
-（下游网关不接受别的形态）。所以统一一个出口。
-
-**为什么挂在原型上，而不是用 `knex.QueryBuilder.extend()`**：
-
-```flow
-grid: true
-groups:
-  - { id: same, label: "两种入口落到同一个原型上", tone: violet }
-nodes:
-  - { id: e1, label: "DB.getInstance()", sub: "→ queryBuilder()", row: 0, tone: blue, group: same }
-  - { id: e2, label: "DB.getInstance('name')", sub: "→ mysql(name)", row: 0, tone: blue, group: same }
-  - { id: p, label: 同一个 Builder.prototype, sub: "两种入口共享这一份", row: 1, tone: violet, group: same }
-  - { id: r, label: "rawQuery()", sub: "挂一次，两种入口都能用", row: 2, tone: green }
-edges:
-  - { from: e1, to: p }
-  - { from: e2, to: p }
-  - { from: p, to: r, label: "core 挂上去的" }
-```
-
-```callout
-tone: amber
-icon: ⚠
-text: |
-  **为什么不能用 `extend()`？** 代码注释里写了答案：
-
-  ==extend 要求方法的返回值必须是 builder 实例==，而 `rawQuery()` 要返回字符串。
-  类型不匹配，所以只能直接挂原型。
-```
-
-#### 那 `toQuery()` 还在用吗？
-
-搜一遍：`rawQuery()` 出现 **43 处**，`toQuery()` 只有 **9 处**，而且**全是值转义**：
-
-```js
-// core/src/db.ts · sqlValue
-return DB.raw('?', [val]).toQuery();   // 把字符串转义成 SQL 字面量，借 knex 的能力
-```
-
-所以分工很清楚：==`rawQuery()` 管出口，`toQuery()` 管转义。==
-
-#### 一句话总结
-
-```summary
-title: knex 在这个库里的角色
-text: |
-  它是**「业务条件」和「SQL 字符串」之间的最后一层**。
-
-  上游只管往 builder 上挂 `where`，不用操心反引号、转义、括号 —— 那些全是 knex 的事。
-
-  这个库对它的唯一改动就是加了一个 `rawQuery()`，把出口统一成字符串。
-```
-
-#### murmurhash —— 决定事件去哪个分片
+### murmurhash —— 决定事件去哪个分片
 
 ```spec
 title: murmurhash
@@ -377,7 +353,7 @@ rows:
       代价是：加新事件时表名不可预测，运维得用 `scripts/bh-event-table.mjs` 现算。
 ```
 
-#### lodash —— 只为了不改坏调用方的数据
+### lodash —— 只为了不改坏调用方的数据
 
 ```spec
 title: lodash
@@ -405,7 +381,7 @@ rows:
     v: 全库只有 2 处用到。为了一个函数引一个工具库，是取舍 —— 深拷贝自己写容易漏边界情况。
 ```
 
-#### 剩下三个：mysql2 / tslib / type-fest
+### 剩下三个：mysql2 / tslib / type-fest
 
 ```callout
 tone: violet
@@ -464,7 +440,227 @@ text: |
   要改版本，别只改 `pnpm-workspace.yaml` —— 先看对应包的 `package.json` 是不是硬编码的。
 ```
 
-## 03 · `packages/core` —— 通用层
+## 04 · 背景：SQL 是怎么被拼出来的
+
+理解这个项目之前，得先知道「SQL 从代码到字符串」这条路长什么样。
+`core` 的地基是 `knex`，这一节从零讲它。
+
+### 概念 ①：数据库只认「一段文本」
+
+你在代码里写的东西，数据库一个都看不懂。**它只接受一段 SQL 文本。**
+
+```flow
+grid: true
+legend: true
+nodes:
+  - { id: app, label: 你的代码, sub: "想查一批用户", row: 0, kind: frontend }
+  - { id: str, label: 一段文本, sub: "SELECT uid FROM user_portrait WHERE ...", row: 1, tone: violet }
+  - { id: db, label: 数据库, sub: "不认对象，不认函数，只认文本", row: 2, kind: database }
+edges:
+  - { from: app, to: str, label: 拼出来 }
+  - { from: str, to: db, label: 发过去 }
+```
+
+所以「操作数据库」这件事，本质上就是 **把想干的事翻译成一段文本**。
+
+### 概念 ②：但手写文本会出事
+
+最直接的做法是拼字符串：
+
+```js
+const sql = "SELECT uid FROM user_portrait WHERE city = '" + city + "'";
+```
+
+问题在于：`city` 是外部传进来的。如果它的值是：
+
+```text
+杭州' OR '1'='1
+```
+
+拼出来的 SQL 就变成了 `WHERE city = '杭州' OR '1'='1'` —— **条件被改写了**。这就是 SQL 注入。
+
+```flow
+grid: true
+groups:
+  - { id: naive, label: "手写拼接这条路", tone: red }
+  - { id: safe,  label: "构造器这条路", tone: green }
+nodes:
+  - { id: a, label: 手写拼接, sub: "值直接嵌进字符串", row: 0, tone: red, group: naive }
+  - { id: b, label: 构造器, sub: "值单独放，不混进 SQL", row: 0, tone: green, group: safe }
+  - { id: r1, label: 注入风险, sub: "值里带引号就出事", row: 1, tone: red, group: naive }
+  - { id: r2, label: 自动转义, sub: "转义交给库", row: 1, tone: green, group: safe }
+edges:
+  - { from: a, to: r1, dashed: true }
+  - { from: b, to: r2 }
+```
+
+==knex 就是「构造器」这一类东西：你用 JS 方法描述要干什么，它负责生成安全的 SQL。==
+
+### 概念 ③：链式调用 = 每个方法都返回自己
+
+knex 的用法长这样：
+
+```js
+DB.getInstance().select('uid').from('user_portrait').where(...)
+```
+
+为什么能一直点下去？因为**每个方法执行完，返回的还是这个对象本身**。
+
+```flow
+grid: true
+nodes:
+  - { id: o, label: 一个查询对象, sub: "像一张空白表单", row: 0, tone: violet }
+  - { id: m1, label: ".select('uid')", sub: "填「要查哪些列」", row: 1, tone: blue }
+  - { id: m2, label: ".from('...')", sub: "填「查哪张表」", row: 2, tone: blue }
+  - { id: m3, label: ".where(...)", sub: "填「筛选条件」", row: 3, tone: blue }
+edges:
+  - { from: o, to: m1, label: 点第一个方法 }
+  - { from: m1, to: m2, label: 返回同一个对象 }
+  - { from: m2, to: m3, label: 返回同一个对象 }
+```
+
+==每一步返回的都是同一个对象，所以能无限点下去。这叫「链式调用」。==
+
+### 概念 ④：链式调用**不生成 SQL**，只往对象上记东西
+
+这是最反直觉的一点。上面那串调用跑完，**一条 SQL 都没有产生** ——
+它只是把「要查哪些列、哪张表、什么条件」记在了那个对象上。
+
+```flow
+grid: true
+groups:
+  - { id: acc, label: "这一整段都只是在记东西 —— 一条 SQL 都没生成", tone: violet }
+nodes:
+  - { id: s0, label: 空对象, sub: "{}", row: 0, tone: muted, group: acc }
+  - { id: s1, label: 记下列, sub: "{ columns: ['uid'] }", row: 1, tone: violet, group: acc }
+  - { id: s2, label: 记下表, sub: "+ { table: 'user_portrait' }", row: 2, tone: violet, group: acc }
+  - { id: s3, label: 记下条件, sub: "+ { where: [...] }", row: 3, tone: violet, group: acc }
+  - { id: sql, label: 编译成 SQL, sub: "还没发生", row: 4, tone: amber }
+edges:
+  - { from: s0, to: s1, label: ".select('uid')" }
+  - { from: s1, to: s2, label: ".from(...)" }
+  - { from: s2, to: s3, label: ".where(...)" }
+  - { from: s3, to: sql, label: "要主动触发", dashed: true }
+```
+
+**自己点一下试试** —— 看状态怎么攒起来、什么时候才真的生成 SQL：
+
+```demo
+widget: knex-chain
+title: 链式调用到底在干什么
+hint: 攒状态中
+actions: false
+html: |
+  <div class="kc">
+    <div class="kc-btns">
+      <button data-kc-step="select">.select('uid')</button>
+      <button data-kc-step="from">.from('user_portrait')</button>
+      <button data-kc-step="where">.where('uid', 'in', [1, 2, 3])</button>
+      <button data-kc-step="raw" class="kc-final">.rawQuery()</button>
+    </div>
+    <div class="kc-panes">
+      <div class="kc-pane"><h5>对象内部状态</h5><pre data-kc-state></pre></div>
+      <div class="kc-pane"><h5>生成的 SQL</h5><pre data-kc-sql></pre></div>
+    </div>
+    <div class="kc-hint" data-kc-hint></div>
+  </div>
+```
+
+### 概念 ⑤：取值时才编译 —— 编译做了两件事
+
+「取值」在 knex 里就是调 `.toString()` 或 `.toQuery()`。这一刻它才把内部状态翻成 SQL，做两件事：
+
+```flow
+grid: true
+nodes:
+  - { id: in, label: 内部状态, sub: "{ table: 'user_portrait', where: [uid in [1,2,3]] }", row: 0, tone: violet }
+  - { id: id1, label: 标识符加反引号, sub: "user_portrait → `user_portrait`", row: 1, tone: amber }
+  - { id: id2, label: 值变占位符, sub: "[1, 2, 3] → ?", row: 1, tone: amber }
+  - { id: out, label: 一段 SQL, sub: "select `uid` from `user_portrait` where `uid` in (?)", row: 2, tone: green }
+edges:
+  - { from: in, to: id1 }
+  - { from: in, to: id2 }
+  - { from: id1, to: out }
+  - { from: id2, to: out }
+```
+
+```callout
+tone: violet
+icon: 💡
+text: |
+  **为什么要留 `?` 不直接写值？**
+
+  因为 `?` 是**占位符** —— 真正的值放在一个单独的参数数组里，由数据库驱动去填充。
+  这样值永远不会被当成 SQL 语法解析，==注入就不可能发生==。
+
+  这个机制叫**参数绑定**，是概念②里那个问题的真正解法。
+```
+
+**为什么叫「惰性」**：链式调用只记状态，编译推迟到取值那一刻。好处是——
+你可以在中途根据条件决定要不要再加一个 `.where()`，反正还没编译。
+
+### 现在看这个库做了什么
+
+knex 原生给了 `.toString()` 和 `.toQuery()`。这个库只加了一个 `.rawQuery()`：
+
+```text
+rawQuery() { return this.toString().trim(); }   // ← 就这么一行
+```
+
+**为什么要加**：knex 原生的取值方式返回值结构不统一，而这个库对外只交付**一段字符串**
+（下游网关不接受别的形态）。所以统一一个出口。
+
+**为什么挂在原型上，而不是用 `knex.QueryBuilder.extend()`**：
+
+```flow
+grid: true
+groups:
+  - { id: same, label: "两种入口落到同一个原型上", tone: violet }
+nodes:
+  - { id: e1, label: "DB.getInstance()", sub: "→ queryBuilder()", row: 0, tone: blue, group: same }
+  - { id: e2, label: "DB.getInstance('name')", sub: "→ mysql(name)", row: 0, tone: blue, group: same }
+  - { id: p, label: 同一个 Builder.prototype, sub: "两种入口共享这一份", row: 1, tone: violet, group: same }
+  - { id: r, label: "rawQuery()", sub: "挂一次，两种入口都能用", row: 2, tone: green }
+edges:
+  - { from: e1, to: p }
+  - { from: e2, to: p }
+  - { from: p, to: r, label: "core 挂上去的" }
+```
+
+```callout
+tone: amber
+icon: ⚠
+text: |
+  **为什么不能用 `extend()`？** 代码注释里写了答案：
+
+  ==extend 要求方法的返回值必须是 builder 实例==，而 `rawQuery()` 要返回字符串。
+  类型不匹配，所以只能直接挂原型。
+```
+
+### 那 `toQuery()` 还在用吗？
+
+搜一遍：`rawQuery()` 出现 **43 处**，`toQuery()` 只有 **9 处**，而且**全是值转义**：
+
+```js
+// core/src/db.ts · sqlValue
+return DB.raw('?', [val]).toQuery();   // 把字符串转义成 SQL 字面量，借 knex 的能力
+```
+
+所以分工很清楚：==`rawQuery()` 管出口，`toQuery()` 管转义。==
+
+### 一句话总结
+
+```summary
+title: knex 在这个库里的角色
+text: |
+  它是**「业务条件」和「SQL 字符串」之间的最后一层**。
+
+  上游只管往 builder 上挂 `where`，不用操心反引号、转义、括号 —— 那些全是 knex 的事。
+
+  这个库对它的唯一改动就是加了一个 `rawQuery()`，把出口统一成字符串。
+```
+
+## 05 · `packages/core` —— 通用层
 
 ### 它是干什么的
 
@@ -478,7 +674,99 @@ svg: core-package
 caption: packages/core 的组成与数据流 —— 由 archify skill 生成
 ```
 
-### 按架构图的每条边走一遍
+### 它由什么组成
+
+```tree
+- label: 表达式模型
+  sub: src/db.ts
+  tone: violet
+  note: 只有数据结构，没有任何行为
+  children:
+    - { label: Expression, sub: "四种形态", note: "普通 / 裸值 / 裸列 / 裸 SQL 片段" }
+    - { label: Condition, sub: "{ logic, items }", note: "logic 是 AND 或 OR，items 可以再嵌套" }
+    - { label: Rule, sub: "Condition | Expression", note: "调用方传进来的就是它" }
+- label: 翻译器
+  sub: src/db.ts
+  tone: green
+  note: DB 类上的静态方法
+  children:
+    - { label: buildWhere, note: "递归展开 —— 遇到 Condition 就建子查询再往下钻" }
+    - { label: "raw / unionAllRaws", note: "拼 SQL 片段和 UNION ALL" }
+    - { label: formatField, note: "反引号包裹列名" }
+- label: 方言层
+  sub: src/dialect/
+  tone: amber
+  note: 所有数据库差异都收在这里
+  children:
+    - { label: interface.ts, sub: "SqlDialect", note: "14 个方法的接口" }
+    - { label: bytehouse.ts, note: "111 行" }
+    - { label: doris.ts, note: "139 行" }
+- label: 工具集
+  sub: src/utils.ts
+  tone: muted
+  note: 675 行 —— 其实是个杂物抽屉
+  children:
+    - { label: 时间表达式, note: "getTimeRules / generateLatestDaysRules" }
+    - { label: uid 编解码, note: "encodeUid / decodeUid / noDecodedSqlGen" }
+    - { label: 树压缩, note: "treeMinimizer —— 去掉只有一个孩子的组合节点" }
+    - { label: 标签表, note: "buildLabelTable —— 其实是给 crowd 的 segmentation 用的" }
+```
+
+```callout
+tone: amber
+icon: ⚠
+text: |
+  ==`utils.ts` 是个杂物抽屉。== 675 行里塞了四类互不相关的东西：
+  时间表达式、uid 编解码、树压缩、标签表。
+
+  其中**标签表是给 `crowd` 的 segmentation 用的** —— 严格说它不属于「通用层」。
+  这是历史遗留，不是设计。
+```
+
+#### `src/` 根文件
+
+```cards
+cols: 2
+items:
+  - { title: db.ts, desc: "**最核心**。DB 类 + Expression/Condition/Rule 类型 + Logic/Op/ScopeOp 等操作符枚举 + buildWhere + unionAllRaws + formatField", tag: 235 行, tone: violet }
+  - { title: utils.ts, desc: "时间表达式（getTimeRules / generateLatestDaysRules）+ uid 编解码 + treeMinimizer + getStringArrayRule + 标签表构建", tag: 675 行, tone: blue }
+  - { title: define.ts, desc: "只有一个 DbType 枚举：mysql / bytehouse / doris", tag: 6 行, tone: muted }
+  - { title: tree.ts, desc: "只有一个 GeneralTree 类型和 TreeForkKey —— 给通用树遍历用的最小接口", tag: 8 行, tone: muted }
+  - { title: index.ts, desc: 统一出口，把上面这些 + dialect + utils 一起导出, tag: 12 行, tone: green }
+```
+
+#### `src/utils/` —— 两个防坑小工具
+
+```cards
+cols: 2
+items:
+  - { title: encode-value.ts, desc: "把绑定值里的 `?` 换成占位符。因为 knex 用 `?` 做参数绑定，值里带问号会把 SQL 拆错", tag: 17 行, tone: amber }
+  - { title: assert-sql-safe-value.ts, desc: "数组值含单引号就直接抛错。因为 stringArray 的值要拼进 SQL 字符串字面量（网关不支持参数绑定），含引号会破坏 SQL 边界", tag: 14 行, tone: red }
+```
+
+```callout
+tone: amber
+icon: ⚠
+text: |
+  这两个文件的存在说明一件事：==这个库有一部分 SQL 是「拼字符串」而不是「参数绑定」==。
+  原因是**数据网关不支持某些绑定写法**。所以需要人工兜底 —— 看到这两个文件，
+  就知道哪些路径上必须小心注入。
+```
+
+#### `src/dialect/` —— 方言
+
+```cards
+cols: 2
+items:
+  - { title: interface.ts, desc: "**SqlDialect 接口**，14 个方法：类型转换、JSON 数组、时间范围、多条件选择、正则匹配…", tag: 59 行, tone: violet }
+  - { title: bytehouse.ts, desc: ByteHouse 实现（`UNIX_TIMESTAMP(...) * 1000`、`DS_DATETIME_ADD`、`match()` 这类专属函数）, tag: 111 行, tone: blue }
+  - { title: doris.ts, desc: Doris 实现（与 ByteHouse 同名方法，内部写法不同）, tag: 139 行, tone: blue }
+  - { title: where-sql.ts, desc: "从完整 SELECT 里把 **WHERE 之后**的部分抠出来。用于「只想要 where 片段」的场景", tag: 32 行, tone: muted }
+  - { title: spark-array-contains.ts, desc: "把 `array_contains(field, v)` 组合成 IN / NOT IN 语义（多个用 OR，取反用 NOT(OR)）", tag: 35 行, tone: muted }
+  - { title: index.ts, desc: 出口, tag: 3 行, tone: muted }
+```
+
+### 它怎么工作：按架构图的每条边走一遍
 
 上面那张图有 **8 个框、7 条边**，每条边都带编号。
 
@@ -882,55 +1170,6 @@ text: |
     —— 网关认得这个函数。
 ```
 
-### 四个部分
-
-```tree
-- label: 表达式模型
-  sub: src/db.ts
-  tone: violet
-  note: 只有数据结构，没有任何行为
-  children:
-    - { label: Expression, sub: "四种形态", note: "普通 / 裸值 / 裸列 / 裸 SQL 片段" }
-    - { label: Condition, sub: "{ logic, items }", note: "logic 是 AND 或 OR，items 可以再嵌套" }
-    - { label: Rule, sub: "Condition | Expression", note: "调用方传进来的就是它" }
-- label: 翻译器
-  sub: src/db.ts
-  tone: green
-  note: DB 类上的静态方法
-  children:
-    - { label: buildWhere, note: "递归展开 —— 遇到 Condition 就建子查询再往下钻" }
-    - { label: "raw / unionAllRaws", note: "拼 SQL 片段和 UNION ALL" }
-    - { label: formatField, note: "反引号包裹列名" }
-- label: 方言层
-  sub: src/dialect/
-  tone: amber
-  note: 所有数据库差异都收在这里
-  children:
-    - { label: interface.ts, sub: "SqlDialect", note: "14 个方法的接口" }
-    - { label: bytehouse.ts, note: "111 行" }
-    - { label: doris.ts, note: "139 行" }
-- label: 工具集
-  sub: src/utils.ts
-  tone: muted
-  note: 675 行 —— 其实是个杂物抽屉
-  children:
-    - { label: 时间表达式, note: "getTimeRules / generateLatestDaysRules" }
-    - { label: uid 编解码, note: "encodeUid / decodeUid / noDecodedSqlGen" }
-    - { label: 树压缩, note: "treeMinimizer —— 去掉只有一个孩子的组合节点" }
-    - { label: 标签表, note: "buildLabelTable —— 其实是给 crowd 的 segmentation 用的" }
-```
-
-```callout
-tone: amber
-icon: ⚠
-text: |
-  ==`utils.ts` 是个杂物抽屉。== 675 行里塞了四类互不相关的东西：
-  时间表达式、uid 编解码、树压缩、标签表。
-
-  其中**标签表是给 `crowd` 的 segmentation 用的** —— 严格说它不属于「通用层」。
-  这是历史遗留，不是设计。
-```
-
 ### 一个藏在里面的不一致
 
 ```callout
@@ -960,52 +1199,7 @@ text: |
   ==这是这套架构里最明显的裂缝。== 理想情况下所有方言分支都该收进接口。
 ```
 
-
-
-### `src/` 根文件
-
-```cards
-cols: 2
-items:
-  - { title: db.ts, desc: "**最核心**。DB 类 + Expression/Condition/Rule 类型 + Logic/Op/ScopeOp 等操作符枚举 + buildWhere + unionAllRaws + formatField", tag: 235 行, tone: violet }
-  - { title: utils.ts, desc: "时间表达式（getTimeRules / generateLatestDaysRules）+ uid 编解码 + treeMinimizer + getStringArrayRule + 标签表构建", tag: 675 行, tone: blue }
-  - { title: define.ts, desc: "只有一个 DbType 枚举：mysql / bytehouse / doris", tag: 6 行, tone: muted }
-  - { title: tree.ts, desc: "只有一个 GeneralTree 类型和 TreeForkKey —— 给通用树遍历用的最小接口", tag: 8 行, tone: muted }
-  - { title: index.ts, desc: 统一出口，把上面这些 + dialect + utils 一起导出, tag: 12 行, tone: green }
-```
-
-### `src/utils/` —— 两个防坑小工具
-
-```cards
-cols: 2
-items:
-  - { title: encode-value.ts, desc: "把绑定值里的 `?` 换成占位符。因为 knex 用 `?` 做参数绑定，值里带问号会把 SQL 拆错", tag: 17 行, tone: amber }
-  - { title: assert-sql-safe-value.ts, desc: "数组值含单引号就直接抛错。因为 stringArray 的值要拼进 SQL 字符串字面量（网关不支持参数绑定），含引号会破坏 SQL 边界", tag: 14 行, tone: red }
-```
-
-```callout
-tone: amber
-icon: ⚠
-text: |
-  这两个文件的存在说明一件事：==这个库有一部分 SQL 是「拼字符串」而不是「参数绑定」==。
-  原因是**数据网关不支持某些绑定写法**。所以需要人工兜底 —— 看到这两个文件，
-  就知道哪些路径上必须小心注入。
-```
-
-### `src/dialect/` —— 方言
-
-```cards
-cols: 2
-items:
-  - { title: interface.ts, desc: "**SqlDialect 接口**，14 个方法：类型转换、JSON 数组、时间范围、多条件选择、正则匹配…", tag: 59 行, tone: violet }
-  - { title: bytehouse.ts, desc: ByteHouse 实现（`UNIX_TIMESTAMP(...) * 1000`、`DS_DATETIME_ADD`、`match()` 这类专属函数）, tag: 111 行, tone: blue }
-  - { title: doris.ts, desc: Doris 实现（与 ByteHouse 同名方法，内部写法不同）, tag: 139 行, tone: blue }
-  - { title: where-sql.ts, desc: "从完整 SELECT 里把 **WHERE 之后**的部分抠出来。用于「只想要 where 片段」的场景", tag: 32 行, tone: muted }
-  - { title: spark-array-contains.ts, desc: "把 `array_contains(field, v)` 组合成 IN / NOT IN 语义（多个用 OR，取反用 NOT(OR)）", tag: 35 行, tone: muted }
-  - { title: index.ts, desc: 出口, tag: 3 行, tone: muted }
-```
-
-## 04 · `packages/crowd` —— 主体
+## 06 · `packages/crowd` —— 主体
 
 ### 五个目录的分工
 
@@ -1170,7 +1364,7 @@ text: |
   `run-expected-sql.mjs` 是「生成的 SQL 真的能执行吗」的兜底。
 ```
 
-## 05 · `packages/goods` + 根级目录
+## 07 · `packages/goods` + 根级目录
 
 ### goods 包
 
@@ -1199,7 +1393,7 @@ items:
   - { title: types/, desc: "**构建产物**，core 的 .d.ts。不要手改", tag: 产物, tone: red }
 ```
 
-## 06 · 我想改 X，去哪个文件
+## 08 · 我想改 X，去哪个文件
 
 ==这是整篇最该收藏的一张表。==
 
@@ -1225,7 +1419,7 @@ rows:
   - 改业务枚举: ["crowd/src/define.ts", "全部在这 45 行里"]
 ```
 
-## 07 · 推荐的看代码顺序
+## 09 · 推荐的看代码顺序
 
 ```lane-stack
 - badge: STEP 01
@@ -1289,7 +1483,7 @@ text: |
   看懂 portrait 之后，其他几种只是细节不同。
 ```
 
-## 08 · 自测
+## 10 · 自测
 
 ```quiz
 - q: 根目录的 `types/` 能改吗？

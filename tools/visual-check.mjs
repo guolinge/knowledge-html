@@ -39,6 +39,7 @@ const CONTAINERS = [
   '.tree',        // tree
   '.archfig',     // arch（内联 archify 的图）
   '.spec',        // spec
+  '.streamshape', // streamshape（raw 写的）
   '.demo',        // demo
 ];
 
