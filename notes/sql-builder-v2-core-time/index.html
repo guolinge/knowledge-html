@@ -1,0 +1,530 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-has-toc="1">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>sql_builder_v2 的时间表达式</title>
+<meta name="description" content="「最近 7 天」在代码里有多少种说法、为什么一个日期要分三条实现路径、两个「包含今天」的参数各自管什么，以及为什么 `&lt;` 必须补一个 `&gt; 0`。" />
+<link rel="stylesheet" href="../../assets/theme.css" />
+  <link rel="stylesheet" href="../../assets/blocks.css" />
+  <link rel="stylesheet" href="../../assets/archify-embed.css" />
+</head>
+<body>
+<div id="progress"></div>
+<div id="tocScrim"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
+    <a class="brand" href="../../index.html"><span class="dot"></span>知识笔记</a>
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="toc" id="toc">
+      <p class="toc-title">目录</p>
+      <a href="../../index.html" class="sub">← 全部笔记</a>
+      <a href="#概念一个最近-n-天有多少种说法">概念：一个「最近 N 天」有多少种说法</a>
+      <a href="#描述一个时间条件的-9-个字段" class="sub">描述一个时间条件的 9 个字段</a>
+      <a href="#组织273-行分四块">组织：273 行分四块</a>
+      <a href="#两个生成器" class="sub">两个生成器</a>
+      <a href="#架构gettimerules-分派到三条路">架构：getTimeRules 分派到三条路</a>
+      <a href="#细节三条路各生成什么">细节：三条路各生成什么</a>
+      <a href="#①-timestamp-毫秒时间戳只给事件用" class="sub">① Timestamp —— 毫秒时间戳（只给事件用）</a>
+      <a href="#②-unixtimestamp-秒时间戳画像" class="sub">② UnixTimestamp —— 秒时间戳（画像）</a>
+      <a href="#③-date-yyyymmdd" class="sub">③ Date —— YYYYMMDD</a>
+      <a href="#细节三个容易踩的地方">细节：三个容易踩的地方</a>
+      <a href="#①-两个包含今天的参数管的不是一回事" class="sub">① 两个「包含今天」的参数，管的不是一回事</a>
+      <a href="#②-有些组合被校验挡掉" class="sub">② 有些组合被校验挡掉</a>
+      <a href="#③-为什么-lt-必须补一个-gt-0" class="sub">③ 为什么 &amp;lt; 必须补一个 &amp;gt; 0</a>
+      <a href="#自测">自测</a>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow">● 从零理解 · 模块</span>
+      <h1>sql_builder_v2 的时间表达式</h1>
+      <p class="lede">「最近 7 天」在代码里有多少种说法、为什么一个日期要分三条实现路径、两个「包含今天」的参数各自管什么，以及为什么 `&lt;` 必须补一个 `&gt; 0`。</p>
+    </div>
+
+    <div class="draft-banner">
+    <span>⚠</span>
+    <span>本页状态为 <b>draft</b>：内容尚未人工核对，引用前请自行验证。</span>
+  </div>
+<aside class="needs">
+      <p class="needs-title">读这篇之前，你需要先知道</p>
+      <a class="need" href="../sql-builder-v2-core/">← <b>4. core 篇</b><span>通用层：递归六层讲一遍</span></a>
+    </aside>
+    <div class="provenance"><span><b>来源</b> sources/gitlab/sql_builder_v2 @ 2c500b2</span><span><b>生成</b> 2026-09-26</span><span><b>模型</b> deepseek-v4.1-flash</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">架构</span> <span class="tag tone-muted">SQL</span> <span class="tag tone-muted">TypeScript</span> <span class="tag tone-muted">圈人</span></span></div>
+
+<div class="callout tone-blue">
+      <span class="ic">🧭</span>
+      <div><p>前置是 <a href="../sql-builder-v2-core/">④ core 篇</a>。</p>
+<p>core 篇说 <code>utils.ts</code> 675 行是个杂物抽屉，时间表达式是里面最大的一块（<strong>273 行</strong>）。
+这篇把它拆开。</p>
+<p>读完你应该能说出：「<mark class="mk-blue">一个「最近 7 天」，代码里有三种完全不同的 SQL 形态。</mark>」</p>
+</div>
+    </div><h2 id="概念一个最近-n-天有多少种说法"><span class="num">01</span>概念：一个「最近 N 天」有多少种说法</h2>
+<p>业务侧说「最近 7 天」，一句话。但它落到 SQL 上要回答<strong>三个问题</strong>：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>问题</th><th>有几种答案</th><th>为什么要分</th></tr></thead><tbody><tr><th>是绝对时间还是相对时间</th><td data-label="有几种答案">2 种</td><td data-label="为什么要分">绝对时间就是一个值，相对时间要算</td></tr><tr><th>底层存的是什么格式</th><td data-label="有几种答案"><strong>3 种</strong></td><td data-label="为什么要分">毫秒时间戳 / 秒时间戳 / <code>YYYYMMDD</code></td></tr><tr><th>要不要包含今天</th><td data-label="有几种答案">2 种</td><td data-label="为什么要分">不包含就是「到今天 0 点」，包含就是「到此刻」</td></tr></tbody></table></div><p><strong>三个问题相乘，就是 12 种组合。</strong> 这就是为什么这个模块有 273 行。</p>
+<h3 id="描述一个时间条件的-9-个字段">描述一个时间条件的 9 个字段</h3>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">export type TimeExpr = {
+    op: Op;                                  // &gt; &gt;= &lt; &lt;=
+    name: string;                            // 列名
+    value: number;                           // N（天数 / 小时数）
+    dateType: DateType;                      // absolute | relative
+    dateFormat: DateFormat;                  // timestamp | unixTimestamp | date
+    includeToday: 0 | 1;                     // Tag 场景：包含当天吗
+    latestIncludeToday: 0 | 1 | undefined;   // Crowd 场景：最近 N 天包含当天吗
+    relativeDateType?: RelativeDateType;     // fromToday | singleDay
+    dateUnit: DateUnit;                      // day | hour
+};
+</code></pre></div>
+<div class="callout tone-amber">
+      <span class="ic">⚠</span>
+      <div><p><mark class="mk-blue"><strong>注意中间那两个「包含今天」的参数。</strong></mark></p>
+<p><code>includeToday</code> 和 <code>latestIncludeToday</code> —— 名字很像，但<strong>管的是不同场景</strong>，
+而且各有各的生效条件（下一节细说）。</p>
+<p><mark class="mk-blue">参数多到需要注释说明「这个字段只在某几个场景生效」，
+是这类模块的典型特征。</mark></p>
+</div>
+    </div><h2 id="组织273-行分四块"><span class="num">02</span>组织：273 行分四块</h2>
+<div class="pipe"><div class="lane tone-muted">
+        <div class="lane-meta">
+          
+          <b>四个枚举</b>
+          <small>定义「有哪几种可能」</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>DateType</b>
+        <small>absolute / relative</small>
+        
+      </div><div class="pnode">
+        <b>RelativeDateType</b>
+        <small>fromToday / singleDay</small>
+        
+      </div><div class="pnode">
+        <b>DateFormat</b>
+        <small>timestamp / unixTimestamp / date</small>
+        
+      </div><div class="pnode">
+        <b>DateUnit</b>
+        <small>day / hour</small>
+        
+      </div></div>
+      </div><div class="lane tone-green">
+        <div class="lane-meta">
+          
+          <b>两个生成器</b>
+          <small>拼出最终的条件数组</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>generateLatestDaysRules</b>
+        <small>「最近 N 天」→ 两个条件</small>
+        
+      </div><div class="pnode">
+        <b>generatePrevDaysRules</b>
+        <small>「N 天前」→ 一个条件</small>
+        
+      </div></div>
+      </div><div class="lane tone-violet">
+        <div class="lane-meta">
+          
+          <b>三个实现</b>
+          <small>按底层格式分</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>getTimestampRules</b>
+        <small>毫秒时间戳（只给事件用）</small>
+        
+      </div><div class="pnode">
+        <b>getUnixTimestampRules</b>
+        <small>秒时间戳（画像）</small>
+        
+      </div><div class="pnode">
+        <b>getDateRules</b>
+        <small>YYYYMMDD（画像）</small>
+        
+      </div></div>
+      </div><div class="lane tone-blue">
+        <div class="lane-meta">
+          
+          <b>一个入口</b>
+          <small>分派 + 校验</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>getTimeRules</b>
+        <small>按 dateFormat 分到三条路</small>
+        
+      </div><div class="pnode">
+        <b>timeExprValidate</b>
+        <small>校验非法组合</small>
+        
+      </div></div>
+      </div></div><div class="callout tone-violet">
+      <span class="ic">💡</span>
+      <div><p><strong>这个结构很清晰：四个枚举定义可能性，两个生成器负责拼装，
+三个实现各管一种格式，一个入口做分派。</strong></p>
+<p><mark class="mk-blue">三个实现都调同一个生成器 —— 差异只在「起止时间怎么算出来」。</mark></p>
+</div>
+    </div><h3 id="两个生成器">两个生成器</h3>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">// 「最近 N 天」→ 两个条件
+export function generateLatestDaysRules(column, startRaw, endRaw, includeEnd = false) {
+    return [
+        { column, op: Op.Gte, rawValue: startRaw },
+        { column, op: includeEnd ? Op.Lte : Op.Lt, rawValue: endRaw }
+    ];
+}
+
+// 「N 天前」→ 一个条件
+function generatePrevDaysRules(column, rawValue) {
+    return [{ column, op: Op.Lt, rawValue }];
+}
+</code></pre></div>
+<div class="callout tone-amber">
+      <span class="ic">⚠</span>
+      <div><p><strong><code>includeEnd</code> 决定上界是 <code>&lt;</code> 还是 <code>&lt;=</code>。</strong></p>
+<p>这个布尔值一路从 <code>getUnixTimestampRules</code> 传进来（那里的 <code>exact</code> 变量）。</p>
+<p><mark class="mk-blue">「到此刻」和「到 0 点」的区别，最终就落在这一个符号上。</mark></p>
+</div>
+    </div><h2 id="架构gettimerules-分派到三条路"><span class="num">03</span>架构：<code>getTimeRules</code> 分派到三条路</h2>
+<div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;in&quot;,&quot;to&quot;:&quot;q0&quot;},{&quot;from&quot;:&quot;q0&quot;,&quot;to&quot;:&quot;abs&quot;,&quot;label&quot;:&quot;否（绝对时间）&quot;,&quot;dashed&quot;:true},{&quot;from&quot;:&quot;q0&quot;,&quot;to&quot;:&quot;v&quot;,&quot;label&quot;:&quot;是&quot;},{&quot;from&quot;:&quot;v&quot;,&quot;to&quot;:&quot;q&quot;},{&quot;from&quot;:&quot;q&quot;,&quot;to&quot;:&quot;ts&quot;,&quot;label&quot;:&quot;timestamp&quot;},{&quot;from&quot;:&quot;q&quot;,&quot;to&quot;:&quot;unix&quot;,&quot;label&quot;:&quot;unixTimestamp&quot;},{&quot;from&quot;:&quot;q&quot;,&quot;to&quot;:&quot;date&quot;,&quot;label&quot;:&quot;date&quot;},{&quot;from&quot;:&quot;q&quot;,&quot;to&quot;:&quot;bad&quot;,&quot;label&quot;:&quot;其它&quot;,&quot;dashed&quot;:true},{&quot;from&quot;:&quot;ts&quot;,&quot;to&quot;:&quot;out&quot;},{&quot;from&quot;:&quot;unix&quot;,&quot;to&quot;:&quot;out&quot;},{&quot;from&quot;:&quot;date&quot;,&quot;to&quot;:&quot;out&quot;}]">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-green" data-id="in">
+              
+              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5L3 8l3 4.5M10 3.5L13 8l-3 4.5"/></svg>
+              <b>getTimeRules(rule, isTag)</b>
+              <small>一个 TimeExpr</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-amber shape-note" data-id="q0">
+              
+              
+              <b>dateType 是 relative？</b>
+              
+            </div></div><div class="flowd-row"><div class="fnode tone-muted" data-id="abs">
+              
+              
+              <b>直接一个条件</b>
+              <small>{ op, column, value }</small>
+            </div><div class="fnode tone-amber" data-id="v">
+              
+              
+              <b>timeExprValidate</b>
+              <small>校验非法组合</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-violet shape-note" data-id="q">
+              
+              
+              <b>switch (dateFormat)</b>
+              
+            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="ts">
+              
+              
+              <b>getTimestampRules</b>
+              <small>毫秒时间戳</small>
+            </div><div class="fnode tone-green" data-id="unix">
+              
+              
+              <b>getUnixTimestampRules</b>
+              <small>秒时间戳</small>
+            </div><div class="fnode tone-blue" data-id="date">
+              
+              
+              <b>getDateRules</b>
+              <small>YYYYMMDD</small>
+            </div><div class="fnode tone-red" data-id="bad">
+              
+              
+              <b>throw</b>
+              <small>非法 dateFormat</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="out">
+              
+              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="8" cy="4.2" rx="5" ry="1.9"/><path d="M3 4.2v7.6c0 1.05 2.24 1.9 5 1.9s5-.85 5-1.9V4.2"/></svg>
+              <b>Expression[]</b>
+              <small>一个或多个条件</small>
+            </div></div></div>
+      
+    </div><div class="callout tone-green">
+      <span class="ic">✅</span>
+      <div><p><mark class="mk-blue"><strong>注意最上面那个分支：绝对时间不展开。</strong></mark></p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">if (dateType !== DateType.Relative) {
+    return [{ op, column: name, value }];
+}
+</code></pre></div>
+</div>
+    </div><p>「2026-03-01 那天」就是一个值，不需要算。
+<mark class="mk-blue">只有相对时间才需要「展开成多个条件」。</mark></p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code>
+### 谁在调它
+
+```text
+getTimeRules 被三个文件调用：
+  crowd/src/entrepots/portrait.ts    ← 画像条件
+  crowd/src/entrepots/event.ts       ← 事件条件
+  crowd/src/entrepots/relation.ts    ← 关系条件
+</code></pre></div>
+<div class="callout tone-amber">
+      <span class="ic">⚠</span>
+      <div><p><mark class="mk-blue"><strong>改这个函数要同时考虑三条调用路径。</strong></mark></p>
+<p>而且 <code>isTag</code> 这个参数就是从调用方传进来的
+（<code>this._type === Modules.Tag</code>）—— 意味着<strong>同一个时间条件在「标签」和「分群」
+两个场景下行为不一样</strong>。</p>
+<p><mark class="mk-blue">这是它参数多的根本原因：它要服务三个调用方 × 两个场景。</mark></p>
+</div>
+    </div><h2 id="细节三条路各生成什么"><span class="num">04</span>细节：三条路各生成什么</h2>
+<h3 id="①-timestamp-毫秒时间戳只给事件用">① <code>Timestamp</code> —— 毫秒时间戳（只给事件用）</h3>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">// 注释写得很明确：
+// 目前仅有 事件使用 ms 时间戳形式，而事件仅支持 最近N 天的相对时间
+if (!isLatestDays(op)) {
+    throw new Error(`相对时间操作符错误，timestamp 当前仅支持 &gt; 和 &gt;=`);
+}
+</code></pre></div>
+<p><strong>生成的东西</strong>（<code>gap = 7</code>）：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-sql">`event_time` &gt;= UNIX_TIMESTAMP(DS_DATETIME_ADD('day', -7, FROM_UNIXTIME(UNIX_TIMESTAMP(), '%Y-%m-%d 00:00:00'))) * 1000
+`event_time` &lt;  UNIX_TIMESTAMP(FROM_UNIXTIME(UNIX_TIMESTAMP(), '%Y-%m-%d 00:00:00')) * 1000
+</code></pre></div>
+<div class="callout tone-violet">
+      <span class="ic">💡</span>
+      <div><p><mark class="mk-blue"><strong>注意最外层那个 <code>* 1000</code>。</strong></mark></p>
+<p>因为 <code>event_time</code> 存的是<strong>毫秒</strong>时间戳，
+而 <code>UNIX_TIMESTAMP()</code> 返回的是<strong>秒</strong>。</p>
+<p>这就是为什么 <a href="../sql-builder-v2-core-dialect/">⑥ 方言篇</a> 里
+Doris 要自己实现一遍 —— Doris 的 <code>event_time</code> 是 <code>DATETIME</code>，
+不能套这层包装。</p>
+</div>
+    </div><h3 id="②-unixtimestamp-秒时间戳画像">② <code>UnixTimestamp</code> —— 秒时间戳（画像）</h3>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">const isLastestDayExactFlag = dateUnit === DateUnit.Day &amp;&amp; isLatestDays(op) &amp;&amp; latestIncludeToday;
+// 是否记录精确值
+const exact = isTag || dateUnit !== DateUnit.Day || isLastestDayExactFlag;
+
+const border = exact ? 'NOW()' : `FROM_UNIXTIME(UNIX_TIMESTAMP(), '${pattern}')`;
+</code></pre></div>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>exact</th><th>起点怎么算</th><th>终点怎么算</th></tr></thead><tbody><tr><th>true</th><td data-label="起点怎么算"><span class="tag tone-blue">`NOW()` —— 精确到此刻</span></td><td data-label="终点怎么算"><code>UNIX_TIMESTAMP()</code> —— 此刻</td></tr><tr><th>false</th><td data-label="起点怎么算"><span class="tag tone-green">`FROM_UNIXTIME(UNIX_TIMESTAMP(), '%Y-%m-%d 00:00:00')` —— 今天 0 点</span></td><td data-label="终点怎么算">今天 0 点</td></tr></tbody></table></div><div class="callout tone-violet">
+      <span class="ic">💡</span>
+      <div><p><strong><code>exact</code> 由三件事决定：</strong></p>
+<ul>
+<li><code>isTag</code> —— 标签场景要精确</li>
+<li><code>dateUnit !== Day</code> —— 小时粒度必须精确</li>
+<li><code>latestIncludeToday</code> —— 明确要求包含当天</li>
+</ul>
+<p><mark class="mk-blue">三个条件里任意一个成立，就从「今天 0 点」变成「此刻」。</mark></p>
+</div>
+    </div><h3 id="③-date-yyyymmdd">③ <code>Date</code> —— <code>YYYYMMDD</code></h3>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">const startGap = isTag &amp;&amp; includeToday ? gap - 1 : gap;
+const endGap   = isTag &amp;&amp; includeToday ? 0 : 1;
+
+return generateLatestDaysRules(
+    column,
+    `DS_DATE_ADD(NOW(), ${-startGap})`,
+    `DS_DATE_ADD(NOW(), ${-endGap})`,
+    true
+);
+</code></pre></div>
+<div class="callout tone-amber">
+      <span class="ic">⚠</span>
+      <div><p><strong><code>YYYYMMDD</code> 是日期字符串，所以加减要按「天」算 ——
+用 <code>DS_DATE_ADD</code> 而不是 <code>DS_DATETIME_ADD</code>。</strong></p>
+<p><mark class="mk-blue">三条路用的函数完全不同：</mark></p>
+<table>
+<thead>
+<tr>
+<th>格式</th>
+<th>加减函数</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>毫秒时间戳</td>
+<td><code>DS_DATETIME_ADD('day', ...)</code></td>
+</tr>
+<tr>
+<td>秒时间戳</td>
+<td><code>DS_DATETIME_ADD('${dateUnit}', ...)</code></td>
+</tr>
+<tr>
+<td><code>YYYYMMDD</code></td>
+<td><code>DS_DATE_ADD(NOW(), ...)</code></td>
+</tr>
+</tbody>
+</table>
+</div>
+    </div><h2 id="细节三个容易踩的地方"><span class="num">05</span>细节：三个容易踩的地方</h2>
+<h3 id="①-两个包含今天的参数管的不是一回事">① 两个「包含今天」的参数，管的不是一回事</h3>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">includeToday: 0 | 1;
+// &quot;Tag 下 日期类 是否包含当天&quot;；Module Tag + dateFormat = 'date' 专用，其它场景会被忽略
+
+latestIncludeToday: 0 | 1 | undefined;
+// &quot;Crowd 下时间类 最近 X 天 是否包含当天&quot;；
+// Module Crowd + DateType === 'relative' + dateUnit === DateUnit.Day 专用，其它场景会被忽略
+</code></pre></div>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>参数</th><th>生效条件</th><th>影响谁</th></tr></thead><tbody><tr><th><code>includeToday</code></th><td data-label="生效条件"><code>Module Tag</code> + <code>dateFormat = 'date'</code></td><td data-label="影响谁"><code>getDateRules</code></td></tr><tr><th><code>latestIncludeToday</code></th><td data-label="生效条件"><code>Module Crowd</code> + <code>relative</code> + <code>dateUnit = Day</code></td><td data-label="影响谁"><code>getUnixTimestampRules</code> 的 <code>exact</code></td></tr></tbody></table></div><div class="callout tone-red">
+      <span class="ic">⚠</span>
+      <div><p><mark class="mk-blue"><strong>两个参数的注释里都写着「其它场景会被忽略」。</strong></mark></p>
+<p>也就是说：<strong>传了不一定生效</strong>。传错场景等于没传。</p>
+<p>这种设计很难说是好的 —— 但它反映了真实情况：
+<mark class="mk-blue">「包含当天」在不同场景下语义不同，硬合成一个参数会更糟。</mark></p>
+</div>
+    </div><h3 id="②-有些组合被校验挡掉">② 有些组合被校验挡掉</h3>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">function timeExprValidate(expr) {
+    if (expr.dateUnit === DateUnit.Hour &amp;&amp; expr.dateFormat !== DateFormat.UnixTimestamp) {
+        throw new Error(`只有 ${DateFormat.UnixTimestamp} 支持&quot;小时&quot;粒度...`);
+    }
+
+    if (expr.relativeDateType === RelativeDateType.SingleDay
+        &amp;&amp; expr.dateFormat !== DateFormat.Timestamp) {
+        throw new Error(`【距今 X 天】，目前仅支持 ${DateFormat.Timestamp}...`);
+    }
+}
+</code></pre></div>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>组合</th><th>合法吗</th><th>为什么</th></tr></thead><tbody><tr><th>小时 + 毫秒时间戳</th><td data-label="合法吗"><span class="tag tone-red">❌</span></td><td data-label="为什么">只有画像支持小时粒度</td></tr><tr><th>小时 + YYYYMMDD</th><td data-label="合法吗"><span class="tag tone-red">❌</span></td><td data-label="为什么">日期字符串没有小时</td></tr><tr><th>单天 + 非时间戳</th><td data-label="合法吗"><span class="tag tone-red">❌</span></td><td data-label="为什么">「距今 X 天」是事件专有的说法</td></tr><tr><th>单天 + 毫秒时间戳</th><td data-label="合法吗"><span class="tag tone-green">✅</span></td><td data-label="为什么">合法</td></tr></tbody></table></div><div class="callout tone-green">
+      <span class="ic">✅</span>
+      <div><p><strong>校验放在展开之前（<code>getTimeRules</code> 里调），不是各个实现里。</strong></p>
+<p>好处是<strong>错误信息统一、早失败</strong>。
+<mark class="mk-blue">而不是等进了 <code>getTimestampRules</code> 才发现「这个组合不该进来」。</mark></p>
+</div>
+    </div><h3 id="③-为什么-lt-必须补一个-gt-0">③ 为什么 <code>&lt;</code> 必须补一个 <code>&gt; 0</code></h3>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">// crowd/src/entrepots/portrait.ts
+function addHackRules(columnName: string, op: Op, rules: Expression[]): Expression[] {
+    // 对于 &lt; 和 &lt;= 的时间范围，需要加上 `&gt; 0` 的限制条件
+    // 否则会筛选出值为 0 的数据
+    if ([Op.Lt, Op.Lte].includes(op)) {
+        return rules.concat({ op: Op.Gt, column: columnName, value: 0 });
+    }
+    return rules;
+}
+</code></pre></div>
+<div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-muted">场景</span>
+            <span class="name">业务说</span>
+            <span class="spacer"></span>
+            
+          </div>
+          
+          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>「开户时间在 7 天前之前」（op = '&lt;'）
+</pre></div>
+          <p class="jnote">意思是「老用户」。</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">展开<span class="note">生成一个条件</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-violet">展开后</span>
+            <span class="name">一个条件</span>
+            <span class="spacer"></span>
+            
+          </div>
+          
+          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>`opened_time` &lt; 开始时间
+</pre></div>
+          <p class="jnote">看起来没问题。</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">但<span class="note">库里有一批值是 0</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-red">问题</span>
+            <span class="name">值为 0 的行也被选中</span>
+            <span class="spacer"></span>
+            
+          </div>
+          
+          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>`opened_time` = 0  &lt;  开始时间   → true
+</pre></div>
+          <p class="jnote"><mark class="mk-blue">在时间戳语义里，<code>0</code> 代表「从没发生过」。</mark>
+
+这个人从来没开过户，但 <code>0 &lt; 开始时间</code> 成立 ——
+<strong>他被当成了「很久以前开过户的老用户」。</strong></p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">补丁<span class="note">加一个下限</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-green">修复</span>
+            <span class="name">加一个 `&gt; 0`</span>
+            <span class="spacer"></span>
+            
+          </div>
+          
+          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>`opened_time` &lt; 开始时间
+AND `opened_time` &gt; 0
+</pre></div>
+          <p class="jnote">把「从没发生过」的人排除掉。<mark class="mk-blue">语义就对了。</mark></p>
+        </div><div class="callout tone-amber">
+      <span class="ic">⚠</span>
+      <div><p><strong>这个补丁叫 <code>addHackRules</code> —— 名字里的 <code>Hack</code> 是诚实的。</strong></p>
+<p>它不是设计的一部分，是<strong>修补一个语义漏洞</strong>：
+「0 代表没发生过」这个约定没有在数据模型里表达出来，
+只能在查询时手工排除。</p>
+<p><mark class="mk-blue">而它在 <code>portrait.ts</code> 和 <code>relation.ts</code> 里各有一份，逐字节相同。</mark>
+（⑧ crowd 篇讲过这个重复。）</p>
+</div>
+    </div><h2 id="自测"><span class="num">06</span>自测</h2>
+<div class="quiz"><details>
+        <summary>一个「最近 7 天」在代码里有几种 SQL 形态？为什么？</summary>
+        <div class="a"><p><strong>三种</strong>，按底层存的格式分：</p>
+<ul>
+<li><code>Timestamp</code>（毫秒时间戳）—— 只给事件用，且只支持 <code>&gt;</code> / <code>&gt;=</code></li>
+<li><code>UnixTimestamp</code>（秒时间戳）—— 画像</li>
+<li><code>Date</code>（<code>YYYYMMDD</code>）—— 画像
+三条路用的加减函数都不同（<code>DS_DATETIME_ADD</code> vs <code>DS_DATE_ADD</code>），
+起止时间算法也不同。</li>
+</ul>
+</div>
+      </details><details>
+        <summary>为什么毫秒时间戳那条路要 <code>* 1000</code>？</summary>
+        <div class="a"><p>因为 <code>event_time</code> 存的是<strong>毫秒</strong>时间戳，而 <code>UNIX_TIMESTAMP()</code> 返回<strong>秒</strong>。
+这也是 <a href="../sql-builder-v2-core-dialect/">⑥ 方言篇</a> 里 Doris 要自己实现一遍的原因 ——
+Doris 的 <code>event_time</code> 是 <code>DATETIME</code>，不能套这层包装。</p>
+</div>
+      </details><details>
+        <summary><code>includeToday</code> 和 <code>latestIncludeToday</code> 是同一回事吗？</summary>
+        <div class="a"><p><strong>不是。</strong> <code>includeToday</code> 是 <code>Module Tag</code> + <code>dateFormat = 'date'</code> 专用；
+<code>latestIncludeToday</code> 是 <code>Module Crowd</code> + <code>relative</code> + <code>dateUnit = Day</code> 专用。
+两个参数的注释里都写着「其它场景会被忽略」——
+<mark class="mk-blue">也就是说传了不一定生效。</mark></p>
+</div>
+      </details><details>
+        <summary><code>getTimeRules</code> 处理绝对时间时会展开吗？</summary>
+        <div class="a"><p><strong>不会。</strong> 它直接返回一个条件：<code>[{ op, column: name, value }]</code>。
+因为「2026-03-01 那天」就是一个值，不需要算。
+<mark class="mk-blue">只有相对时间才需要展开成多个条件。</mark></p>
+</div>
+      </details><details>
+        <summary>为什么 <code>&lt;</code> 的时间条件要额外补一个 <code>&gt; 0</code>？</summary>
+        <div class="a"><p>因为时间戳语义里 <code>0</code> 代表「<strong>从没发生过</strong>」。
+比如「开户时间在 7 天前之前」意思是「老用户」，
+但一个从没开过户的人 <code>opened_time = 0</code>，<code>0 &lt; 开始时间</code> 成立 ——
+<mark class="mk-blue">他被当成了老用户</mark>。补一个 <code>&gt; 0</code> 把这些人排除掉。</p>
+</div>
+      </details><details>
+        <summary>改 <code>getTimeRules</code> 时要注意什么？</summary>
+        <div class="a"><p>它被<strong>三个文件</strong>调用：<code>portrait.ts</code> / <code>event.ts</code> / <code>relation.ts</code>。
+而且 <code>isTag</code> 参数是从调用方传进来的（<code>this._type === Modules.Tag</code>）——
+<mark class="mk-blue">同一个时间条件在「标签」和「分群」两个场景下行为不一样。</mark>
+这就是它参数多的根本原因：服务三个调用方 × 两个场景。</p>
+</div>
+      </details></div>
+
+    <footer>
+      <span>sql_builder_v2 的时间表达式</span>
+      <span>最后更新 2026-09-26 · 单文件可离线打开</span>
+    </footer>
+  </main>
+</div>
+
+<script src="../../assets/app.js"></script>
+</body>
+</html>

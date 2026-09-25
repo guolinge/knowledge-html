@@ -1,0 +1,4567 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-has-toc="1">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>sql_builder_v2 的时间表达式</title>
+<meta name="description" content="「最近 7 天」在代码里有多少种说法、为什么一个日期要分三条实现路径、两个「包含今天」的参数各自管什么，以及为什么 `&lt;` 必须补一个 `&gt; 0`。" />
+<style>
+/* ============================================================
+   theme.css — 设计 token 与页面骨架
+   ------------------------------------------------------------
+   规则：所有颜色 / 间距 / 字体只在这里定义。
+   积木（blocks.css）不允许写死色值，只能引用 var(--*)。
+   换主题 = 改这个文件，全站跟着变。
+   ============================================================ */
+
+:root {
+  /* —— 表面 —— */
+  --bg: #f7f8fa;
+  --surface: #ffffff;
+  --surface-2: #f2f4f7;
+
+  /* —— 文字 —— */
+  --text: #171a1f;
+  --text-2: #4a5260;
+  --muted: #737d8c;
+
+  /* —— 线条 —— */
+  --border: #e3e6eb;
+  --border-strong: #d2d7de;
+
+  /* —— 语义色 —— */
+  --blue: #2563eb;    --blue-soft: #eaf1ff;
+  --violet: #7c3aed;  --violet-soft: #f3ecff;
+  --green: #0f9d63;   --green-soft: #e6f7ef;
+  --amber: #b45309;   --amber-soft: #fdf1e0;
+  --red: #d13b3b;     --red-soft: #fdecec;
+
+  /* —— 形状 —— */
+  --shadow: 0 1px 2px rgba(16,24,40,.05), 0 8px 24px -12px rgba(16,24,40,.18);
+  --radius: 14px;
+  --grid-line: rgba(16, 24, 40, .055);   /* 图的背景网格线 */
+
+  /* —— 字体 —— */
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+          "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+          "Liberation Mono", monospace;
+
+  /* —— 版心 ——
+     屏幕越宽，多出来的宽度给「图」，不把文字拉长（长行伤可读性）。
+     所以 prose 单独限宽，积木不受它限制。 */
+  --shell: 1600px;                            /* 外框最大宽度 */
+  --toc-w: 240px;                             /* 目录列宽；收起时变 0 */
+  --gap: clamp(24px, 3vw, 52px);              /* 目录与正文的间距 */
+  --gutter: clamp(16px, 2.2vw, 40px);         /* 页面左右留白 */
+  --prose: 880px;                             /* 文字列最大宽度 */
+}
+
+html[data-theme="dark"] {
+  --bg: #0d1017;
+  --surface: #151a22;
+  --surface-2: #1b2129;
+  --text: #e7edf4;
+  --text-2: #b6c0cd;
+  --muted: #8b95a3;
+  --border: #242c37;
+  --border-strong: #313b48;
+  --blue: #6ba4ff;    --blue-soft: #16233a;
+  --violet: #b28cff;  --violet-soft: #241b3a;
+  --green: #4ecf96;   --green-soft: #12291f;
+  --amber: #e8b061;   --amber-soft: #2e2415;
+  --red: #f08a8a;     --red-soft: #2e1a1a;
+  --shadow: 0 1px 2px rgba(0,0,0,.4), 0 10px 30px -16px rgba(0,0,0,.7);
+  --grid-line: rgba(255, 255, 255, .045);
+}
+
+/* ---------- reset ---------- */
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; scroll-padding-top: 84px; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.75 var(--sans);
+  -webkit-font-smoothing: antialiased;
+  transition: background .25s, color .25s;
+}
+img { max-width: 100%; }
+
+/* ---------- 阅读进度 ---------- */
+#progress {
+  position: fixed; top: 0; left: 0; height: 2px; width: 0%;
+  background: linear-gradient(90deg, var(--blue), var(--violet));
+  z-index: 60; transition: width .1s linear;
+}
+
+/* ---------- 顶栏 ---------- */
+.topbar {
+  position: sticky; top: 0; z-index: 50;
+  backdrop-filter: saturate(180%) blur(12px);
+  background: color-mix(in srgb, var(--bg) 82%, transparent);
+  border-bottom: 1px solid var(--border);
+}
+.topbar-inner {
+  max-width: var(--shell); margin: 0 auto; padding: 12px var(--gutter);
+  display: flex; align-items: center; gap: 14px;
+}
+.brand {
+  display: flex; align-items: center; gap: 9px;
+  font-weight: 650; letter-spacing: -.01em;
+  color: var(--text); text-decoration: none;
+}
+.brand .dot {
+  width: 20px; height: 20px; border-radius: 6px; flex: none;
+  background: linear-gradient(135deg, var(--blue), var(--violet));
+}
+.topbar .spacer { flex: 1; }
+.topbar nav { display: flex; gap: 4px; }
+.topbar nav a {
+  color: var(--text-2); text-decoration: none; font-size: 13.5px;
+  padding: 6px 11px; border-radius: 8px;
+}
+.topbar nav a:hover { background: var(--surface-2); color: var(--text); }
+.icon-btn {
+  width: 34px; height: 34px; display: grid; place-items: center;
+  border: 1px solid var(--border); background: var(--surface);
+  border-radius: 9px; cursor: pointer; color: var(--text-2);
+}
+.icon-btn:hover { border-color: var(--border-strong); color: var(--text); }
+@media (max-width: 860px) { .topbar nav { display: none; } }
+
+/* 目录按钮只在有目录时显示 */
+#tocBtn { display: none; }
+html[data-has-toc="1"] #tocBtn { display: grid; }
+
+/* ---------- 版式 ---------- */
+.shell {
+  max-width: var(--shell); margin: 0 auto;
+  padding: 40px var(--gutter) 100px;
+  display: grid;
+  grid-template-columns: var(--toc-w) minmax(0, 1fr);
+  gap: var(--gap);
+  align-items: start;
+  transition: grid-template-columns .22s ease, gap .22s ease;
+}
+
+/* 内容列自身也有上限：不然收起目录后（或 4K 屏上）积木会被拉得过宽，
+   而文字列始终是 --prose，右边会空出一大片。
+
+   max-width 里的 100% 是必要的：main 是 grid item，而 margin-inline:auto
+   会让它按 fit-content 定宽，fit-content 又不会小于 min-content ——
+   于是一个 min-content 超宽的子元素（比如一行很长的 SQL 放在 pre 里）
+   会把 main 甚至整个页面撑出横向滚动条。min(1280px, 100%) 只封顶、
+   不改宽屏上的 fit-content 宽度。 */
+main { max-width: min(1280px, 100%); margin-inline: auto; }
+
+/* 文字元素限宽；积木（pipe / journey / compare / demo / cards …）不限 */
+main > p,
+main > h2,
+main > h3,
+main > h4,
+main > ul,
+main > ol,
+main > .hero,
+main > .callout,
+main > .quiz,
+main > .provenance,
+main > .draft-banner { max-width: var(--prose); }
+
+/* ---------- 目录 ---------- */
+.toc {
+  position: sticky; top: 76px;
+  max-height: calc(100vh - 104px);
+  overflow-y: auto; overscroll-behavior: contain;
+  font-size: 13.5px;
+  transition: opacity .18s ease;
+}
+.toc-title {
+  font-size: 11px; letter-spacing: .1em; text-transform: uppercase;
+  color: var(--muted); font-weight: 650; margin: 0 0 10px 12px;
+}
+.toc a {
+  display: block; color: var(--muted); text-decoration: none;
+  padding: 6px 12px; border-left: 2px solid transparent;
+  border-radius: 0 7px 7px 0; transition: .15s;
+}
+.toc a:hover { color: var(--text); background: var(--surface-2); }
+.toc a.active {
+  color: var(--blue); border-left-color: var(--blue);
+  background: var(--blue-soft); font-weight: 550;
+}
+.toc a.sub { padding-left: 24px; font-size: 12.5px; }
+
+/* 宽屏：目录是一列，可以收成 0 */
+@media (min-width: 1081px) {
+  html[data-toc="closed"] .shell {
+    grid-template-columns: 0 minmax(0, 1fr);
+    gap: 0;
+  }
+  html[data-toc="closed"] .toc { opacity: 0; visibility: hidden; }
+}
+
+/* 窄屏 / 竖屏：目录变成抽屉，从左侧滑出 */
+@media (max-width: 1080px) {
+  .shell { grid-template-columns: minmax(0, 1fr); }
+  .toc {
+    position: fixed; top: 0; left: 0; bottom: 0; z-index: 45;
+    width: min(300px, 82vw);
+    max-height: none; padding: 72px 18px 28px;
+    background: var(--surface);
+    border-right: 1px solid var(--border);
+    transform: translateX(-102%);
+    transition: transform .24s ease, box-shadow .24s ease;
+  }
+  html[data-toc="open"] .toc {
+    transform: none;
+    box-shadow: var(--shadow);
+  }
+}
+
+/* 抽屉打开时的遮罩（仅窄屏） */
+#tocScrim {
+  display: none;
+  position: fixed; inset: 0; z-index: 44;
+  background: rgba(0, 0, 0, .32);
+  opacity: 0; transition: opacity .24s ease;
+}
+@media (max-width: 1080px) {
+  html[data-toc="open"] #tocScrim { display: block; opacity: 1; }
+}
+
+/* ---------- hero ---------- */
+.hero { margin-bottom: 46px; }
+.eyebrow {
+  display: inline-flex; align-items: center; gap: 7px;
+  font-size: 12px; font-weight: 600;
+  color: var(--violet); background: var(--violet-soft);
+  padding: 5px 12px; border-radius: 100px; margin-bottom: 16px;
+}
+h1 {
+  font-size: clamp(28px, 4vw, 40px); line-height: 1.25;
+  letter-spacing: -.025em; margin: 0 0 16px; font-weight: 700;
+}
+h1 .grad {
+  background: linear-gradient(100deg, var(--blue), var(--violet));
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+}
+.lede { font-size: 17px; color: var(--text-2); max-width: 66ch; margin: 0 0 26px; }
+
+/* ---------- 正文 ---------- */
+section { margin-bottom: 62px; scroll-margin-top: 84px; }
+h2 {
+  font-size: 25px; letter-spacing: -.02em; font-weight: 680;
+  margin: 0 0 8px; display: flex; align-items: baseline; gap: 12px;
+}
+h2 .num {
+  font: 600 13px/1 var(--mono); color: var(--blue);
+  background: var(--blue-soft); border-radius: 7px; padding: 5px 9px;
+  flex: none; position: relative; top: -2px;
+}
+h3 {
+  font-size: 17.5px; font-weight: 650; letter-spacing: -.01em;
+  margin: 34px 0 12px; scroll-margin-top: 84px;
+}
+h4 { font-size: 14.5px; font-weight: 650; margin: 22px 0 8px; }
+p { margin: 0 0 14px; color: var(--text-2); }
+strong, b { color: var(--text); font-weight: 640; }
+a { color: var(--blue); }
+code:not(pre code) {
+  font-family: var(--mono); font-size: .87em; padding: .15em .42em;
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: 5px; color: var(--text); white-space: nowrap;
+}
+ul.plain, ol.plain { margin: 0 0 16px; padding-left: 20px; color: var(--text-2); }
+ul.plain li, ol.plain li { margin-bottom: 6px; }
+
+/* ---------- 通用卡片 / 栅格 ---------- */
+.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+.grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+@media (max-width: 780px) { .grid-2, .grid-3 { grid-template-columns: 1fr; } }
+.card {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 22px; box-shadow: var(--shadow);
+}
+.card h4 { margin-top: 0; display: flex; align-items: center; gap: 9px; font-size: 15.5px; }
+
+/* ---------- 代码 ---------- */
+.code-wrap { position: relative; margin: 0 0 18px; }
+pre {
+  margin: 0; background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: 11px; padding: 16px 18px; overflow-x: auto;
+  font-family: var(--mono); font-size: 13px; line-height: 1.65;
+  color: var(--text); tab-size: 2;
+}
+pre .c { color: var(--muted); font-style: italic; }
+pre .k { color: var(--violet); }
+pre .s { color: var(--green); }
+pre .n { color: var(--blue); }
+.copy {
+  position: absolute; top: 9px; right: 9px;
+  font: 600 11px/1 var(--sans); padding: 6px 9px; border-radius: 7px;
+  background: var(--surface); border: 1px solid var(--border);
+  color: var(--muted); cursor: pointer; opacity: 0; transition: .15s;
+}
+.code-wrap:hover .copy, .copy:focus-visible { opacity: 1; }
+.copy:hover { color: var(--text); border-color: var(--border-strong); }
+
+/* ---------- 正文里的 Markdown 表格 ----------
+   积木（compare / mini-table）有自己的样式，这里只管裸表格：
+   没有它，表格会渲染成没边框没分隔的几行字。 */
+main > table {
+  /* 表格按内容定宽，不拉满 —— 两列的小表拉满会变成两根柱子。 */
+  width: auto; max-width: 100%;
+  border-collapse: separate; border-spacing: 0;
+  margin: 0 0 20px; font-size: 14.5px;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); overflow: hidden; box-shadow: var(--shadow);
+}
+main > table thead th {
+  text-align: left; padding: 11px 16px; background: var(--surface-2);
+  font-size: 12px; font-weight: 650; letter-spacing: .04em; color: var(--muted);
+  border-bottom: 1px solid var(--border); white-space: nowrap;
+}
+main > table tbody td { padding: 10px 16px; color: var(--text-2); }
+main > table tbody tr + tr td { border-top: 1px solid var(--border); }
+main > table tbody tr:hover td { background: color-mix(in srgb, var(--blue-soft) 40%, transparent); }
+@media (max-width: 700px) {
+  main > table { font-size: 13px; }
+  main > table thead th, main > table tbody td { padding: 8px 10px; }
+}
+
+/* ---------- 页脚 ---------- */
+footer {
+  border-top: 1px solid var(--border); padding: 26px 0 0;
+  color: var(--muted); font-size: 13px;
+  display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+}
+
+/* ---------- 溯源头（每页必带） ---------- */
+.provenance {
+  display: flex; flex-wrap: wrap; gap: 8px 18px;
+  border: 1px solid var(--border); border-radius: 12px;
+  background: var(--surface); padding: 12px 16px; margin: 0 0 30px;
+  font-size: 12.5px; color: var(--muted);
+}
+.provenance b { color: var(--text-2); font-weight: 600; }
+.provenance a { color: var(--blue); }
+.draft-banner {
+  display: flex; align-items: center; gap: 10px;
+  border: 1px solid color-mix(in srgb, var(--amber) 45%, var(--border));
+  background: var(--amber-soft); color: var(--amber);
+  border-radius: 10px; padding: 10px 16px; margin: 0 0 26px;
+  font-size: 13px; font-weight: 550;
+}
+
+/* ---------- 打印 ---------- */
+@media print {
+  .topbar, .toc, #progress, .copy, .demo-head .btn { display: none !important; }
+  body { background: #fff; }
+  .shell { grid-template-columns: 1fr; padding: 0; }
+  section { break-inside: avoid; }
+  .provenance, .draft-banner { break-inside: avoid; }
+}
+
+</style>
+  <style>
+/* ============================================================
+   blocks.css — 积木原语
+   ------------------------------------------------------------
+   每个积木只消费 theme.css 的 token，不写死色值。
+   统一用 tone 系统着色：<div class="tone-blue"> → --tone / --tone-soft
+   ============================================================ */
+
+/* ---------- tone 系统 ---------- */
+.tone-muted  { --tone: var(--muted);  --tone-soft: var(--surface-2); }
+.tone-blue   { --tone: var(--blue);   --tone-soft: var(--blue-soft); }
+.tone-violet { --tone: var(--violet); --tone-soft: var(--violet-soft); }
+.tone-green  { --tone: var(--green);  --tone-soft: var(--green-soft); }
+.tone-amber  { --tone: var(--amber);  --tone-soft: var(--amber-soft); }
+.tone-red    { --tone: var(--red);    --tone-soft: var(--red-soft); }
+
+.tag {
+  font: 600 11px/1 var(--mono); padding: 4px 8px; border-radius: 6px;
+  letter-spacing: .02em; white-space: nowrap;
+  background: var(--tone-soft, var(--surface-2));
+  color: var(--tone, var(--muted));
+}
+.pnode .tag, .jcard-head .tag { align-self: flex-start; }
+
+/* ============================================================
+   积木 1 · lane-stack —— 分层 / 泳道流程
+   ============================================================ */
+.pipe {
+  border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--surface); box-shadow: var(--shadow);
+  padding: 16px; margin: 0 0 20px;
+}
+.lane {
+  display: grid; grid-template-columns: 164px minmax(0, 1fr); gap: 16px;
+  align-items: start;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--tone, var(--border-strong));
+  border-radius: 12px; background: var(--surface-2); padding: 13px 15px;
+  transition: border-color .2s;
+}
+.lane:hover { border-color: color-mix(in srgb, var(--tone, var(--border-strong)) 50%, var(--border)); }
+.lane-meta { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.lane-meta .ln {
+  font: 700 10.5px/1.4 var(--mono); letter-spacing: .08em;
+  color: var(--tone, var(--muted));
+}
+.lane-meta b { font-size: 13.5px; font-weight: 640; line-height: 1.4; }
+.lane-meta small { font-size: 11.5px; color: var(--muted); line-height: 1.55; }
+.lane-body { display: flex; flex-wrap: wrap; gap: 9px; align-items: stretch; }
+
+.pnode {
+  flex: 1 1 128px; min-width: 110px;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 10px; padding: 9px 11px;
+  display: flex; flex-direction: column; gap: 2px;
+  transition: transform .18s, border-color .18s, box-shadow .18s;
+}
+.pnode:hover {
+  transform: translateY(-1px);
+  border-color: var(--border-strong); box-shadow: var(--shadow);
+}
+.pnode b { font-size: 12.8px; font-weight: 620; line-height: 1.4; }
+.pnode small {
+  font-family: var(--mono); font-size: 10.8px; color: var(--muted);
+  line-height: 1.5; word-break: break-word;
+}
+.pnode .tag { margin-top: 4px; }
+/* 节点自带 tone 时给一道彩色左缘，用来在层内区分状态 */
+.pnode.tone-muted,
+.pnode.tone-blue,
+.pnode.tone-violet,
+.pnode.tone-green,
+.pnode.tone-amber,
+.pnode.tone-red { border-left: 3px solid var(--tone); }
+
+/* 连接条 */
+.conn {
+  --conn: color-mix(in srgb, var(--blue) 52%, var(--border-strong));
+  display: flex; flex-direction: column; align-items: center;
+  justify-content: center; padding: 4px 0; position: relative;
+}
+.conn::before {
+  content: ""; position: absolute; top: 0; bottom: 0; left: 50%; width: 2px;
+  transform: translateX(-50%); border-radius: 2px; opacity: .55;
+  background: repeating-linear-gradient(to bottom, var(--conn) 0 4px, transparent 4px 8px);
+}
+.conn .stem { width: 2px; height: 12px; background: var(--conn); border-radius: 2px; flex: none; position: relative; }
+.conn .head {
+  width: 0; height: 0; flex: none; position: relative;
+  border-left: 5px solid transparent; border-right: 5px solid transparent;
+  border-top: 8px solid var(--conn);
+}
+.conn .pill {
+  position: relative; display: inline-flex; align-items: baseline;
+  gap: 8px; flex-wrap: wrap; justify-content: center;
+  max-width: min(100%, 620px); margin: 3px 0;
+  font-size: 12px; font-weight: 620; color: var(--text); text-align: center;
+  background: var(--surface);
+  border: 1px solid color-mix(in srgb, var(--blue) 30%, var(--border));
+  border-radius: 100px; padding: 5px 14px;
+  box-shadow: 0 0 0 4px var(--surface);
+}
+.conn .pill .en { font-family: var(--mono); font-size: 10.5px; color: var(--blue); letter-spacing: .02em; }
+.conn .pill .note { font-weight: 400; font-size: 11.5px; color: var(--muted); }
+
+/* 数仓内部分组 */
+.wgroup {
+  border: 1px dashed color-mix(in srgb, var(--violet) 45%, var(--border));
+  border-radius: 14px; padding: 12px;
+  background: color-mix(in srgb, var(--violet-soft) 50%, transparent);
+}
+.wgroup .lane { background: var(--surface); }
+.wgroup .conn .pill { box-shadow: 0 0 0 4px var(--violet-soft); }
+.wgroup-label {
+  font-size: 11.5px; font-weight: 650; letter-spacing: .04em;
+  color: var(--violet); margin: 0 0 10px 5px;
+}
+
+/* ============================================================
+   积木 2 · journey —— 每一步的形态快照
+   ============================================================ */
+.jcard {
+  border: 1px solid var(--border); border-radius: 12px;
+  background: var(--surface); padding: 14px 16px; box-shadow: var(--shadow);
+}
+.jcard pre { margin: 0; }
+.jcard-head { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; margin-bottom: 11px; }
+.jcard-head .name { font-family: var(--mono); font-size: 12.8px; font-weight: 650; color: var(--text); }
+.jcard-head .spacer { flex: 1; }
+.rec { display: flex; flex-wrap: wrap; gap: 6px; }
+.rec > div {
+  display: inline-flex; align-items: baseline; gap: 6px;
+  border: 1px solid var(--border); background: var(--surface-2);
+  border-radius: 8px; padding: 5px 9px;
+  font-family: var(--mono); font-size: 11.6px; line-height: 1.5;
+}
+.rec b { color: var(--muted); font-weight: 600; }
+.rec span { color: var(--text); }
+.rec em { font-style: normal; font-weight: 400; font-size: 10.8px; color: var(--tone, var(--amber)); }
+.rec > div.warn { border-color: color-mix(in srgb, var(--amber) 40%, var(--border)); background: var(--amber-soft); }
+.rec > div.ok   { border-color: color-mix(in srgb, var(--green) 35%, var(--border)); background: var(--green-soft); }
+.jnote {
+  margin: 11px 0 0; font-size: 12.8px; color: var(--text-2);
+  padding-left: 22px; position: relative; line-height: 1.65;
+}
+.jnote::before { content: "→"; position: absolute; left: 4px; top: 0; color: var(--blue); font-weight: 700; }
+.jnote.bad::before { content: "!"; color: var(--amber); }
+.jnote strong { color: var(--text); }
+
+/* ============================================================
+   积木 3 · compare —— 多维对比表
+   ============================================================ */
+.compare-wrap {
+  border: 1px solid var(--border); border-radius: var(--radius);
+  overflow: hidden; box-shadow: var(--shadow); background: var(--surface);
+  margin: 0 0 20px;
+}
+.compare { width: 100%; border-collapse: collapse; font-size: 14.5px; }
+.compare thead th {
+  /* 不要 text-transform: uppercase —— 表头里经常出现代码标识符，
+     大写会把它写错（Rule[] → RULE[]、ByteHouse → BYTEHOUSE）。
+     小字号 + 字距 + 弱化颜色已经足够表达「这是表头」。 */
+  text-align: left; font-size: 12px; letter-spacing: .04em;
+  color: var(--muted); font-weight: 650; padding: 13px 18px;
+  background: var(--surface-2); border-bottom: 1px solid var(--border);
+}
+.compare tbody th {
+  text-align: left; font-weight: 600; color: var(--text); white-space: nowrap;
+  padding: 13px 18px; vertical-align: top;
+}
+.compare tbody td {
+  padding: 13px 18px; color: var(--text-2); vertical-align: top;
+  /* 单元格里的行内 code 默认 nowrap，长内容会把表格撑破容器 */
+  overflow-wrap: anywhere;
+}
+.compare tbody td code { white-space: normal; overflow-wrap: anywhere; }
+.compare tbody th { overflow-wrap: anywhere; }
+.compare tbody tr + tr th, .compare tbody tr + tr td { border-top: 1px solid var(--border); }
+.compare tbody tr:hover td, .compare tbody tr:hover th {
+  background: color-mix(in srgb, var(--blue-soft) 45%, transparent);
+}
+@media (max-width: 700px) {
+  .compare thead { display: none; }
+  .compare tbody tr { display: block; padding: 6px 0; border-top: 1px solid var(--border); }
+  .compare tbody tr:first-child { border-top: 0; }
+  .compare tbody th {
+    display: block; padding: 12px 16px 4px; font-size: 12px;
+    letter-spacing: .04em; color: var(--muted);
+  }
+  .compare tbody td {
+    display: grid; grid-template-columns: 74px 1fr; gap: 12px;
+    padding: 7px 16px; border-top: 0 !important;
+  }
+  .compare tbody td::before {
+    content: attr(data-label); font-size: 12px; font-weight: 650; color: var(--text);
+  }
+}
+
+/* ============================================================
+   积木 4 · callout —— 提示 / 陷阱 / 引用
+   ============================================================ */
+.callout {
+  display: flex; gap: 14px; padding: 16px 18px; border-radius: 12px;
+  border: 1px solid var(--border); border-left: 3px solid var(--tone, var(--blue));
+  background: var(--surface); margin: 0 0 18px; font-size: 14.5px;
+}
+.callout.tinted { background: color-mix(in srgb, var(--tone-soft, var(--blue-soft)) 55%, var(--surface)); }
+.callout .ic { flex: none; font-size: 15px; line-height: 1.6; }
+.callout p:last-child { margin-bottom: 0; }
+.callout.quote { font-size: 15.5px; font-weight: 550; color: var(--text); }
+
+/* ============================================================
+   积木 5 · checklist —— 正例 / 反例 / 警告
+   ============================================================ */
+ul.check { list-style: none; margin: 0 0 16px; padding: 0; }
+ul.check li { position: relative; padding-left: 26px; margin-bottom: 8px; color: var(--text-2); }
+ul.check li::before {
+  content: "✓"; position: absolute; left: 0; top: 4px; width: 18px; height: 18px;
+  display: grid; place-items: center; font-size: 11px; font-weight: 700;
+  border-radius: 50%; background: var(--green-soft); color: var(--green);
+}
+ul.check.cross li::before { content: "✕"; background: var(--red-soft); color: var(--red); }
+ul.check.warn  li::before { content: "!"; background: var(--amber-soft); color: var(--amber); }
+
+/* ============================================================
+   积木 6 · quiz —— 自测（防「收藏代替理解」）
+   ============================================================ */
+.quiz { display: flex; flex-direction: column; gap: 10px; margin: 0 0 20px; }
+.quiz details {
+  border: 1px solid var(--border); border-radius: 12px;
+  background: var(--surface); box-shadow: var(--shadow); overflow: hidden;
+}
+.quiz summary {
+  cursor: pointer; padding: 14px 18px 14px 44px; position: relative;
+  font-weight: 600; font-size: 14.5px; color: var(--text); list-style: none;
+}
+.quiz summary::-webkit-details-marker { display: none; }
+.quiz summary::before {
+  content: "?"; position: absolute; left: 16px; top: 50%; transform: translateY(-50%);
+  width: 20px; height: 20px; display: grid; place-items: center;
+  font: 700 11px/1 var(--mono); border-radius: 50%;
+  background: var(--violet-soft); color: var(--violet);
+}
+.quiz summary:hover { background: var(--surface-2); }
+.quiz details[open] summary { border-bottom: 1px solid var(--border); }
+.quiz details[open] summary::before { content: "!"; background: var(--green-soft); color: var(--green); }
+.quiz .a { padding: 14px 18px; font-size: 14.5px; color: var(--text-2); }
+.quiz .a p:last-child { margin-bottom: 0; }
+
+/* ============================================================
+   积木 7 · demo —— 可交互模拟的宿主
+   ============================================================ */
+.demo {
+  border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--surface); box-shadow: var(--shadow);
+  overflow: hidden; margin: 0 0 20px;
+}
+.demo-head {
+  display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+  padding: 14px 18px; border-bottom: 1px solid var(--border);
+  background: var(--surface-2);
+}
+.demo-head .title { font-weight: 640; font-size: 14.5px; }
+.demo-head .status { font-size: 12.5px; color: var(--muted); font-family: var(--mono); }
+.demo-head .spacer { flex: 1; }
+.btn {
+  font: 600 13px/1 var(--sans); padding: 9px 15px; border-radius: 9px; cursor: pointer;
+  border: 1px solid var(--blue); background: var(--blue); color: #fff; transition: .15s;
+}
+.btn:hover { filter: brightness(1.08); }
+.btn.ghost { background: transparent; border-color: var(--border-strong); color: var(--text-2); }
+.btn.ghost:hover { background: var(--surface); color: var(--text); filter: none; }
+.btn:disabled { opacity: .5; cursor: not-allowed; }
+
+.demo-body { display: grid; grid-template-columns: 1fr 1fr; }
+@media (max-width: 780px) { .demo-body { grid-template-columns: 1fr; } }
+.pane { padding: 16px 18px; min-width: 0; }
+.pane + .pane { border-left: 1px solid var(--border); }
+@media (max-width: 780px) { .pane + .pane { border-left: 0; border-top: 1px solid var(--border); } }
+.pane-head {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin-bottom: 12px; font-size: 13.5px; font-weight: 640;
+}
+.pane-head .sub { font-weight: 400; font-size: 12px; color: var(--muted); }
+.log {
+  min-height: 236px; max-height: 300px; overflow-y: auto;
+  font-family: var(--mono); font-size: 12.2px; line-height: 1.6;
+  border: 1px solid var(--border); border-radius: 10px;
+  background: var(--surface-2); padding: 10px;
+  display: flex; flex-direction: column; gap: 6px;
+}
+.log:empty::after {
+  content: "点击「开始模拟」查看效果"; color: var(--muted);
+  font-family: var(--sans); font-size: 12.5px; margin: auto;
+}
+.line {
+  display: flex; gap: 8px; align-items: baseline;
+  padding: 6px 8px; border-radius: 7px; background: var(--surface);
+  border: 1px solid var(--border); animation: slide .28s ease-out both;
+}
+@keyframes slide { from { opacity: 0; transform: translateY(-5px); } }
+.line .badge {
+  flex: none; font-size: 10px; font-weight: 700;
+  padding: 2px 6px; border-radius: 5px; letter-spacing: .03em;
+  background: var(--tone-soft, var(--surface-2)); color: var(--tone, var(--muted));
+}
+.line .time { flex: none; color: var(--muted); font-size: 11px; }
+.line .txt { flex: 1; min-width: 0; color: var(--text-2); }
+.line.warn { border-color: color-mix(in srgb, var(--amber) 40%, var(--border)); }
+.line.warn .txt { color: var(--amber); }
+.pane-foot { margin-top: 12px; font-size: 12.5px; display: flex; flex-wrap: wrap; gap: 6px; }
+.pane-foot .tag { font-family: var(--sans); font-weight: 600; }
+
+/* ============================================================
+   积木 8 · summary —— 收尾总结
+   ------------------------------------------------------------
+   一块干净的实底，**无边框、无阴影** —— 跟 callout（左边框）和
+   ccard（边框 + 阴影 + 顶部色条）都不是一个语言。
+   分量靠「块 + 字号（17px，比正文大一档）+ 松行距（1.85）」拿。
+
+   试过两版都被否了：
+     ① 蓝紫渐变 + 白字 —— 在浅底页面里太跳；而且为了在深底上放 code /
+        ==标记==，只能给它们叠半透明白底，变成「浅底浅字」
+     ② 浅蓝卡 + 左边框 —— 那就是 callout / card 的语言，跟别的积木撞了
+   ============================================================ */
+.summary {
+  margin: 20px 0 34px;
+  padding: 30px 34px;
+  border: 0;
+  border-radius: 16px;
+  background: var(--surface-2);
+  box-shadow: none;
+}
+.summary h3 {
+  margin: 0 0 15px;
+  font-size: 12px; font-weight: 650;
+  letter-spacing: .16em; color: var(--blue);
+}
+.summary p {
+  margin: 0 0 14px;
+  color: var(--text);
+  font-size: 17px; font-weight: 450; line-height: 1.85;
+  max-width: 42em;
+}
+.summary p:last-child { margin-bottom: 0; }
+.summary code:not(pre code) { font-size: .88em; }
+@media (max-width: 640px) {
+  .summary { padding: 24px 22px; margin: 16px 0 28px; }
+  .summary p { font-size: 16px; line-height: 1.8; }
+}
+
+/* ============================================================
+   积木 9 · cards —— 并列概念 / 要点网格
+   适合：一堆没有先后关系的并列概念，用文字排会很平，用卡片能一眼扫完
+   ============================================================ */
+.cards {
+  display: grid; gap: 14px; margin: 0 0 20px;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+}
+@media (min-width: 780px) {
+  .cards[data-cols="1"] { grid-template-columns: 1fr; }
+  .cards[data-cols="2"] { grid-template-columns: repeat(2, 1fr); }
+  .cards[data-cols="3"] { grid-template-columns: repeat(3, 1fr); }
+  .cards[data-cols="4"] { grid-template-columns: repeat(4, 1fr); }
+}
+.ccard {
+  /* min-width:0 是关键 —— grid item 默认 min-width:auto，
+     不会缩到内容宽度以下，里面的 <pre> 就会把卡片撑破容器 */
+  min-width: 0;
+  background: var(--surface); border: 1px solid var(--border);
+  border-top: 3px solid var(--tone, var(--border-strong));
+  border-radius: 12px; padding: 16px 18px; box-shadow: var(--shadow);
+  transition: transform .18s, border-color .18s;
+}
+.ccard:hover { transform: translateY(-2px); border-color: var(--border-strong); }
+.ccard .tag { display: inline-block; margin-bottom: 9px; }
+.ccard h4 { margin: 0 0 8px; font-size: 15px; line-height: 1.45; }
+.ccard > p { margin: 0; font-size: 13.5px; color: var(--muted); line-height: 1.65; }
+.ccard pre { margin: 10px 0 0; font-size: 11.8px; padding: 10px 12px; }
+
+/* ---------- body：卡片里的完整 Markdown ----------
+   desc 只能写一行（走 inline），要标题 + 解释 + 例子 + 代码就用 body。
+   内容一多，卡片就不能再窄，所以建议配 cols: 1 或 2。 */
+.ccard .cbody {
+  font-size: 13.5px; color: var(--muted); line-height: 1.7;
+}
+.ccard .cbody > :first-child { margin-top: 0; }
+.ccard .cbody > :last-child { margin-bottom: 0; }
+.ccard .cbody p { margin: 0 0 10px; font-size: inherit; color: inherit; line-height: inherit; }
+.ccard .cbody ul,
+.ccard .cbody ol { margin: 0 0 10px; padding-left: 19px; }
+.ccard .cbody li { margin-bottom: 5px; }
+.ccard .cbody strong { color: var(--text); }
+.ccard .cbody h5 {
+  margin: 14px 0 6px; font-size: 12px; font-weight: 650;
+  letter-spacing: .04em; text-transform: uppercase; color: var(--tone, var(--muted));
+}
+.ccard .cbody pre {
+  margin: 8px 0 10px; font-size: 11.5px; padding: 9px 11px; line-height: 1.6;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.ccard .cbody code:not(pre code) { font-size: .9em; }
+
+/* ============================================================
+   积木 10 · timeline —— 时间线 / 版本演进
+   适合：按时间顺序发生的事件、技术选型的演进、事故时间线
+   ============================================================ */
+.timeline { position: relative; margin: 0 0 20px; padding-left: 30px; }
+.timeline::before {
+  content: ''; position: absolute; left: 9px; top: 8px; bottom: 8px;
+  width: 2px; background: var(--border-strong); border-radius: 2px;
+}
+.titem { position: relative; padding: 0 0 22px; }
+.titem:last-child { padding-bottom: 0; }
+.titem::before {
+  content: ''; position: absolute; left: -26px; top: 7px;
+  width: 10px; height: 10px; border-radius: 50%;
+  background: var(--tone, var(--blue));
+  box-shadow: 0 0 0 3px var(--surface);
+}
+.titem .when {
+  display: block; margin-bottom: 5px;
+  font: 700 11px/1 var(--mono); letter-spacing: .04em;
+  color: var(--tone, var(--muted));
+}
+.titem h4 { margin: 0 0 4px; font-size: 14.5px; }
+.titem p { margin: 0; font-size: 13.5px; color: var(--muted); line-height: 1.65; }
+
+/* ============================================================
+   控件样式 · combination-count
+   演示 UNION ALL + GROUP BY + HAVING COUNT 如何实现集合的 AND / OR
+   ============================================================ */
+.demo-body.custom { display: block; }
+.cc { padding: 18px; }
+
+.cc-sets { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+@media (max-width: 700px) { .cc-sets { grid-template-columns: 1fr; } }
+.cc-set {
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--tone, var(--border-strong));
+  border-radius: 10px; padding: 12px 14px;
+  background: var(--surface-2);
+}
+.cc-set b { display: block; font-size: 13.5px; margin-bottom: 3px; }
+.cc-set small { display: block; font-size: 11.5px; color: var(--muted); margin-bottom: 9px; }
+.cc-set .uids {
+  font-family: var(--mono); font-size: 12.5px; font-weight: 600;
+  color: var(--tone, var(--text));
+}
+
+.cc-arrow {
+  text-align: center; font-size: 12px; font-weight: 620;
+  color: var(--muted); padding: 14px 0 12px;
+  font-family: var(--mono);
+}
+
+.cc-table {
+  width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 12.5px;
+  border: 1px solid var(--border); border-radius: 10px; overflow: hidden;
+}
+.cc-table th {
+  text-align: left; padding: 8px 12px; background: var(--surface-2);
+  color: var(--muted); font-size: 11px; font-weight: 650;
+  border-bottom: 1px solid var(--border); white-space: nowrap;
+}
+.cc-table td {
+  padding: 7px 12px; border-bottom: 1px solid var(--border);
+  color: var(--text-2);
+}
+.cc-table tr:last-child td { border-bottom: 0; }
+.cc-table td:first-child { color: var(--text); font-weight: 650; }
+.cc-table .src { letter-spacing: .08em; }
+.cc-table tr { transition: opacity .18s, background .18s; }
+.cc-table tr.drop { opacity: .3; }
+.cc-table tr.keep { background: var(--green-soft); }
+.cc-table tr.keep td:first-child { color: var(--green); }
+
+.cc-modes { display: flex; flex-wrap: wrap; gap: 8px; margin: 18px 0 14px; }
+.cc-modes button {
+  font: 620 12.5px/1 var(--sans); padding: 9px 15px; border-radius: 9px;
+  border: 1px solid var(--border); background: var(--surface);
+  color: var(--text-2); cursor: pointer; transition: .15s;
+}
+.cc-modes button:hover { border-color: var(--border-strong); color: var(--text); }
+.cc-modes button.on {
+  background: var(--blue); border-color: var(--blue); color: #fff;
+}
+
+.cc-out {
+  display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+  font-size: 13.5px; color: var(--text-2); margin-bottom: 12px;
+}
+.cc-out b { font-family: var(--mono); font-size: 20px; color: var(--green); }
+.cc pre { font-size: 12.2px; line-height: 1.7; }
+
+/* ============================================================
+   行内强调：==关键结论== / !!坑!! / ++推荐++
+   ------------------------------------------------------------
+   全文都是 **加粗** 时等于没有重点。这三个标记把「结论 / 坑 / 推荐」
+   拆成不同颜色，`**加粗**` 降级为句子内的重音。
+   ============================================================ */
+mark.mk-blue,
+mark.mk-amber,
+mark.mk-green {
+  background: none;            /* 清掉浏览器默认的黄底 */
+  color: inherit;
+  font-weight: 640;
+  padding: 1px 6px;
+  border-radius: 6px;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+mark.mk-blue  { background: var(--blue-soft);  color: var(--blue); }
+mark.mk-amber { background: var(--amber-soft); color: var(--amber); }
+mark.mk-green { background: var(--green-soft); color: var(--green); }
+
+/* ============================================================
+   积木 11 · spec —— 拆解卡
+   适合：把一个东西按固定维度拆开（输入 / 处理 / 输出 / 怎么调用 /
+   为什么这么设计 / 业务价值）。维度自由，但同页几张卡要一致。
+   ============================================================ */
+.spec {
+  border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--surface); box-shadow: var(--shadow);
+  margin: 0 0 20px; overflow: hidden;
+}
+.spec-head {
+  display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+  padding: 13px 18px; background: var(--surface-2);
+  border-bottom: 1px solid var(--border);
+  border-left: 3px solid var(--tone, var(--border-strong));
+}
+.spec-head b { font-family: var(--mono); font-size: 14px; color: var(--text); }
+.spec-head span { font-size: 12.5px; color: var(--muted); }
+
+.srow {
+  display: grid; grid-template-columns: 116px minmax(0, 1fr);
+  gap: 20px; padding: 14px 18px;
+}
+.srow + .srow { border-top: 1px solid var(--border); }
+.sk {
+  font-size: 12.5px; font-weight: 650; line-height: 1.7;
+  color: var(--tone, var(--muted));
+}
+.sv { min-width: 0; font-size: 14px; color: var(--text-2); line-height: 1.75; }
+.sv > :first-child { margin-top: 0; }
+.sv > :last-child { margin-bottom: 0; }
+.sv ul, .sv ol { padding-left: 20px; margin: 0 0 12px; }
+.sv li { margin-bottom: 5px; }
+.sv pre { font-size: 12.2px; }
+@media (max-width: 620px) {
+  .srow { grid-template-columns: 1fr; gap: 6px; }
+  .sk { font-size: 11.5px; letter-spacing: .04em; }
+}
+
+/* ============================================================
+   积木 12 · flow —— 带分支/汇合的流程图
+   节点用 flex 排版，连线由 app.js 测量后画成 SVG 路径
+   ============================================================ */
+.flowd { position: relative; margin: 0 0 20px; }
+
+/* 背景网格：给图「工程图纸」的质感，也让空白不那么飘 */
+.flowd.has-grid::before,
+.seqd.has-grid::before {
+  content: ''; position: absolute; inset: 0; z-index: 0;
+  border-radius: 14px;
+  background-image:
+    linear-gradient(to right, var(--grid-line) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--grid-line) 1px, transparent 1px);
+  background-size: 28px 28px;
+  -webkit-mask-image: radial-gradient(ellipse at center, #000 55%, transparent 100%);
+  mask-image: radial-gradient(ellipse at center, #000 55%, transparent 100%);
+}
+
+.flowd-groups { position: absolute; inset: 0; z-index: 0; }
+.fgroup {
+  position: absolute;
+  border: 1.5px dashed color-mix(in srgb, var(--tone, var(--border-strong)) 65%, transparent);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--tone-soft, var(--surface-2)) 40%, transparent);
+  pointer-events: none;
+}
+.fgroup-label {
+  position: absolute; top: -9px; left: 14px;
+  font: 600 10.5px/1 var(--mono); letter-spacing: .04em;
+  color: var(--tone, var(--muted));
+  background: var(--bg); padding: 2px 7px; border-radius: 4px;
+}
+
+/* 有区域框时，顶部要留出「框边 + 标签」的高度 ——
+   否则框会溢出到上面的段落里（框顶 = 首个节点 -28px）。 */
+.flowd.has-groups { padding-top: 38px; padding-bottom: 26px; }
+/* 有分组时，行内间距要足够大 —— 否则两组节点的包围盒会几乎相接，
+   区域框一往外扩就重叠（每行独立居中，同组节点跨行会错位）。 */
+.flowd.has-groups .flowd-row { gap: 72px; }
+
+.flowd-grid {
+  position: relative; z-index: 2;
+  display: flex; flex-direction: column;
+  gap: 58px;                    /* 行间距 = 连线的垂直空间 */
+}
+/* 自环画在节点上方，那一行要额外留空间 */
+.flowd-row.has-selfloop { margin-top: 58px; }
+.flowd-row {
+  display: flex; justify-content: center;
+  align-items: stretch; gap: 30px; flex-wrap: wrap;
+}
+
+.fnode {
+  position: relative;
+  flex: 0 1 auto; min-width: 0; max-width: 250px;
+  background: color-mix(in srgb, var(--tone-soft, var(--surface-2)) 70%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--tone, var(--border-strong)) 32%, var(--border));
+  border-radius: 11px; padding: 13px 16px 13px 40px;
+  text-align: left; box-shadow: 0 1px 2px rgba(16,24,40,.04);
+}
+.fnode:not(:has(.ficon)) { padding-left: 16px; text-align: center; }
+/* 图标：左上角，用 tone 上色 */
+.ficon {
+  position: absolute; left: 13px; top: 13px;
+  width: 17px; height: 17px;
+  color: var(--tone, var(--muted));
+}
+.fnode b {
+  display: block; font-size: 13.5px; font-weight: 650;
+  line-height: 1.4; color: var(--text);
+}
+.fnode small {
+  display: block; margin-top: 3px;
+  font-family: var(--mono); font-size: 10.5px;
+  line-height: 1.5; color: var(--muted);
+}
+
+/* 形状：状态机用 pill，判定节点用 note */
+.fnode.shape-pill {
+  border-radius: 999px; padding: 14px 22px;
+}
+.fnode.shape-pill:has(.ficon) { padding-left: 42px; }
+.fnode.shape-note {
+  border-style: dashed;
+  background: var(--surface-2);
+}
+/* 初始状态：左侧一个实心小圆点 */
+.fnode.is-initial { padding-left: 34px; }
+.finit {
+  position: absolute; left: 15px; top: 50%; margin-top: -4px;
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--tone, var(--muted));
+}
+.fnode.shape-pill.is-initial { padding-left: 36px; }
+
+/* 图例：按 kind 自动汇总 */
+.flegend {
+  position: relative; z-index: 2;
+  display: flex; flex-wrap: wrap; gap: 16px;
+  margin-top: 22px; padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+.fleg-item {
+  display: inline-flex; align-items: center; gap: 6px;
+  font: 550 11.5px/1 var(--mono);
+  color: var(--tone, var(--muted));
+}
+.fleg-item svg { width: 14px; height: 14px; flex: none; }
+.fleg-item em { font-style: normal; opacity: .55; }
+
+/* SVG 覆盖层：连线画在区域框之上、节点之下 */
+.flowd-svg {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  z-index: 1; pointer-events: none; overflow: visible;
+  color: var(--muted); opacity: .9;
+}
+.flowd-svg path.fedge {
+  fill: none; stroke: currentColor; stroke-width: 1.8;
+  marker-end: url(#fa);
+}
+.flowd-svg path.fedge.dashed { stroke-dasharray: 5 4; }
+.flowd-svg text.felabel {
+  font-family: var(--mono); font-size: 10.5px;
+  fill: var(--muted); text-anchor: middle;
+  paint-order: stroke; stroke: var(--bg); stroke-width: 4px; stroke-linejoin: round;
+}
+
+/* 让某条边动起来：给 edge 加 anim: true */
+.flowd-svg path.fedge.anim {
+  stroke-dasharray: 6 5;
+  animation: fdash 1.2s linear infinite;
+}
+@keyframes fdash { to { stroke-dashoffset: -22; } }
+
+@media (max-width: 640px) {
+  .flowd-grid { gap: 46px; }
+  .flowd-row { gap: 14px; }
+  .fnode { max-width: none; flex: 1 1 120px; padding: 10px 12px; }
+  .fnode b { font-size: 13px; }
+}
+
+/* ============================================================
+   控件样式 · knex-chain
+   ============================================================ */
+.kc { padding: 18px; }
+.kc-btns { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 18px; }
+.kc-btns button {
+  font: 550 12.5px/1 var(--mono); padding: 10px 14px; border-radius: 9px;
+  border: 1px solid var(--border); background: var(--surface);
+  color: var(--text-2); cursor: pointer; transition: .15s;
+}
+.kc-btns button:hover:not(:disabled) { border-color: var(--border-strong); color: var(--text); }
+.kc-btns button.on {
+  background: var(--blue-soft); border-color: var(--blue); color: var(--blue);
+}
+.kc-btns button:disabled { opacity: .45; cursor: not-allowed; }
+.kc-btns button.kc-final.on {
+  background: var(--green-soft); border-color: var(--green); color: var(--green);
+}
+
+.kc-panes { display: grid; grid-template-columns: 1fr 1.25fr; gap: 14px; }
+@media (max-width: 700px) { .kc-panes { grid-template-columns: 1fr; } }
+.kc-pane {
+  border: 1px solid var(--border); border-radius: 10px;
+  background: var(--surface-2); overflow: hidden; min-width: 0;
+}
+.kc-pane h5 {
+  margin: 0; padding: 9px 13px; font-size: 11.5px; font-weight: 650;
+  letter-spacing: .04em; color: var(--muted);
+  background: var(--surface); border-bottom: 1px solid var(--border);
+}
+.kc-pane pre {
+  margin: 0; border: 0; border-radius: 0; background: transparent;
+  font-size: 12px; line-height: 1.7; padding: 13px;
+  min-height: 108px; white-space: pre-wrap; word-break: break-word;
+}
+.kc-hint {
+  margin-top: 14px; padding: 11px 14px; border-radius: 9px;
+  background: var(--surface-2); border-left: 3px solid var(--blue);
+  font-size: 13px; color: var(--text-2); line-height: 1.65;
+}
+
+/* ============================================================
+   积木 13 · seq —— 时序图
+   参与者横排，时间向下，消息是水平箭头（UML 2.5 记法）
+   ============================================================ */
+.seqd { position: relative; margin: 0 0 20px; }
+.seqd.has-grid::before { z-index: 0; }
+
+.seqd-head {
+  position: relative; z-index: 1;
+  display: grid; gap: 10px;
+  grid-auto-flow: column; grid-auto-columns: 1fr;
+}
+.scell { display: flex; justify-content: center; min-width: 0; }
+.spart {
+  position: relative; min-width: 0; max-width: 100%;
+  background: color-mix(in srgb, var(--tone-soft, var(--surface-2)) 70%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--tone, var(--border-strong)) 32%, var(--border));
+  border-radius: 10px; padding: 10px 14px;
+  text-align: center; box-shadow: 0 1px 2px rgba(16,24,40,.04);
+}
+.spart.has-icon { padding-left: 34px; text-align: left; }
+.spart .ficon { position: absolute; left: 12px; top: 50%; margin-top: -8.5px; }
+.spart b { display: block; font-size: 13.5px; font-weight: 640; color: var(--text); }
+.spart small {
+  display: block; margin-top: 3px; font-family: var(--mono);
+  font-size: 10.5px; color: var(--muted);
+}
+
+.seqd-body { position: relative; z-index: 1; }
+.smsg {
+  position: relative;
+  height: 52px;                       /* 一行 = 一条消息的垂直空间 */
+  display: flex; align-items: center; justify-content: center;
+}
+.smsg[data-tone] .slabel { color: var(--tone); }
+.smsg .slabel {
+  position: relative; z-index: 1;
+  font-family: var(--mono); font-size: 11.5px; color: var(--text-2);
+  background: var(--bg); padding: 2px 8px; border-radius: 5px;
+  max-width: 70%; text-align: center;
+}
+/* 自调用：环画在 lifeline 右侧，标签跟着环走（x 由 app.js 写进 --lx） */
+.smsg.is-self .slabel {
+  position: absolute; top: 50%; left: calc(var(--lx, 0px) + 46px);
+  transform: translateY(-50%); max-width: 40%;
+}
+
+.seqd-svg {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  z-index: 0; pointer-events: none; overflow: visible;
+  color: var(--muted); opacity: .9;
+}
+.seqd-svg .lifeline {
+  stroke: var(--border-strong); stroke-width: 1.2; stroke-dasharray: 4 4;
+}
+.seqd-svg .msg { fill: none; stroke: currentColor; stroke-width: 1.6; }
+.seqd-svg .msg.sync  { marker-end: url(#s-fill); }
+.seqd-svg .msg.async { marker-end: url(#s-open); }
+.seqd-svg .msg.reply {
+  stroke-dasharray: 5 4; marker-end: url(#s-open);
+}
+.seqd-svg .msg.self  { marker-end: url(#s-fill); }
+.seqd-svg .msg.hot   { color: var(--blue); stroke-width: 2.2; }
+.seqd-svg .note {
+  font-family: var(--mono); font-size: 10px; fill: var(--muted);
+  text-anchor: middle;
+}
+
+@media (max-width: 640px) {
+  .spart { padding: 8px; }
+  .spart b { font-size: 12px; }
+  .spart small { display: none; }
+  .smsg { height: 46px; }
+  .smsg .slabel { font-size: 10.5px; max-width: 88%; }
+}
+
+/* ============================================================
+   控件样式 · 通用控件库（stepper / tuner / diff）
+   ============================================================ */
+.demo-body.custom { display: block; padding: 18px; }
+
+/* ---- 逐步执行器 ---- */
+.st-dots { display: flex; gap: 6px; margin-bottom: 14px; }
+.st-dot {
+  flex: 1; height: 3px; border-radius: 2px; background: var(--border);
+  transition: background .2s;
+}
+.st-dot.done { background: color-mix(in srgb, var(--blue) 45%, var(--border)); }
+.st-dot.on   { background: var(--blue); }
+
+.st-list { display: flex; flex-wrap: wrap; gap: 7px; margin-bottom: 16px; }
+.st-item {
+  display: inline-flex; align-items: center; gap: 7px;
+  font: 550 12.5px/1 var(--sans); padding: 8px 12px;
+  border: 1px solid var(--border); background: var(--surface);
+  color: var(--text-2); border-radius: 9px; cursor: pointer; transition: .15s;
+}
+.st-item:hover { border-color: var(--border-strong); color: var(--text); }
+.st-item.done { color: var(--muted); }
+.st-item.on {
+  background: var(--blue-soft); border-color: var(--blue); color: var(--blue);
+  font-weight: 640;
+}
+.st-idx {
+  font: 700 10.5px/1 var(--mono); opacity: .6;
+}
+
+.st-pane {
+  border: 1px solid var(--border); border-radius: 10px;
+  background: var(--surface-2); padding: 14px; margin-bottom: 16px;
+  min-height: 84px;
+}
+.st-code {
+  margin: 0; border: 0; background: transparent; padding: 0;
+  font-size: 12.5px; line-height: 1.75; white-space: pre-wrap;
+}
+.st-note {
+  margin: 10px 0 0; font-size: 13.5px; color: var(--text-2); line-height: 1.7;
+}
+.st-note:first-child { margin-top: 0; }
+
+.st-bar { display: flex; flex-wrap: wrap; gap: 8px; }
+.st-btn {
+  font: 600 12.5px/1 var(--sans); padding: 9px 14px; border-radius: 9px;
+  border: 1px solid var(--border); background: var(--surface);
+  color: var(--text-2); cursor: pointer; transition: .15s;
+}
+.st-btn:hover:not(:disabled) { border-color: var(--border-strong); color: var(--text); }
+.st-btn:disabled { opacity: .4; cursor: not-allowed; }
+.st-btn.st-primary {
+  background: var(--blue); border-color: var(--blue); color: #fff;
+}
+.st-btn.st-primary:hover:not(:disabled) { filter: brightness(1.08); color: #fff; }
+.st-btn.st-ghost { border-color: transparent; }
+
+/* ---- 参数调节器 ---- */
+.tn-head {
+  display: flex; align-items: baseline; gap: 12px; margin-bottom: 10px;
+}
+.tn-lab { font-size: 13px; color: var(--muted); }
+.tn-val {
+  font-family: var(--mono); font-size: 22px; color: var(--blue);
+  line-height: 1; margin-left: auto;
+}
+.tn-range {
+  -webkit-appearance: none; appearance: none;
+  width: 100%; height: 6px; border-radius: 3px;
+  background: var(--surface-2); outline: none; margin: 4px 0 0;
+}
+.tn-range::-webkit-slider-thumb {
+  -webkit-appearance: none; appearance: none;
+  width: 20px; height: 20px; border-radius: 50%;
+  background: var(--blue); border: 3px solid var(--surface);
+  box-shadow: 0 1px 4px rgba(0,0,0,.25); cursor: pointer;
+}
+.tn-range::-moz-range-thumb {
+  width: 16px; height: 16px; border-radius: 50%;
+  background: var(--blue); border: 3px solid var(--surface); cursor: pointer;
+}
+.tn-scale {
+  display: flex; justify-content: space-between;
+  font: 400 11px/1 var(--mono); color: var(--muted);
+  margin: 8px 0 18px;
+}
+.tn-mid { opacity: .6; }
+
+.tn-out { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+.tn-card {
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--tone, var(--border-strong));
+  border-radius: 10px; padding: 12px 14px; background: var(--surface);
+}
+.tn-card small { display: block; font-size: 11.5px; color: var(--muted); margin-bottom: 5px; }
+.tn-num {
+  font-family: var(--mono); font-size: 19px; font-weight: 650;
+  color: var(--tone, var(--text)); line-height: 1;
+}
+.tn-unit { font-size: 11.5px; color: var(--muted); margin-left: 4px; }
+
+/* ---- 并排差异对比 ---- */
+.demo-body.custom:has(.df-col) {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 12px; padding: 18px;
+}
+@media (max-width: 720px) {
+  .demo-body.custom:has(.df-col) { grid-template-columns: 1fr; }
+}
+.df-col { min-width: 0; }
+.df-title {
+  font-size: 12px; font-weight: 650; color: var(--muted);
+  letter-spacing: .03em; margin-bottom: 8px;
+}
+.df-col.df-left .df-title  { color: var(--red); }
+.df-col.df-right .df-title { color: var(--green); }
+.df-code {
+  border: 1px solid var(--border); border-radius: 10px;
+  background: var(--surface-2); overflow-x: auto; padding: 6px 0;
+  font-family: var(--mono); font-size: 12.2px; line-height: 1.7;
+}
+.df-row {
+  display: flex; gap: 8px; padding: 2px 12px 2px 8px;
+  white-space: pre; transition: background .12s;
+}
+.df-mark {
+  flex: none; width: 12px; text-align: center;
+  color: var(--muted); font-weight: 700;
+}
+.df-text { color: var(--text-2); }
+.df-row.del { background: var(--red-soft); }
+.df-row.del .df-mark { color: var(--red); }
+.df-row.del .df-text { color: var(--red); }
+.df-row.add { background: var(--green-soft); }
+.df-row.add .df-mark { color: var(--green); }
+.df-row.add .df-text { color: var(--green); }
+.df-row.hover { background: color-mix(in srgb, var(--blue) 14%, transparent); }
+
+/* ============================================================
+   积木 14 · matrix —— 2x2 定位矩阵
+   阈值线是主角（它决定分类结果），所以画粗、画明显；
+   轴标签放两端、极简
+   ============================================================ */
+.mx { display: flex; gap: 10px; margin: 0 0 20px; align-items: stretch; }
+
+/* 竖排的轴名称，放最左 */
+.mx-ylab {
+  writing-mode: vertical-rl; transform: rotate(180deg);
+  display: grid; place-items: center; flex: none;
+  font-size: 11.5px; font-weight: 650; letter-spacing: .1em;
+  color: var(--muted);
+}
+
+.mx-body {
+  flex: 1; min-width: 0;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-rows: 1fr 1fr auto auto;
+  column-gap: 12px;
+}
+/* Y 轴两端标签：水平文字，分别对齐上下两行 */
+.mx-y {
+  grid-column: 1;
+  display: flex; align-items: center; justify-content: flex-end;
+  font-size: 12px; color: var(--text-2); text-align: right;
+  white-space: nowrap;
+}
+.mx-yto   { grid-row: 1; }
+.mx-yfrom { grid-row: 2; }
+
+/* 阈值线：grid 间隙 + 容器背景色 —— 比 border 更醒目，也不会和单元格边框打架 */
+.mx-grid {
+  grid-column: 2; grid-row: 1 / 3;
+  display: grid;
+  grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr;
+  gap: 3px;
+  background: color-mix(in srgb, var(--border-strong) 80%, transparent);
+  border-radius: 5px;
+  overflow: hidden;
+}
+/* 单元格不再画自己的色条 —— 否则会和阈值线撞在一起分不清谁是阈值。
+   象限的区分改用背景微染，把「线」全部留给阈值。 */
+.mcell {
+  background: color-mix(in srgb, var(--tone-soft, var(--surface-2)) 55%, var(--surface));
+  padding: 16px 18px;
+  display: flex; flex-direction: column; gap: 6px;
+  min-height: 96px;
+}
+.mcell.is-empty { background: var(--surface-2); }
+/* 象限名用 tone 上色，背景保持淡，避免喧宾夺主 */
+.mcell b { font-size: 14.5px; font-weight: 650; color: var(--tone, var(--text)); line-height: 1.4; }
+.mcell span { font-size: 13px; color: var(--muted); line-height: 1.6; }
+
+/* X 轴两端标签：左对齐 / 右对齐，各自贴着自己那一列 */
+.mx-xrow {
+  grid-column: 2; grid-row: 3;
+  display: grid; grid-template-columns: 1fr 1fr;
+  padding-top: 8px;
+  font-size: 12px; color: var(--text-2);
+}
+.mx-xrow span:last-child { text-align: right; }
+
+.mx-xlab {
+  grid-column: 2; grid-row: 4;
+  text-align: center; padding-top: 4px;
+  font-size: 11.5px; font-weight: 650; letter-spacing: .1em;
+  color: var(--muted);
+}
+
+@media (max-width: 640px) {
+  .mx { gap: 6px; }
+  .mx-body { column-gap: 8px; }
+  .mx-y { font-size: 11px; }
+  .mcell { padding: 12px; min-height: 78px; }
+  .mcell b { font-size: 13px; }
+  .mcell span { font-size: 11.5px; }
+}
+
+/* ============================================================
+   积木 15 · tree —— 层级结构图
+   细线 + 圆角肘 + 圆点标记。不用整行色块，靠缩进和标记表达层级。
+   ============================================================ */
+.tree { margin: 0 0 22px; }
+.tree ul { list-style: none; margin: 0; padding: 0; }
+.tree li { position: relative; }
+
+/* 子层缩进 */
+.tree li > ul { padding-left: 32px; margin-top: 6px; }
+/* 兄弟行之间留口气 —— 之前只有 2px 的 margin-top，几行叠在一起 */
+.tree li > ul > li + li { margin-top: 5px; }
+
+/* 竖线：从父节点一路连到最后一个孩子 */
+.tree li > ul > li::before {
+  content: ''; position: absolute; left: -16px; top: 0; bottom: 0;
+  width: 2px; border-radius: 1px;
+  background: var(--border-strong);
+}
+.tree li > ul > li:last-child::before { bottom: auto; height: 25px; }
+
+/* 肘：从竖线圆角拐进节点 */
+.tree li > ul > li::after {
+  content: ''; position: absolute; left: -16px; top: 17px;
+  width: 15px; height: 9px;
+  border-left: 2px solid var(--border-strong);
+  border-bottom: 2px solid var(--border-strong);
+  border-bottom-left-radius: 8px;
+}
+
+.tnode {
+  position: relative;
+  display: inline-flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+  max-width: 100%;
+  padding: 7px 14px 7px 8px;
+  border-radius: 8px;
+  background: transparent;
+  transition: background .14s;
+}
+.tnode:hover { background: color-mix(in srgb, var(--tone-soft, var(--surface-2)) 80%, transparent); }
+.tree li.has-kids > .tnode { cursor: pointer; }
+
+/* 叶子：一个 tone 色小圆点 */
+.tdot {
+  flex: none; width: 6px; height: 6px; border-radius: 50%;
+  background: var(--tone, var(--muted));
+  transform: translateY(-1px);
+}
+/* 有孩子：三角箭头，展开时朝下 */
+.tcaret {
+  flex: none; width: 0; height: 0; margin-right: 1px;
+  border-left: 5px solid var(--tone, var(--muted));
+  border-top: 4px solid transparent; border-bottom: 4px solid transparent;
+  transform: rotate(90deg); transform-origin: 30% 50%;
+  transition: transform .18s;
+}
+.tree li.folded > .tnode .tcaret { transform: rotate(0deg); }
+.tree li.folded > ul { display: none; }
+.tree li.folded > .tnode::after {
+  content: '⋯'; color: var(--muted); font-size: 12px; margin-left: 2px;
+}
+
+.tnode b {
+  font-family: var(--mono); font-size: 13.5px; font-weight: 650;
+  color: var(--text); line-height: 1.5;
+}
+/* 签名 / 类型 / 路径：给节点的 tone 色，不要跟下面的说明一样是灰的 */
+.tnode code {
+  font-family: var(--mono); font-size: 11.5px;
+  color: var(--tone, var(--text-2));
+  background: var(--tone-soft, var(--surface-2));
+  border: 1px solid color-mix(in srgb, var(--tone, var(--border)) 28%, var(--border));
+  border-radius: 5px; padding: 2px 7px; line-height: 1.5;
+}
+.tnode .tnote {
+  font-size: 12.5px; color: var(--muted); line-height: 1.6;
+}
+
+/* 顶层节点加重一点，作为树的锚点 */
+.tree > .tlist > li > .tnode b { font-size: 14px; }
+.tree > .tlist > li + li { margin-top: 12px; }
+/* 有孩子的节点给一点底色，让层级一眼看得出来 */
+.tree li.has-kids > .tnode {
+  background: color-mix(in srgb, var(--tone-soft, var(--surface-2)) 55%, transparent);
+}
+.tree li.has-kids > .tnode:hover {
+  background: color-mix(in srgb, var(--tone-soft, var(--surface-2)) 90%, transparent);
+}
+
+@media (max-width: 640px) {
+  .tree li > ul { padding-left: 20px; }
+  .tree li > ul > li::before,
+  .tree li > ul > li::after { left: -10px; }
+  .tree li > ul > li::after { width: 8px; }
+  .tnode { padding: 4px 8px 4px 4px; gap: 7px; }
+  .tnode b { font-size: 12.5px; }
+  .tnode .tnote { font-size: 11.5px; }
+}
+
+/* ============================================================
+   积木 16 · arch —— 内联 archify 生成的图
+   SVG 自带 viewBox，所以 max-width:100% 就能响应式缩放
+   ============================================================ */
+.archfig { margin: 0 0 20px; }
+.archfig svg {
+  display: block; width: 100%; height: auto; max-width: 100%;
+  border-radius: 12px; background: var(--surface-2);
+  border: 1px solid var(--border);
+}
+.archfig figcaption {
+  margin-top: 10px; font-size: 12.5px; color: var(--muted);
+  text-align: center; line-height: 1.6;
+}
+
+/* ============================================================
+   响应式：lane-stack / journey
+   ============================================================ */
+@media (max-width: 900px) { .lane { grid-template-columns: 132px minmax(0, 1fr); gap: 12px; } }
+@media (max-width: 720px) {
+  .pipe { padding: 11px; }
+  .lane { grid-template-columns: 1fr; gap: 9px; }
+  .lane-meta { flex-direction: row; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+  .lane-meta small { flex: 1 1 100%; }
+}
+
+/* ============================================================
+   通用控件原语 · seg —— 分段按钮（几个互斥选项里选一个）
+   ------------------------------------------------------------
+   和 .tag 一样消费 --tone，所以每个按钮可以带自己的语义色。
+   ============================================================ */
+.seg { display: flex; flex-wrap: wrap; gap: 7px; }
+.seg button {
+  font: 620 12.5px/1 var(--mono); padding: 9px 14px; border-radius: 9px;
+  border: 1px solid var(--border); background: var(--surface);
+  color: var(--text-2); cursor: pointer; transition: .15s;
+}
+.seg button:hover { border-color: var(--border-strong); color: var(--text); }
+.seg button.on {
+  background: var(--tone, var(--blue)); border-color: var(--tone, var(--blue)); color: #fff;
+}
+
+/* 规则说明行：一句话说清「当前这个选项做了什么」 */
+.seg-rule {
+  margin: 0 0 14px; padding: 7px 0 7px 12px;
+  border-left: 2px solid var(--tone, var(--blue));
+  font-size: 13px; color: var(--text-2); line-height: 1.6;
+}
+.seg-rule b { color: var(--tone, var(--blue)); }
+
+/* 小结果表：多个控件共用 */
+.mini-wrap { border: 1px solid var(--border); border-radius: 10px; overflow: auto; max-height: 320px; }
+.mini-wrap.plain { max-height: none; }
+
+/* 控件底部贴的 SQL 块 */
+.seg-sql { margin: 16px 0 0; font-size: 12.2px; }
+.mini-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.mini-table th {
+  text-align: left; padding: 8px 12px; background: var(--surface-2);
+  font: 650 10.5px/1.4 var(--mono); letter-spacing: .04em; color: var(--muted);
+  border-bottom: 1px solid var(--border); white-space: nowrap; position: sticky; top: 0;
+}
+.mini-table td {
+  padding: 7px 12px; border-bottom: 1px solid var(--border);
+  color: var(--text-2); font-family: var(--mono); white-space: nowrap;
+}
+.mini-table tr:last-child td { border-bottom: 0; }
+.mini-table .nul { color: var(--muted); font-style: italic; }
+.mini-table tr.lone td { background: var(--amber-soft); }
+.mini-table tr.cross td { background: color-mix(in srgb, var(--amber-soft) 45%, transparent); }
+
+/* ============================================================
+   控件样式 · join-lab —— 同一份数据切换 5 种 JOIN
+   ------------------------------------------------------------
+   左：两列行 + SVG 配对连线（坐标由 JS 实测，不写死）
+   右：结果表      下：对应 SQL
+   ============================================================ */
+.jl { padding: 18px; }
+.jl-top { margin-bottom: 12px; }
+
+.jl-cols {
+  display: grid; grid-template-columns: minmax(0, 1.02fr) minmax(0, 1fr);
+  gap: 20px; align-items: start;
+}
+@media (max-width: 900px) { .jl-cols { grid-template-columns: minmax(0, 1fr); gap: 16px; } }
+
+.jl-stage {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) clamp(26px, 6vw, 76px) minmax(0, 1fr);
+  padding: 3px 0;
+}
+.jl-lines { position: absolute; inset: 0; overflow: visible; pointer-events: none; }
+.jl-link { fill: none; stroke: var(--blue); stroke-width: 1.7; opacity: .7; }
+.jl-link.cross { stroke: var(--red); stroke-width: 1.2; opacity: .38; }
+.jl-dot { fill: var(--blue); opacity: .8; }
+.jl-dot.cross { fill: var(--red); opacity: .5; }
+
+.jl-col { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.jl-col-head {
+  font: 700 10px/1 var(--mono); letter-spacing: .1em;
+  color: var(--muted); padding: 0 3px 3px;
+}
+.jl-row {
+  display: flex; align-items: baseline; gap: 7px; min-width: 0;
+  border: 1px solid var(--border); border-radius: 9px;
+  background: var(--surface-2); padding: 7px 10px; font-size: 12.5px;
+  transition: opacity .2s, border-color .2s, background .2s;
+}
+.jl-row b { flex: none; font: 700 10.5px/1.5 var(--mono); color: var(--muted); }
+.jl-row i { flex: none; font: 400 10.5px/1.5 var(--mono); font-style: normal; color: var(--blue); }
+.jl-row span { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 配不上的行：虚线边框 + 「落单」角标；被丢掉时整体压暗 */
+.jl-row.lone { border-style: dashed; border-color: color-mix(in srgb, var(--amber) 45%, var(--border)); }
+.jl-row.lone::after {
+  content: "落单"; margin-left: auto; flex: none;
+  font: 600 9.5px/1.5 var(--mono); color: var(--amber);
+}
+.jl-row.drop { opacity: .34; }
+.jl-row.drop span { text-decoration: line-through; }
+
+.jl-out-head { font-size: 12.5px; font-weight: 650; color: var(--text-2); margin-bottom: 8px; }
+
+/* ============================================================
+   控件样式 · on-vs-where —— 过滤条件写在 ON 还是 WHERE
+   ============================================================ */
+.ow { padding: 18px; }
+.ow-top { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-bottom: 12px; }
+.ow-matrix { width: 100%; border-collapse: collapse; font-size: 12.8px; }
+.ow-matrix th, .ow-matrix td {
+  padding: 9px 13px; border-bottom: 1px solid var(--border); text-align: left;
+}
+.ow-matrix thead th {
+  background: var(--surface-2); border-bottom: 1px solid var(--border);
+  font: 650 11px/1.4 var(--sans); color: var(--muted); white-space: nowrap;
+}
+.ow-matrix tbody th { font-family: var(--mono); font-weight: 600; color: var(--text); white-space: nowrap; }
+.ow-matrix tbody th small { display: block; font: 400 10.5px/1.5 var(--mono); color: var(--muted); }
+.ow-matrix td { color: var(--text-2); font-family: var(--mono); }
+.ow-matrix tr:last-child th, .ow-matrix tr:last-child td { border-bottom: 0; }
+.ow-matrix .col { transition: background .2s; }
+.ow-matrix .col.on { background: color-mix(in srgb, var(--blue-soft) 70%, transparent); }
+.ow-matrix tr.sum th, .ow-matrix tr.sum td {
+  border-top: 1px solid var(--border-strong); font-weight: 650; color: var(--text);
+}
+.ow-matrix tr.sum td { font-size: 15px; }
+.ow-matrix tr.sum .col.on { color: var(--blue); }
+.ow-matrix .gone { color: var(--red); }
+@media (max-width: 620px) {
+  .ow-matrix th, .ow-matrix td { padding: 8px 9px; font-size: 12px; }
+  .ow-matrix thead th { font-size: 10.5px; }
+  /* 窄屏让表头换行，不要靠横向滚动看列名 */
+  .ow-matrix thead th, .ow-matrix tbody th { white-space: normal; }
+}
+
+/* ============================================================
+   积木 17 · streamshape —— 数据流的「形状」
+   ------------------------------------------------------------
+   一根时间轴上，事件一个接一个排下去。用来表达两种形状：
+     无界：右边没有尽头（⋯⋯ 尾巴 + 渐隐）
+     有界：右边有一堵墙（文件末尾）
+   也用来画「无界流被切成窗口」。
+   ============================================================ */
+.streamshape {
+  border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--surface); box-shadow: var(--shadow);
+  padding: 6px; margin: 0 0 20px;
+}
+.ss-row {
+  display: grid; grid-template-columns: 148px minmax(0, 1fr);
+  gap: 16px; align-items: center;
+  padding: 14px 16px;
+}
+.ss-row + .ss-row { border-top: 1px solid var(--border); }
+.ss-side { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.ss-side b { font-size: 13.5px; font-weight: 650; color: var(--text); }
+.ss-side .tag { align-self: flex-start; margin: 2px 0 1px; }
+.ss-side small { font-size: 11.5px; color: var(--muted); line-height: 1.5; }
+
+.ss-track {
+  position: relative; min-width: 0;
+  display: flex; align-items: center; flex-wrap: wrap;
+  row-gap: 8px;
+}
+/* 连接线画在 chip 的右内边距里，所以换行也不会错位 */
+.ss-ev {
+  position: relative; flex: none;
+  display: inline-flex; align-items: center; gap: 6px;
+  border: 1px solid var(--border-strong); border-radius: 8px;
+  background: var(--surface-2); color: var(--text);
+  font: 600 11.5px/1 var(--mono); padding: 7px 10px;
+}
+.ss-ev + .ss-ev { margin-left: 20px; }
+.ss-ev + .ss-ev::before {
+  content: ""; position: absolute; left: -20px; top: 50%;
+  width: 20px; height: 2px; transform: translateY(-50%);
+  background: var(--tone, var(--border-strong)); opacity: .5;
+}
+.ss-ev.tone-blue, .ss-ev.tone-green, .ss-ev.tone-amber { border-color: var(--tone); }
+
+/* 无界的尾巴：没有边框，渐隐到右边 */
+.ss-tail {
+  border: 0; background: none; padding: 7px 0;
+  color: var(--tone, var(--muted)); letter-spacing: .18em;
+  -webkit-mask-image: linear-gradient(90deg, #000 34%, transparent 99%);
+  mask-image: linear-gradient(90deg, #000 34%, transparent 99%);
+}
+/* 选择器比 `.ss-ev + .ss-ev::before` 重一档，就不用 !important 了 */
+.ss-track .ss-ev.ss-tail::before { background: linear-gradient(90deg, var(--tone), transparent); }
+/* 中间的省略号：保留连接线，但不要 chip 的外壳 */
+.ss-gap {
+  border: 0; background: none; padding: 7px 0;
+  color: var(--muted); letter-spacing: .18em;
+}
+/* 无界行的收尾标注：没有墙，只有一句话 */
+.ss-open {
+  flex: none; margin-left: 16px; white-space: nowrap;
+  font: 600 11px/1.3 var(--mono); color: var(--tone, var(--muted));
+}
+
+/* 有界的墙：一根实心竖条 + 标注 */
+.ss-cap {
+  flex: none; display: flex; align-items: center; gap: 8px; margin-left: 18px;
+  position: relative;
+}
+.ss-cap::before {
+  content: ""; width: 3px; height: 26px; border-radius: 2px;
+  background: var(--tone, var(--border-strong));
+}
+.ss-cap span {
+  font: 600 11px/1.3 var(--mono); color: var(--tone, var(--muted)); white-space: nowrap;
+}
+@media (max-width: 720px) {
+  .ss-row { grid-template-columns: 1fr; gap: 8px; padding: 12px; }
+  .ss-side { flex-direction: row; align-items: baseline; flex-wrap: wrap; gap: 8px; }
+  .ss-side small { flex: 1 1 100%; }
+  .ss-ev { font-size: 11px; padding: 6px 8px; }
+}
+
+/* ---- streamshape 的变体：无界流被切成窗口 ---- */
+.winsplit { padding: 16px; }
+.ws-stream {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 9px 14px; border-radius: 9px 9px 0 0;
+  background: var(--blue-soft); color: var(--blue);
+  font-size: 12.5px; font-weight: 620;
+}
+.ws-stream .ws-arrow { margin-left: auto; font-family: var(--mono); font-size: 11.5px; }
+/* 每一段（窗口）带着自己的结果，所以窄屏堆叠时配对不会错。
+   gap 露出的底色就是分界线。 */
+.ws-grid {
+  display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px;
+  background: var(--border-strong);
+}
+.ws-col { display: flex; flex-direction: column; gap: 4px; background: var(--border-strong); }
+.ws-seg {
+  background: var(--surface); padding: 12px 14px; flex: 1;
+  display: flex; flex-direction: column; gap: 4px;
+  border-top: 3px solid var(--tone, var(--border-strong));
+}
+.ws-seg b { font-size: 13px; font-weight: 650; color: var(--tone, var(--text)); }
+.ws-seg span { font: 600 12px/1.4 var(--mono); color: var(--text-2); }
+.ws-seg.open {
+  border-top-style: dashed;
+  background: repeating-linear-gradient(135deg,
+    transparent 0 7px, color-mix(in srgb, var(--amber-soft) 80%, transparent) 7px 14px);
+}
+.ws-seg.open span { color: var(--amber); }
+.ws-res {
+  padding: 11px 14px; font-size: 12.5px; color: var(--text-2); line-height: 1.55;
+  background: var(--surface-2); border-radius: 0 0 9px 9px;
+}
+.ws-res::before {
+  content: "↓"; display: block; font-size: 13px; line-height: 1;
+  color: var(--tone, var(--muted)); margin-bottom: 6px; font-weight: 700;
+}
+.ws-res b { color: var(--tone, var(--text)); font-weight: 640; }
+.ws-res.open { background: var(--amber-soft); }
+@media (max-width: 720px) {
+  .ws-grid { grid-template-columns: 1fr; }
+  .ws-res::before { display: none; }
+}
+/* ============================================================
+   控件样式 · stream-modes —— 同一条流，三种跑法
+   ============================================================ */
+.sm { padding: 18px; }
+.sm-top { margin-bottom: 12px; }
+.sm-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+@media (max-width: 780px) { .sm-cols { grid-template-columns: 1fr; } }
+.sm-cols .log { min-height: 300px; max-height: 340px; }
+.sm-task {
+  margin-top: 14px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  border: 1px solid var(--border); border-left: 3px solid var(--tone, var(--border-strong));
+  border-radius: 10px; padding: 11px 15px; background: var(--surface-2);
+  font-size: 13px; color: var(--text-2);
+}
+.sm-task b { color: var(--tone, var(--text)); font-weight: 650; }
+.sm-task .sm-task-note { font-family: var(--mono); font-size: 11.5px; color: var(--muted); margin-left: auto; }
+/* 窗口分界线：横穿输入栏的一条虚线 */
+.log .line.divider {
+  background: none; border: 0; padding: 2px 8px; justify-content: center;
+}
+.log .line.divider .txt {
+  font-size: 10.5px; color: var(--amber); letter-spacing: .04em;
+}
+.log .line.divider::before {
+  content: ""; flex: 1; height: 1px; background: var(--border-strong);
+  margin-right: 8px;
+}
+.log .line.divider::after {
+  content: ""; flex: 1; height: 1px; background: var(--border-strong);
+  margin-left: 8px;
+}
+.log .line.eof .txt { color: var(--green); font-weight: 650; }
+.log .line.eof .badge { background: var(--green-soft); color: var(--green); }
+
+/* ============================================================
+   控件样式 · operator-lab —— 同一批数据，过不同算子
+   ------------------------------------------------------------
+   左栏是输入（被丢掉的记录会变灰划线），右栏是这个算子的产出。
+   keyBy 的产出不是一列记录，而是几个桶 —— 所以右栏有两种形态。
+   ============================================================ */
+.ol { padding: 18px; }
+.ol-top { margin-bottom: 12px; }
+.ol-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+@media (max-width: 820px) { .ol-cols { grid-template-columns: 1fr; } }
+.ol-cols .log { min-height: 268px; max-height: 320px; }
+
+/* 一条记录：编号 · 用户 · 金额 · 状态 · 商品 */
+.ol-rec {
+  display: flex; align-items: baseline; gap: 8px; min-width: 0;
+  padding: 6px 9px; border-radius: 7px;
+  background: var(--surface); border: 1px solid var(--border);
+  font: 600 11.5px/1.5 var(--mono);
+  animation: slide .22s ease-out both;
+}
+.ol-rec > b { flex: none; color: var(--text); }
+.ol-rec > i { flex: none; font-style: normal; color: var(--blue); }
+.ol-rec > u { flex: none; text-decoration: none; color: var(--green); }
+.ol-rec > s { flex: none; text-decoration: none; color: var(--muted); }
+.ol-rec > s.paid { color: var(--green); }
+.ol-rec > s.unpaid { color: var(--amber); }
+.ol-rec > em {
+  font-style: normal; color: var(--muted); font-size: 10.5px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ol-rec .grow { flex: 1; }
+/* 被这个算子丢掉的输入 */
+.ol-rec.drop { opacity: .34; }
+.ol-rec.drop > * { text-decoration: line-through; }
+.ol-rec.drop::after {
+  content: "丢掉"; margin-left: auto; flex: none;
+  font: 600 9.5px/1.5 var(--mono); color: var(--red); text-decoration: none;
+}
+.ol-rec.kept { border-color: color-mix(in srgb, var(--green) 40%, var(--border)); }
+
+/* keyBy 的产出：几个桶 */
+.ol-buckets { display: flex; flex-direction: column; gap: 8px; }
+.ol-bucket {
+  border: 1px solid var(--border); border-left: 3px solid var(--tone, var(--border-strong));
+  border-radius: 9px; background: var(--surface-2); padding: 8px 10px;
+  animation: slide .22s ease-out both;
+}
+.ol-bucket > .ol-bhead {
+  display: flex; align-items: baseline; gap: 8px;
+  font: 700 11.5px/1.4 var(--mono); color: var(--tone, var(--text));
+  margin-bottom: 6px;
+}
+.ol-bucket > .ol-bhead small { font-weight: 400; color: var(--muted); font-size: 10.5px; }
+.ol-bucket > .ol-bhead .cnt { margin-left: auto; }
+.ol-bucket .ol-rec { background: var(--surface); font-size: 11px; padding: 4px 8px; }
+.ol-bucket .ol-rec + .ol-rec { margin-top: 4px; }
+
+/* 状态栏：算子规则 + 进出的条数 */
+.ol-rule { margin: 0 0 14px; padding: 7px 0 7px 12px; border-left: 2px solid var(--tone, var(--blue));
+  font-size: 13px; color: var(--text-2); line-height: 1.6; }
+.ol-rule b { color: var(--tone, var(--blue)); }
+.ol-io {
+  margin-top: 14px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  border: 1px solid var(--border); border-left: 3px solid var(--tone, var(--border-strong));
+  border-radius: 10px; padding: 11px 15px; background: var(--surface-2);
+  font-size: 13px; color: var(--text-2);
+}
+.ol-io b { color: var(--tone, var(--text)); font-weight: 650; }
+.ol-io .ol-io-note { font-family: var(--mono); font-size: 11.5px; color: var(--muted); margin-left: auto; }
+
+/* ============================================================
+   控件样式 · keyby-viz —— 不 keyBy 会算错，keyBy 之后才对
+   ------------------------------------------------------------
+   同一批数据、并行度 3，两种分发方式的结果对比。
+   「每个 Task 只看得见自己手上那几条」是这个图要说清的事。
+   ============================================================ */
+.keyby-viz { display: flex; flex-direction: column; gap: 0; margin: 0 0 20px; }
+.kb-case {
+  border: 1px solid var(--border); border-left: 3px solid var(--tone, var(--border-strong));
+  border-radius: var(--radius); background: var(--surface);
+  box-shadow: var(--shadow); padding: 16px 18px;
+}
+.kb-case + .kb-case { margin-top: 0; }
+.kb-label { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 13px; }
+.kb-label b { font-size: 14px; font-weight: 650; color: var(--text); }
+.kb-label small { flex: 1 1 100%; font-size: 12.5px; color: var(--muted); line-height: 1.6; }
+
+.kb-tasks { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; }
+.kb-task {
+  border: 1px solid var(--border); border-top: 3px solid var(--tone, var(--border-strong));
+  border-radius: 10px; background: var(--surface-2); padding: 10px 12px;
+  display: flex; flex-direction: column; gap: 5px;
+}
+.kb-head {
+  display: flex; align-items: baseline; gap: 8px;
+  font: 700 11.5px/1.4 var(--mono); color: var(--tone, var(--muted));
+}
+.kb-head small { font-weight: 400; color: var(--muted); font-size: 10.5px; }
+.kb-rec {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+  padding: 5px 8px; font: 600 11px/1.5 var(--mono); color: var(--text);
+}
+.kb-out {
+  margin-top: 2px; padding-top: 7px; border-top: 1px dashed var(--border-strong);
+  font: 600 11.5px/1.5 var(--mono); color: var(--tone, var(--muted));
+}
+.kb-out.wrong::after { content: " ✗"; }
+.kb-out.right::after { content: " ✓"; }
+
+/* 中间那根「洗牌」的箭头 */
+.kb-shuffle {
+  display: flex; align-items: center; gap: 10px; justify-content: center;
+  padding: 10px 0; font: 620 12px/1.5 var(--mono); color: var(--blue);
+}
+.kb-shuffle::before, .kb-shuffle::after {
+  content: ""; flex: 1; height: 2px; border-radius: 2px;
+  background: repeating-linear-gradient(90deg, var(--blue) 0 5px, transparent 5px 10px);
+  opacity: .5;
+}
+@media (max-width: 620px) {
+  .kb-label small { flex: 1 1 100%; }
+  .kb-tasks { grid-template-columns: 1fr; }
+}
+
+/* ===== 「前置」区块 =====
+   由 tools/lib/plan.mjs 从 plans/*.yaml 的 needs 生成，插在正文之前。
+   读者沿「嵌套产物树」走，每篇开头都要知道「我该先读什么」。 */
+.needs {
+  margin: 0 0 30px;
+  padding: 16px 20px 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--amber);
+  border-radius: 12px;
+}
+.needs-title {
+  margin: 0 0 4px;
+  font: 600 12.5px/1 var(--sans);
+  color: var(--muted);
+  letter-spacing: .02em;
+}
+.needs .need {
+  display: block;
+  text-decoration: none;
+  color: inherit;
+  padding: 11px 0;
+  border-top: 1px solid var(--border);
+  font-size: 14.5px;
+  line-height: 1.5;
+  transition: color .15s;
+}
+.needs .need b { font-weight: 600; color: var(--text); }
+.needs .need span { display: block; color: var(--muted); font-size: 13px; margin-top: 3px; }
+a.need:hover b { color: var(--blue); }
+a.need:hover { color: var(--blue); }
+
+/* 还没写出来的前置：显示但不可点 —— 让读者知道「这里缺一块」，
+   而不是给一个点了 404 的死链接 */
+.needs .need.is-planned { opacity: .55; }
+.needs .need.is-planned em {
+  font-style: normal;
+  font: 500 11px/1 var(--sans);
+  color: var(--muted);
+  border: 1px dashed var(--border-strong);
+  border-radius: 100px;
+  padding: 3px 7px;
+  margin-left: 8px;
+}
+
+/* ============================================================
+   控件样式 · flarch —— Flink 集群架构图（raw 写的）
+   ------------------------------------------------------------
+   要表达的是「嵌套」：JobManager 调度 → TaskManager（进程）→ Slot（资源）→ Task（执行单元）。
+   两个 TaskManager 中间那道竖线就是 keyBy 造成的网络 shuffle。
+   ============================================================ */
+.flarch {
+  border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--surface); box-shadow: var(--shadow);
+  padding: 18px; margin: 0 0 20px;
+  display: flex; flex-direction: column; align-items: center;
+}
+.fa-node {
+  width: min(100%, 460px); text-align: center;
+  border: 1px solid var(--border); border-left: 3px solid var(--tone, var(--border-strong));
+  border-radius: 10px; background: var(--surface-2); padding: 10px 14px;
+}
+.fa-node b { display: block; font-size: 13.5px; font-weight: 650; color: var(--text); }
+.fa-node small {
+  display: block; margin-top: 3px;
+  font: 400 11px/1.5 var(--mono); color: var(--muted);
+}
+.fa-down {
+  display: flex; flex-direction: column; align-items: center; gap: 3px;
+  padding: 8px 0; font: 600 11.5px/1.4 var(--mono); color: var(--tone, var(--muted));
+}
+.fa-down::before { content: ""; width: 2px; height: 12px; background: var(--tone, var(--border-strong)); }
+.fa-down::after {
+  content: ""; width: 0; height: 0;
+  border-left: 5px solid transparent; border-right: 5px solid transparent;
+  border-top: 7px solid var(--tone, var(--border-strong));
+}
+
+.fa-flow { display: grid; grid-template-columns: 1fr auto 1fr; gap: 12px; align-items: center; width: 100%; }
+.fa-tm {
+  border: 1px dashed var(--tone, var(--border-strong)); border-radius: 12px;
+  padding: 12px; background: color-mix(in srgb, var(--tone-soft, var(--surface-2)) 60%, transparent);
+}
+.fa-tm-head {
+  text-align: center; margin-bottom: 10px;
+  font-size: 12.5px; font-weight: 650; color: var(--tone, var(--text));
+}
+.fa-tm-head small {
+  display: block; margin-top: 2px;
+  font: 400 10.5px/1.5 var(--mono); color: var(--muted);
+}
+.fa-slots { display: flex; flex-direction: column; gap: 8px; }
+.fa-slot {
+  border: 1px solid var(--border); border-radius: 9px;
+  background: var(--surface); padding: 9px 11px;
+}
+.fa-slot b { display: block; font: 700 10.5px/1.4 var(--mono); color: var(--tone, var(--muted)); }
+.fa-slot span { display: block; margin-top: 2px; font: 600 11.5px/1.5 var(--mono); color: var(--text); }
+.fa-slot em {
+  display: block; margin-top: 4px; font-style: normal;
+  font-size: 10.5px; line-height: 1.5; color: var(--muted);
+}
+.fa-shuffle {
+  display: flex; flex-direction: column; align-items: center; gap: 5px;
+  padding: 0 4px; text-align: center;
+  font: 620 11px/1.5 var(--mono); color: var(--amber);
+}
+.fa-shuffle::before {
+  content: ""; width: 0; height: 0;
+  border-top: 5px solid transparent; border-bottom: 5px solid transparent;
+  border-left: 8px solid var(--amber);
+}
+@media (max-width: 780px) {
+  .fa-flow { grid-template-columns: 1fr; gap: 6px; }
+  .fa-shuffle { flex-direction: row; justify-content: center; padding: 6px 0; }
+  .fa-shuffle::before { transform: rotate(90deg); }
+}
+
+</style>
+  <style>
+/* ==========================================================
+       THEME VARIABLES — switch by toggling [data-theme] on <html>
+       ========================================================== */
+    :root,
+    [data-theme="dark"] {
+      --af-bg: #020617;
+      --af-grid: #1e293b;
+      --af-text: #ffffff;
+      --af-text-muted: #94a3b8;
+      --af-text-dim: #475569;
+      /* UI chrome and menu hints need more contrast than SVG .t-dim accents */
+      --af-text-faint: #7d8da1;
+
+      --af-panel: rgba(15, 23, 42, 0.5);
+      --af-panel-border: #1e293b;
+      --af-lane-fill: rgba(15, 23, 42, 0.22);
+      --af-lane-stroke: #334155;
+
+      --af-arrow: #64748b;
+      --af-arrow-emphasis: #34d399;
+
+      /* Opaque mask color used behind semi-transparent component fills
+         so the arrows drawn underneath are properly hidden. */
+      --af-mask: #0f172a;
+
+      --af-frontend-fill:    rgba(8, 51, 68, 0.4);
+      --af-frontend-stroke:  #22d3ee;
+      --af-backend-fill:     rgba(6, 78, 59, 0.4);
+      --af-backend-stroke:   #34d399;
+      --af-database-fill:    rgba(76, 29, 149, 0.4);
+      --af-database-stroke:  #a78bfa;
+      --af-cloud-fill:       rgba(120, 53, 15, 0.3);
+      --af-cloud-stroke:     #fbbf24;
+      --af-security-fill:    rgba(136, 19, 55, 0.4);
+      --af-security-stroke:  #fb7185;
+      --af-messagebus-fill:  rgba(251, 146, 60, 0.3);
+      --af-messagebus-stroke:#fb923c;
+      --af-external-fill:    rgba(30, 41, 59, 0.5);
+      --af-external-stroke:  #94a3b8;
+
+      --af-toolbar-bg:       rgba(15, 23, 42, 0.8);
+      --af-toolbar-border:   #334155;
+      --af-toolbar-text:     #e2e8f0;
+      --af-toolbar-hover:    rgba(15, 23, 42, 0.95);
+      --af-toolbar-menu-bg:  #0f172a;
+    }
+[data-theme="light"] {
+      --af-bg: #f8fafc;
+      --af-grid: #e2e8f0;
+      --af-text: #0f172a;
+      --af-text-muted: #64748b;
+      --af-text-dim: #94a3b8;
+      --af-text-faint: #64748b;
+
+      --af-panel: #ffffff;
+      --af-panel-border: #e2e8f0;
+      --af-lane-fill: rgba(248, 250, 252, 0.65);
+      --af-lane-stroke: #cbd5e1;
+
+      --af-arrow: #94a3b8;
+      --af-arrow-emphasis: #059669;
+
+      --af-mask: #ffffff;
+
+      --af-frontend-fill:    rgba(34, 211, 238, 0.15);
+      --af-frontend-stroke:  #0891b2;
+      --af-backend-fill:     rgba(52, 211, 153, 0.18);
+      --af-backend-stroke:   #059669;
+      --af-database-fill:    rgba(167, 139, 250, 0.2);
+      --af-database-stroke:  #7c3aed;
+      --af-cloud-fill:       rgba(251, 191, 36, 0.18);
+      --af-cloud-stroke:     #d97706;
+      --af-security-fill:    rgba(251, 113, 133, 0.15);
+      --af-security-stroke:  #e11d48;
+      --af-messagebus-fill:  rgba(251, 146, 60, 0.15);
+      --af-messagebus-stroke:#ea580c;
+      --af-external-fill:    rgba(148, 163, 184, 0.18);
+      --af-external-stroke:  #64748b;
+
+      --af-toolbar-bg:       rgba(255, 255, 255, 0.92);
+      --af-toolbar-border:   #cbd5e1;
+      --af-toolbar-text:     #334155;
+      --af-toolbar-hover:    #ffffff;
+      --af-toolbar-menu-bg:  #ffffff;
+    }
+/* ==========================================================
+       SIGNAL FLOW — an opt-in, motion-forward visual preset.
+       The variables also target a standalone exported SVG, whose
+       root carries data-preset and data-theme directly.
+       ========================================================== */
+    [data-preset="signal-flow"][data-theme="dark"] {
+      --af-bg: #030711;
+      --af-grid: #15233a;
+      --af-panel: rgba(6, 14, 28, 0.78);
+      --af-panel-border: #1d3350;
+      --af-lane-fill: rgba(9, 22, 40, 0.5);
+      --af-lane-stroke: #2c4564;
+      --af-text: #f5fbff;
+      --af-text-muted: #9eb0c7;
+      --af-text-dim: #52667f;
+      --af-text-faint: #7890ad;
+      --af-mask: #07101e;
+      --af-frontend-fill: rgba(6, 182, 212, 0.14);
+      --af-frontend-stroke: #67e8f9;
+      --af-backend-fill: rgba(16, 185, 129, 0.14);
+      --af-backend-stroke: #5eead4;
+      --af-database-fill: rgba(139, 92, 246, 0.16);
+      --af-database-stroke: #c4b5fd;
+      --af-cloud-fill: rgba(245, 158, 11, 0.13);
+      --af-cloud-stroke: #fcd34d;
+      --af-security-fill: rgba(244, 63, 94, 0.13);
+      --af-security-stroke: #fda4af;
+      --af-messagebus-fill: rgba(249, 115, 22, 0.13);
+      --af-messagebus-stroke: #fdba74;
+      --af-external-fill: rgba(71, 85, 105, 0.24);
+      --af-external-stroke: #a5b4c7;
+      --af-arrow: #7890ad;
+      --af-arrow-emphasis: #2dd4bf;
+      --af-toolbar-bg: rgba(7, 16, 30, 0.86);
+      --af-toolbar-border: #29415f;
+      --af-toolbar-menu-bg: #07101e;
+    }
+[data-preset="signal-flow"][data-theme="light"] {
+      --af-bg: #f4f9fc;
+      --af-grid: #d4e5ee;
+      --af-panel: rgba(255, 255, 255, 0.82);
+      --af-panel-border: #bfd5e2;
+      --af-lane-fill: rgba(232, 243, 248, 0.62);
+      --af-lane-stroke: #a9c5d5;
+      --af-text: #102638;
+      --af-text-muted: #587287;
+      --af-text-dim: #8aa2b4;
+      --af-text-faint: #668397;
+      --af-mask: #ffffff;
+      --af-frontend-fill: rgba(6, 182, 212, 0.09);
+      --af-frontend-stroke: #0789a1;
+      --af-backend-fill: rgba(5, 150, 105, 0.09);
+      --af-backend-stroke: #087f69;
+      --af-database-fill: rgba(124, 58, 237, 0.09);
+      --af-database-stroke: #7254c7;
+      --af-cloud-fill: rgba(217, 119, 6, 0.08);
+      --af-cloud-stroke: #b9670b;
+      --af-security-fill: rgba(225, 29, 72, 0.08);
+      --af-security-stroke: #c53a59;
+      --af-messagebus-fill: rgba(234, 88, 12, 0.08);
+      --af-messagebus-stroke: #c65f27;
+      --af-external-fill: rgba(100, 116, 139, 0.1);
+      --af-external-stroke: #607a8c;
+      --af-arrow: #7b97aa;
+      --af-arrow-emphasis: #0d9488;
+    }
+/* ==========================================================
+       BLUEPRINT — a review-first drafting preset for deployment,
+       infrastructure, and technical design documentation. It keeps
+       the same semantic palette and geometry while trading glow for
+       precise grid contrast, squared materials, and drafting marks.
+       ========================================================== */
+    [data-preset="blueprint"][data-theme="dark"] {
+      --af-bg: #06131f;
+      --af-grid: #17425a;
+      --af-panel: rgba(7, 27, 43, 0.9);
+      --af-panel-border: #27627f;
+      --af-lane-fill: rgba(10, 43, 66, 0.36);
+      --af-lane-stroke: #34799a;
+      --af-text: #e3f6ff;
+      --af-text-muted: #91b8ca;
+      --af-text-dim: #557e92;
+      --af-text-faint: #739caf;
+      --af-mask: #0a2031;
+      --af-frontend-fill: rgba(26, 157, 193, 0.14);
+      --af-frontend-stroke: #66d9ef;
+      --af-backend-fill: rgba(31, 155, 124, 0.13);
+      --af-backend-stroke: #69dfbd;
+      --af-database-fill: rgba(120, 105, 196, 0.14);
+      --af-database-stroke: #b4a8ff;
+      --af-cloud-fill: rgba(197, 145, 43, 0.13);
+      --af-cloud-stroke: #ffd166;
+      --af-security-fill: rgba(199, 76, 104, 0.13);
+      --af-security-stroke: #ff8da1;
+      --af-messagebus-fill: rgba(207, 112, 49, 0.13);
+      --af-messagebus-stroke: #ffad66;
+      --af-external-fill: rgba(84, 119, 139, 0.18);
+      --af-external-stroke: #a7cad9;
+      --af-arrow: #78a3b7;
+      --af-arrow-emphasis: #64dfc1;
+      --af-toolbar-bg: rgba(7, 28, 45, 0.92);
+      --af-toolbar-border: #34799a;
+      --af-toolbar-text: #d8f3ff;
+      --af-toolbar-hover: rgba(18, 58, 83, 0.95);
+      --af-toolbar-menu-bg: #0a2031;
+    }
+[data-preset="blueprint"][data-theme="light"] {
+      --af-bg: #edf7fa;
+      --af-grid: #b5d5e1;
+      --af-panel: rgba(249, 253, 255, 0.94);
+      --af-panel-border: #78aabd;
+      --af-lane-fill: rgba(210, 232, 240, 0.42);
+      --af-lane-stroke: #83b2c4;
+      --af-text: #123344;
+      --af-text-muted: #4e7486;
+      --af-text-dim: #86a6b4;
+      --af-text-faint: #668c9d;
+      --af-mask: #f9fdff;
+      --af-frontend-fill: rgba(8, 145, 178, 0.08);
+      --af-frontend-stroke: #087f9c;
+      --af-backend-fill: rgba(5, 128, 101, 0.08);
+      --af-backend-stroke: #08755f;
+      --af-database-fill: rgba(100, 75, 180, 0.08);
+      --af-database-stroke: #6757a8;
+      --af-cloud-fill: rgba(181, 120, 15, 0.08);
+      --af-cloud-stroke: #a86609;
+      --af-security-fill: rgba(190, 48, 80, 0.07);
+      --af-security-stroke: #b32f50;
+      --af-messagebus-fill: rgba(196, 81, 22, 0.07);
+      --af-messagebus-stroke: #b65120;
+      --af-external-fill: rgba(79, 112, 128, 0.08);
+      --af-external-stroke: #506f7e;
+      --af-arrow: #6d93a5;
+      --af-arrow-emphasis: #087f69;
+      --af-toolbar-bg: rgba(247, 252, 254, 0.94);
+      --af-toolbar-border: #8ab5c5;
+      --af-toolbar-text: #294f61;
+      --af-toolbar-hover: #ffffff;
+      --af-toolbar-menu-bg: #f9fdff;
+    }
+/* ==========================================================
+       EDITORIAL — a warm, publication-minded preset for design
+       reviews, launch notes, and documentation. The diagram keeps
+       the same semantic palette and exact geometry, but trades
+       software chrome for paper, ink, ruled structure, and one
+       restrained vermilion accent.
+       ========================================================== */
+    [data-preset="editorial"][data-theme="dark"] {
+      --af-bg: #181611;
+      --af-grid: #39342a;
+      --af-panel: rgba(35, 31, 24, 0.96);
+      --af-panel-border: #625a4a;
+      --af-lane-fill: rgba(52, 46, 35, 0.46);
+      --af-lane-stroke: #726957;
+      --af-text: #f4eddf;
+      --af-text-muted: #b9ae9b;
+      --af-text-dim: #776e60;
+      --af-text-faint: #9d917e;
+      --af-mask: #231f18;
+      --af-frontend-fill: rgba(43, 133, 142, 0.16);
+      --af-frontend-stroke: #7fc6c7;
+      --af-backend-fill: rgba(63, 132, 92, 0.16);
+      --af-backend-stroke: #8fc29e;
+      --af-database-fill: rgba(117, 91, 141, 0.17);
+      --af-database-stroke: #c0a4d0;
+      --af-cloud-fill: rgba(170, 119, 49, 0.16);
+      --af-cloud-stroke: #d8ad68;
+      --af-security-fill: rgba(157, 69, 65, 0.17);
+      --af-security-stroke: #df9085;
+      --af-messagebus-fill: rgba(174, 79, 42, 0.16);
+      --af-messagebus-stroke: #df946f;
+      --af-external-fill: rgba(126, 115, 96, 0.18);
+      --af-external-stroke: #b8ad99;
+      --af-arrow: #948978;
+      --af-arrow-emphasis: #dd6b3d;
+      --af-toolbar-bg: rgba(35, 31, 24, 0.92);
+      --af-toolbar-border: #625a4a;
+      --af-toolbar-text: #eee5d5;
+      --af-toolbar-hover: #302a20;
+      --af-toolbar-menu-bg: #231f18;
+    }
+[data-preset="editorial"][data-theme="light"] {
+      --af-bg: #f2eee5;
+      --af-grid: #d8d0c2;
+      --af-panel: rgba(251, 248, 241, 0.97);
+      --af-panel-border: #c4b9a6;
+      --af-lane-fill: rgba(229, 221, 207, 0.42);
+      --af-lane-stroke: #b8aa94;
+      --af-text: #242018;
+      --af-text-muted: #6f6658;
+      --af-text-dim: #a09788;
+      --af-text-faint: #817767;
+      --af-mask: #fbf8f1;
+      --af-frontend-fill: rgba(31, 117, 126, 0.09);
+      --af-frontend-stroke: #287e84;
+      --af-backend-fill: rgba(42, 119, 75, 0.09);
+      --af-backend-stroke: #397b53;
+      --af-database-fill: rgba(105, 75, 130, 0.09);
+      --af-database-stroke: #765d86;
+      --af-cloud-fill: rgba(157, 103, 31, 0.1);
+      --af-cloud-stroke: #9a671f;
+      --af-security-fill: rgba(153, 58, 52, 0.09);
+      --af-security-stroke: #9e463f;
+      --af-messagebus-fill: rgba(182, 70, 27, 0.09);
+      --af-messagebus-stroke: #ad4b25;
+      --af-external-fill: rgba(101, 91, 75, 0.09);
+      --af-external-stroke: #746b5e;
+      --af-arrow: #8a806f;
+      --af-arrow-emphasis: #bb4c23;
+      --af-toolbar-bg: rgba(251, 248, 241, 0.94);
+      --af-toolbar-border: #c4b9a6;
+      --af-toolbar-text: #40392f;
+      --af-toolbar-hover: #fffdf8;
+      --af-toolbar-menu-bg: #fbf8f1;
+    }
+html[data-preset="signal-flow"][data-theme="light"] body {
+      background-image:
+        radial-gradient(circle at 18% -8%, rgba(6, 182, 212, 0.12), transparent 34rem),
+        radial-gradient(circle at 92% 18%, rgba(139, 92, 246, 0.08), transparent 30rem);
+    }
+html[data-preset="signal-flow"][data-theme="light"] .diagram-container {
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.9), rgba(237, 246, 250, 0.94));
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.72), 0 24px 60px rgba(45, 78, 99, 0.12);
+    }
+html[data-preset="signal-flow"][data-theme="light"] .card {
+      background: linear-gradient(145deg, rgba(255, 255, 255, 0.92), rgba(237, 246, 250, 0.9));
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.82), 0 12px 32px rgba(45, 78, 99, 0.08);
+    }
+[data-theme="light"] #theme-icon {
+      -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'%3E%3Cg fill='none' stroke='black' stroke-width='1.7' stroke-linecap='round'%3E%3Ccircle cx='10' cy='10' r='3.1'/%3E%3Cpath d='M10 2.2v1.4M10 16.4v1.4M2.2 10h1.4M16.4 10h1.4M4.5 4.5l1 1M14.5 14.5l1 1M15.5 4.5l-1 1M5.5 14.5l-1 1'/%3E%3C/g%3E%3C/svg%3E");
+      mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'%3E%3Cg fill='none' stroke='black' stroke-width='1.7' stroke-linecap='round'%3E%3Ccircle cx='10' cy='10' r='3.1'/%3E%3Cpath d='M10 2.2v1.4M10 16.4v1.4M2.2 10h1.4M16.4 10h1.4M4.5 4.5l1 1M14.5 14.5l1 1M15.5 4.5l-1 1M5.5 14.5l-1 1'/%3E%3C/g%3E%3C/svg%3E");
+    }
+[data-theme="dark"] #theme-icon {
+      -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'%3E%3Cpath d='M15.2 12.7A6.3 6.3 0 017.3 4.8a6.3 6.3 0 107.9 7.9Z' fill='none' stroke='black' stroke-width='1.7' stroke-linejoin='round'/%3E%3C/svg%3E");
+      mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'%3E%3Cpath d='M15.2 12.7A6.3 6.3 0 017.3 4.8a6.3 6.3 0 107.9 7.9Z' fill='none' stroke='black' stroke-width='1.7' stroke-linejoin='round'/%3E%3C/svg%3E");
+    }
+/* ==========================================================
+       SVG SEMANTIC CLASSES — use these instead of inline fill/stroke
+       ========================================================== */
+    .c-grid       { stroke: var(--af-grid); fill: none; }
+.c-mask       { fill: var(--af-mask); stroke: none; }
+.c-backend    { fill: var(--af-backend-fill);    stroke: var(--af-backend-stroke); }
+.c-database   { fill: var(--af-database-fill);   stroke: var(--af-database-stroke); }
+.c-cloud      { fill: var(--af-cloud-fill);      stroke: var(--af-cloud-stroke); }
+.c-security   { fill: var(--af-security-fill);   stroke: var(--af-security-stroke); }
+.c-messagebus { fill: var(--af-messagebus-fill); stroke: var(--af-messagebus-stroke); }
+.c-external   { fill: var(--af-external-fill);   stroke: var(--af-external-stroke); }
+/* Text helpers */
+    .t-primary { fill: var(--af-text); }
+.t-muted   { fill: var(--af-text-muted); }
+.t-backend    { fill: var(--af-backend-stroke); }
+.t-database   { fill: var(--af-database-stroke); }
+.t-cloud      { fill: var(--af-cloud-stroke); }
+.t-security   { fill: var(--af-security-stroke); }
+.t-messagebus { fill: var(--af-messagebus-stroke); }
+/* Semantic Sigils are small authored role stamps, not icons from a brand
+       pack and not viewer controls. Prefix selectors with svg so the canonical
+       export's SVG-only stylesheet collector keeps them automatically. */
+    svg .semantic-sigil {
+      fill: none;
+      stroke: currentColor;
+      stroke-width: 1.35;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      opacity: 0.76;
+      pointer-events: none;
+    }
+svg .semantic-sigil > * { vector-effect: non-scaling-stroke; }
+svg .semantic-sigil .sigil-fill { fill: currentColor; stroke: none; }
+svg .s-backend    { color: var(--af-backend-stroke); }
+svg .s-database   { color: var(--af-database-stroke); }
+svg .s-cloud      { color: var(--af-cloud-stroke); }
+svg .s-security   { color: var(--af-security-stroke); }
+svg .s-messagebus { color: var(--af-messagebus-stroke); }
+svg .s-external   { color: var(--af-external-stroke); }
+/* Arrows */
+    .a-default   { stroke: var(--af-arrow); fill: none; }
+.a-emphasis  { stroke: var(--af-arrow-emphasis); fill: none; }
+.a-security  { stroke: var(--af-security-stroke); fill: none; stroke-dasharray: 5,5; }
+.a-dashed    { stroke: var(--af-database-stroke); fill: none; stroke-dasharray: 4,4; }
+/* Arrowhead markers reference these */
+    .m-default   { fill: var(--af-arrow); }
+.m-emphasis  { fill: var(--af-arrow-emphasis); }
+.m-security  { fill: var(--af-security-stroke); }
+.m-dashed    { fill: var(--af-database-stroke); }
+svg[data-preset="editorial"] .c-grid {
+      stroke-dasharray: 1 4;
+      opacity: 0.48;
+    }
+svg[data-preset="editorial"] .c-region {
+      fill: color-mix(in srgb, var(--af-cloud-fill) 48%, transparent);
+      stroke-dasharray: 9 4;
+    }
+svg[data-preset="blueprint"] .c-grid {
+      stroke-dasharray: 1 3;
+      opacity: 0.78;
+    }
+svg[data-preset="blueprint"] .c-region {
+      fill: color-mix(in srgb, var(--af-cloud-fill) 58%, transparent);
+      stroke-dasharray: 12 4 2 4;
+    }
+svg[data-preset="blueprint"] .c-security-group,
+    svg[data-preset="blueprint"] .c-lane { stroke-dasharray: 7 3; }
+/* Dashed boundary variants */
+    .c-security-group { fill: transparent; stroke: var(--af-security-stroke); stroke-dasharray: 4,4; }
+.c-region         { fill: rgba(251, 191, 36, 0.05); stroke: var(--af-cloud-stroke); stroke-dasharray: 8,4; }
+</style>
+</head>
+<body>
+<div id="progress"></div>
+<div id="tocScrim"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
+    <a class="brand" href="../../index.html"><span class="dot"></span>知识笔记</a>
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="toc" id="toc">
+      <p class="toc-title">目录</p>
+      <a href="../../index.html" class="sub">← 全部笔记</a>
+      <a href="#概念一个最近-n-天有多少种说法">概念：一个「最近 N 天」有多少种说法</a>
+      <a href="#描述一个时间条件的-9-个字段" class="sub">描述一个时间条件的 9 个字段</a>
+      <a href="#组织273-行分四块">组织：273 行分四块</a>
+      <a href="#两个生成器" class="sub">两个生成器</a>
+      <a href="#架构gettimerules-分派到三条路">架构：getTimeRules 分派到三条路</a>
+      <a href="#细节三条路各生成什么">细节：三条路各生成什么</a>
+      <a href="#①-timestamp-毫秒时间戳只给事件用" class="sub">① Timestamp —— 毫秒时间戳（只给事件用）</a>
+      <a href="#②-unixtimestamp-秒时间戳画像" class="sub">② UnixTimestamp —— 秒时间戳（画像）</a>
+      <a href="#③-date-yyyymmdd" class="sub">③ Date —— YYYYMMDD</a>
+      <a href="#细节三个容易踩的地方">细节：三个容易踩的地方</a>
+      <a href="#①-两个包含今天的参数管的不是一回事" class="sub">① 两个「包含今天」的参数，管的不是一回事</a>
+      <a href="#②-有些组合被校验挡掉" class="sub">② 有些组合被校验挡掉</a>
+      <a href="#③-为什么-lt-必须补一个-gt-0" class="sub">③ 为什么 &amp;lt; 必须补一个 &amp;gt; 0</a>
+      <a href="#自测">自测</a>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow">● 从零理解 · 模块</span>
+      <h1>sql_builder_v2 的时间表达式</h1>
+      <p class="lede">「最近 7 天」在代码里有多少种说法、为什么一个日期要分三条实现路径、两个「包含今天」的参数各自管什么，以及为什么 `&lt;` 必须补一个 `&gt; 0`。</p>
+    </div>
+
+    <div class="draft-banner">
+    <span>⚠</span>
+    <span>本页状态为 <b>draft</b>：内容尚未人工核对，引用前请自行验证。</span>
+  </div>
+<aside class="needs">
+      <p class="needs-title">读这篇之前，你需要先知道</p>
+      <a class="need" href="../sql-builder-v2-core/">← <b>4. core 篇</b><span>通用层：递归六层讲一遍</span></a>
+    </aside>
+    <div class="provenance"><span><b>来源</b> sources/gitlab/sql_builder_v2 @ 2c500b2</span><span><b>生成</b> 2026-09-26</span><span><b>模型</b> deepseek-v4.1-flash</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">架构</span> <span class="tag tone-muted">SQL</span> <span class="tag tone-muted">TypeScript</span> <span class="tag tone-muted">圈人</span></span></div>
+
+<div class="callout tone-blue">
+      <span class="ic">🧭</span>
+      <div><p>前置是 <a href="../sql-builder-v2-core/">④ core 篇</a>。</p>
+<p>core 篇说 <code>utils.ts</code> 675 行是个杂物抽屉，时间表达式是里面最大的一块（<strong>273 行</strong>）。
+这篇把它拆开。</p>
+<p>读完你应该能说出：「<mark class="mk-blue">一个「最近 7 天」，代码里有三种完全不同的 SQL 形态。</mark>」</p>
+</div>
+    </div><h2 id="概念一个最近-n-天有多少种说法"><span class="num">01</span>概念：一个「最近 N 天」有多少种说法</h2>
+<p>业务侧说「最近 7 天」，一句话。但它落到 SQL 上要回答<strong>三个问题</strong>：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>问题</th><th>有几种答案</th><th>为什么要分</th></tr></thead><tbody><tr><th>是绝对时间还是相对时间</th><td data-label="有几种答案">2 种</td><td data-label="为什么要分">绝对时间就是一个值，相对时间要算</td></tr><tr><th>底层存的是什么格式</th><td data-label="有几种答案"><strong>3 种</strong></td><td data-label="为什么要分">毫秒时间戳 / 秒时间戳 / <code>YYYYMMDD</code></td></tr><tr><th>要不要包含今天</th><td data-label="有几种答案">2 种</td><td data-label="为什么要分">不包含就是「到今天 0 点」，包含就是「到此刻」</td></tr></tbody></table></div><p><strong>三个问题相乘，就是 12 种组合。</strong> 这就是为什么这个模块有 273 行。</p>
+<h3 id="描述一个时间条件的-9-个字段">描述一个时间条件的 9 个字段</h3>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">export type TimeExpr = {
+    op: Op;                                  // &gt; &gt;= &lt; &lt;=
+    name: string;                            // 列名
+    value: number;                           // N（天数 / 小时数）
+    dateType: DateType;                      // absolute | relative
+    dateFormat: DateFormat;                  // timestamp | unixTimestamp | date
+    includeToday: 0 | 1;                     // Tag 场景：包含当天吗
+    latestIncludeToday: 0 | 1 | undefined;   // Crowd 场景：最近 N 天包含当天吗
+    relativeDateType?: RelativeDateType;     // fromToday | singleDay
+    dateUnit: DateUnit;                      // day | hour
+};
+</code></pre></div>
+<div class="callout tone-amber">
+      <span class="ic">⚠</span>
+      <div><p><mark class="mk-blue"><strong>注意中间那两个「包含今天」的参数。</strong></mark></p>
+<p><code>includeToday</code> 和 <code>latestIncludeToday</code> —— 名字很像，但<strong>管的是不同场景</strong>，
+而且各有各的生效条件（下一节细说）。</p>
+<p><mark class="mk-blue">参数多到需要注释说明「这个字段只在某几个场景生效」，
+是这类模块的典型特征。</mark></p>
+</div>
+    </div><h2 id="组织273-行分四块"><span class="num">02</span>组织：273 行分四块</h2>
+<div class="pipe"><div class="lane tone-muted">
+        <div class="lane-meta">
+          
+          <b>四个枚举</b>
+          <small>定义「有哪几种可能」</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>DateType</b>
+        <small>absolute / relative</small>
+        
+      </div><div class="pnode">
+        <b>RelativeDateType</b>
+        <small>fromToday / singleDay</small>
+        
+      </div><div class="pnode">
+        <b>DateFormat</b>
+        <small>timestamp / unixTimestamp / date</small>
+        
+      </div><div class="pnode">
+        <b>DateUnit</b>
+        <small>day / hour</small>
+        
+      </div></div>
+      </div><div class="lane tone-green">
+        <div class="lane-meta">
+          
+          <b>两个生成器</b>
+          <small>拼出最终的条件数组</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>generateLatestDaysRules</b>
+        <small>「最近 N 天」→ 两个条件</small>
+        
+      </div><div class="pnode">
+        <b>generatePrevDaysRules</b>
+        <small>「N 天前」→ 一个条件</small>
+        
+      </div></div>
+      </div><div class="lane tone-violet">
+        <div class="lane-meta">
+          
+          <b>三个实现</b>
+          <small>按底层格式分</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>getTimestampRules</b>
+        <small>毫秒时间戳（只给事件用）</small>
+        
+      </div><div class="pnode">
+        <b>getUnixTimestampRules</b>
+        <small>秒时间戳（画像）</small>
+        
+      </div><div class="pnode">
+        <b>getDateRules</b>
+        <small>YYYYMMDD（画像）</small>
+        
+      </div></div>
+      </div><div class="lane tone-blue">
+        <div class="lane-meta">
+          
+          <b>一个入口</b>
+          <small>分派 + 校验</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>getTimeRules</b>
+        <small>按 dateFormat 分到三条路</small>
+        
+      </div><div class="pnode">
+        <b>timeExprValidate</b>
+        <small>校验非法组合</small>
+        
+      </div></div>
+      </div></div><div class="callout tone-violet">
+      <span class="ic">💡</span>
+      <div><p><strong>这个结构很清晰：四个枚举定义可能性，两个生成器负责拼装，
+三个实现各管一种格式，一个入口做分派。</strong></p>
+<p><mark class="mk-blue">三个实现都调同一个生成器 —— 差异只在「起止时间怎么算出来」。</mark></p>
+</div>
+    </div><h3 id="两个生成器">两个生成器</h3>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">// 「最近 N 天」→ 两个条件
+export function generateLatestDaysRules(column, startRaw, endRaw, includeEnd = false) {
+    return [
+        { column, op: Op.Gte, rawValue: startRaw },
+        { column, op: includeEnd ? Op.Lte : Op.Lt, rawValue: endRaw }
+    ];
+}
+
+// 「N 天前」→ 一个条件
+function generatePrevDaysRules(column, rawValue) {
+    return [{ column, op: Op.Lt, rawValue }];
+}
+</code></pre></div>
+<div class="callout tone-amber">
+      <span class="ic">⚠</span>
+      <div><p><strong><code>includeEnd</code> 决定上界是 <code>&lt;</code> 还是 <code>&lt;=</code>。</strong></p>
+<p>这个布尔值一路从 <code>getUnixTimestampRules</code> 传进来（那里的 <code>exact</code> 变量）。</p>
+<p><mark class="mk-blue">「到此刻」和「到 0 点」的区别，最终就落在这一个符号上。</mark></p>
+</div>
+    </div><h2 id="架构gettimerules-分派到三条路"><span class="num">03</span>架构：<code>getTimeRules</code> 分派到三条路</h2>
+<div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;in&quot;,&quot;to&quot;:&quot;q0&quot;},{&quot;from&quot;:&quot;q0&quot;,&quot;to&quot;:&quot;abs&quot;,&quot;label&quot;:&quot;否（绝对时间）&quot;,&quot;dashed&quot;:true},{&quot;from&quot;:&quot;q0&quot;,&quot;to&quot;:&quot;v&quot;,&quot;label&quot;:&quot;是&quot;},{&quot;from&quot;:&quot;v&quot;,&quot;to&quot;:&quot;q&quot;},{&quot;from&quot;:&quot;q&quot;,&quot;to&quot;:&quot;ts&quot;,&quot;label&quot;:&quot;timestamp&quot;},{&quot;from&quot;:&quot;q&quot;,&quot;to&quot;:&quot;unix&quot;,&quot;label&quot;:&quot;unixTimestamp&quot;},{&quot;from&quot;:&quot;q&quot;,&quot;to&quot;:&quot;date&quot;,&quot;label&quot;:&quot;date&quot;},{&quot;from&quot;:&quot;q&quot;,&quot;to&quot;:&quot;bad&quot;,&quot;label&quot;:&quot;其它&quot;,&quot;dashed&quot;:true},{&quot;from&quot;:&quot;ts&quot;,&quot;to&quot;:&quot;out&quot;},{&quot;from&quot;:&quot;unix&quot;,&quot;to&quot;:&quot;out&quot;},{&quot;from&quot;:&quot;date&quot;,&quot;to&quot;:&quot;out&quot;}]">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-green" data-id="in">
+              
+              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5L3 8l3 4.5M10 3.5L13 8l-3 4.5"/></svg>
+              <b>getTimeRules(rule, isTag)</b>
+              <small>一个 TimeExpr</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-amber shape-note" data-id="q0">
+              
+              
+              <b>dateType 是 relative？</b>
+              
+            </div></div><div class="flowd-row"><div class="fnode tone-muted" data-id="abs">
+              
+              
+              <b>直接一个条件</b>
+              <small>{ op, column, value }</small>
+            </div><div class="fnode tone-amber" data-id="v">
+              
+              
+              <b>timeExprValidate</b>
+              <small>校验非法组合</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-violet shape-note" data-id="q">
+              
+              
+              <b>switch (dateFormat)</b>
+              
+            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="ts">
+              
+              
+              <b>getTimestampRules</b>
+              <small>毫秒时间戳</small>
+            </div><div class="fnode tone-green" data-id="unix">
+              
+              
+              <b>getUnixTimestampRules</b>
+              <small>秒时间戳</small>
+            </div><div class="fnode tone-blue" data-id="date">
+              
+              
+              <b>getDateRules</b>
+              <small>YYYYMMDD</small>
+            </div><div class="fnode tone-red" data-id="bad">
+              
+              
+              <b>throw</b>
+              <small>非法 dateFormat</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="out">
+              
+              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="8" cy="4.2" rx="5" ry="1.9"/><path d="M3 4.2v7.6c0 1.05 2.24 1.9 5 1.9s5-.85 5-1.9V4.2"/></svg>
+              <b>Expression[]</b>
+              <small>一个或多个条件</small>
+            </div></div></div>
+      
+    </div><div class="callout tone-green">
+      <span class="ic">✅</span>
+      <div><p><mark class="mk-blue"><strong>注意最上面那个分支：绝对时间不展开。</strong></mark></p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">if (dateType !== DateType.Relative) {
+    return [{ op, column: name, value }];
+}
+</code></pre></div>
+</div>
+    </div><p>「2026-03-01 那天」就是一个值，不需要算。
+<mark class="mk-blue">只有相对时间才需要「展开成多个条件」。</mark></p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code>
+### 谁在调它
+
+```text
+getTimeRules 被三个文件调用：
+  crowd/src/entrepots/portrait.ts    ← 画像条件
+  crowd/src/entrepots/event.ts       ← 事件条件
+  crowd/src/entrepots/relation.ts    ← 关系条件
+</code></pre></div>
+<div class="callout tone-amber">
+      <span class="ic">⚠</span>
+      <div><p><mark class="mk-blue"><strong>改这个函数要同时考虑三条调用路径。</strong></mark></p>
+<p>而且 <code>isTag</code> 这个参数就是从调用方传进来的
+（<code>this._type === Modules.Tag</code>）—— 意味着<strong>同一个时间条件在「标签」和「分群」
+两个场景下行为不一样</strong>。</p>
+<p><mark class="mk-blue">这是它参数多的根本原因：它要服务三个调用方 × 两个场景。</mark></p>
+</div>
+    </div><h2 id="细节三条路各生成什么"><span class="num">04</span>细节：三条路各生成什么</h2>
+<h3 id="①-timestamp-毫秒时间戳只给事件用">① <code>Timestamp</code> —— 毫秒时间戳（只给事件用）</h3>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">// 注释写得很明确：
+// 目前仅有 事件使用 ms 时间戳形式，而事件仅支持 最近N 天的相对时间
+if (!isLatestDays(op)) {
+    throw new Error(`相对时间操作符错误，timestamp 当前仅支持 &gt; 和 &gt;=`);
+}
+</code></pre></div>
+<p><strong>生成的东西</strong>（<code>gap = 7</code>）：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-sql">`event_time` &gt;= UNIX_TIMESTAMP(DS_DATETIME_ADD('day', -7, FROM_UNIXTIME(UNIX_TIMESTAMP(), '%Y-%m-%d 00:00:00'))) * 1000
+`event_time` &lt;  UNIX_TIMESTAMP(FROM_UNIXTIME(UNIX_TIMESTAMP(), '%Y-%m-%d 00:00:00')) * 1000
+</code></pre></div>
+<div class="callout tone-violet">
+      <span class="ic">💡</span>
+      <div><p><mark class="mk-blue"><strong>注意最外层那个 <code>* 1000</code>。</strong></mark></p>
+<p>因为 <code>event_time</code> 存的是<strong>毫秒</strong>时间戳，
+而 <code>UNIX_TIMESTAMP()</code> 返回的是<strong>秒</strong>。</p>
+<p>这就是为什么 <a href="../sql-builder-v2-core-dialect/">⑥ 方言篇</a> 里
+Doris 要自己实现一遍 —— Doris 的 <code>event_time</code> 是 <code>DATETIME</code>，
+不能套这层包装。</p>
+</div>
+    </div><h3 id="②-unixtimestamp-秒时间戳画像">② <code>UnixTimestamp</code> —— 秒时间戳（画像）</h3>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">const isLastestDayExactFlag = dateUnit === DateUnit.Day &amp;&amp; isLatestDays(op) &amp;&amp; latestIncludeToday;
+// 是否记录精确值
+const exact = isTag || dateUnit !== DateUnit.Day || isLastestDayExactFlag;
+
+const border = exact ? 'NOW()' : `FROM_UNIXTIME(UNIX_TIMESTAMP(), '${pattern}')`;
+</code></pre></div>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>exact</th><th>起点怎么算</th><th>终点怎么算</th></tr></thead><tbody><tr><th>true</th><td data-label="起点怎么算"><span class="tag tone-blue">`NOW()` —— 精确到此刻</span></td><td data-label="终点怎么算"><code>UNIX_TIMESTAMP()</code> —— 此刻</td></tr><tr><th>false</th><td data-label="起点怎么算"><span class="tag tone-green">`FROM_UNIXTIME(UNIX_TIMESTAMP(), '%Y-%m-%d 00:00:00')` —— 今天 0 点</span></td><td data-label="终点怎么算">今天 0 点</td></tr></tbody></table></div><div class="callout tone-violet">
+      <span class="ic">💡</span>
+      <div><p><strong><code>exact</code> 由三件事决定：</strong></p>
+<ul>
+<li><code>isTag</code> —— 标签场景要精确</li>
+<li><code>dateUnit !== Day</code> —— 小时粒度必须精确</li>
+<li><code>latestIncludeToday</code> —— 明确要求包含当天</li>
+</ul>
+<p><mark class="mk-blue">三个条件里任意一个成立，就从「今天 0 点」变成「此刻」。</mark></p>
+</div>
+    </div><h3 id="③-date-yyyymmdd">③ <code>Date</code> —— <code>YYYYMMDD</code></h3>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">const startGap = isTag &amp;&amp; includeToday ? gap - 1 : gap;
+const endGap   = isTag &amp;&amp; includeToday ? 0 : 1;
+
+return generateLatestDaysRules(
+    column,
+    `DS_DATE_ADD(NOW(), ${-startGap})`,
+    `DS_DATE_ADD(NOW(), ${-endGap})`,
+    true
+);
+</code></pre></div>
+<div class="callout tone-amber">
+      <span class="ic">⚠</span>
+      <div><p><strong><code>YYYYMMDD</code> 是日期字符串，所以加减要按「天」算 ——
+用 <code>DS_DATE_ADD</code> 而不是 <code>DS_DATETIME_ADD</code>。</strong></p>
+<p><mark class="mk-blue">三条路用的函数完全不同：</mark></p>
+<table>
+<thead>
+<tr>
+<th>格式</th>
+<th>加减函数</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>毫秒时间戳</td>
+<td><code>DS_DATETIME_ADD('day', ...)</code></td>
+</tr>
+<tr>
+<td>秒时间戳</td>
+<td><code>DS_DATETIME_ADD('${dateUnit}', ...)</code></td>
+</tr>
+<tr>
+<td><code>YYYYMMDD</code></td>
+<td><code>DS_DATE_ADD(NOW(), ...)</code></td>
+</tr>
+</tbody>
+</table>
+</div>
+    </div><h2 id="细节三个容易踩的地方"><span class="num">05</span>细节：三个容易踩的地方</h2>
+<h3 id="①-两个包含今天的参数管的不是一回事">① 两个「包含今天」的参数，管的不是一回事</h3>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">includeToday: 0 | 1;
+// &quot;Tag 下 日期类 是否包含当天&quot;；Module Tag + dateFormat = 'date' 专用，其它场景会被忽略
+
+latestIncludeToday: 0 | 1 | undefined;
+// &quot;Crowd 下时间类 最近 X 天 是否包含当天&quot;；
+// Module Crowd + DateType === 'relative' + dateUnit === DateUnit.Day 专用，其它场景会被忽略
+</code></pre></div>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>参数</th><th>生效条件</th><th>影响谁</th></tr></thead><tbody><tr><th><code>includeToday</code></th><td data-label="生效条件"><code>Module Tag</code> + <code>dateFormat = 'date'</code></td><td data-label="影响谁"><code>getDateRules</code></td></tr><tr><th><code>latestIncludeToday</code></th><td data-label="生效条件"><code>Module Crowd</code> + <code>relative</code> + <code>dateUnit = Day</code></td><td data-label="影响谁"><code>getUnixTimestampRules</code> 的 <code>exact</code></td></tr></tbody></table></div><div class="callout tone-red">
+      <span class="ic">⚠</span>
+      <div><p><mark class="mk-blue"><strong>两个参数的注释里都写着「其它场景会被忽略」。</strong></mark></p>
+<p>也就是说：<strong>传了不一定生效</strong>。传错场景等于没传。</p>
+<p>这种设计很难说是好的 —— 但它反映了真实情况：
+<mark class="mk-blue">「包含当天」在不同场景下语义不同，硬合成一个参数会更糟。</mark></p>
+</div>
+    </div><h3 id="②-有些组合被校验挡掉">② 有些组合被校验挡掉</h3>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">function timeExprValidate(expr) {
+    if (expr.dateUnit === DateUnit.Hour &amp;&amp; expr.dateFormat !== DateFormat.UnixTimestamp) {
+        throw new Error(`只有 ${DateFormat.UnixTimestamp} 支持&quot;小时&quot;粒度...`);
+    }
+
+    if (expr.relativeDateType === RelativeDateType.SingleDay
+        &amp;&amp; expr.dateFormat !== DateFormat.Timestamp) {
+        throw new Error(`【距今 X 天】，目前仅支持 ${DateFormat.Timestamp}...`);
+    }
+}
+</code></pre></div>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>组合</th><th>合法吗</th><th>为什么</th></tr></thead><tbody><tr><th>小时 + 毫秒时间戳</th><td data-label="合法吗"><span class="tag tone-red">❌</span></td><td data-label="为什么">只有画像支持小时粒度</td></tr><tr><th>小时 + YYYYMMDD</th><td data-label="合法吗"><span class="tag tone-red">❌</span></td><td data-label="为什么">日期字符串没有小时</td></tr><tr><th>单天 + 非时间戳</th><td data-label="合法吗"><span class="tag tone-red">❌</span></td><td data-label="为什么">「距今 X 天」是事件专有的说法</td></tr><tr><th>单天 + 毫秒时间戳</th><td data-label="合法吗"><span class="tag tone-green">✅</span></td><td data-label="为什么">合法</td></tr></tbody></table></div><div class="callout tone-green">
+      <span class="ic">✅</span>
+      <div><p><strong>校验放在展开之前（<code>getTimeRules</code> 里调），不是各个实现里。</strong></p>
+<p>好处是<strong>错误信息统一、早失败</strong>。
+<mark class="mk-blue">而不是等进了 <code>getTimestampRules</code> 才发现「这个组合不该进来」。</mark></p>
+</div>
+    </div><h3 id="③-为什么-lt-必须补一个-gt-0">③ 为什么 <code>&lt;</code> 必须补一个 <code>&gt; 0</code></h3>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">// crowd/src/entrepots/portrait.ts
+function addHackRules(columnName: string, op: Op, rules: Expression[]): Expression[] {
+    // 对于 &lt; 和 &lt;= 的时间范围，需要加上 `&gt; 0` 的限制条件
+    // 否则会筛选出值为 0 的数据
+    if ([Op.Lt, Op.Lte].includes(op)) {
+        return rules.concat({ op: Op.Gt, column: columnName, value: 0 });
+    }
+    return rules;
+}
+</code></pre></div>
+<div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-muted">场景</span>
+            <span class="name">业务说</span>
+            <span class="spacer"></span>
+            
+          </div>
+          
+          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>「开户时间在 7 天前之前」（op = '&lt;'）
+</pre></div>
+          <p class="jnote">意思是「老用户」。</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">展开<span class="note">生成一个条件</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-violet">展开后</span>
+            <span class="name">一个条件</span>
+            <span class="spacer"></span>
+            
+          </div>
+          
+          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>`opened_time` &lt; 开始时间
+</pre></div>
+          <p class="jnote">看起来没问题。</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">但<span class="note">库里有一批值是 0</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-red">问题</span>
+            <span class="name">值为 0 的行也被选中</span>
+            <span class="spacer"></span>
+            
+          </div>
+          
+          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>`opened_time` = 0  &lt;  开始时间   → true
+</pre></div>
+          <p class="jnote"><mark class="mk-blue">在时间戳语义里，<code>0</code> 代表「从没发生过」。</mark>
+
+这个人从来没开过户，但 <code>0 &lt; 开始时间</code> 成立 ——
+<strong>他被当成了「很久以前开过户的老用户」。</strong></p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">补丁<span class="note">加一个下限</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-green">修复</span>
+            <span class="name">加一个 `&gt; 0`</span>
+            <span class="spacer"></span>
+            
+          </div>
+          
+          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>`opened_time` &lt; 开始时间
+AND `opened_time` &gt; 0
+</pre></div>
+          <p class="jnote">把「从没发生过」的人排除掉。<mark class="mk-blue">语义就对了。</mark></p>
+        </div><div class="callout tone-amber">
+      <span class="ic">⚠</span>
+      <div><p><strong>这个补丁叫 <code>addHackRules</code> —— 名字里的 <code>Hack</code> 是诚实的。</strong></p>
+<p>它不是设计的一部分，是<strong>修补一个语义漏洞</strong>：
+「0 代表没发生过」这个约定没有在数据模型里表达出来，
+只能在查询时手工排除。</p>
+<p><mark class="mk-blue">而它在 <code>portrait.ts</code> 和 <code>relation.ts</code> 里各有一份，逐字节相同。</mark>
+（⑧ crowd 篇讲过这个重复。）</p>
+</div>
+    </div><h2 id="自测"><span class="num">06</span>自测</h2>
+<div class="quiz"><details>
+        <summary>一个「最近 7 天」在代码里有几种 SQL 形态？为什么？</summary>
+        <div class="a"><p><strong>三种</strong>，按底层存的格式分：</p>
+<ul>
+<li><code>Timestamp</code>（毫秒时间戳）—— 只给事件用，且只支持 <code>&gt;</code> / <code>&gt;=</code></li>
+<li><code>UnixTimestamp</code>（秒时间戳）—— 画像</li>
+<li><code>Date</code>（<code>YYYYMMDD</code>）—— 画像
+三条路用的加减函数都不同（<code>DS_DATETIME_ADD</code> vs <code>DS_DATE_ADD</code>），
+起止时间算法也不同。</li>
+</ul>
+</div>
+      </details><details>
+        <summary>为什么毫秒时间戳那条路要 <code>* 1000</code>？</summary>
+        <div class="a"><p>因为 <code>event_time</code> 存的是<strong>毫秒</strong>时间戳，而 <code>UNIX_TIMESTAMP()</code> 返回<strong>秒</strong>。
+这也是 <a href="../sql-builder-v2-core-dialect/">⑥ 方言篇</a> 里 Doris 要自己实现一遍的原因 ——
+Doris 的 <code>event_time</code> 是 <code>DATETIME</code>，不能套这层包装。</p>
+</div>
+      </details><details>
+        <summary><code>includeToday</code> 和 <code>latestIncludeToday</code> 是同一回事吗？</summary>
+        <div class="a"><p><strong>不是。</strong> <code>includeToday</code> 是 <code>Module Tag</code> + <code>dateFormat = 'date'</code> 专用；
+<code>latestIncludeToday</code> 是 <code>Module Crowd</code> + <code>relative</code> + <code>dateUnit = Day</code> 专用。
+两个参数的注释里都写着「其它场景会被忽略」——
+<mark class="mk-blue">也就是说传了不一定生效。</mark></p>
+</div>
+      </details><details>
+        <summary><code>getTimeRules</code> 处理绝对时间时会展开吗？</summary>
+        <div class="a"><p><strong>不会。</strong> 它直接返回一个条件：<code>[{ op, column: name, value }]</code>。
+因为「2026-03-01 那天」就是一个值，不需要算。
+<mark class="mk-blue">只有相对时间才需要展开成多个条件。</mark></p>
+</div>
+      </details><details>
+        <summary>为什么 <code>&lt;</code> 的时间条件要额外补一个 <code>&gt; 0</code>？</summary>
+        <div class="a"><p>因为时间戳语义里 <code>0</code> 代表「<strong>从没发生过</strong>」。
+比如「开户时间在 7 天前之前」意思是「老用户」，
+但一个从没开过户的人 <code>opened_time = 0</code>，<code>0 &lt; 开始时间</code> 成立 ——
+<mark class="mk-blue">他被当成了老用户</mark>。补一个 <code>&gt; 0</code> 把这些人排除掉。</p>
+</div>
+      </details><details>
+        <summary>改 <code>getTimeRules</code> 时要注意什么？</summary>
+        <div class="a"><p>它被<strong>三个文件</strong>调用：<code>portrait.ts</code> / <code>event.ts</code> / <code>relation.ts</code>。
+而且 <code>isTag</code> 参数是从调用方传进来的（<code>this._type === Modules.Tag</code>）——
+<mark class="mk-blue">同一个时间条件在「标签」和「分群」两个场景下行为不一样。</mark>
+这就是它参数多的根本原因：服务三个调用方 × 两个场景。</p>
+</div>
+      </details></div>
+
+    <footer>
+      <span>sql_builder_v2 的时间表达式</span>
+      <span>最后更新 2026-09-26 · 单文件可离线打开</span>
+    </footer>
+  </main>
+</div>
+
+<script>
+/* ============================================================
+   app.js — 全站交互
+   ------------------------------------------------------------
+   1. 主题切换（跟随系统 + localStorage）
+   2. 目录开合（宽屏收起 / 窄屏抽屉）
+   3. 阅读进度条
+   4. 目录滚动高亮
+   5. 代码块复制
+   6. 自测题（原生 <details>，这里只做增强）
+   7. 交互演示控件注册表 WIDGETS
+   ============================================================ */
+(() => {
+  /* localStorage 在隐私模式、部分 file:// 场景下会抛异常。
+     统一包一层，失败就静默降级成「不记忆」，不阻断页面。 */
+  const store = {
+    get(k) { try { return localStorage.getItem(k); } catch { return null; } },
+    set(k, v) { try { localStorage.setItem(k, v); } catch { /* 忽略 */ } },
+  };
+
+  /* createElement 简写：控件拼 DOM 用它，不用 innerHTML。
+     内容虽然是写死的常量，但习惯一旦养成，真带用户输入时就会忘转义。 */
+  function h(tag, opts, kids) {
+    const el = document.createElement(tag);
+    opts = opts || {};
+    if (opts.cls) el.className = opts.cls;
+    if (opts.text !== undefined && opts.text !== null) el.textContent = String(opts.text);
+    if (opts.attrs) Object.keys(opts.attrs).forEach((k) => el.setAttribute(k, opts.attrs[k]));
+    (kids || []).forEach((k) => { if (k) el.appendChild(k); });
+    return el;
+  }
+  /** 清空并填入子节点（不用 innerHTML） */
+  function fill(el, kids) {
+    while (el.firstChild) el.removeChild(el.firstChild);
+    (kids || []).forEach((k) => el.appendChild(k));
+  }
+
+  /* ---------- 1. 主题 ---------- */
+  (function theme() {
+    const root = document.documentElement;
+    const saved = store.get('kh-theme');
+    const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+    root.setAttribute('data-theme', saved || (prefersDark ? 'dark' : 'light'));
+
+    const btn = document.getElementById('themeBtn');
+    if (btn) btn.addEventListener('click', () => {
+      const next = root.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+      root.setAttribute('data-theme', next);
+      store.set('kh-theme', next);
+    });
+  })();
+
+  /* ---------- 2. 目录开合 ----------
+     宽屏：目录是一列，收起时宽度变 0；窄屏：变成左侧抽屉。
+     两者的开合状态都记在 <html data-toc> 上，样式在 theme.css。
+  ------------------------------------------------ */
+  (function tocToggle() {
+    const root = document.documentElement;
+    const btn = document.getElementById('tocBtn');
+    if (!btn || root.getAttribute('data-has-toc') !== '1') return;
+
+    const narrow = () => window.matchMedia('(max-width: 1080px)').matches;
+
+    // 窄屏不恢复「展开」—— 否则一进页就弹抽屉
+    root.setAttribute('data-toc', narrow() ? 'closed' : store.get('kh-toc') || 'open');
+
+    function set(state) {
+      root.setAttribute('data-toc', state);
+      btn.setAttribute('aria-expanded', state === 'open' ? 'true' : 'false');
+      store.set('kh-toc', state);
+    }
+
+    btn.addEventListener('click', () => {
+      set(root.getAttribute('data-toc') === 'open' ? 'closed' : 'open');
+    });
+
+    // 窄屏点目录项后自动收起
+    document.querySelectorAll('#toc a').forEach((a) =>
+      a.addEventListener('click', () => { if (narrow()) set('closed'); }),
+    );
+
+    // 遮罩、Esc 关闭
+    var scrim = document.getElementById('tocScrim');
+    if (scrim) scrim.addEventListener('click', () => set('closed'));
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && narrow()) set('closed');
+    });
+
+    btn.setAttribute('aria-expanded', root.getAttribute('data-toc') === 'open' ? 'true' : 'false');
+  })();
+
+  /* ---------- 3. 阅读进度 ---------- */
+  (function progress() {
+    var bar = document.getElementById('progress');
+    if (!bar) return;
+    function update() {
+      var h = document.documentElement.scrollHeight - window.innerHeight;
+      bar.style.width = (h > 0 ? (window.scrollY / h) * 100 : 0) + '%';
+    }
+    window.addEventListener('scroll', update, { passive: true });
+    window.addEventListener('resize', update);
+    update();
+  })();
+
+  /* ---------- 4. 目录滚动高亮 ---------- */
+  (function scrollspy() {
+    var links = Array.prototype.slice.call(document.querySelectorAll('#toc a'));
+    if (!links.length) return;
+    /* 目录里混着非锚点链接（如「← 全部笔记」），它的 href 不是合法选择器，
+       直接丢给 querySelector 会抛错 —— 而抛在这里会把后面所有初始化（复制、
+       quiz、所有 demo 控件）一起带走。所以先筛成锚点，再用 getElementById 找目标。 */
+    var anchors = links.filter((a) => (a.getAttribute('href') || '').startsWith('#'));
+    var targets = anchors
+      .map((a) => document.getElementById((a.getAttribute('href') || '').slice(1)))
+      .filter(Boolean);
+    if (!targets.length) return;
+
+    function update() {
+      var y = window.scrollY + 110;
+      var current = targets[0];
+      targets.forEach((t) => { if (t.offsetTop <= y) current = t; });
+      anchors.forEach((a) => {
+        a.classList.toggle('active', !!current && a.getAttribute('href') === '#' + current.id);
+      });
+    }
+    window.addEventListener('scroll', update, { passive: true });
+    window.addEventListener('resize', update);
+    update();
+  })();
+
+  /* ---------- 5. 复制 ---------- */
+  (function copy() {
+    document.querySelectorAll('[data-copy]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const pre = btn.parentElement.querySelector('pre');
+        const text = pre ? pre.innerText : '';
+        function done() {
+          btn.textContent = '已复制';
+          setTimeout(() => { btn.textContent = '复制'; }, 1400);
+        }
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(text).then(done, done);
+        } else {
+          const ta = document.createElement('textarea');
+          ta.value = text; document.body.appendChild(ta); ta.select();
+          try { document.execCommand('copy'); } catch { /* 忽略 */ }
+          document.body.removeChild(ta); done();
+        }
+      });
+    });
+  })();
+
+  /* ---------- 6. 自测题：只允许同时展开一题，避免一口气看答案 ---------- */
+  (function quiz() {
+    document.querySelectorAll('.quiz').forEach((box) => {
+      var items = box.querySelectorAll('details');
+      items.forEach((d) => {
+        d.addEventListener('toggle', () => {
+          if (!d.open) return;
+          items.forEach((o) => { if (o !== d) o.open = false; });
+        });
+      });
+    });
+  })();
+
+  /* ---------- 7. 交互演示控件注册表 ----------
+     新增控件：WIDGETS['名字'] = function (root, opts) { ... }
+     在 note.md 里用：
+       ```demo
+       widget: 名字
+       title: 标题
+       ```
+  ------------------------------------------------ */
+  var WIDGETS = {};
+
+  /* —— 控件：轮询 vs CDC —— */
+  WIDGETS['polling-vs-cdc'] = (root) => {
+    var STEP = 620;
+    var EVENTS = [
+      { t: 0,  type: 'INSERT', text: '新增订单 A001（待支付）' },
+      { t: 3,  type: 'UPDATE', text: 'A001：待支付 → 已支付' },
+      { t: 6,  type: 'UPDATE', text: 'A001：已支付 → 已发货' },
+      { t: 9,  type: 'DELETE', text: '删除测试订单 A002' },
+      { t: 12, type: 'UPDATE', text: 'A001：已发货 → 已完成' },
+      { t: 15, type: 'INSERT', text: '新增订单 A003（待支付）' }
+    ];
+    var POLLS = [
+      { t: 0,  warn: false, text: '查到 A001 = 待支付' },
+      { t: 10, warn: true,  text: '查到 A001 = 已发货。中间「已支付」状态从未被同步；A002 的删除在增量查询下不可见' },
+      { t: 20, warn: false, text: '查到 A001 = 已完成、A003 = 待支付，但已经晚了最多 10 分钟' }
+    ];
+
+    var pollLog = root.querySelector('[data-log="poll"]');
+    var cdcLog  = root.querySelector('[data-log="cdc"]');
+    var statusEl = root.querySelector('[data-status]');
+    var runBtn  = root.querySelector('[data-run]');
+    var resetBtn = root.querySelector('[data-reset]');
+    var timers = [];
+
+    function addLine(box, badge, tone, time, text, warn) {
+      var el = document.createElement('div');
+      el.className = 'line' + (warn ? ' warn' : '');
+
+      var b = document.createElement('span');
+      b.className = 'badge tone-' + tone;
+      b.textContent = badge;
+
+      var tm = document.createElement('span');
+      tm.className = 'time';
+      tm.textContent = time;
+
+      var tx = document.createElement('span');
+      tx.className = 'txt';
+      tx.textContent = text;
+
+      el.append(b, tm, tx);
+      box.appendChild(el);
+      box.scrollTop = box.scrollHeight;
+    }
+    function clearTimers() { timers.forEach(clearTimeout); timers = []; }
+
+    function reset() {
+      clearTimers();
+      pollLog.innerHTML = ''; cdcLog.innerHTML = '';
+      statusEl.textContent = '未开始';
+      runBtn.disabled = false; runBtn.textContent = '▶ 开始模拟';
+    }
+
+    function run() {
+      reset();
+      runBtn.disabled = true; runBtn.textContent = '模拟中…';
+      statusEl.textContent = 't = 0 分钟';
+
+      EVENTS.forEach((e) => {
+        timers.push(setTimeout(() => {
+          addLine(cdcLog, e.type, e.type.toLowerCase() === 'delete' ? 'red'
+                 : e.type === 'insert' ? 'green' : 'blue', 't=' + e.t + 'min', e.text, false);
+          statusEl.textContent = 't = ' + e.t + ' 分钟';
+        }, e.t * STEP + 40));
+      });
+      POLLS.forEach((p) => {
+        timers.push(setTimeout(() => {
+          addLine(pollLog, 'POLL', 'amber', 't=' + p.t + 'min', p.text, p.warn);
+        }, p.t * STEP + 200));
+      });
+      timers.push(setTimeout(() => {
+        statusEl.textContent = '模拟结束 · 共 6 次真实变更，轮询只看到 3 个时间点';
+        runBtn.disabled = false; runBtn.textContent = '▶ 再跑一次';
+      }, 22 * STEP));
+    }
+
+    runBtn.addEventListener('click', run);
+    resetBtn.addEventListener('click', reset);
+  };
+
+  /* —— 控件：条件组合怎么变成 AND / OR ——
+     演示 Combination.combineSql 的核心机制：
+       UNION ALL 把各条件的 uid 堆在一起 → GROUP BY uid 计数 → HAVING 筛选
+     OR   = 不加 HAVING（任一条命中）
+     AND  = HAVING count = 子查询数（每一条都命中）
+     自定义 = HAVING count >= N（至少 N 个条件命中）
+  ------------------------------------------------ */
+  WIDGETS['combination-count'] = (root) => {
+    const sqlBox = root.querySelector('[data-cc-sql]');
+    const countBox = root.querySelector('[data-cc-count]');
+    const statusEl = root.querySelector('[data-status]');
+    const rows = Array.from(root.querySelectorAll('[data-cc-row]'));
+    const buttons = Array.from(root.querySelectorAll('[data-cc-mode]'));
+
+    const N = 3; // 条件个数
+    const SUB = ['A', 'B', 'C'].map(
+      (_k, i) => `SELECT \`uid\` FROM ${['event_add_cart', 'user_portrait', 'crowds'][i]} WHERE ...`,
+    );
+
+    const MODES = {
+      or: {
+        label: 'OR',
+        having: null,
+        hint: '不加 HAVING：任一条子查询命中就保留',
+        desc: '任一条件命中',
+      },
+      and: {
+        label: 'AND',
+        having: `HAVING count(\`uid\`) = ${N}`,
+        hint: `HAVING count(uid) = ${N}：必须在 ${N} 个子查询里都出现`,
+        desc: '全部条件命中',
+      },
+      n2: {
+        label: '至少 2 个',
+        having: 'HAVING count(`uid`) >= 2',
+        hint: 'HAVING count(uid) >= 2：至少 2 个条件命中（unionCount 写法）',
+        desc: '自定义数量',
+      },
+    };
+
+    function render(mode) {
+      const cfg = MODES[mode];
+      buttons.forEach((b) => b.classList.toggle('on', b.getAttribute('data-cc-mode') === mode));
+
+      let hit = 0;
+      rows.forEach((tr) => {
+        const n = Number(tr.getAttribute('data-count'));
+        let keep;
+        if (mode === 'or') keep = n >= 1;
+        else if (mode === 'and') keep = n === N;
+        else keep = n >= 2;
+        tr.classList.toggle('keep', keep);
+        tr.classList.toggle('drop', !keep);
+        if (keep) hit++;
+      });
+
+      countBox.textContent = String(hit);
+      statusEl.textContent = cfg.desc;
+      sqlBox.textContent =
+        'SELECT UID_DECODE(`uid`) as `uid`\nFROM (\n  ' +
+        SUB.join('\n  UNION ALL\n  ') +
+        '\n) ct1\nGROUP BY `uid`' +
+        (cfg.having ? '\n' + cfg.having : '') +
+        '\n\n-- ' +
+        cfg.hint;
+    }
+
+    buttons.forEach((b) =>
+      b.addEventListener('click', () => render(b.getAttribute('data-cc-mode'))),
+    );
+    render('or');
+  };
+
+  /* —— 控件：join-lab ——
+     同一份数据，切换 5 种 JOIN，看「哪些行被留下」。
+     左边是两列行 + 配对连线（坐标实测，不写死）；右边是结果表；下面是 SQL。
+     数据固定成 3 用户 × 4 订单，所以连线逻辑可以写成一张常量表。 */
+  WIDGETS['join-lab'] = (root) => {
+    var NS = 'http://www.w3.org/2000/svg';
+
+    var USERS = [
+      { key: 'u1', id: '1', name: '小明' },
+      { key: 'u2', id: '2', name: '小红' },
+      { key: 'u3', id: '3', name: '小刚' },
+    ];
+    var ORDERS = [
+      { key: 'o101', id: '101', uid: '1', product: '键盘' },
+      { key: 'o102', id: '102', uid: '1', product: '鼠标' },
+      { key: 'o103', id: '103', uid: '2', product: '显示器' },
+      { key: 'o104', id: '104', uid: '99', product: '测试商品' },
+    ];
+    // ON users.id = orders.user_id 能配上的三对
+    var MATCH = [['u1', 'o101'], ['u1', 'o102'], ['u2', 'o103']];
+
+    var MODES = [
+      {
+        id: 'inner', label: 'INNER JOIN', tone: 'blue',
+        rule: '配不上的行，两边都丢掉。',
+        stat: '结果 3 行 · 丢掉「小刚」和「订单 104」',
+        sql: 'SELECT u.name, o.product\nFROM users u\nINNER JOIN orders o\n  ON u.id = o.user_id;',
+      },
+      {
+        id: 'left', label: 'LEFT JOIN', tone: 'green',
+        rule: '左表全部保留；右表配不上就填 NULL。',
+        stat: '结果 4 行 · 只丢掉「订单 104」',
+        sql: 'SELECT u.name, o.product\nFROM users u\nLEFT JOIN orders o\n  ON u.id = o.user_id;',
+      },
+      {
+        id: 'right', label: 'RIGHT JOIN', tone: 'violet',
+        rule: '右表全部保留；左表配不上就填 NULL。',
+        stat: '结果 4 行 · 只丢掉「小刚」',
+        sql: 'SELECT u.name, o.product\nFROM users u\nRIGHT JOIN orders o\n  ON u.id = o.user_id;',
+      },
+      {
+        id: 'full', label: 'FULL OUTER JOIN', tone: 'amber',
+        rule: '两边都全部保留；谁配不上就填 NULL。MySQL 不直接支持，要 UNION 拼。',
+        stat: '结果 5 行 · 谁都不丢',
+        sql: '-- MySQL 没有 FULL OUTER JOIN，只能拼两半\nSELECT u.name, o.product\nFROM users u\nLEFT JOIN orders o ON u.id = o.user_id\nUNION\nSELECT u.name, o.product\nFROM users u\nRIGHT JOIN orders o ON u.id = o.user_id;',
+      },
+      {
+        id: 'cross', label: 'CROSS JOIN', tone: 'red',
+        rule: '不写 ON，左表每一行 × 右表每一行，全组合。',
+        stat: '结果 12 行 = 3 用户 × 4 订单',
+        sql: 'SELECT u.name, o.product\nFROM users u\nCROSS JOIN orders o;   -- 没有 ON，3 × 4 = 12 行',
+      },
+    ];
+
+    var stage = root.querySelector('[data-jl-stage]');
+    var svg = root.querySelector('[data-jl-lines]');
+    var colUsers = root.querySelector('[data-jl-col="users"]');
+    var colOrders = root.querySelector('[data-jl-col="orders"]');
+    var modesBox = root.querySelector('[data-jl-modes]');
+    var ruleEl = root.querySelector('[data-jl-rule]');
+    var outHead = root.querySelector('[data-jl-outhead]');
+    var tableBox = root.querySelector('[data-jl-table]');
+    var sqlEl = root.querySelector('[data-jl-sql]');
+    var statusEl = root.querySelector('[data-status]');
+
+    var byKey = (list, k) => list.find((x) => x.key === k);
+    var cur = 'inner';
+
+    /* ---- 每个模式下：哪些行留下来、哪些连线存在 ---- */
+    function linksFor(id) {
+      if (id !== 'cross') return MATCH;
+      var all = [];
+      USERS.forEach((u) => ORDERS.forEach((o) => all.push([u.key, o.key])));
+      return all;
+    }
+    function stateFor(id) {
+      var links = {}, users = {}, orders = {};
+      linksFor(id).forEach((p) => {
+        links[p[0] + '|' + p[1]] = 1; users[p[0]] = 1; orders[p[1]] = 1;
+      });
+      if (id === 'left' || id === 'full') users.u3 = 1;      // 左表落单
+      if (id === 'right' || id === 'full') orders.o104 = 1;  // 右表落单
+      return { links: links, users: users, orders: orders };
+    }
+    function rowsFor(id) {
+      if (id === 'cross') {
+        var grid = [];
+        USERS.forEach((u) => ORDERS.forEach((o) => grid.push({ u: u, o: o, kind: 'cross' })));
+        return grid;
+      }
+      var rows = MATCH.map((p) => ({ u: byKey(USERS, p[0]), o: byKey(ORDERS, p[1]), kind: 'match' }));
+      if (id === 'left' || id === 'full') rows.push({ u: byKey(USERS, 'u3'), o: null, kind: 'lone' });
+      if (id === 'right' || id === 'full') rows.push({ u: null, o: byKey(ORDERS, 'o104'), kind: 'lone' });
+      return rows;
+    }
+
+    /* ---- 左：两列行 ---- */
+    function buildCol(colEl, rows, side) {
+      fill(colEl, [h('div', { cls: 'jl-col-head', text: side === 'users' ? 'users' : 'orders' })]);
+      rows.forEach((r) => {
+        const kids = [h('b', { text: r.id })];
+        if (side === 'orders') kids.push(h('i', { text: 'u' + r.uid }));
+        kids.push(h('span', { text: side === 'users' ? r.name : r.product }));
+        colEl.appendChild(h('div', { cls: 'jl-row', attrs: { 'data-row': r.key } }, kids));
+      });
+    }
+
+    /* ---- 配对连线：坐标实测，宽屏窄屏都不会错位 ---- */
+    function svgNode(tag, attrs) {
+      var el = document.createElementNS(NS, tag);
+      Object.keys(attrs).forEach((k) => el.setAttribute(k, attrs[k]));
+      return el;
+    }
+    function drawLines(id) {
+      var box = stage.getBoundingClientRect();
+      if (box.width < 2 || box.height < 2) return;
+      svg.setAttribute('viewBox', '0 0 ' + box.width + ' ' + box.height);
+      while (svg.firstChild) svg.removeChild(svg.firstChild);
+      linksFor(id).forEach((p) => {
+        var uEl = stage.querySelector('[data-row="' + p[0] + '"]');
+        var oEl = stage.querySelector('[data-row="' + p[1] + '"]');
+        if (!uEl || !oEl) return;
+        var ur = uEl.getBoundingClientRect();
+        var orr = oEl.getBoundingClientRect();
+        var sx = ur.right - box.left, sy = ur.top - box.top + ur.height / 2;
+        var tx = orr.left - box.left, ty = orr.top - box.top + orr.height / 2;
+        var dx = Math.max(10, Math.abs(tx - sx) * 0.45);
+        var cls = id === 'cross' ? ' cross' : '';
+        svg.appendChild(svgNode('path', {
+          class: 'jl-link' + cls,
+          d: 'M ' + sx + ' ' + sy + ' C ' + (sx + dx) + ' ' + sy + ', ' +
+             (tx - dx) + ' ' + ty + ', ' + tx + ' ' + ty,
+        }));
+        [[sx, sy], [tx, ty]].forEach((pt) =>
+          svg.appendChild(svgNode('circle', { class: 'jl-dot' + cls, cx: pt[0], cy: pt[1], r: 2.6 })),
+        );
+      });
+    }
+
+    /* ---- 右：结果表 ---- */
+    function renderTable(id) {
+      const rows = rowsFor(id);
+      const head = h('tr', null, ['u.name', 'o.product', '这行怎么来的']
+        .map((t) => h('th', { text: t })));
+      const body = rows.map((r) => {
+        let tag;
+        if (r.kind === 'match') tag = h('span', { cls: 'tag tone-green', text: '匹配' });
+        else if (r.kind === 'cross') tag = h('span', { cls: 'tag tone-red', text: '组合' });
+        else tag = h('span', {
+          cls: 'tag tone-amber',
+          text: r.u ? '左表独有 · 补 NULL' : '右表独有 · 补 NULL',
+        });
+        return h('tr', { cls: r.kind === 'match' ? '' : r.kind }, [
+          h('td', r.u ? { text: r.u.name } : { cls: 'nul', text: 'NULL' }),
+          h('td', r.o ? { text: r.o.product } : { cls: 'nul', text: 'NULL' }),
+          h('td', null, [tag]),
+        ]);
+      });
+      fill(tableBox, [h('div', { cls: 'mini-wrap' }, [
+        h('table', { cls: 'mini-table' }, [h('thead', null, [head]), h('tbody', null, body)]),
+      ])]);
+      outHead.textContent = '② 结果表 · ' + rows.length + ' 行';
+    }
+
+    function render(id) {
+      cur = id;
+      const cfg = MODES.find((m) => m.id === id);
+      var st = stateFor(id);
+
+      Array.prototype.forEach.call(modesBox.children, (b) =>
+        b.classList.toggle('on', b.getAttribute('data-jl-mode') === id));
+      ruleEl.className = 'seg-rule tone-' + cfg.tone;
+      ruleEl.textContent = cfg.rule;
+
+      [[colUsers, 'users'], [colOrders, 'orders']].forEach((pair) => {
+        var colEl = pair[0], side = pair[1];
+        Array.prototype.forEach.call(colEl.querySelectorAll('.jl-row'), (el) => {
+          var key = el.getAttribute('data-row');
+          var keep = side === 'users' ? st.users[key] : st.orders[key];
+          var alone = (side === 'users' && key === 'u3') || (side === 'orders' && key === 'o104');
+          el.classList.toggle('drop', !keep);
+          el.classList.toggle('lone', alone && id !== 'cross');
+        });
+      });
+
+      drawLines(id);
+      renderTable(id);
+      sqlEl.textContent = cfg.sql;
+      if (statusEl) statusEl.textContent = cfg.stat;
+    }
+
+    /* ---- 装配 ---- */
+    buildCol(colUsers, USERS, 'users');
+    buildCol(colOrders, ORDERS, 'orders');
+    MODES.forEach((m) => {
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'tone-' + m.tone;
+      b.textContent = m.label;
+      b.setAttribute('data-jl-mode', m.id);
+      b.addEventListener('click', () => render(m.id));
+      modesBox.appendChild(b);
+    });
+
+    var raf = 0;
+    function redraw() {
+      if (raf) cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(() => drawLines(cur));
+    }
+    window.addEventListener('resize', redraw);
+    if (window.ResizeObserver) new ResizeObserver(redraw).observe(stage);
+    if (document.fonts && document.fonts.ready) document.fonts.ready.then(redraw);
+
+    render('inner');
+    redraw();
+  };
+
+  /* —— 控件：on-vs-where ——
+     同一个过滤条件 o.status = 'PAID'，写在 ON 里和写在 WHERE 里，结果不一样。
+     4 行候选结果的「命运」列成矩阵，切换时高亮当前那一列。 */
+  WIDGETS['on-vs-where'] = (root) => {
+    // LEFT JOIN 之后可能出现的全部 4 行。订单 104 永远进不来（它在右表、且没人要保留它）。
+    var CAND = [
+      { u: '小明', o: '键盘', st: "'PAID'",
+        on: { t: '保留', tone: 'green' },
+        wh: { t: '保留', tone: 'green' } },
+      { u: '小明', o: '鼠标', st: "'UNPAID'",
+        on: { t: '没配上 · 这行不存在', tone: 'muted' },
+        wh: { t: '✕ 被过滤', tone: 'red' } },
+      { u: '小红', o: '显示器', st: "'PAID'",
+        on: { t: '保留', tone: 'green' },
+        wh: { t: '保留', tone: 'green' } },
+      { u: '小刚', o: 'NULL', st: 'NULL',
+        on: { t: '保留 · 补 NULL', tone: 'amber' },
+        wh: { t: '✕ 被过滤', tone: 'red' } },
+    ];
+
+    var MODES = {
+      on: {
+        label: '写在 ON 里',
+        rule: '过滤条件参与配对：配不上的行，LEFT JOIN 照样保留。',
+        stat: '结果 3 行 · 小刚还在',
+        sql: "SELECT u.name, o.product\nFROM users u\nLEFT JOIN orders o\n  ON u.id = o.user_id\n AND o.status = 'PAID';   -- 过滤写在 ON 里",
+      },
+      wh: {
+        label: '写在 WHERE 里',
+        rule: '过滤条件在 JOIN 之后才生效：补出来的 NULL 不满足条件，整行被删。',
+        stat: '结果 2 行 · 小刚被干掉了',
+        sql: "SELECT u.name, o.product\nFROM users u\nLEFT JOIN orders o\n  ON u.id = o.user_id\nWHERE o.status = 'PAID';  -- 过滤写在 WHERE 里",
+      },
+    };
+
+    var modesBox = root.querySelector('[data-ow-modes]');
+    var matrix = root.querySelector('[data-ow-matrix]');
+    var sqlEl = root.querySelector('[data-ow-sql]');
+    var ruleEl = root.querySelector('[data-ow-rule]');
+    var statusEl = root.querySelector('[data-status]');
+
+    function tagEl(c) {
+      return h('span', { cls: 'tag tone-' + c.tone, text: c.t });
+    }
+    function colCls(mode, mine) {
+      return 'col' + (mode === mine ? ' on' : '');
+    }
+
+    function render(mode) {
+      Array.prototype.forEach.call(modesBox.children, (b) =>
+        b.classList.toggle('on', b.getAttribute('data-ow-mode') === mode));
+
+      const thead = h('tr', null, [
+        h('th', { text: 'LEFT JOIN 之后可能出现的行' }),
+        h('th', { text: 'o.status' }),
+        h('th', { cls: colCls(mode, 'on'), text: '写在 ON 里' }),
+        h('th', { cls: colCls(mode, 'wh'), text: '写在 WHERE 里' }),
+      ]);
+      const body = CAND.map((r) => h('tr', null, [
+        h('th', { text: r.u + ' · ' + r.o }),
+        h('td', { text: r.st }),
+        h('td', { cls: colCls(mode, 'on') }, [tagEl(r.on)]),
+        h('td', { cls: colCls(mode, 'wh') }, [tagEl(r.wh)]),
+      ]));
+      body.push(h('tr', { cls: 'sum' }, [
+        h('th', { text: '结果行数' }),
+        h('td'),
+        h('td', { cls: colCls(mode, 'on'), text: '3' }),
+        h('td', { cls: colCls(mode, 'wh') }, [h('span', { cls: 'gone', text: '2' })]),
+      ]));
+
+      fill(matrix, [h('div', { cls: 'mini-wrap plain' }, [
+        h('table', { cls: 'ow-matrix' }, [h('thead', null, [thead]), h('tbody', null, body)]),
+      ])]);
+
+      ruleEl.className = 'seg-rule tone-' + (mode === 'on' ? 'green' : 'amber');
+      ruleEl.textContent = MODES[mode].rule;
+      sqlEl.textContent = MODES[mode].sql;
+      if (statusEl) statusEl.textContent = MODES[mode].stat;
+    }
+
+    Object.keys(MODES).forEach((k) => {
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.className = k === 'on' ? 'tone-green' : 'tone-red';
+      b.textContent = MODES[k].label;
+      b.setAttribute('data-ow-mode', k);
+      b.addEventListener('click', () => render(k));
+      modesBox.appendChild(b);
+    });
+    render('on');
+  };
+
+  /* ---------- 8. 流程图连线 ----------
+     节点用 flex 排版，这里测量它们的位置，再把连线画成 SVG 路径。
+     好处：文字多长都不用调坐标，换行/窄屏自动重算。
+  ------------------------------------------------ */
+  (function flowDiagram() {
+    const roots = Array.from(document.querySelectorAll('[data-flow]'));
+    if (!roots.length) return;
+
+    function draw(root) {
+      const svg = root.querySelector('.flowd-svg');
+      const grid = root.querySelector('.flowd-grid');
+      if (!svg || !grid) return;
+
+      let edges = [];
+      try { edges = JSON.parse(root.getAttribute('data-edges') || '[]'); } catch { edges = []; }
+
+      // ⚠️ 节点的 offsetTop/Left 是相对 .flowd-grid 的，
+      // 而 SVG 和区域框是相对 .flowd 定位的（inset:0 填的是 padding box）。
+      // 所以必须加上 grid 自身的偏移 —— 否则 .flowd 一有 padding 就会错位。
+      const gx = grid.offsetLeft;
+      const gy = grid.offsetTop;
+
+      const nodes = {};
+      root.querySelectorAll('.fnode').forEach((el) => {
+        const t = gy + el.offsetTop;
+        const l = gx + el.offsetLeft;
+        nodes[el.getAttribute('data-id')] = {
+          cx: l + el.offsetWidth / 2,
+          cy: t + el.offsetHeight / 2,
+          top: t,
+          bottom: t + el.offsetHeight,
+          left: l,
+          right: l + el.offsetWidth,
+          h: el.offsetHeight,
+        };
+      });
+
+      // ---- 区域框 ----
+      // 先算每个框的「成员包围盒」（不含 padding），再统一决定水平留白。
+      //
+      // 为什么不能直接用固定 padding：
+      //   .flowd-row 是「每行独立居中」，所以同一组的节点跨行时会水平错位
+      //   （行总宽不同 → 居中起点不同）。结果两组的包围盒可能只差 2px，
+      //   而框要往外扩 20px → 必然重叠。
+      // 所以这里先按名义留白算，检测到重叠就整体收缩，直到不重叠。
+      const PAD_Y = 20;      // 上下留白（放标签 + 呼吸）
+      const PAD_X_MAX = 18;  // 左右名义留白
+
+      const boxes = [];
+      root.querySelectorAll('[data-group-box]').forEach((boxEl) => {
+        const gid = boxEl.getAttribute('data-group-box');
+        const members = Array.from(root.querySelectorAll(`.fnode[data-group="${gid}"]`));
+        if (!members.length) { boxEl.hidden = true; return; }
+        boxEl.hidden = false;
+        boxes.push({
+          el: boxEl,
+          minL: Math.min(...members.map((m) => gx + m.offsetLeft)),
+          maxR: Math.max(...members.map((m) => gx + m.offsetLeft + m.offsetWidth)),
+          minT: Math.min(...members.map((m) => gy + m.offsetTop)),
+          maxB: Math.max(...members.map((m) => gy + m.offsetTop + m.offsetHeight)),
+        });
+      });
+
+      // 水平留白自适应：找到让所有框互不重叠的最大值
+      let padX = PAD_X_MAX;
+      const overlaps = (p) => {
+        for (let i = 0; i < boxes.length; i++) {
+          for (let j = i + 1; j < boxes.length; j++) {
+            const a = boxes[i];
+            const b = boxes[j];
+            if (a.minL - p < b.maxR + p && b.minL - p < a.maxR + p) return true;
+          }
+        }
+        return false;
+      };
+      while (padX > 0 && overlaps(padX)) padX -= 2;
+
+      boxes.forEach((b) => {
+        const top = b.minT - PAD_Y - 8;
+        const left = b.minL - padX;
+        const right = b.maxR + padX;
+        const bottom = b.maxB + PAD_Y;
+        b.el.style.top = `${top}px`;
+        b.el.style.left = `${left}px`;
+        b.el.style.width = `${right - left}px`;
+        b.el.style.height = `${bottom - top}px`;
+      });
+
+      // viewBox 用 SVG 元素自身尺寸 —— 用 grid 的尺寸会让 preserveAspectRatio
+      // 做一次等比缩放+居中，和节点坐标对不上。
+      const W = svg.clientWidth || root.clientWidth;
+      const H = svg.clientHeight || root.clientHeight;
+      svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+
+      // 同一对节点之间可能有多条边（或同一目标有多条汇入），
+      // 给它们一个水平偏移，否则会完全重叠
+      const pairCount = {};
+      for (const e of edges) {
+        const k = `${e.from}->${e.to}`;
+        pairCount[k] = (pairCount[k] || 0) + 1;
+      }
+      const pairSeen = {};
+
+      const parts = [];
+      for (const e of edges) {
+        const a = nodes[e.from];
+        const b = nodes[e.to];
+        if (!a || !b) continue;
+
+        const pk = `${e.from}->${e.to}`;
+        const idx = pairSeen[pk] = (pairSeen[pk] || 0);
+        pairSeen[pk] += 1;
+        // 同对多边时，向外散开
+        const spread = pairCount[pk] > 1 ? (idx - (pairCount[pk] - 1) / 2) * 26 : 0;
+
+        let d;
+        let lx;
+        let ly;
+
+        // 自环：状态不变但有事件触发，画成节点上方的一个弧
+        if (e.self || e.from === e.to) {
+          const r = 30;
+          d = `M ${a.cx - 16} ${a.top} C ${a.cx - 34} ${a.top - r * 1.7}, ${a.cx + 34} ${
+            a.top - r * 1.7
+          }, ${a.cx + 16} ${a.top}`;
+          lx = a.cx;
+          ly = a.top - r * 1.32;   // 标签放在弧顶上方，不压线
+          const cls0 = ['fedge', 'self', e.dashed && 'dashed', e.anim && 'anim']
+            .filter(Boolean)
+            .join(' ');
+          parts.push(`<path class="${cls0}" d="${d}"/>`);
+          if (e.on || e.label) {
+            parts.push(
+              `<text class="felabel" x="${lx}" y="${ly}">${escapeXml(e.on || e.label)}</text>`,
+            );
+          }
+          continue;
+        }
+
+        const vertical = Math.abs(b.cy - a.cy) > (a.h + b.h) / 2 + 6;
+        if (vertical) {
+          const y1 = a.cy < b.cy ? a.bottom : a.top;
+          const y2 = a.cy < b.cy ? b.top : b.bottom;
+          const my = (y1 + y2) / 2;
+          const ox = a.cx + spread;
+          const ix = b.cx + spread;
+          d = `M ${a.cx} ${y1} C ${ox} ${my}, ${ix} ${my}, ${b.cx} ${y2}`;
+          lx = (ox + ix) / 2;
+          ly = my + idx * 13;   // 标签也错开，不互相压
+        } else {
+          const [l, r] = a.cx < b.cx ? [a, b] : [b, a];
+          const mx = (l.right + r.left) / 2;
+          d = `M ${l.right} ${l.cy} C ${mx} ${l.cy}, ${mx} ${r.cy}, ${r.left} ${r.cy}`;
+          lx = mx;
+          ly = (l.cy + r.cy) / 2 - 7;
+        }
+
+        const cls = ['fedge', e.dashed && 'dashed', e.anim && 'anim'].filter(Boolean).join(' ');
+        parts.push(
+          `<path class="${cls}" d="${d}"${e.tone ? ` style="color:var(--${e.tone})"` : ''}${
+            e.both ? ' marker-start="url(#fa)"' : ''
+          }/>`,
+        );
+        const edgeText = e.on || e.label;
+        if (edgeText) {
+          parts.push(`<text class="felabel" x="${lx}" y="${ly}">${escapeXml(edgeText)}</text>`);
+        }
+      }
+      svg.innerHTML = svg.querySelector('defs').outerHTML + parts.join('');
+    }
+
+    function escapeXml(s) {
+      return String(s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[c]);
+    }
+
+    function drawAll() { roots.forEach(draw); }
+
+    drawAll();
+    window.addEventListener('resize', drawAll);
+    // 字体加载完宽度会变，重画一次
+    if (document.fonts && document.fonts.ready) document.fonts.ready.then(drawAll);
+  })();
+
+  /* —— 控件：knex 链式调用到底在干什么 ——
+     点方法按钮 → 看内部状态累积；点 rawQuery() → 才编译成 SQL。
+     要讲清的就一件事：==链式调用不生成 SQL，取值时才编译。==
+  ------------------------------------------------ */
+  WIDGETS['knex-chain'] = (root) => {
+    const stateBox = root.querySelector('[data-kc-state]');
+    const sqlBox = root.querySelector('[data-kc-sql]');
+    const hintBox = root.querySelector('[data-kc-hint]');
+    const btns = Array.from(root.querySelectorAll('[data-kc-step]'));
+    const statusEl = root.querySelector('[data-status]');
+
+    const STEPS = {
+      select: { state: { columns: ['uid'] }, hint: '只是把「要查哪些列」记在对象上' },
+      from: { state: { table: 'user_portrait' }, hint: '再把「查哪张表」记上去' },
+      where: { state: { where: [['uid', 'in', [1, 2, 3]]] }, hint: '再把「筛选条件」记上去' },
+    };
+    const ORDER = ['select', 'from', 'where'];
+
+    const SQL_PLACEHOLDER =
+      'select `uid` from `user_portrait` where (`uid` in (?))';
+    const SQL_INLINED =
+      'select `uid` from `user_portrait` where (`uid` in (1, 2, 3))';
+
+    let applied = [];   // 只放 select / from / where
+    let compiled = false; // 是否已调过 rawQuery()
+
+    function renderState() {
+      if (!applied.length) {
+        stateBox.textContent = '{}   // 空空如也';
+        return;
+      }
+      const merged = {};
+      applied.forEach((k) => Object.assign(merged, STEPS[k].state));
+      stateBox.textContent = JSON.stringify(merged, null, 2);
+    }
+
+    function render() {
+      renderState();
+      const done = applied.length === ORDER.length;
+      btns.forEach((b) => {
+        const k = b.getAttribute('data-kc-step');
+        if (k === 'raw') {
+          b.classList.toggle('on', compiled);
+          b.disabled = !done;
+        } else {
+          b.classList.toggle('on', applied.includes(k));
+          b.disabled = applied.includes(k);
+        }
+      });
+
+      if (compiled) {
+        sqlBox.textContent = SQL_INLINED;
+        hintBox.textContent =
+          '✅ rawQuery() 触发了编译：加反引号 + 值内联。这才是最终交给数据库的东西。';
+        statusEl.textContent = '已编译';
+      } else if (done) {
+        sqlBox.textContent = SQL_PLACEHOLDER;
+        hintBox.textContent =
+          '🔍 三个方法都调完了，但 SQL 里的值还是 ? —— 因为还没取值。点 .rawQuery() 试试。';
+        statusEl.textContent = '状态齐了，还没编译';
+      } else {
+        sqlBox.textContent = '// 还没编译。链式调用只往对象上记东西，不生成 SQL。';
+        hintBox.textContent = '点上面的方法，看内部状态怎么一点点攒起来。';
+        statusEl.textContent = '攒状态中';
+      }
+    }
+
+    btns.forEach((b) =>
+      b.addEventListener('click', () => {
+        const k = b.getAttribute('data-kc-step');
+        if (k === 'raw') {
+          compiled = !compiled;
+        } else {
+          compiled = false; // 改了链式调用，之前的编译结果作废
+          applied.includes(k)
+            ? applied.splice(applied.indexOf(k), 1)
+            : applied.push(k);
+        }
+        render();
+      }),
+    );
+
+    render();
+  };
+
+  /* ---------- 9. 时序图 ----------
+     参与者横排，时间向下，消息是水平箭头。
+     lifeline（虚线）和消息箭头都画在 SVG 里，标签用 HTML 居中。
+  ------------------------------------------------ */
+  (function sequenceDiagram() {
+    const roots = Array.from(document.querySelectorAll('[data-seq]'));
+    if (!roots.length) return;
+
+    function draw(root) {
+      const svg = root.querySelector('.seqd-svg');
+      const head = root.querySelector('.seqd-head');
+      const body = root.querySelector('.seqd-body');
+      if (!svg || !head || !body) return;
+
+      // 每个参与者的中心 x（grid 均分，所以可以直接算）
+      const n = Number(root.getAttribute('data-n')) || 1;
+      const W = head.offsetWidth;
+      const cellW = W / n;
+      const cx = {};
+      root.querySelectorAll('.spart').forEach((el, i) => {
+        const id = el.getAttribute('data-id');
+        cx[id] = i * cellW + cellW / 2;
+      });
+
+      const headH = head.offsetHeight;
+      const bodyH = body.offsetHeight;
+      const totalH = headH + 18 + bodyH;
+      svg.setAttribute('viewBox', `0 0 ${W} ${totalH}`);
+      svg.setAttribute('width', W);
+      svg.setAttribute('height', totalH);
+
+      const parts = [];
+
+      // 1) lifeline：从头部底部到主体底部
+      const lifeTop = headH + 6;
+      const lifeBottom = headH + 18 + bodyH;
+      Object.values(cx).forEach((x) => {
+        parts.push(
+          `<line class="lifeline" x1="${x}" y1="${lifeTop}" x2="${x}" y2="${lifeBottom}"/>`,
+        );
+      });
+
+      // 2) 消息箭头
+      root.querySelectorAll('.smsg').forEach((row) => {
+        const from = row.getAttribute('data-from');
+        const to = row.getAttribute('data-to');
+        const kind = row.getAttribute('data-kind') || 'sync';
+        const note = row.getAttribute('data-note');
+        const tone = row.getAttribute('data-tone');
+        const toneAttr = tone ? ` style="color:var(--${tone})"` : '';
+        const x1 = cx[from];
+        const x2 = cx[to];
+        if (x1 === undefined || x2 === undefined) return;
+
+        const y = headH + 18 + row.offsetTop + row.offsetHeight / 2;
+
+        if (from === to) {
+          // 自调用：右侧一个环，标签的 x 交给 CSS 用
+          row.style.setProperty('--lx', `${x1}px`);
+          const r = 34;
+          parts.push(
+            `<path class="msg self"${toneAttr} d="M ${x1 + 6} ${y - 11} L ${x1 + r} ${
+              y - 11
+            } ` + `L ${x1 + r} ${y + 11} L ${x1 + 8} ${y + 11}"/>`,
+          );
+        } else {
+          const dir = x2 > x1 ? 1 : -1;
+          // 留出箭头位置，别被标签盖住
+          const pad = 8;
+          parts.push(
+            `<path class="msg ${kind}"${toneAttr} d="M ${x1 + dir * pad} ${y} L ${
+              x2 - dir * pad
+            } ${y}"/>`,
+          );
+        }
+
+        if (note) {
+          parts.push(
+            `<text class="note" x="${(x1 + x2) / 2}" y="${y - 13}">${escapeXml2(note)}</text>`,
+          );
+        }
+      });
+
+      svg.innerHTML = svg.querySelector('defs').outerHTML + parts.join('');
+    }
+
+    function escapeXml2(s) {
+      return String(s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[c]);
+    }
+
+    function drawAll() { roots.forEach(draw); }
+    drawAll();
+    window.addEventListener('resize', drawAll);
+    if (document.fonts && document.fonts.ready) document.fonts.ready.then(drawAll);
+  })();
+
+  /* ============================================================
+     通用控件库
+     ------------------------------------------------------------
+     约定：控件从 root.dataset.config 读配置，自己渲染 [data-mount] 里的内容。
+     这样作者只写 YAML，不用手写 HTML。
+  ============================================================ */
+  const el = (tag, cls, text) => {
+    const n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text !== undefined) n.textContent = text;
+    return n;
+  };
+  const cfgOf = (root) => {
+    try { return JSON.parse(root.getAttribute('data-config') || '{}'); }
+    catch { return {}; }
+  };
+  const mountOf = (root) => root.querySelector('[data-mount]') || root;
+
+  /* —— 控件：逐步执行器 ——
+     点下一步，看代码/状态逐行走。适合讲算法、协议、状态机。
+     config:
+       steps: [{ label, code, note }]
+  ------------------------------------------------ */
+  WIDGETS.stepper = (root) => {
+    const cfg = cfgOf(root);
+    const steps = cfg.steps || [];
+    if (!steps.length) return;
+    const box = mountOf(root);
+    const statusEl = root.querySelector('[data-status]');
+    let i = 0;
+    let timer = null;
+
+    const bar = el('div', 'st-bar');
+    const dots = el('div', 'st-dots');
+    const list = el('div', 'st-list');
+    const pane = el('div', 'st-pane');
+    const code = el('pre', 'st-code');
+    const note = el('p', 'st-note');
+
+    const prev = el('button', 'st-btn', '‹ 上一步');
+    const next = el('button', 'st-btn st-primary', '下一步 ›');
+    const play = el('button', 'st-btn', '▶ 自动播放');
+    const reset = el('button', 'st-btn st-ghost', '重置');
+    bar.append(prev, next, play, reset);
+
+    const items = steps.map((s, k) => {
+      const d = el('button', 'st-item');
+      d.append(el('span', 'st-idx', String(k + 1)), el('span', 'st-label', s.label || ''));
+      d.addEventListener('click', () => { stop(); go(k); });
+      list.append(d);
+      const dot = el('span', 'st-dot');
+      dots.append(dot);
+      return { d, dot };
+    });
+
+    pane.append(code, note);
+    box.append(dots, list, pane, bar);
+
+    function go(k) {
+      i = Math.max(0, Math.min(steps.length - 1, k));
+      const s = steps[i];
+      items.forEach(({ d, dot }, n) => {
+        d.classList.toggle('on', n === i);
+        d.classList.toggle('done', n < i);
+        dot.classList.toggle('on', n === i);
+        dot.classList.toggle('done', n < i);
+      });
+      code.textContent = s.code || '';
+      note.textContent = s.note || '';
+      code.hidden = !s.code;
+      note.hidden = !s.note;
+      prev.disabled = i === 0;
+      next.disabled = i === steps.length - 1;
+      if (statusEl) statusEl.textContent = `第 ${i + 1} / ${steps.length} 步`;
+    }
+    function stop() {
+      if (timer) { clearInterval(timer); timer = null; play.textContent = '▶ 自动播放'; }
+    }
+    prev.addEventListener('click', () => { stop(); go(i - 1); });
+    next.addEventListener('click', () => { stop(); go(i + 1); });
+    reset.addEventListener('click', () => { stop(); go(0); });
+    play.addEventListener('click', () => {
+      if (timer) return stop();
+      play.textContent = '⏸ 暂停';
+      timer = setInterval(() => {
+        if (i >= steps.length - 1) return stop();
+        go(i + 1);
+      }, 1100);
+    });
+    go(0);
+  };
+
+  /* —— 控件：参数调节器 ——
+     拖动滑块，看多个指标实时变化。
+     config:
+       param:  { label, unit, values: [...] }
+       outputs:[{ label, unit, values: [...], tone }]
+  ------------------------------------------------ */
+  WIDGETS.tuner = (root) => {
+    const cfg = cfgOf(root);
+    const param = cfg.param || {};
+    const vals = param.values || [];
+    if (!vals.length) return;
+    const box = mountOf(root);
+    const statusEl = root.querySelector('[data-status]');
+
+    const head = el('div', 'tn-head');
+    const val = el('b', 'tn-val', String(vals[0]));
+    const lab = el('span', 'tn-lab', (param.label || '') + (param.unit ? `（${param.unit}）` : ''));
+    const range = el('input', 'tn-range');
+    range.type = 'range';
+    range.min = '0';
+    range.max = String(vals.length - 1);
+    range.value = '0';
+    head.append(lab, val);
+
+    const out = el('div', 'tn-out');
+    const cards = (cfg.outputs || []).map((o) => {
+      const c = el('div', `tn-card tone-${o.tone || 'muted'}`);
+      c.append(el('small', '', o.label || ''));
+      const v = el('b', 'tn-num');
+      c.append(v);
+      if (o.unit) c.append(el('span', 'tn-unit', o.unit));
+      out.append(c);
+      return { v, o };
+    });
+
+    // 刻度：显示首尾，避免滑到哪都不知道范围
+    const scale = el('div', 'tn-scale');
+    scale.append(el('span', '', String(vals[0])));
+    if (vals.length > 2) scale.append(el('span', 'tn-mid', String(vals[Math.floor(vals.length / 2)])));
+    scale.append(el('span', '', String(vals[vals.length - 1])));
+
+    box.append(head, range, scale, out);
+
+    function apply() {
+      const i = Number(range.value);
+      val.textContent = String(vals[i]);
+      cards.forEach(({ v, o }) => {
+        const x = (o.values || [])[i];
+        v.textContent = x === undefined ? '—' : String(x);
+      });
+      if (statusEl) statusEl.textContent = `${param.label || '参数'} = ${vals[i]}`;
+    }
+    range.addEventListener('input', apply);
+    apply();
+  };
+
+  /* —— 控件：并排差异对比 ——
+     行首写 `- ` / `+ ` 自动识别为删除/新增；悬停时两边对应行联动高亮。
+     config:
+       left:  { title, code }
+       right: { title, code }
+       link:  true   # 是否联动高亮（默认 true）
+  ------------------------------------------------ */
+  WIDGETS.diff = (root) => {
+    const cfg = cfgOf(root);
+    const box = mountOf(root);
+    const link = cfg.link !== false;
+
+    const cols = ['left', 'right'].map((side) => {
+      const c = cfg[side] || {};
+      const col = el('div', `df-col df-${side}`);
+      col.append(el('div', 'df-title', c.title || ''));
+      const pre = el('div', 'df-code');
+      const rows = String(c.code || '')
+        .replace(/\n$/, '')
+        .split('\n')
+        .map((line) => {
+          let kind = '';
+          let text = line;
+          if (/^- /.test(line)) { kind = 'del'; text = line.slice(2); }
+          else if (/^\+ /.test(line)) { kind = 'add'; text = line.slice(2); }
+          else if (/^  /.test(line)) { text = line.slice(2); }
+          const r = el('div', `df-row${kind ? ' ' + kind : ''}`);
+          r.append(el('span', 'df-mark', kind === 'del' ? '−' : kind === 'add' ? '+' : ''));
+          r.append(el('span', 'df-text', text || ' '));
+          pre.append(r);
+          return r;
+        });
+      col.append(pre);
+      return { col, rows };
+    });
+
+    box.append(cols[0].col, cols[1].col);
+
+    if (!link) return;
+    // 悬停联动：把另一边对应的「有标记行」也高亮
+    ['del', 'add'].forEach(() => {});
+    const markRows = (side, kind) => cols[side].rows.filter((r) => r.classList.contains(kind));
+    cols[0].rows.forEach((r, i) => {
+      r.addEventListener('mouseenter', () => {
+        const other = cols[1].rows[i];
+        if (other) other.classList.add('hover');
+        r.classList.add('hover');
+      });
+      r.addEventListener('mouseleave', () => {
+        cols[0].rows.forEach((x) => x.classList.remove('hover'));
+        cols[1].rows.forEach((x) => x.classList.remove('hover'));
+      });
+    });
+    cols[1].rows.forEach((r, i) => {
+      r.addEventListener('mouseenter', () => {
+        const other = cols[0].rows[i];
+        if (other) other.classList.add('hover');
+        r.classList.add('hover');
+      });
+    });
+    void markRows;
+  };
+
+  /* ---------- 10. 结构图折叠 ----------
+     点节点收起/展开它的子树。纯属性切换，样式在 blocks.css。 */
+  (function treeFold() {
+    document.querySelectorAll('[data-tree] li.has-kids > [data-tree-node]').forEach((node) => {
+      node.addEventListener('click', () => node.parentElement.classList.toggle('folded'));
+    });
+  })();
+
+  /* —— 控件：stream-modes ——
+     同一条订单流，三种跑法。三种模式共用同一份事件、同一段业务逻辑，
+     只在「源有没有末尾」和「任务什么时候结束」上不同。
+       有界·一次读完   —— 输入栏一直涨，输出栏一直是空的，最后只吐一行
+       无界·持续累计   —— 每来一条就更新一次当前结果
+       无界·每分钟窗口 —— 窗口关闭才结算，而最后一个窗口永远等不到关闭 */
+  WIDGETS['stream-modes'] = (root) => {
+    var EVENTS = [
+      { t: '10:00:01', u: 'u01', amt: 99 },
+      { t: '10:00:03', u: 'u02', amt: 50 },
+      { t: '10:00:05', u: 'u03', amt: 120 },
+      { t: '10:00:08', u: 'u01', amt: 20 },
+      { t: '10:00:10', u: 'u04', amt: 88 },
+      { t: '10:00:14', u: 'u02', amt: 66 },
+      { t: '10:01:02', u: 'u05', amt: 150 },
+      { t: '10:01:05', u: 'u01', amt: 30 },
+      { t: '10:01:09', u: 'u03', amt: 45 },
+      { t: '10:01:15', u: 'u06', amt: 200 },
+      { t: '10:02:01', u: 'u02', amt: 77 },
+      { t: '10:02:04', u: 'u05', amt: 33 },
+    ];
+    var TOTAL = EVENTS.reduce((s, e) => s + e.amt, 0);
+
+    var MODES = [
+      {
+        id: 'batch', label: '有界 · 一次读完', tone: 'green', step: 180,
+        rule: '源是文件，有末尾。全部读完 → 一个最终结果 → 任务结束。',
+      },
+      {
+        id: 'cum', label: '无界 · 持续累计', tone: 'blue', step: 420,
+        rule: '源是 Kafka，没有末尾。每来一条就更新一次当前结果，任务永不结束。',
+      },
+      {
+        id: 'win', label: '无界 · 每分钟窗口', tone: 'violet', step: 420,
+        rule: '把永不结束的流按分钟切段。窗口关闭才结算 —— 而最后一个窗口永远等不到关闭。',
+      },
+    ];
+
+    var modesBox = root.querySelector('[data-sm-modes]');
+    var ruleEl = root.querySelector('[data-sm-rule]');
+    var inBox = root.querySelector('[data-log="in"]');
+    var outBox = root.querySelector('[data-log="out"]');
+    var countEl = root.querySelector('[data-sm-count]');
+    var taskEl = root.querySelector('[data-sm-task]');
+    var statusEl = root.querySelector('[data-status]');
+    var runBtn = root.querySelector('[data-run]');
+    var resetBtn = root.querySelector('[data-reset]');
+
+    var mode = 'batch';
+    var timers = [];
+
+    function addLine(box, badge, tone, time, text, cls) {
+      box.appendChild(h('div', { cls: 'line' + (cls ? ' ' + cls : '') }, [
+        badge ? h('span', { cls: 'badge tone-' + tone, text: badge }) : null,
+        time ? h('span', { cls: 'time', text: time }) : null,
+        h('span', { cls: 'txt', text: text }),
+      ]));
+      box.scrollTop = box.scrollHeight;
+    }
+    /** 输入栏里的窗口分界线 */
+    function addDivider(box, text) {
+      box.appendChild(h('div', { cls: 'line divider' }, [h('span', { cls: 'txt', text: text })]));
+      box.scrollTop = box.scrollHeight;
+    }
+    function setTask(label, tone, note) {
+      taskEl.className = 'sm-task tone-' + tone;
+      fill(taskEl, [
+        h('span', { text: '任务状态：' }),
+        h('b', { text: label }),
+        h('span', { text: note }),
+      ]);
+    }
+    function clearTimers() { timers.forEach(clearTimeout); timers = []; }
+
+    function reset() {
+      clearTimers();
+      fill(inBox, []); fill(outBox, []);
+      countEl.textContent = '0 / ' + EVENTS.length + ' 条';
+      setTask('未开始', 'muted', '点「开始模拟」跑一遍');
+      statusEl.textContent = '未开始 · ' + EVENTS.length + ' 条订单等着被处理';
+      runBtn.disabled = false;
+      runBtn.textContent = '▶ 开始模拟';
+    }
+
+    function play() {
+      reset();
+      var cfg = MODES.filter((m) => m.id === mode)[0];
+      var step = cfg.step;
+      runBtn.disabled = true;
+      runBtn.textContent = '模拟中…';
+      setTask('运行中', 'blue', '正在接收事件');
+      statusEl.textContent = '已到达 0 / ' + EVENTS.length + ' 条';
+
+      var cum = 0, win = null, winSum = 0, winCount = 0;
+
+      if (mode === 'batch') {
+        addLine(inBox, 'FILE', 'muted', '', '打开 orders_2026-09-23.csv');
+      }
+
+      EVENTS.forEach((e, i) => {
+        timers.push(setTimeout(() => {
+          // 窗口模式：分钟一变，先把上一个窗口结算掉
+          if (mode === 'win') {
+            var w = e.t.slice(0, 5);
+            if (win && w !== win) {
+              addLine(outBox, 'WINDOW', 'green', win,
+                win + ' 窗口关闭 → ' + winCount + ' 笔 · ' + winSum + ' 元');
+              addDivider(inBox, win + ' 窗口关闭');
+            }
+            if (w !== win) { win = w; winSum = 0; winCount = 0; }
+            winSum += e.amt; winCount++;
+          }
+
+          addLine(inBox, 'EVENT', 'blue', e.t, e.u + ' 下单 ' + e.amt + ' 元');
+          countEl.textContent = (i + 1) + ' / ' + EVENTS.length + ' 条';
+          cum += e.amt;
+
+          if (mode === 'cum') {
+            addLine(outBox, 'UPDATE', 'blue', e.t, '当前累计销售额 = ' + cum + ' 元');
+            statusEl.textContent = '已到达 ' + (i + 1) + ' / ' + EVENTS.length + ' 条 · 当前累计 ' + cum + ' 元';
+          } else if (mode === 'win') {
+            statusEl.textContent = win + ' 窗口攒到 ' + winCount + ' 笔 · ' + winSum + ' 元';
+          } else {
+            statusEl.textContent = '正在读取文件 … ' + (i + 1) + ' / ' + EVENTS.length;
+          }
+        }, i * step + 60));
+      });
+
+      timers.push(setTimeout(() => {
+        if (mode === 'batch') {
+          addLine(inBox, 'EOF', 'green', '', '文件末尾 —— 没有更多数据了', 'eof');
+          addLine(outBox, 'FINAL', 'green', '', '总销售额 = ' + TOTAL + ' 元 · 共 ' + EVENTS.length + ' 笔');
+          addLine(outBox, 'DONE', 'green', '', '任务结束 ✓');
+          setTask('已结束', 'green', '批任务：读完就退出');
+          statusEl.textContent = '任务已结束 · 这个结果是最终答案，不会再变';
+        } else if (mode === 'cum') {
+          addLine(inBox, '…', 'muted', '', '还在等下一条 —— 不知道什么时候来，也不知道有没有最后一条');
+          setTask('持续运行中', 'blue', '流任务：不会自己退出');
+          statusEl.textContent = '任务不会结束 · 每来一条就更新一次结果';
+        } else {
+          addLine(outBox, 'OPEN', 'amber', win,
+            win + ' 窗口还在攒（' + winCount + ' 笔 · ' + winSum + ' 元）', 'warn');
+          addLine(outBox, 'WAIT', 'amber', '', '要等 10:03 的第一条数据到来，这个窗口才会结算', 'warn');
+          setTask('持续运行中', 'amber', '最后一个窗口还开着');
+          statusEl.textContent = '任务不会结束 · 最后一个窗口永远等不到关闭';
+        }
+        runBtn.disabled = false;
+        runBtn.textContent = '▶ 再跑一次';
+      }, EVENTS.length * step + 480));
+    }
+
+    function setMode(id, autoplay) {
+      mode = id;
+      var cfg = MODES.filter((m) => m.id === id)[0];
+      Array.prototype.forEach.call(modesBox.children, (b) =>
+        b.classList.toggle('on', b.getAttribute('data-sm-mode') === id));
+      ruleEl.className = 'seg-rule tone-' + cfg.tone;
+      ruleEl.textContent = cfg.rule;
+      if (autoplay) play();
+      else reset();
+    }
+
+    MODES.forEach((m) => {
+      var b = h('button', { cls: 'tone-' + m.tone, text: m.label, attrs: { 'data-sm-mode': m.id } });
+      b.type = 'button';
+      b.addEventListener('click', () => setMode(m.id, true));
+      modesBox.appendChild(b);
+    });
+    runBtn.addEventListener('click', play);
+    if (resetBtn) resetBtn.addEventListener('click', reset);
+
+    // 初始只把状态摆好，不自动跑 —— 读者滚到这里时应该看到一个「还没开始」的场
+    setMode('batch', false);
+  };
+
+  /* —— 控件：operator-lab ——
+     同一批 6 条订单，过不同的 Transformation 算子，看产出怎么变。
+     想说的就一件事：==算子之间的区别是「一条进几条出」和「以什么为单位」==。
+       map / filter / flatMap —— 逐条处理，条数会变
+       keyBy                —— 条数不变，变的是「桶」
+       keyBy + sum          —— 每条输入都产出一条「当前累计」 */
+  WIDGETS['operator-lab'] = (root) => {
+    var ORDERS = [
+      { id: '1001', uid: 'u01', amount: 99, status: 'PAID', products: ['A100', 'B200'] },
+      { id: '1002', uid: 'u02', amount: 0, status: 'PAID', products: ['A100'] },
+      { id: '1003', uid: 'u01', amount: -10, status: 'UNPAID', products: ['C300'] },
+      { id: '1004', uid: 'u03', amount: 50, status: 'PAID', products: ['B200', 'C300'] },
+      { id: '1005', uid: 'u01', amount: 20, status: 'PAID', products: ['A100'] },
+      { id: '1006', uid: 'u02', amount: 80, status: 'UNPAID', products: [] },
+    ];
+
+    var OPS = [
+      {
+        id: 'map', label: 'map', tone: 'blue',
+        rule: '1 条进 → 1 条出。只换内容，条数不变。',
+        head: '输出 · Order → (uid, amount)',
+        io: '6 条进 → 6 条出', note: '字段从 5 个变成 2 个，条数一个没少',
+        keep: function () { return true; },
+      },
+      {
+        id: 'filter', label: 'filter 金额 > 0', tone: 'green',
+        rule: '1 条进 → 0 或 1 条出。条件不满足的，连人带记录一起消失。',
+        head: '输出 · 留下来的订单',
+        io: '6 条进 → 4 条出', note: '丢掉 2 条金额非法的',
+        keep: function (o) { return o.amount > 0; },
+      },
+      {
+        id: 'flatMap', label: 'flatMap 拆商品', tone: 'violet',
+        rule: '1 条进 → 0 到多条出。一条记录拆成好几条。',
+        head: '输出 · 商品行（一条订单拆成 N 行）',
+        io: '6 条进 → 7 条出', note: '订单 1006 没有商品，一条也不出',
+        keep: function () { return true; },
+      },
+      {
+        id: 'keyBy', label: 'keyBy(uid)', tone: 'amber',
+        rule: '条数一点没变 —— keyBy 不产出数据，它只决定后续计算以什么为单位。',
+        head: '输出 · 按 uid 分的桶',
+        io: '6 条进 → 6 条出，分成了 3 个桶', note: '这就是 keyBy：不加工，只分堆',
+        keep: function () { return true; },
+      },
+      {
+        id: 'sum', label: 'keyBy + sum', tone: 'green',
+        rule: '每个 key 各维护一份状态，每条输入都产出一条「当前累计」。',
+        head: '输出 · 每个 key 的当前累计',
+        io: '6 条进 → 6 条出', note: '不是最后才出一条，是每条都出',
+        keep: function () { return true; },
+      },
+    ];
+
+    var modesBox = root.querySelector('[data-ol-modes]');
+    var ruleEl = root.querySelector('[data-ol-rule]');
+    var inBox = root.querySelector('[data-log="in"]');
+    var outBox = root.querySelector('[data-log="out"]');
+    var inHead = root.querySelector('[data-ol-inhead]');
+    var outHead = root.querySelector('[data-ol-outhead]');
+    var ioEl = root.querySelector('[data-ol-io]');
+    var statusEl = root.querySelector('[data-status]');
+    var runBtn = root.querySelector('[data-run]');
+    var resetBtn = root.querySelector('[data-reset]');
+
+    var cur = 'map';
+    var timers = [];
+
+    function rec(parts, cls) {
+      return h('div', { cls: 'ol-rec' + (cls ? ' ' + cls : '') },
+        parts.map((p) => h(p.t, { cls: p.c || '', text: p.v })));
+    }
+    function inputParts(o) {
+      return [
+        { t: 'b', v: o.id },
+        { t: 'i', v: o.uid },
+        { t: 'u', v: o.amount + ' 元' },
+        { t: 's', c: o.status === 'PAID' ? 'paid' : 'unpaid', v: o.status },
+        { t: 'em', v: o.products.length ? o.products.join(', ') : '（无商品）' },
+      ];
+    }
+    function byId(id) { return OPS.find((o) => o.id === id); }
+    function clearTimers() { timers.forEach(clearTimeout); timers = []; }
+
+    /* 每个算子的产出，逐条（或逐桶）排好，交给动画按时序吐出来 */
+    function outputs(op) {
+      var out = [];
+      if (op.id === 'map') {
+        ORDERS.forEach((o) => out.push({
+          parts: [{ t: 'b', v: o.uid }, { t: 'u', v: o.amount + ' 元' }, { t: 'em', v: '← 订单 ' + o.id }],
+        }));
+      } else if (op.id === 'filter') {
+        ORDERS.filter(op.keep).forEach((o) => out.push({ parts: inputParts(o), cls: 'kept' }));
+      } else if (op.id === 'flatMap') {
+        ORDERS.forEach((o) => o.products.forEach((p) => out.push({
+          parts: [{ t: 'b', v: p }, { t: 'em', v: '← 订单 ' + o.id }],
+        })));
+      } else if (op.id === 'sum') {
+        var acc = {};
+        ORDERS.forEach((o) => {
+          acc[o.uid] = (acc[o.uid] || 0) + o.amount;
+          out.push({
+            parts: [{ t: 'b', v: o.uid }, { t: 'u', v: '累计 ' + acc[o.uid] + ' 元' },
+              { t: 'em', v: '← 订单 ' + o.id }],
+          });
+        });
+      }
+      return out;
+    }
+
+    function buckets() {
+      var order = [], map = {};
+      ORDERS.forEach((o) => {
+        if (!map[o.uid]) { map[o.uid] = []; order.push(o.uid); }
+        map[o.uid].push(o);
+      });
+      return order.map((uid) => ({ uid: uid, items: map[uid] }));
+    }
+
+    function reset() {
+      clearTimers();
+      fill(inBox, []); fill(outBox, []);
+      inHead.textContent = '输入 · 6 条订单';
+      outHead.textContent = '输出';
+      ioEl.className = 'ol-io tone-muted';
+      fill(ioEl, [h('span', { text: '点一个算子，看它把数据变成了什么' })]);
+      statusEl.textContent = '未开始';
+      runBtn.disabled = false;
+      runBtn.textContent = '▶ 重放';
+    }
+
+    function play(id) {
+      clearTimers();
+      var op = byId(id);
+      cur = id;
+
+      Array.prototype.forEach.call(modesBox.children, (b) =>
+        b.classList.toggle('on', b.getAttribute('data-ol-mode') === id));
+      ruleEl.className = 'ol-rule tone-' + op.tone;
+      ruleEl.textContent = op.rule;
+      outHead.textContent = op.head;
+      inHead.textContent = '输入 · 6 条订单';
+      statusEl.textContent = op.io;
+
+      ioEl.className = 'ol-io tone-' + op.tone;
+      fill(ioEl, [h('b', { text: op.io }), h('span', { text: op.note })]);
+
+      // 输入栏：全在，被丢掉的标灰
+      fill(inBox, ORDERS.map((o) => rec(inputParts(o), op.keep(o) ? '' : 'drop')));
+
+      // 输出栏：逐条 / 逐桶吐出来
+      fill(outBox, []);
+      var step = 90;
+      if (op.id === 'keyBy') {
+        buckets().forEach((bk, i) => {
+          timers.push(setTimeout(() => {
+            var kids = [h('div', { cls: 'ol-bhead' }, [
+              h('span', { text: 'key = ' + bk.uid }),
+              h('span', { cls: 'cnt', text: bk.items.length + ' 条' }),
+            ])];
+            bk.items.forEach((o) => kids.push(rec(inputParts(o))));
+            outBox.appendChild(h('div', { cls: 'ol-bucket tone-amber' }, kids));
+            outBox.scrollTop = outBox.scrollHeight;
+          }, i * 220 + 40));
+        });
+      } else {
+        outputs(op).forEach((r, i) => {
+          timers.push(setTimeout(() => {
+            outBox.appendChild(rec(r.parts, r.cls));
+            outBox.scrollTop = outBox.scrollHeight;
+          }, i * step + 40));
+        });
+      }
+
+      runBtn.disabled = false;
+      runBtn.textContent = '▶ 重放';
+    }
+
+    OPS.forEach((op) => {
+      var b = h('button', { cls: 'tone-' + op.tone, text: op.label, attrs: { 'data-ol-mode': op.id } });
+      b.type = 'button';
+      b.addEventListener('click', () => play(op.id));
+      modesBox.appendChild(b);
+    });
+    runBtn.addEventListener('click', () => play(cur));
+    if (resetBtn) resetBtn.addEventListener('click', reset);
+
+    // 初始直接把 map 的结果摆好 —— 这个控件的重点是「对比产出」，
+    // 上来就空着反而不知道该干什么。点其它算子才是探索。
+    play('map');
+  };
+
+  /* ---------- 挂载 ---------- */
+  document.querySelectorAll('[data-widget]').forEach((root) => {
+    var name = root.getAttribute('data-widget');
+    var fn = WIDGETS[name];
+    if (fn) { try { fn(root); } catch (e) { console.error('[widget:' + name + ']', e); } }
+    else { console.warn('[widget] 未注册：' + name); }
+  });
+})();
+
+</script>
+</body>
+</html>
