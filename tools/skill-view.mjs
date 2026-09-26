@@ -25,19 +25,19 @@ const md = new MarkdownIt({ html: true, linkify: true }).use(blocksPlugin);
 const DEFAULT_PAGES = [
   {
     slug: 'skill',
-    file: '.agents/skills/knowledge-html/SKILL.md',
+    file: 'SKILL.md',
     title: 'knowledge-html skill',
     summary: '总入口：原则 · 工作流 · 规范 · 多会话协作 · 硬约束',
   },
   {
     slug: 'blocks',
-    file: '.agents/skills/knowledge-html/references/blocks.md',
+    file: 'references/blocks.md',
     title: '积木参考',
     summary: '17 个积木的完整 DSL（示例都是真的，能直接跑）',
   },
   {
     slug: 'extend',
-    file: '.agents/skills/knowledge-html/references/extend.md',
+    file: 'references/extend.md',
     title: '加新积木',
     summary: '积木不够用时怎么办',
   },

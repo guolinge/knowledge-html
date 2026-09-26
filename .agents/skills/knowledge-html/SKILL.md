@@ -455,7 +455,7 @@ text: |
   → 这一节写不下。==它不是「方言层的一个方法」，它是一条独立的架构裂缝。==
 ```
 
-### 什么时候该长出新节点
+#### 1.8.1 什么时候该长出新节点
 
 ```compare
 first: 写作时的信号
@@ -468,7 +468,7 @@ rows:
   - 「这里和前面某一节重复了」: ["两个节点**边界划错了**", "合并或重新切"]
 ```
 
-### 怎么维护
+#### 1.8.2 怎么维护
 
 ```callout
 tone: green
@@ -1283,6 +1283,7 @@ pre-push 会重建 + 量图。**它拦下来通常不是你的问题。**
 - [ ] 结尾有 `quiz`
 - [ ] `meta.json` 的 `status` 是 `draft`，`sources` 填了原文出处
 - [ ] 走的是「一个面」时，**知识树的每个节点都有归属**（单独一篇 / 并入哪篇）
+- [ ] 改了 skill 的话，**跑一遍 `npm run skill` 看渲染有没有崩**（它自己也是用积木写的）
 
 ## 参考
 
@@ -1308,4 +1309,20 @@ pre-push 会重建 + 量图。**它拦下来通常不是你的问题。**
 - [`references/extend.md`](references/extend.md) —— 积木不够用时怎么加一个
 - `notes/blocks-cheatsheet/note.md` —— 可运行的积木示例
 - `notes/data-warehouse-cdc-flink/note.md` —— 长文转图的实战案例
-- `notes/sql-builder-v2-code-map/note.md` —— 源码通读的实战案例
+
+### 实战：一棵完整的树
+
+`notes/sql-builder-v2-*` 是一棵**已完成的嵌套产物树**（12 篇），
+从 [① 概念篇](notes/sql-builder-v2-concepts/note.md) 开始。
+
+值得看的几篇：
+
+| 看什么 | 去哪 |
+|---|---|
+| 递归六层怎么落到具体一篇 | [④ core 篇](notes/sql-builder-v2-core/note.md) · [⑨ crowd 篇](notes/sql-builder-v2-crowd/note.md) |
+| 一个抽象怎么讲透 | [⑤ Rule[] 篇](notes/sql-builder-v2-core-rule/note.md) —— 四种形态的 2×2 |
+| 怎么把「架构裂缝」写成一篇 | [⑧ 数组条件的两种路径](notes/sql-builder-v2-core-dialect-array/note.md) |
+| 树长出来的新节点长什么样 | [⑫ 条件树重写](notes/sql-builder-v2-crowd-combi-optimizer/note.md) |
+
+（`sql-builder-v2-code-map` 和 `sql-builder-v2-core-abstractions` 是**旧版**，
+内容已拆进上面 12 篇，只作为历史素材保留。）

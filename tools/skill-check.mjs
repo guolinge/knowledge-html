@@ -184,6 +184,29 @@ if (fs.existsSync(ARCH) && fs.existsSync(ARCH_CSS)) {
   }
 }
 
+// 10. skill-view.mjs 的默认页面路径必须能解析
+//     真实事故：泛化它支持「传文件路径」时，DEFAULT_PAGES 的 file 写成了相对 ROOT 的，
+//     但 root 是 SKILL —— 路径拼了两次，`npm run skill` 直接 ENOENT。
+//     因为之后只用显式路径调用过，一直没发现。
+const svPath = path.join(ROOT, 'tools/skill-view.mjs');
+if (fs.existsSync(svPath)) {
+  const sv = read(svPath);
+  const rootM = sv.match(/const SKILL = path\.join\(ROOT, '([^']+)'\)/);
+  const defaults = sv.match(/const DEFAULT_PAGES = \[([\s\S]*?)\n\];/);
+  if (rootM && defaults) {
+    for (const m of defaults[1].matchAll(/file: '([^']+)'/g)) {
+      const target = path.join(ROOT, rootM[1], m[1]);
+      if (!fs.existsSync(target)) {
+        note(
+          `skill-view.mjs 的默认页面路径解析不了：${m[1]}\n` +
+            `      → 拼出来是 ${path.relative(ROOT, target)}（不存在）\n` +
+            `      → file 要相对 SKILL 目录写，不是相对仓库根`,
+        );
+      }
+    }
+  }
+}
+
 /* ─────────── 报告 ─────────── */
 
 if (problems.length === 0) {
