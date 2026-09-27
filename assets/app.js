@@ -935,12 +935,16 @@
       svg.setAttribute('height', totalH);
 
       const parts = [];
+      const lifelines = [];   // 先攒着 —— 激活条要压在生命线上面
+      const acts = [];        // 激活条
+      const segBoxes = [];    // 时间段框
+      const msgGeom = [];     // 每条消息的 { i, from, to, y }
 
       // 1) lifeline：从头部底部到主体底部
       const lifeTop = headH + 6;
       const lifeBottom = headH + 18 + bodyH;
       Object.values(cx).forEach((x) => {
-        parts.push(
+        lifelines.push(
           `<line class="lifeline" x1="${x}" y1="${lifeTop}" x2="${x}" y2="${lifeBottom}"/>`,
         );
       });
@@ -958,6 +962,12 @@
         if (x1 === undefined || x2 === undefined) return;
 
         const y = headH + 18 + row.offsetTop + row.offsetHeight / 2;
+        msgGeom.push({
+          i: Number(row.getAttribute('data-i')) || msgGeom.length + 1,
+          from,
+          to,
+          y,
+        });
 
         if (from === to) {
           // 自调用：右侧一个环，标签的 x 交给 CSS 用
@@ -986,7 +996,68 @@
         }
       });
 
-      svg.innerHTML = svg.querySelector('defs').outerHTML + parts.join('');
+      /* 3) 激活条 —— **从消息自动推导**，不用手写。
+            取这个参与者「所有相关消息」的 y 区间。
+
+            **纯发起方不画**（比如客户端）：激活条表示「在处理」，
+            而它从发出请求到收到响应之间是在**等待**，不是处理。
+            这也是 UML 惯例 —— archify 生成的图同样不给客户端画。 */
+      const byPart = {};
+      msgGeom.forEach((m, idx) => {
+        (byPart[m.from] ||= { ys: [], firstIn: Infinity, firstOut: Infinity }).ys.push(m.y);
+        (byPart[m.to] ||= { ys: [], firstIn: Infinity, firstOut: Infinity }).ys.push(m.y);
+        byPart[m.from].firstOut = Math.min(byPart[m.from].firstOut, idx);
+        byPart[m.to].firstIn = Math.min(byPart[m.to].firstIn, idx);
+      });
+      Object.entries(byPart).forEach(([id, { ys, firstIn, firstOut }]) => {
+        // 纯发起方（先发后收，比如客户端）不画 —— 它在等待，不在处理
+        if (firstOut < firstIn) return;
+        const x = cx[id];
+        if (x === undefined) return;
+        const first = Math.min(...ys);
+        const last = Math.max(...ys);
+        acts.push(
+          `<rect class="activation" x="${x - 5}" y="${first}" width="10" height="${Math.max(
+            last - first,
+            20,
+          )}" rx="4"/>`,
+        );
+      });
+
+      /* 4) 时间段框 —— 按消息序号圈出一段，左上方带标签。
+            画在生命线后面，所以放前面。 */
+      let segs = [];
+      try {
+        segs = JSON.parse(root.getAttribute('data-segs') || '[]');
+      } catch (e) {
+        segs = [];
+      }
+      const xs = Object.values(cx);
+      if (xs.length) {
+        const left = Math.min(...xs);
+        const right = Math.max(...xs);
+        segs.forEach((g) => {
+          const inRange = msgGeom.filter((m) => m.i >= g.from && m.i <= g.to);
+          if (!inRange.length) return;
+          const top = Math.min(...inRange.map((m) => m.y)) - 14;
+          const bottom = Math.max(...inRange.map((m) => m.y)) + 14;
+          segBoxes.push(
+            `<rect class="segbox" x="${left - 30}" y="${top}" width="${
+              right - left + 60
+            }" height="${bottom - top}" rx="10"/>` +
+              `<text class="seglabel" x="${left - 30}" y="${top - 7}">${escapeXml2(
+                g.label,
+              )}</text>`,
+          );
+        });
+      }
+
+      svg.innerHTML =
+        svg.querySelector('defs').outerHTML +
+        segBoxes.join('') +
+        lifelines.join('') +
+        acts.join('') +
+        parts.join('');
     }
 
     function escapeXml2(s) {

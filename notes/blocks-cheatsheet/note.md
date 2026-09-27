@@ -102,19 +102,39 @@ participants:
   - { id: c, label: 客户端, sub: browser session, kind: frontend }
   - { id: g, label: 数据网关, sub: request handler, kind: backend }
   - { id: d, label: ByteHouse, sub: source of truth, kind: database }
+segments:
+  - { from: 1, to: 1, label: 请求 }
+  - { from: 2, to: 4, label: 查询 }
 messages:
   - { from: c, to: g, label: "POST /query", kind: sync, note: 1 }
   - { from: g, to: d, label: "SELECT uid FROM ...", kind: sync, note: 2 }
   - { from: d, to: g, label: 结果集, kind: reply, note: 3 }
-  - { from: g, to: c, label: "200 OK", kind: reply, note: 4 }
+  - { from: g, to: c, label: "200 OK", kind: reply, note: 4, gap: 46 }
   - { from: g, to: g, label: 重试, kind: self }
 ```
 
 要点：
 
 - `kind` 决定箭头：`sync` 实心 / `async` 空心 / `reply` 虚线+空心 / `self` 自调用。
-- **一行 = 一条消息**，时间轴等距。`note` 是画在箭头上方的序号或旁注。
+- **一行 = 一条消息**。`note` 是画在箭头上方的序号或旁注。
+- **激活条是自动的** —— 不用写。它按「收到消息开始、发出最后一条结束」推导，
+  一眼看出「谁在处理、处理了多久」。
+- `segments` 把消息分阶段（按**消息序号**圈定），画成虚线框 + 左上角标签。
+- `gap` 给这条消息前面加留白，**用来表达「这一步慢」**（上面 `200 OK` 的 46px）。
 - 参与者别超过 5 个，否则列太窄。
+
+```callout
+tone: violet
+icon: 💡
+text: |
+  **需要更复杂的时候（比如嵌套 alt/loop 框、精确到像素的时间轴），
+  去调 [archify skill](../../.agents/skills/knowledge-html/SKILL.md)。**
+
+  它的 `sequence` 类型支持 `views`（分段聚焦）和显式的 `y` 坐标，
+  还有布局校验器。代价是要跑外部工具、生成 SVG 文件。
+
+  ==这里的 `seq` 覆盖日常的调用链；复杂的交给它。==
+```
 
 ## 05 · matrix —— 2x2 定位矩阵
 

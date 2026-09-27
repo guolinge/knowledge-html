@@ -52,6 +52,33 @@ setTimeout(function () {
   var problems = [];
   var TOL = 2;   // 2px 容差，避免亚像素误差误报
 
+  /* 有 SVG 的积木：必须真画出东西来。
+     踩过：app.js 里一段代码放错位置（两个积木的绘制函数尾部长得一样，
+     字符串替换打中了另一个），运行时抛异常，结果 SVG 是空的 ——
+     但空 SVG 没有溢出，布局检查全绿。==所以「画出来没有」要单独查。== */
+  var SVG_BLOCKS = ['[data-flow]', '[data-seq]'];
+  SVG_BLOCKS.forEach(function (sel) {
+    document.querySelectorAll(sel).forEach(function (box, i) {
+      var svg = box.querySelector('svg');
+      if (!svg) { problems.push(sel + '[' + i + '] 没有 svg 元素'); return; }
+      /* 只数「真正画在图上」的图元 —— 要排除 <defs> 里的。
+         别用 defs * 去减：那会把 marker 元素本身也算进去，
+         边少的图（比如只有 2 条边）会被误判成空。踩过这个坑。
+         （PROBE 是模板字符串，注释里不能出现反引号 —— 也别踩。） */
+      var drawn = Array.prototype.filter.call(
+        svg.querySelectorAll('line, rect, path, circle, ellipse, polygon, polyline, text'),
+        function (el) { return !el.closest('defs'); },
+      ).length;
+      if (drawn < 2) {
+        problems.push(
+          sel + '[' + i + '] 的 svg 是空的（只有 ' + drawn + ' 个图元）' +
+            ' —— 多半是绘制时抛了异常',
+        );
+      }
+    });
+  });
+
+
   CONTAINERS.forEach(function (sel) {
     document.querySelectorAll(sel).forEach(function (box, i) {
       var br = box.getBoundingClientRect();
@@ -156,7 +183,14 @@ for (const file of files) {
   }
 
   const m = dom.match(/<pre id="vc-result">([\s\S]*?)<\/pre>/);
-  if (!m) { console.error(`  ? ${slug}  探针没回数据`); continue; }
+  /* 探针没回数据 = 它自己抛了异常。**不能算通过** ——
+     踩过：探针里引用了一个已删除的变量，抛 ReferenceError，
+     结果所有图都「检查通过」，而实际上一个都没检查。 */
+  if (!m) {
+    console.error(`  ✗ ${slug}  探针没回数据（多半是探针自己抛了异常）`);
+    total++;
+    continue;
+  }
 
   /* 探针把诊断塞在 <pre> 的 textContent 里，读回来得先反转义。
      这一步必须包住：解析失败时要报出「哪一篇、内容长什么样」，
@@ -171,7 +205,8 @@ for (const file of files) {
         .replace(/&gt;/g, '>'),
     );
   } catch {
-    console.error(`  ? ${slug}  探针返回的内容不是合法 JSON：${m[1].slice(0, 120)}`);
+    console.error(`  ✗ ${slug}  探针返回的内容不是合法 JSON：${m[1].slice(0, 120)}`);
+    total++;
     continue;
   }
 

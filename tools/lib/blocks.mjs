@@ -446,7 +446,12 @@ const KIND_TONE = {
   /* ===== 积木 13 · seq =====
      时序图。参与者横排，时间向下流，消息是水平箭头。
      依据 UML 2.5：每条消息线必须「水平或向下」，不能向上。
-     几何全由 app.js 测量后画成 SVG（和 flow 同一套思路）。 */
+     几何全由 app.js 测量后画成 SVG（和 flow 同一套思路）。
+
+     三个能力（对齐 UML 时序图的核心表达）：
+       · activations —— 激活条，**从消息自动推导**，不用手写
+       · segments    —— 时间段框，把消息分阶段（按序号指定）
+       · gap         —— 消息前的额外留白，用来表达「这一步慢」 */
   function seq(body) {
     const cfg = YAML.parse(body) || {};
     const parts = cfg.participants || [];
@@ -471,17 +476,26 @@ const KIND_TONE = {
 
     const rows = msgs
       .map(
-        (m) => `<div class="smsg${m.from === m.to ? ' is-self' : ''}" data-from="${esc(
+        (m, i) => `<div class="smsg${m.from === m.to ? ' is-self' : ''}" data-from="${esc(
           m.from,
-        )}" data-to="${esc(m.to)}" data-kind="${esc(m.kind || 'sync')}"${
+        )}" data-to="${esc(m.to)}" data-kind="${esc(m.kind || 'sync')}" data-i="${i + 1}"${
           m.tone ? ` data-tone="${esc(m.tone)}"` : ''
-        }${m.note ? ` data-note="${esc(m.note)}"` : ''}>${
+        }${m.note ? ` data-note="${esc(m.note)}"` : ''
+        }${m.gap ? ` style="margin-top:${Number(m.gap) || 0}px"` : ''}>${
           m.label ? `<span class="slabel">${inline(m.label)}</span>` : ''
         }</div>`,
       )
       .join('');
 
-    return `<div class="seqd${cfg.grid ? ' has-grid' : ''}" data-seq data-n="${n}">
+    // segments：按消息序号圈出时间段。app.js 画成带标签的框
+    const segs = (cfg.segments || [])
+      .filter((g) => g && g.label && g.from)
+      .map((g) => ({ from: Number(g.from), to: Number(g.to ?? g.from), label: g.label }));
+    const segAttr = segs.length
+      ? ` data-segs="${esc(JSON.stringify(segs))}"`
+      : '';
+
+    return `<div class="seqd${cfg.grid ? ' has-grid' : ''}" data-seq data-n="${n}"${segAttr}>
       <svg class="seqd-svg" aria-hidden="true">
         <defs>
           <marker id="s-fill" viewBox="0 0 10 10" refX="9" refY="5"

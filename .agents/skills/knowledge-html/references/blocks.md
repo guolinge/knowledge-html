@@ -288,15 +288,19 @@ edges:
 > 核心约束是「每条消息线必须水平或向下」—— 所以不可能出现向上的箭头（回复除外）。
 
 ```seq
+grid: true
 participants:
   - { id: c, label: 客户端, tone: blue }
   - { id: g, label: API 网关, tone: violet }
   - { id: d, label: 数据库, tone: green }
+segments:
+  - { from: 1, to: 1, label: 请求 }
+  - { from: 2, to: 4, label: 查询 }
 messages:
   - { from: c, to: g, label: "POST /orders", kind: sync, note: 1 }
   - { from: g, to: d, label: "SELECT * FROM orders", kind: sync, note: 2 }
   - { from: d, to: g, label: 结果集, kind: reply, note: 3 }
-  - { from: g, to: c, label: "200 OK", kind: reply, note: 4 }
+  - { from: g, to: c, label: "200 OK", kind: reply, note: 4, gap: 40 }
   - { from: g, to: g, label: 重试, kind: self }
 ```
 
@@ -311,6 +315,12 @@ messages:
 | `messages[].note` | 序号或旁注，画在箭头上方 |
 | `messages[].kind` | 箭头样式，见下 |
 | `messages[].tone` | 消息着色（箭头和标签一起变色） |
+| `messages[].gap` | 这条消息**前面**额外留白（px）。用来表达「这一步慢」 |
+| `segments[]` | 时间段框：`{ from, to, label }`，`from`/`to` 是**消息序号**（1 起） |
+
+**激活条是自动的，不用写。** 它按「这个参与者收到过什么、发出过什么」推导：
+取所有相关消息的 y 区间。==纯发起方（先发后收，比如客户端）不画== ——
+激活条表示「在处理」，而它在等待。
 
 顶层加 `grid: true` 会有背景网格。
 
