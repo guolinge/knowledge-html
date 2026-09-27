@@ -1,0 +1,553 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-has-toc="1">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>单机代码藏着的 7 个假设，分布式里全部失效</title>
+<meta name="description" content="一段七行的 while 循环，脚下踩着七个没写出来的假设。逐个拆开它们失效后会发生什么，以及业界各自的标准解法 —— 一致性哈希、幂等与去重、单写者原则、快照加位点、反压、key group。" />
+<link rel="stylesheet" href="../../assets/theme.css" />
+  <link rel="stylesheet" href="../../assets/blocks.css" />
+  <link rel="stylesheet" href="../../assets/archify-embed.css" />
+</head>
+<body>
+<div id="progress"></div>
+<div id="tocScrim"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
+    <a class="brand" href="../../index.html"><span class="dot"></span>知识笔记</a>
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="toc" id="toc">
+      <p class="toc-title">目录</p>
+      <a href="../../index.html" class="sub">← 全部笔记</a>
+      <a href="#一段七行的代码藏着七个假设">一段七行的代码，藏着七个假设</a>
+      <a href="#假设①-只有一个执行者-数据该分给谁">假设① 只有一个执行者 —— 数据该分给谁</a>
+      <a href="#但取模有个致命伤" class="sub">但「取模」有个致命伤</a>
+      <a href="#假设②-内存随手可及-数据必须走网络">假设② 内存随手可及 —— 数据必须走网络</a>
+      <a href="#最麻烦的是最后一条" class="sub">最麻烦的是最后一条</a>
+      <a href="#假设③-顺序执行-同一秒改同一个-key">假设③ 顺序执行 —— 同一秒改同一个 key</a>
+      <a href="#一个比加锁更深的洞察" class="sub">一个比「加锁」更深的洞察</a>
+      <a href="#业界的三种解法" class="sub">业界的三种解法</a>
+      <a href="#假设⑥-快慢自然协调-反压">假设⑥ 快慢自然协调 —— 反压</a>
+      <a href="#一个很少被讲但很要命的细节" class="sub">一个很少被讲、但很要命的细节</a>
+      <a href="#假设⑦-机器数量不变-状态要搬家">假设⑦ 机器数量不变 —— 状态要搬家</a>
+      <a href="#flink-是怎么解这一题的" class="sub">Flink 是怎么解这一题的</a>
+      <a href="#收束这些复杂性被算子封装了">收束：这些复杂性，被「算子」封装了</a>
+      <a href="#一句话总结" class="sub">一句话总结</a>
+      <a href="#自测">自测</a>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow">● 分布式 · 概念与通用解法</span>
+      <h1>单机代码藏着的 7 个假设，分布式里全部失效</h1>
+      <p class="lede">一段七行的 while 循环，脚下踩着七个没写出来的假设。逐个拆开它们失效后会发生什么，以及业界各自的标准解法 —— 一致性哈希、幂等与去重、单写者原则、快照加位点、反压、key group。</p>
+    </div>
+
+    <div class="draft-banner">
+    <span>⚠</span>
+    <span>本页状态为 <b>draft</b>：内容尚未人工核对，引用前请自行验证。</span>
+  </div>
+
+    <div class="provenance"><span><b>来源</b> 用户粘贴的《单机 vs 分布式：七个失效的假设》原文 · Apache Flink 官方博客：An Overview of End-to-End Exactly-Once Processing in Apache Flink with Apache Kafka · Apache Flink 官方博客：A Deep Dive into Rescalable State in Apache Flink（key group / FLINK-3755） · FLINK-7282（credit-based 流控）/ sage 关于 backpressure 与 checkpoint barrier 的讨论 · Consistent Hashing with Virtual Nodes（Dynamo 论文思路 / Cassandra 实现） · PostgreSQL 并发隔离资料：lost update 的语义本质（相对值 vs 绝对值） · Kafka 幂等生产者与事务：ProducerID + SequenceNumber 去重、Kafka-to-Kafka 边界</span><span><b>生成</b> 2026-09-26</span><span><b>模型</b> deepseek-v4.1-flash</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">分布式</span> <span class="tag tone-muted">状态</span> <span class="tag tone-muted">一致性哈希</span> <span class="tag tone-muted">幂等</span> <span class="tag tone-muted">反压</span> <span class="tag tone-muted">Checkpoint</span></span></div>
+
+<blockquote>
+<p>单机程序脚下踩着七个<strong>没写出来的假设</strong>。它们不是靠你的代码成立的，是靠 CPU、线程、进程内存和函数调用替你保证的。</p>
+<p>一旦拆到多台机器，<mark class="mk-blue">这七个假设全部失效，必须由系统显式补上</mark>。这篇逐个拆开它们，以及业界各自的标准解法。</p>
+</blockquote>
+<h2 id="一段七行的代码藏着七个假设"><span class="num">01</span>一段七行的代码，藏着七个假设</h2>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-java">while (true) {
+    Order o = read();
+    if (o.getAmount() &lt;= 0) continue;
+    total += o.getAmount();
+    write(total);
+}
+</code></pre></div>
+<p>看起来很朴素。但它默认下面这些事<strong>已经成立</strong>：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>代码里没写、但单机默认成立的假设</th><th>单机里谁在保证它</th><th>分布式里会变成什么</th></tr></thead><tbody><tr><th>只有一个执行者</th><td data-label="单机里谁在保证它">一个线程在跑这段循环</td><td data-label="分布式里会变成什么"><span class="tag tone-red">数据散在多台机器上，谁算全局值？</span></td></tr><tr><th>内存随手可及</th><td data-label="单机里谁在保证它">都在同一个进程地址空间里</td><td data-label="分布式里会变成什么"><span class="tag tone-red">跨机器只能走网络 —— 而网络会丢、会重、会乱序</span></td></tr><tr><th>数据按一个顺序处理</th><td data-label="单机里谁在保证它">循环天生就是顺序的</td><td data-label="分布式里会变成什么">多个节点同时改同一个 key，谁覆盖谁？</td></tr><tr><th>变量更新不会冲突</th><td data-label="单机里谁在保证它">单线程没有竞态这回事</td><td data-label="分布式里会变成什么">两个进程「读-改-写」交错，丢更新</td></tr><tr><th>进程不出故障</th><td data-label="单机里谁在保证它">挂了就整个停，不用想恢复</td><td data-label="分布式里会变成什么"><span class="tag tone-red">局部故障是常态，必须能精确恢复</span></td></tr><tr><th>上下游速度差自然协调</th><td data-label="单机里谁在保证它"><code>write()</code> 慢，<code>read()</code> 就自动跟着慢</td><td data-label="分布式里会变成什么">中间会无限积压，直到 OOM</td></tr><tr><th>机器数量不变</th><td data-label="单机里谁在保证它">没有「扩容」这回事</td><td data-label="分布式里会变成什么">扩了容，历史状态还留在老机器上</td></tr></tbody></table></div><div class="callout tone-violet tinted">
+      <span class="ic">🧭</span>
+      <div><p>所以分布式带来的问题，<mark class="mk-blue">不是业务突然变复杂了</mark> ——
+而是<strong>单机环境里那些被默认保证的条件，到了多机环境必须被明确设计和实现</strong>。</p>
+<p>下面七个假设逐个拆。每一节都按同样的三步走：
+<strong>哪个假设失效了 → 会发生什么 → 业界的通用解法是什么。</strong></p>
+</div>
+    </div><h2 id="假设①-只有一个执行者-数据该分给谁"><span class="num">02</span>假设① 只有一个执行者 —— 数据该分给谁</h2>
+<p>单机只有一个 <code>total</code>：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">订单 → 同一个循环 → 同一个 total
+</code></pre></div>
+<p>分布式里，同一个变量变成了三份<strong>互不知情</strong>的副本：</p>
+<div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;in&quot;,&quot;to&quot;:&quot;a&quot;},{&quot;from&quot;:&quot;in&quot;,&quot;to&quot;:&quot;b&quot;},{&quot;from&quot;:&quot;in&quot;,&quot;to&quot;:&quot;c&quot;},{&quot;from&quot;:&quot;a&quot;,&quot;to&quot;:&quot;out&quot;,&quot;dashed&quot;:true},{&quot;from&quot;:&quot;b&quot;,&quot;to&quot;:&quot;out&quot;,&quot;dashed&quot;:true},{&quot;from&quot;:&quot;c&quot;,&quot;to&quot;:&quot;out&quot;,&quot;dashed&quot;:true}]">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-blue" data-id="in">
+              
+              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M3 5h10M3 8h10M3 11h6"/></svg>
+              <b>订单流</b>
+              <small>所有人都在下</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="a">
+              
+              
+              <b>机器 A</b>
+              <small>totalA = 100</small>
+            </div><div class="fnode tone-violet" data-id="b">
+              
+              
+              <b>机器 B</b>
+              <small>totalB = 200</small>
+            </div><div class="fnode tone-violet" data-id="c">
+              
+              
+              <b>机器 C</b>
+              <small>totalC = 300</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-red" data-id="out">
+              
+              
+              <b>全局 total = ?&quot;</b>
+              <small>没有任何一台机器天然知道</small>
+            </div></div></div>
+      
+    </div><p>三台机器各算各的，加起来是 600 —— 但<strong>没有一台机器知道这个数</strong>。所以必须做选择：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>策略</th><th>怎么做</th><th>代价是什么</th></tr></thead><tbody><tr><th>全都送到一台机器</th><td data-label="怎么做">多台机器把数据都发给同一个汇总节点</td><td data-label="代价是什么"><span class="tag tone-amber">结果是对的，但没有并行度，汇总节点必然成瓶颈</span></td></tr><tr><th>局部聚合 + 二次汇总</th><td data-label="怎么做">每台先算局部值，再合并局部结果</td><td data-label="代价是什么">需要一个额外的聚合阶段；能用是因为 <code>sum</code> 满足结合律</td></tr><tr><th>按 key 分区</th><td data-label="怎么做"><code>hash(key) % N</code>，让每个 key 固定由一台机器负责</td><td data-label="代价是什么"><span class="tag tone-green">分布式计算的标准答案</span></td></tr></tbody></table></div><h3 id="但取模有个致命伤">但「取模」有个致命伤</h3>
+<p>按 key 分区听起来很简单，<code>hash(key) % N</code> 就够了。直到你要<strong>扩缩容</strong>：</p>
+<div class="keyspace">
+  <div class="ks-case tone-red">
+    <h5>取模分区 · hash(key) % N</h5>
+    <p>节点数一变，key 的归属几乎全部重算 —— 因为对 3 取模和对 5 取模，是两个完全无关的函数。</p>
+    <div class="ks-row">
+      <b>N = 3</b>
+      <div class="ks-bar">
+        <div class="ks-seg">A</div><div class="ks-seg">B</div><div class="ks-seg">C</div>
+      </div>
+    </div>
+    <div class="ks-row">
+      <b>N = 5</b>
+      <div class="ks-bar">
+        <div class="ks-seg moved">A</div><div class="ks-seg moved">B</div>
+        <div class="ks-seg moved">C</div><div class="ks-seg moved">D</div>
+        <div class="ks-seg moved">E</div>
+      </div>
+    </div>
+    <div class="ks-verdict"><b>3 → 5 时，约 2/3 的 key 要搬家。</b>节点越多越糟 —— N 从 10 变成 11，也有约 90% 的 key 换主人。这不只是性能问题，它意味着扩容时几乎全部状态都要跨网络迁移。</div>
+  </div>
+
+  <div class="ks-case tone-green">
+    <h5>一致性哈希 · 把 key 和节点放到同一个环上</h5>
+    <p>key 顺时针找到第一个节点就算归它。加一个节点，它只从「前一个节点」手里接管自己那一段。</p>
+    <div class="ks-row">
+      <b>N = 3</b>
+      <div class="ks-bar">
+        <div class="ks-seg">A</div><div class="ks-seg">B</div><div class="ks-seg">C</div>
+      </div>
+    </div>
+    <div class="ks-row">
+      <b>加一台 D</b>
+      <div class="ks-bar">
+        <div class="ks-seg">A</div><div class="ks-seg">B</div>
+        <div class="ks-seg moved" style="--w: .6">C</div>
+        <div class="ks-seg fresh" style="--w: .4">D</div>
+      </div>
+    </div>
+    <div class="ks-verdict"><b>只有 D 接管的那一小段要搬家，其余 key 一动不动。</b>业界把这一段再切细（虚拟节点，一个物理节点管几百个虚拟节点），用来解决负载倾斜和快速恢复。Cassandra 用的就是这套。</div>
+  </div>
+</div>
+<div class="callout tone-green">
+      <span class="ic">✅</span>
+      <div><p><strong>判断一个分片方案好不好，别只看「能不能路由对」——要看扩容时要搬多少东西。</strong></p>
+<p><code>hash % N</code> 满足前半句，输在后半句。一致性哈希的价值不在「哈希更高级」，
+而在<mark class="mk-blue">它保证「加一个节点，只影响一小段 key」</mark>。</p>
+</div>
+    </div><h2 id="假设②-内存随手可及-数据必须走网络"><span class="num">03</span>假设② 内存随手可及 —— 数据必须走网络</h2>
+<p>单机里这一句，就是一次内存读写：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-java">total += amount;   // total 就在当前进程地址空间里
+</code></pre></div>
+<p>分布式里，订单在 A，而它需要的状态在 B：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">订单在机器 A
+user_1 的累计状态在机器 B
+</code></pre></div>
+<p>A 没法访问 B 的内存，只能发网络消息。而网络比内存<strong>多了六种坏脾气</strong>：</p>
+<div class="cards" data-cols="3"><div class="ccard tone-amber">
+          
+          <h4>会延迟</h4>
+          <p>什么时候到不保证。平时 1ms，抖动起来 1s</p>
+          
+          
+        </div><div class="ccard tone-red">
+          
+          <h4>会丢失</h4>
+          <p>发出去了，不一定会到</p>
+          
+          
+        </div><div class="ccard tone-red">
+          
+          <h4>会重复</h4>
+          <p>到了，可能到两次 —— 你没发两次，但它真的到了两次</p>
+          
+          
+        </div><div class="ccard tone-amber">
+          
+          <h4>会乱序</h4>
+          <p>先发的可能后到</p>
+          
+          
+        </div><div class="ccard tone-red">
+          
+          <h4>会断</h4>
+          <p>连接随时可能中断，而且断的时候你不知道对面收到没</p>
+          
+          
+        </div><div class="ccard tone-violet">
+          
+          <h4>无法判断</h4>
+          <p>超时只说明「你等够了」，不说明对面没做</p>
+          
+          
+        </div></div><h3 id="最麻烦的是最后一条">最麻烦的是最后一条</h3>
+<div class="seqd has-grid" data-seq data-n="2">
+      <svg class="seqd-svg" aria-hidden="true">
+        <defs>
+          <marker id="s-fill" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+          <marker id="s-open" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10" fill="none" stroke="currentColor" stroke-width="1.4"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="seqd-head"><div class="scell"><div class="spart tone-blue" data-id="a">
+          <b>机器 A</b><small>订单在这里</small>
+        </div></div><div class="scell"><div class="spart tone-violet" data-id="b">
+          <b>机器 B</b><small>user_1 的 total 在这里</small>
+        </div></div></div>
+      <div class="seqd-body"><div class="smsg" data-from="a" data-to="b" data-kind="sync" data-i="1" data-note="① 发出"><span class="slabel">total += 100</span></div><div class="smsg is-self" data-from="b" data-to="b" data-kind="self" data-i="2" data-note="② 但回包丢了"><span class="slabel">执行了，total = 100</span></div><div class="smsg is-self" data-from="a" data-to="a" data-kind="self" data-i="3" data-note="③ 不知道"><span class="slabel">超时了：它到底做没做？</span></div><div class="smsg" data-from="a" data-to="b" data-kind="sync" data-i="4" data-note="④ 重试"><span class="slabel">重试 total += 100</span></div><div class="smsg is-self" data-from="b" data-to="b" data-kind="self" data-i="5" data-note="⑤ 重复了"><span class="slabel">total = 200 —— 多算了一次</span></div></div>
+    </div><p>重试可能重复累加，不重试可能漏算。<strong>这个两难没有便宜的解法</strong>，只能把语义摊开来选：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>投递语义</th><th>会不会丢</th><th>会不会重</th><th>怎么做到</th></tr></thead><tbody><tr><th>至多一次 At-most-once</th><td data-label="会不会丢"><span class="tag tone-red">可能丢</span></td><td data-label="会不会重"><span class="tag tone-green">不会重</span></td><td data-label="怎么做到">发出去就不管了。实现最省事，但会丢数据</td></tr><tr><th>至少一次 At-least-once</th><td data-label="会不会丢"><span class="tag tone-green">尽量不丢</span></td><td data-label="会不会重"><span class="tag tone-red">可能重</span></td><td data-label="怎么做到">失败就重试。<mark class="mk-blue">这是绝大多数系统的默认选择</mark></td></tr><tr><th>恰好一次 Exactly-once</th><td data-label="会不会丢"><span class="tag tone-green">不丢</span></td><td data-label="会不会重"><span class="tag tone-green">不重</span></td><td data-label="怎么做到">不是「一种协议」，而是「事务 + 幂等 + 去重」组合出来的效果，最贵</td></tr></tbody></table></div><div class="callout tone-red">
+      <span class="ic">⚠</span>
+      <div><p><mark class="mk-amber">「恰好一次」不是买来的，是拼出来的 —— 而且端到端由<strong>最弱的一环</strong>决定。</mark></p>
+<p>投递语义是一个三层栈：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">Source 读进来  →  引擎内部处理  →  Sink 写出去
+</code></pre></div>
+<p>引擎内部可以做到恰好一次，但你 Sink 出去如果是「调一个第三方 HTTP 接口」，
+那一环就是至少一次 —— <mark class="mk-blue">整条链路的保证，等于最弱那一环</mark>。</p>
+<p>Kafka 从 0.11 起有幂等生产者（<code>ProducerID</code> + 每个分区的 <code>SequenceNumber</code> 去重），
+Flink 有 <code>TwoPhaseCommitSinkFunction</code> —— 但它们都有边界：
+<mark class="mk-blue"><strong>Kafka 的恰好一次只管 Kafka-to-Kafka</strong></mark>，写数据库、调接口、发短信不在保护范围内。</p>
+</div>
+    </div><p><strong>那业界怎么补上「至少一次」的缺口</strong>：</p>
+<ul class="check"><li>幂等写入 —— 让「重复写一次」和「写一次」结果相同，最省心的做法</li><li>去重表 / 唯一键 —— 每条消息带唯一 ID，处理前查一下，处理完记一笔</li><li>事务 —— 靠外部系统的事务能力，把「写结果」和「记位点」绑成一个原子操作</li><li>两阶段提交 —— 一个 checkpoint 对应一个事务：先预提交，checkpoint 成功才正式提交</li></ul><h2 id="假设③-顺序执行-同一秒改同一个-key"><span class="num">04</span>假设③ 顺序执行 —— 同一秒改同一个 key</h2>
+<p>单机这个循环是顺序的，永远不会有两个线程同时执行 <code>total += amount</code>。</p>
+<p>分布式里可以：</p>
+<div class="seqd has-grid" data-seq data-n="3">
+      <svg class="seqd-svg" aria-hidden="true">
+        <defs>
+          <marker id="s-fill" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+          <marker id="s-open" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10" fill="none" stroke="currentColor" stroke-width="1.4"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="seqd-head"><div class="scell"><div class="spart tone-blue" data-id="a">
+          <b>写者 A</b><small>user_1 +100</small>
+        </div></div><div class="scell"><div class="spart tone-violet" data-id="s">
+          <b>存储</b><small>user_1 的 total</small>
+        </div></div><div class="scell"><div class="spart tone-amber" data-id="b">
+          <b>写者 B</b><small>user_1 +200</small>
+        </div></div></div>
+      <div class="seqd-body"><div class="smsg" data-from="a" data-to="s" data-kind="sync" data-i="1" data-note="①"><span class="slabel">读 total</span></div><div class="smsg" data-from="b" data-to="s" data-kind="sync" data-i="2" data-note="② 也读"><span class="slabel">读 total</span></div><div class="smsg" data-from="s" data-to="b" data-kind="reply" data-i="3" data-note="③"><span class="slabel">返回 0</span></div><div class="smsg" data-from="s" data-to="a" data-kind="reply" data-i="4" data-note="④ 两边都拿到旧值"><span class="slabel">返回 0</span></div><div class="smsg" data-from="a" data-to="s" data-kind="sync" data-i="5" data-note="⑤"><span class="slabel">写 100</span></div><div class="smsg" data-from="b" data-to="s" data-kind="sync" data-i="6" data-note="⑥ 覆盖了 A"><span class="slabel">写 200</span></div><div class="smsg is-self" data-from="s" data-to="s" data-kind="self" data-i="7" data-note="⑦"><span class="slabel">最终 total = 200，A 的 100 丢了</span></div></div>
+    </div><p>这叫<strong>丢失更新（lost update）</strong>。正确结果应该是 300。</p>
+<h3 id="一个比加锁更深的洞察">一个比「加锁」更深的洞察</h3>
+<p>第一反应是「加锁」。但先看清 <mark class="mk-blue"><code>total += amount</code> 其实是三步：读、改、写</mark>。</p>
+<div class="callout tone-amber">
+      <span class="ic">🕳</span>
+      <div><p>数据库里有个反直觉的事实：<strong>即使你加了行锁，结果仍可能是错的。</strong></p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-sql">-- 这是「相对值」：不管谁先谁后，加起来都对
+UPDATE counter SET value = value + 1;
+
+-- 这是「绝对值」：第二个写者拿着过期的读，写回一个错的数
+UPDATE counter SET value = 101;
+</code></pre></div>
+<p><mark class="mk-blue">加锁只保证「三步不被打断」，不保证「你写回的数是正确的合约」。</mark>
+第二个写法即使严格串行执行，也会把前一个的修改抹掉。</p>
+<p>这是<strong>语义问题，不是锁问题</strong> —— 分布式里也一样：写回绝对值，谁也救不了你。</p>
+</div>
+    </div><h3 id="业界的三种解法">业界的三种解法</h3>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>解法</th><th>怎么保证不冲突</th><th>什么时候用</th></tr></thead><tbody><tr><th>悲观锁</th><td data-label="怎么保证不冲突">改之前先锁住（<code>SELECT ... FOR UPDATE</code>），强制串行</td><td data-label="什么时候用">冲突高、必须严格串行时。代价是等待和死锁风险</td></tr><tr><th>乐观锁</th><td data-label="怎么保证不冲突">写的时候校验版本号（<code>WHERE version = 旧值</code>），影响 0 行就是冲突了</td><td data-label="什么时候用">冲突低、重试便宜时。<mark class="mk-blue">注意要校验版本号而不是值 —— 否则会踩 ABA</mark></td></tr><tr><th>单写者</th><td data-label="怎么保证不冲突"><span class="tag tone-green">让同一个 key 永远只有一个处理者，从根上消除并发</span></td><td data-label="什么时候用"><span class="tag tone-green">分布式计算的标准答案</span></td></tr></tbody></table></div><div class="callout tone-green tinted">
+      <span class="ic">🔑</span>
+      <div><p><mark class="mk-blue">分布式里最优雅的解法不是「锁得更聪明」，而是「让冲突不可能发生」。</mark></p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">hash(userId) % 并行度  →  同一个 user 的所有订单，永远落到同一个处理者
+</code></pre></div>
+</div>
+    </div><p>没有并发，就不需要锁 —— 也不需要处理锁带来的一切麻烦（死锁、超时、重试风暴）。</p>
+<p>这就是 <code>keyBy</code>、分区、shuffle、路由这一整套机制存在的真正原因：
+<mark class="mk-blue"><strong>它们不是为了「分发」而存在，是为了「让同一个 key 只有一个主人」而存在。</strong></mark></p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code>
+## 05 · 假设④ 变量就在那儿 —— 状态得活过重启
+
+单机里 `total` 放在 JVM 内存里，天经地义。但分布式里，一个进程随时可能：
+
+```text
+宕机 · 被容器平台杀掉 · 因为发版重启 · 机器断电 · OOM · 被调度到别的机器
+</code></pre></div>
+<p>状态只在内存里的话，<code>机器 A 挂掉</code> 就意味着 <code>A 负责的那些用户状态全部丢失</code>。所以状态必须能被存下来、并且<strong>恢复得刚刚好</strong>：</p>
+<div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-blue">① 运行时</span>
+            <span class="name">算子的状态</span>
+            <span class="spacer"></span>
+            <span class="tag tone-red">只在内存里</span>
+          </div>
+          <div class="rec"><div class="">
+            <b>user_1</b><span>1000</span></div><div class="">
+            <b>user_2</b><span>250</span></div></div>
+          
+          <p class="jnote bad">进程一挂，这一整块就没了 —— 而且<mark class="mk-blue">没有别人知道它原本是多少</mark>。</p>
+        </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-violet">② 拍快照</span>
+            <span class="name">checkpoint</span>
+            <span class="spacer"></span>
+            <span class="tag tone-violet">两个东西一起存</span>
+          </div>
+          <div class="rec"><div class="ok">
+            <b>状态快照</b><span>user_1 = 1000</span><em>写到可靠存储</em></div><div class="ok">
+            <b>输入位点</b><span>offset = 50000</span><em>我处理到哪了</em></div></div>
+          
+          <p class="jnote">这两样<strong>必须成对保存</strong>。只存状态，你不知道从哪继续；
+只存位点，你不知道重新开始时累计值该是多少。</p>
+        </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-green">③ 恢复</span>
+            <span class="name">重启之后</span>
+            <span class="spacer"></span>
+            <span class="tag tone-green">必须对得上</span>
+          </div>
+          <div class="rec"><div class="">
+            <b>恢复的状态</b><span>user_1 = 1000</span></div><div class="ok">
+            <b>从哪继续</b><span>offset = 50001</span><em>正好接上</em></div></div>
+          
+          <p class="jnote">状态和位点<strong>必须来自同一次快照</strong>。配错了，要么漏数据、要么重复算。</p>
+        </div><div class="callout tone-blue">
+      <span class="ic">📌</span>
+      <div><p><strong>「存状态」和「存位点」要当成一件事来做。</strong></p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">状态快照：user_1 的 total = 1000
+输入位点：Kafka 已处理到 offset = 50000
+</code></pre></div>
+</div>
+    </div><p><mark class="mk-blue">这两行必须来自同一个时间点。</mark> 拿 10:00 的状态配 10:05 的位点，中间那 5 分钟的数据就永远算不进去了。</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code>
+## 06 · 假设⑤ 进程不会挂 —— 局部故障是常态
+
+单机只有一个进程，挂了就是「整个程序停了」，好理解也好处理。分布式是另一回事：
+
+```text
+100 台机器 · 1000 个容器 · 数万个网络连接
+</code></pre></div>
+<p>规模一上来，<mark class="mk-blue">局部故障不是「会不会发生」，而是「哪台机器什么时候坏」</mark>。</p>
+<p>最难受的是<strong>故障发生在中间</strong>：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">订单算完了  →  状态更新了  →  ✗ 进程在这里挂了  →  结果没写出去
+                                    ↑
+                              恢复时该怎么办？
+</code></pre></div>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>恢复策略</th><th>会怎样</th></tr></thead><tbody><tr><th>从旧位点重放</th><td data-label="会怎样"><span class="tag tone-red">可能重复写 —— 状态被加了两遍</span></td></tr><tr><th>不重放</th><td data-label="会怎样"><span class="tag tone-red">可能丢结果 —— 这条订单永远没写出去</span></td></tr><tr><th>去问下游收没收到</th><td data-label="会怎样"><span class="tag tone-amber">下游可能也答不上来（比如它自己刚重启）</span></td></tr></tbody></table></div><p>所以容错不是一件事，是一组机制配合：</p>
+<ul class="check"><li>Checkpoint / 快照 —— 定期把状态存到可靠存储</li><li>Replay —— 出事后从上次的输入位点重放</li><li>幂等写入 —— 让「重复写」无害，这是最实在的一道保险</li><li>去重 —— 认出「这条我已经处理过了」</li><li>事务 / 两阶段提交 —— 让「提交状态」和「写出结果」原子化</li><li>故障检测与重启 —— 得先知道谁挂了，才谈得上恢复</li></ul><div class="callout tone-amber">
+      <span class="ic">⚠</span>
+      <div><p>注意这份清单里，<mark class="mk-blue">只有第 1、2 条是「算」的事，后面全是在「写」上做文章</mark>。</p>
+<p>这也解释了为什么「恰好一次」这么贵：真正的难点不在状态本身，
+而在<strong>把状态的变化和对外部世界的写入，绑成一个不会只做一半的动作</strong>。</p>
+</div>
+    </div><h2 id="假设⑥-快慢自然协调-反压"><span class="num">07</span>假设⑥ 快慢自然协调 —— 反压</h2>
+<p>单机循环里，<code>write()</code> 慢，<code>read()</code> 自然就跟着慢 —— <strong>这是一种天然的节流</strong>，你什么都不用做。</p>
+<p>分布式里，各步骤在不同进程里，谁也不知道谁的速度：</p>
+<div class="flowviz">
+  <div class="fv-grid">
+    <div class="fv-node tone-blue"><b>Source</b><small>10 万/秒</small></div>
+    <div class="fv-arrow">→</div>
+    <div class="fv-node tone-violet"><b>Filter</b><small>10 万/秒</small></div>
+    <div class="fv-arrow">→</div>
+    <div class="fv-node tone-violet"><b>Aggregate</b><small>10 万/秒</small></div>
+    <div class="fv-arrow">→</div>
+    <div class="fv-node slow"><b>Database Sink</b><small>1 万/秒</small></div>
+  </div>
+  <div class="fv-back"><span>反压　Sink 忙 → Aggregate 暂停发送 → Filter 减速 → Source 少拉一点</span></div>
+  <div class="fv-note">
+    <b>差 10 倍。</b>第 1 秒积压 9 万条，第 2 秒 18 万条，第 N 秒把内存、磁盘或者消息队列撑爆。<br>
+    所以必须让下游的「慢」<b>沿数据流的反方向传回去</b> —— 这个机制叫<b>反压（backpressure）</b>。
+  </div>
+</div>
+<div class="callout tone-blue tinted">
+      <span class="ic">🧠</span>
+      <div><p><mark class="mk-blue">一句话记住反压的本质：</mark></p>
+<p><strong>一条流水线的整体速度，最终由最慢的那一环决定。
+系统必须让积压可感知、可传回，而不能靠「无限缓存」把问题藏起来。</strong></p>
+<p>缓冲只能买时间，不能解决问题 —— 缓存越深，故障时炸得越响。</p>
+</div>
+    </div><h3 id="一个很少被讲但很要命的细节">一个很少被讲、但很要命的细节</h3>
+<p>早年的 Flink（1.5 之前）反压是靠 TCP 自己的流控做的。它有两个坑：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">① 一条 TCP 连接上复用了多个 channel，
+   只要其中一个 channel 被堵，整条连接上其它 channel 全被拖住 —— 队头阻塞。
+
+② 更麻烦的是：反压一旦形成，checkpoint 的 barrier 也传不过去了。
+   而 barrier 传不过去 → checkpoint 超时 → checkpoint 失败 → 触发更多重试。
+   一个性能问题，滚成了一个可靠性问题。
+</code></pre></div>
+<p>1.5 之后改成了 <strong>credit-based 流控</strong>：下游主动告诉上游「我还有多少缓冲空间（credit）」，上游有 credit 才发数据。<mark class="mk-blue">这样每条 channel 独立受限，且 barrier 始终能穿过去。</mark></p>
+<h2 id="假设⑦-机器数量不变-状态要搬家"><span class="num">08</span>假设⑦ 机器数量不变 —— 状态要搬家</h2>
+<p>最后一个假设最容易被忽略，因为单机时代根本不存在「扩容」这回事。</p>
+<p>现在假设按 <code>hash(userId) % 3</code> 分区，每台机器管着一部分用户的状态。你要把并行度从 3 改成 5：</p>
+<div class="keyspace">
+  <div class="ks-case tone-amber">
+    <h5>状态不是「请求」，不能只是重新分配就完事</h5>
+    <p>无状态服务扩容很简单：多起两个进程，负载均衡把新请求分过去就行。</p>
+    <div class="ks-row">
+      <b>并行度 3</b>
+      <div class="ks-bar">
+        <div class="ks-seg">A · 分区 0</div><div class="ks-seg">B · 分区 1</div><div class="ks-seg">C · 分区 2</div>
+      </div>
+    </div>
+    <div class="ks-row">
+      <b>并行度 5</b>
+      <div class="ks-bar">
+        <div class="ks-seg moved">A</div><div class="ks-seg fresh">D</div>
+        <div class="ks-seg moved">B</div>
+        <div class="ks-seg fresh">E</div>
+        <div class="ks-seg moved">C</div>
+      </div>
+    </div>
+    <div class="ks-verdict"><b>但 <code>user_1</code> 的历史状态还在 A 上。</b>请求重新分配了，状态却没跟过来 —— 新接手的 D 从零开始算，结果直接算错。所以扩容必须做完整套动作：<b>存下状态 → 按新规则拆分 → 把状态搬给新实例 → 从正确的位点恢复。</b></div>
+  </div>
+</div>
+<h3 id="flink-是怎么解这一题的">Flink 是怎么解这一题的</h3>
+<p>关键在于：<strong>不要让「并行度」直接决定「状态的归属」。</strong></p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">hash(userId) % 3   ← 并行度一变，归属全变（取模的问题，第 02 节见过）
+
+                ↓ 换一种做法
+
+先把 key 空间切成固定份数：key group（数量 = maxParallelism）
+每个并行实例负责一段连续的 key group
+                     ↓
+扩缩容时，只是在重新分配这些「固定的块」——
+状态搬家的粒度从「一个个 key」变成了「一块块 key group」
+</code></pre></div>
+<div class="callout tone-green">
+      <span class="ic">📦</span>
+      <div><p><mark class="mk-blue">key group 的存在，就是为了让「改并行度」不必重算每一个 key 的哈希。</mark></p>
+<p>代价是：<strong>key group 的数量（最大并行度）在作业第一次提交时就定死了</strong>，
+之后改不了 —— 因为一旦改，所有历史的 key group 下标就全对不上了。</p>
+<p>这是分布式系统里很典型的一种权衡：<mark class="mk-blue"><strong>用一个提前锁死的常量，换运行时的灵活。</strong></mark>
+类似的设计你在别处也见过 —— 比如 Kafka 的分区数一旦定了就不好改。</p>
+</div>
+    </div><h2 id="收束这些复杂性被算子封装了"><span class="num">09</span>收束：这些复杂性，被「算子」封装了</h2>
+<p>回头看：这七个问题，<strong>没有一个跟你的业务有关</strong>。它们全都来自「把单机程序放到多台机器上」这一件事。</p>
+<div class="cards" data-cols="2"><div class="ccard tone-violet">
+          <span class="tag tone-violet">通用复杂性</span>
+          <h4>算子替你处理的</h4>
+          
+          <div class="cbody"><p>你只写业务逻辑：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code>filter → keyBy → sum → sink
+</code></pre></div>
+<p>而下面这些全部由引擎接走：</p>
+<ul>
+<li><strong>并行化</strong> —— 你说要几个实例，它去起线程</li>
+<li><strong>分区路由</strong> —— <code>keyBy</code> 之后，同一个 key 落到同一个实例</li>
+<li><strong>状态管理</strong> —— 状态怎么存、存多少、怎么换后端</li>
+<li><strong>故障恢复</strong> —— checkpoint + replay，不用你写</li>
+<li><strong>反压</strong> —— credit-based 流控，自动的</li>
+<li><strong>状态迁移</strong> —— 改并行度时，key group 自动重分配</li>
+</ul>
+</div>
+          <pre>orders
+  .filter(o -&gt; o.getAmount() &gt; 0)
+  .keyBy(Order::getUserId)
+  .sum(&quot;amount&quot;)
+  .sinkTo(clickHouse);
+</pre>
+        </div><div class="ccard tone-amber">
+          <span class="tag tone-amber">不该甩锅给引擎</span>
+          <h4>你仍然要负责的</h4>
+          
+          <div class="cbody"><p>引擎解决的是<strong>通用</strong>问题。有几件事它替不了你：</p>
+<ul>
+<li><strong>幂等边界</strong> —— Sink 写出去那一步的语义，取决于下游系统，
+引擎只能帮你到「至少一次 + 事务化写」</li>
+<li><strong>消息 ID 生成</strong> —— 去重表要的唯一键，得你的业务提供</li>
+<li><strong><code>keyBy</code> 选哪个字段</strong> —— 选错了，热点全压在一个实例上</li>
+<li><strong>状态大小</strong> —— 状态会不会无限长？要不要设 TTL？</li>
+<li><strong>下游能不能被反复写</strong> —— 你调的那个第三方接口，幂等吗？</li>
+</ul>
+<p><mark class="mk-blue">这些是「业务语义」问题，引擎看不见，也管不了。</mark></p>
+</div>
+          
+        </div></div><div class="summary">
+      <h3 id="一句话总结">一句话总结</h3>
+      <p>单机依赖的是：<strong>唯一状态 + 顺序执行 + 本地内存 + 不走网络 + 少量故障</strong>。
+分布式面对的是：<strong>多份状态 + 并行执行 + 网络通信 + 节点故障 + 动态扩缩容</strong>。</p>
+<p>所以一句 <code>total += amount;</code> 在分布式里会展开成一串问题：
+这个 amount 路由到哪？这个 total 属于谁？会不会并发修改？状态可恢复吗？
+重试会不会重复？下游慢了怎么办？扩容后旧状态怎么搬？</p>
+<p><mark class="mk-blue">而「算子」就是把这些通用复杂性打包收走的那个抽象。</mark>
+你表达计算逻辑，引擎负责让它在多机上正确地活下去。</p>
+
+    </div><h2 id="自测">自测</h2>
+<div class="quiz"><details>
+        <summary>为什么分布式里「加锁」不一定能解决丢失更新？</summary>
+        <div class="a"><p>因为 <code>total += amount</code> 其实是<strong>读、改、写</strong>三步。
+加锁只保证这三步不被打断，但它保证不了「你写回的数是正确的合约」——
+如果写回的是<strong>绝对值<strong>（<code>SET value = 101</code>）而不是</strong>相对值</strong>（<code>value = value + 1</code>），
+即使严格串行执行，第二个写者也会拿着过期的读把前一个的修改抹掉。
+<mark class="mk-blue">这是语义问题，不是锁问题。</mark></p>
+</div>
+      </details><details>
+        <summary>一致性哈希比 <code>hash(key) % N</code> 好在哪？为什么值钱？</summary>
+        <div class="a"><p>好在<strong>扩容时搬的东西少</strong>。
+<code>hash % N</code> 里节点数一变，几乎所有 key 的归属都重算 —— 3 改 5 时约 2/3 的 key 换主人，
+N 从 10 变 11 也有约 90%。对「有状态」的系统来说，这意味着大半个状态都要跨网络迁移。
+一致性哈希把 key 和节点放在同一个环上，加一个节点只接管一小段，
+<mark class="mk-blue">代价从「几乎全部」降到「约 1/N」。</mark> 再加虚拟节点，就顺手解决了负载倾斜。</p>
+</div>
+      </details><details>
+        <summary>「恰好一次」是一套协议吗？为什么 Kafka 的 exactly-once 不能保证你写数据库也不重复？</summary>
+        <div class="a"><p>不是一套协议，是<strong>事务 + 幂等 + 去重组合出来的效果</strong>。
+而且投递语义是一个三层栈 —— Source / 引擎 / Sink，<mark class="mk-blue">端到端由最弱的一环决定</mark>。
+Kafka 从 0.11 起的幂等生产者（<code>ProducerID</code> + 每个分区的 <code>SequenceNumber</code>）
+和事务，只管 <strong>Kafka-to-Kafka</strong> 这一段。
+你 Sink 出去如果写的是数据库或者调第三方接口，那一环仍然是至少一次 ——
+要自己去补幂等键、去重表或者事务。</p>
+</div>
+      </details><details>
+        <summary>为什么「无限缓冲」不能解决上下游速度不一致？</summary>
+        <div class="a"><p>缓冲只能<strong>买时间</strong>，不能解决问题。差 10 倍的话，积压是 9 万、18 万、27 万这样线性涨上去的，
+内存/磁盘/消息队列迟早撑爆 —— 而且缓存越深，故障时炸得越响、恢复时重放得越久。
+正确的做法是让下游的慢<strong>沿数据流反向传回去</strong>（反压），
+让 Source 主动少拉一点。<mark class="mk-blue">本质是：流水线的速度由最慢一环决定，系统必须控制积压而不是藏起积压。</mark></p>
+</div>
+      </details></div>
+
+    <footer>
+      <span>单机代码藏着的 7 个假设，分布式里全部失效</span>
+      <span>最后更新 2026-09-26 · 单文件可离线打开</span>
+    </footer>
+  </main>
+</div>
+
+<script src="../../assets/app.js"></script>
+</body>
+</html>
