@@ -702,7 +702,7 @@ node tools/archify.mjs archify/<名字>.json <名字>
 
 #### 它自带「聚焦 + 关系追踪」
 
-```callout
+````callout
 tone: green
 icon: ✅
 text: |
@@ -716,7 +716,7 @@ text: |
   ```
 
   `app.js` 按属性筛一遍就有聚焦效果了（键盘也能用，Enter / Esc）。
-```
+````
 
 ```callout
 tone: amber
