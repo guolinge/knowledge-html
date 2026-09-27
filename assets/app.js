@@ -1071,6 +1071,90 @@
   })();
 
   /* ============================================================
+     arch 积木的聚焦交互
+     ------------------------------------------------------------
+     archify 抠出来的 SVG 里自带：
+       · 节点：<g data-node-id="rule" data-node-kind="backend">
+       · 边：  <path data-edge-from="caller" data-edge-to="rule">
+     所以「聚焦一个节点，只看它和它连出去的关系」不用重新解析，按属性筛就行。
+
+     archify 完整 HTML 有 627KB 的 viewer runtime（缩放/搜索/演示/导出…）。
+     我们把单文件体积看得很重，所以只搬最常用的两个：**聚焦 + 关系追踪**。
+  ============================================================ */
+  (function () {
+    var figs = Array.prototype.slice.call(document.querySelectorAll('[data-arch]'));
+    if (!figs.length) return;
+
+    figs.forEach(function (fig) {
+      var svg = fig.querySelector('svg');
+      if (!svg) return;
+
+      var nodes = Array.prototype.slice.call(svg.querySelectorAll('[data-node-id]'));
+      var edges = Array.prototype.slice.call(svg.querySelectorAll('[data-edge-from]'));
+
+      function clear() {
+        fig.removeAttribute('data-focus');
+        nodes.forEach(function (n) {
+          n.classList.remove('is-hot');
+          n.setAttribute('aria-pressed', 'false');
+        });
+        edges.forEach(function (e) { e.classList.remove('is-hot'); });
+      }
+
+      function focus(id) {
+        clear();
+        if (!id) return;
+        var keep = { };          // 要保留的节点 id
+        keep[id] = true;
+
+        edges.forEach(function (e) {
+          var from = e.getAttribute('data-edge-from');
+          var to = e.getAttribute('data-edge-to');
+          var hit = from === id || to === id;
+          e.classList.toggle('is-hot', hit);
+          if (hit) { keep[from] = true; keep[to] = true; }
+        });
+
+        nodes.forEach(function (n) {
+          var on = !!keep[n.getAttribute('data-node-id')];
+          n.classList.toggle('is-hot', on);
+          n.setAttribute('aria-pressed', on ? 'true' : 'false');
+        });
+
+        // 一个节点都没连出去也要能聚焦（否则点了像没反应）
+        fig.setAttribute('data-focus', id);
+      }
+
+      svg.addEventListener('click', function (ev) {
+        var g = ev.target.closest && ev.target.closest('[data-node-id]');
+        var id = g && g.getAttribute('data-node-id');
+        // 点同一个再取消
+        if (!id || fig.getAttribute('data-focus') === id) return clear();
+        focus(id);
+      });
+
+      // 键盘可达 —— archify 的节点本来就带 tabindex 和 role="button"
+      svg.addEventListener('keydown', function (ev) {
+        if (ev.key !== 'Enter' && ev.key !== ' ') return;
+        var g = ev.target.closest && ev.target.closest('[data-node-id]');
+        if (!g) return;
+        ev.preventDefault();
+        var id = g.getAttribute('data-node-id');
+        if (fig.getAttribute('data-focus') === id) clear();
+        else focus(id);
+      });
+
+      // 点图以外的空白 / Esc 取消
+      document.addEventListener('click', function (ev) {
+        if (!fig.contains(ev.target)) clear();
+      });
+      document.addEventListener('keydown', function (ev) {
+        if (ev.key === 'Escape') clear();
+      });
+    });
+  })();
+
+  /* ============================================================
      通用控件库
      ------------------------------------------------------------
      约定：控件从 root.dataset.config 读配置，自己渲染 [data-mount] 里的内容。

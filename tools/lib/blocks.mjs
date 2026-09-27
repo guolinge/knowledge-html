@@ -596,9 +596,13 @@ const KIND_TONE = {
       );
     }
     const svg = fs.readFileSync(file, 'utf8');
-    return `<figure class="archfig">
+    return `<figure class="archfig" data-arch>
       ${svg}
       ${cfg.caption ? `<figcaption>${inline(cfg.caption)}</figcaption>` : ''}
+      <p class="arch-hint">
+        <span class="idle">点头上的任意一个框，只看它和它连出去的关系</span>
+        <span class="focused">再点一次空白处取消</span>
+      </p>
     </figure>`;
   }
 

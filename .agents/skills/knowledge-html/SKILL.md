@@ -822,6 +822,10 @@ svg: <名字>              # 必填，对应 assets/arch/<名字>.svg
 caption: 这张图说明什么    # 可选，图注
 ```
 
+**抠出来的 SVG 自带「聚焦 + 关系追踪」**（点节点只看它和它连出去的关系）——
+因为 archify 的 SVG 里留了 `data-node-id` / `data-edge-from` / `data-edge-to`，
+`app.js` 按属性筛一遍就行。键盘也能用（Enter / Esc）。
+
 **`tools/archify.mjs` 做了三件事**（这三件事不做会踩坑）：
 
 1. 调 archify 的 `validate` + `deliver`（校验不过会直接报出诊断）

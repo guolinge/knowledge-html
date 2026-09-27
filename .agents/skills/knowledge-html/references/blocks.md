@@ -700,6 +700,52 @@ caption: packages/core 的组成与数据流
 node tools/archify.mjs archify/<名字>.json <名字>
 ```
 
+#### 它自带「聚焦 + 关系追踪」
+
+```callout
+tone: green
+icon: ✅
+text: |
+  **点图上任意一个框，只看它、它的邻居和相连的边。** 再点空白处取消。
+
+  ==不用额外写任何东西== —— archify 抠出来的 SVG 里自带这些数据：
+
+  ```html
+  <g data-node-id="rule" data-node-kind="backend" tabindex="0" role="button">
+  <path data-edge-from="caller" data-edge-to="rule" data-edge-label="① 传入条件">
+  ```
+
+  `app.js` 按属性筛一遍就有聚焦效果了（键盘也能用，Enter / Esc）。
+```
+
+```callout
+tone: amber
+icon: ⚠
+text: |
+  **archify 完整 HTML 有 627KB 的 viewer runtime** ——
+  缩放、搜索、演示、导出 PNG/SVG/WebM、引导式分章（`views`）……
+  我们只搬了**聚焦**这一个。
+
+  ==因为「单文件发人」是这个仓库的底线==：抠出来的 SVG 只有 20KB，
+  嵌完整 HTML 会让每篇笔记多 600KB。
+
+  真需要那些能力时，直接跑 archify 生成独立 HTML，别走这个积木。
+```
+
+#### 它能画 5 种图
+
+由 spec 里的 `diagram_type` 决定，工具会自动读：
+
+| diagram_type | 画什么 | 适合的知识点 |
+|---|---|---|
+| `architecture` | 系统组成、部署拓扑、依赖关系 | 「这个系统由什么组成」 |
+| `sequence` | 调用链、握手、时序 | 「一次请求经过了谁」 |
+| `workflow` | 跨角色的流程、审批 | 「这件事怎么一步步走完」 |
+| `dataflow` | 流水线、ETL、血缘 | 「数据从哪来到哪去」 |
+| `lifecycle` | 状态机、生命周期、重试 | 「这个东西有哪几种状态」 |
+
+==五种都验证过能走我们的管线==（`node tools/archify.mjs` 直接吃它们的 spec）。
+
 **要点**：
 
 - **SVG 是预先抠好提交进仓库的**，构建时不调 archify ——
