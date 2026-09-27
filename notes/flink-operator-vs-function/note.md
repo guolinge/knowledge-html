@@ -4,12 +4,42 @@
 
 ## 01 · 先给结论：算子不是函数
 
+### 先把「lambda」这个词说清
+
+````callout
+tone: muted
+icon: 📎
+text: |
+  **lambda 就是「匿名函数」** —— 一段没有名字、直接写在调用点的函数。各语言的写法：
+
+  ```text
+  Java    (Order o) -> o.getAmount() > 0
+  JS      (o) => o.amount > 0
+  Python  lambda o: o.amount > 0        ← Python 直接用了 lambda 这个词
+  ```
+
+  平时把它当「一段逻辑」看就够了。但有一件事必须先知道，因为它就是下面整篇的起点：
+
+  ==在 Java 里，lambda 不是一个函数，而是一个**对象**。==
+  编译器会把它变成一个实现了某个接口的实例（比如 `FilterFunction<Order>`）。
+  所以「把 lambda 传给 `map`」，实际是**把一个对象存进了算子**。
+
+  更关键的是：Flink 的这些函数接口除了 `@FunctionalInterface`，还额外继承了 `Serializable` ——
+  ==因为这些对象要被序列化后发到别的机器上去执行==。
+  这是普通函数永远不需要的能力，也是「算子 ≠ 函数」的第一道缝。
+````
+
+### 逐项对比
+
 把同一个「过滤金额 ≤ 0 的订单」分别写成普通函数和 Flink 算子，逐项对比：
 
 ```compare
 first: 维度
 head: [普通函数, Flink 算子]
 rows:
+  - 在 Java 里它到底是什么:
+      - 一段代码
+      - { text: 一个实现了接口、能被序列化的对象, tone: violet }
   - 谁调用谁:
       - 你在代码里调用它
       - { text: 框架调用你 —— 你不调用它, tone: amber }

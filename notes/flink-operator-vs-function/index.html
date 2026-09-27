@@ -4,7 +4,7 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>算子不是函数：把 Flink 算子拆到进程、线程和内存那一层</title>
-<meta name="description" content="你写的 lambda 只是算子对象里的一个字段 —— 是框架在循环里调你，不是你在调用它。顺带把上一篇里用过但没解释的词（水印、窗口、托管状态、Checkpoint、背压）一次讲完。" />
+<meta name="description" content="你写的 lambda（匿名函数）只是算子对象里的一个字段 —— 是框架在循环里调你，不是你在调用它。顺带把上一篇里用过但没解释的词（水印、窗口、托管状态、Checkpoint、背压）一次讲完。" />
 <link rel="stylesheet" href="../../assets/theme.css" />
   <link rel="stylesheet" href="../../assets/blocks.css" />
   <link rel="stylesheet" href="../../assets/archify-embed.css" />
@@ -27,6 +27,8 @@
       <p class="toc-title">目录</p>
       <a href="../../index.html" class="sub">← 全部笔记</a>
       <a href="#先给结论算子不是函数">先给结论：算子不是函数</a>
+      <a href="#先把lambda这个词说清" class="sub">先把「lambda」这个词说清</a>
+      <a href="#逐项对比" class="sub">逐项对比</a>
       <a href="#先看清物理图景机器上到底有什么">先看清物理图景：机器上到底有什么</a>
       <a href="#八个区别逐个拆">八个区别，逐个拆</a>
       <a href="#31-谁调用谁控制反转" class="sub">3.1 谁调用谁：控制反转</a>
@@ -47,7 +49,7 @@
     <div class="hero">
       <span class="eyebrow">● 流处理 · 底层视角</span>
       <h1>算子不是函数：把 Flink 算子拆到进程、线程和内存那一层</h1>
-      <p class="lede">你写的 lambda 只是算子对象里的一个字段 —— 是框架在循环里调你，不是你在调用它。顺带把上一篇里用过但没解释的词（水印、窗口、托管状态、Checkpoint、背压）一次讲完。</p>
+      <p class="lede">你写的 lambda（匿名函数）只是算子对象里的一个字段 —— 是框架在循环里调你，不是你在调用它。顺带把上一篇里用过但没解释的词（水印、窗口、托管状态、Checkpoint、背压）一次讲完。</p>
     </div>
 
     <div class="draft-banner">
@@ -63,8 +65,25 @@
 <p>上一篇讲「有哪些算子」，这一篇讲「算子这个东西本身」。</p>
 </blockquote>
 <h2 id="先给结论算子不是函数"><span class="num">01</span>先给结论：算子不是函数</h2>
+<h3 id="先把lambda这个词说清">先把「lambda」这个词说清</h3>
+<div class="callout tone-muted">
+      <span class="ic">📎</span>
+      <div><p><strong>lambda 就是「匿名函数」</strong> —— 一段没有名字、直接写在调用点的函数。各语言的写法：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">Java    (Order o) -&gt; o.getAmount() &gt; 0
+JS      (o) =&gt; o.amount &gt; 0
+Python  lambda o: o.amount &gt; 0        ← Python 直接用了 lambda 这个词
+</code></pre></div>
+<p>平时把它当「一段逻辑」看就够了。但有一件事必须先知道，因为它就是下面整篇的起点：</p>
+<p><mark class="mk-blue">在 Java 里，lambda 不是一个函数，而是一个<strong>对象</strong>。</mark>
+编译器会把它变成一个实现了某个接口的实例（比如 <code>FilterFunction&lt;Order&gt;</code>）。
+所以「把 lambda 传给 <code>map</code>」，实际是<strong>把一个对象存进了算子</strong>。</p>
+<p>更关键的是：Flink 的这些函数接口除了 <code>@FunctionalInterface</code>，还额外继承了 <code>Serializable</code> ——
+<mark class="mk-blue">因为这些对象要被序列化后发到别的机器上去执行</mark>。
+这是普通函数永远不需要的能力，也是「算子 ≠ 函数」的第一道缝。</p>
+</div>
+    </div><h3 id="逐项对比">逐项对比</h3>
 <p>把同一个「过滤金额 ≤ 0 的订单」分别写成普通函数和 Flink 算子，逐项对比：</p>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>维度</th><th>普通函数</th><th>Flink 算子</th></tr></thead><tbody><tr><th>谁调用谁</th><td data-label="普通函数">你在代码里调用它</td><td data-label="Flink 算子"><span class="tag tone-amber">框架调用你 —— 你不调用它</span></td></tr><tr><th>活多久</th><td data-label="普通函数">一次调用，返回即结束</td><td data-label="Flink 算子">一个对象，活到整个 task 结束</td></tr><tr><th>生命周期</th><td data-label="普通函数">没有这个概念</td><td data-label="Flink 算子"><code>open</code> → 处理 N 条 → <code>snapshotState</code> → <code>close</code></td></tr><tr><th>状态</th><td data-label="普通函数">局部变量在栈上，返回就没了</td><td data-label="Flink 算子">托管状态：住在内存里，能快照、能恢复、能重分配</td></tr><tr><th>有几份</th><td data-label="普通函数">一份代码</td><td data-label="Flink 算子">N 份并行实例（N = 并行度），各持一份状态分片</td></tr><tr><th>跑在哪个线程</th><td data-label="普通函数">调用者的线程</td><td data-label="Flink 算子">task 线程；<strong>链上的几个算子共用一个线程</strong></td></tr><tr><th>之间怎么传数据</th><td data-label="普通函数">参数压栈 / 进寄存器</td><td data-label="Flink 算子">同链走方法调用；跨链要序列化 + 走网络</td></tr><tr><th>谁看得见它</th><td data-label="普通函数">编译器</td><td data-label="Flink 算子">调度器 —— 并行、checkpoint、failover 全拿它当单位</td></tr></tbody></table></div><div class="callout tone-amber tinted">
+<div class="compare-wrap"><table class="compare"><thead><tr><th>维度</th><th>普通函数</th><th>Flink 算子</th></tr></thead><tbody><tr><th>在 Java 里它到底是什么</th><td data-label="普通函数">一段代码</td><td data-label="Flink 算子"><span class="tag tone-violet">一个实现了接口、能被序列化的对象</span></td></tr><tr><th>谁调用谁</th><td data-label="普通函数">你在代码里调用它</td><td data-label="Flink 算子"><span class="tag tone-amber">框架调用你 —— 你不调用它</span></td></tr><tr><th>活多久</th><td data-label="普通函数">一次调用，返回即结束</td><td data-label="Flink 算子">一个对象，活到整个 task 结束</td></tr><tr><th>生命周期</th><td data-label="普通函数">没有这个概念</td><td data-label="Flink 算子"><code>open</code> → 处理 N 条 → <code>snapshotState</code> → <code>close</code></td></tr><tr><th>状态</th><td data-label="普通函数">局部变量在栈上，返回就没了</td><td data-label="Flink 算子">托管状态：住在内存里，能快照、能恢复、能重分配</td></tr><tr><th>有几份</th><td data-label="普通函数">一份代码</td><td data-label="Flink 算子">N 份并行实例（N = 并行度），各持一份状态分片</td></tr><tr><th>跑在哪个线程</th><td data-label="普通函数">调用者的线程</td><td data-label="Flink 算子">task 线程；<strong>链上的几个算子共用一个线程</strong></td></tr><tr><th>之间怎么传数据</th><td data-label="普通函数">参数压栈 / 进寄存器</td><td data-label="Flink 算子">同链走方法调用；跨链要序列化 + 走网络</td></tr><tr><th>谁看得见它</th><td data-label="普通函数">编译器</td><td data-label="Flink 算子">调度器 —— 并行、checkpoint、failover 全拿它当单位</td></tr></tbody></table></div><div class="callout tone-amber tinted">
       <span class="ic">🔑</span>
       <div><p><mark class="mk-blue">最本质的一条是「谁调用谁」。</mark></p>
 <p>普通函数：<strong>你</strong>在代码里调用它，调用点长在你的程序里。
