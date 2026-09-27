@@ -482,8 +482,8 @@ const KIND_TONE = {
           m.tone ? ` data-tone="${esc(m.tone)}"` : ''
         }${m.note ? ` data-note="${esc(m.note)}"` : ''
         }${m.gap ? ` style="margin-top:${Number(m.gap) || 0}px"` : ''}>${
-          m.label ? `<span class="slabel">${inline(m.label)}</span>` : ''
-        }</div>`,
+          m.note ? `<span class="snote">${inline(String(m.note))}</span>` : ''
+        }${m.label ? `<span class="slabel">${inline(m.label)}</span>` : ''}</div>`,
       )
       .join('');
 

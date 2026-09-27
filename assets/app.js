@@ -954,7 +954,6 @@
         const from = row.getAttribute('data-from');
         const to = row.getAttribute('data-to');
         const kind = row.getAttribute('data-kind') || 'sync';
-        const note = row.getAttribute('data-note');
         const tone = row.getAttribute('data-tone');
         const toneAttr = tone ? ` style="color:var(--${tone})"` : '';
         const x1 = cx[from];
@@ -962,6 +961,20 @@
         if (x1 === undefined || x2 === undefined) return;
 
         const y = headH + 18 + row.offsetTop + row.offsetHeight / 2;
+        /* 把标签移到「这条箭头的中点」下方 ——
+           它默认是 flex 居中的，落在**容器**中点；
+           参与者不是对称两个时（比如三条泳道取相邻两条），
+           容器中点和箭头中点差很远，标签就指错线了。
+           用 translateX 补偿：不脱离文档流、不影响行高。
+           夹一下范围，别把标签推出容器。 */
+        if (from !== to && x1 !== undefined && x2 !== undefined) {
+          const label = row.querySelector('.slabel');
+          const half = Math.max(label ? label.offsetWidth / 2 : 0, 40);
+          const want = (x1 + x2) / 2 - W / 2;
+          const lim = Math.max(0, W / 2 - half - 4);
+          row.style.setProperty('--dx', `${Math.round(Math.max(-lim, Math.min(lim, want)))}px`);
+        }
+
         msgGeom.push({
           i: Number(row.getAttribute('data-i')) || msgGeom.length + 1,
           from,
@@ -989,11 +1002,8 @@
           );
         }
 
-        if (note) {
-          parts.push(
-            `<text class="note" x="${(x1 + x2) / 2}" y="${y - 13}">${escapeXml2(note)}</text>`,
-          );
-        }
+        /* note（序号/旁注）不画在 SVG 里 —— 它是 HTML，和 label 纵向排列。
+           画在 SVG 上的话两者都在水平中点，必然重叠（踩过）。 */
       });
 
       /* 3) 激活条 —— **从消息自动推导**，不用手写。
@@ -1738,6 +1748,243 @@
     // 初始直接把 map 的结果摆好 —— 这个控件的重点是「对比产出」，
     // 上来就空着反而不知道该干什么。点其它算子才是探索。
     play('map');
+  };
+
+  /* —— 控件：hashring ——
+     把 key 和节点都放到同一个环上，切换分配规则看「搬了多少」。
+     想说的就一件事：取模把「节点数」写进了路由公式，所以 N 一变几乎全搬；
+     一致性哈希里节点只是环上的点，加一个只截走相邻的一段。 */
+  WIDGETS.hashring = (root) => {
+    const cfg = cfgOf(root);
+    const SVGNS = 'http://www.w3.org/2000/svg';
+    const CX = 140, CY = 140, R_OUT = 100, R_IN = 64, R_KEY = 82, R_NODE = 111;
+    const COLORS = ['blue', 'green', 'violet', 'amber', 'red'];
+    const NAMES = ['A', 'B', 'C', 'D', 'E'];
+
+    /* 哈希值 0~99 → 角度（0 在正上方，顺时针增长） */
+    const ang = (v) => (-90 + (v / 100) * 360) * (Math.PI / 180);
+    const pt = (v, r) => [CX + r * Math.cos(ang(v)), CY + r * Math.sin(ang(v))];
+
+    /* 节点的位置是写死的：加一台 D 时，它落在 40 和 80 之间 ——
+       这正是要看的：A/B/C 一动没动。 */
+    const NODE_POS = [10, 40, 80, 65, 92];
+    /* 虚拟节点：每台机器在环上铺 6 个点，位置固定（伪随机但确定） */
+    const VNODE_POS = [
+      [3, 19, 27, 51, 68, 91],
+      [11, 34, 45, 58, 79, 88],
+      [7, 24, 39, 63, 72, 85],
+      [16, 30, 47, 55, 77, 94],
+      [22, 42, 61, 70, 83, 96],
+    ];
+
+    /* key 集合：位置固定，两种分布 */
+    const KEYS = cfg.keys === 'hot'
+      ? Array.from({ length: 44 }, (_, i) => 40 + (i * 25) / 43)
+      : Array.from({ length: 52 }, (_, i) => (i * 100) / 52);
+
+    let kindIdx = 0;
+    let size = cfg.sizes[0];
+
+    const kind = () => cfg.kinds[kindIdx];
+
+    /** 当前策略下，环上有哪些「点」：{ v: 环上位置, node: 第几个物理节点 } */
+    function points(k, n) {
+      if (k.mode === 'mod') return null; // 取模不是「点」，是等分区间
+      const vn = k.vnodes || 1;
+      const out = [];
+      for (let i = 0; i < n; i++) {
+        if (vn === 1) out.push({ v: NODE_POS[i], node: i });
+        else VNODE_POS[i].forEach((v) => out.push({ v, node: i }));
+      }
+      return out.sort((a, b) => a.v - b.v);
+    }
+
+    /** 一个 hash 值归哪个物理节点 */
+    function ownerOf(v, k, n) {
+      if (k.mode === 'mod') return Math.min(n - 1, Math.floor((v / 100) * n));
+      const ps = points(k, n);
+      for (const p of ps) if (v <= p.v) return p.node;
+      return ps[0].node; // 绕回开头
+    }
+
+    /** 每个区间：[起始位置, 结束位置, 归属节点]；取模时是等分，环上时是节点之间 */
+    function spans(k, n) {
+      if (k.mode === 'mod') {
+        return Array.from({ length: n }, (_, i) => [
+          (i * 100) / n, ((i + 1) * 100) / n, i,
+        ]);
+      }
+      const ps = points(k, n);
+      return ps.map((p, i) => {
+        const next = ps[(i + 1) % ps.length];
+        const end = i === ps.length - 1 ? ps[0].v + 100 : next.v;
+        return [p.v, end, p.node];
+      });
+    }
+
+    const svgEl = (tag, attrs) => {
+      const el = document.createElementNS(SVGNS, tag);
+      Object.keys(attrs).forEach((k) => el.setAttribute(k, attrs[k]));
+      return el;
+    };
+
+    /** 环形扇区路径（v1 → v2） */
+    function donut(v1, v2) {
+      const [x1, y1] = pt(v1, R_OUT), [x2, y2] = pt(v2, R_OUT);
+      const [x3, y3] = pt(v2, R_IN), [x4, y4] = pt(v1, R_IN);
+      const large = v2 - v1 > 50 ? 1 : 0;
+      return `M${x1} ${y1}A${R_OUT} ${R_OUT} 0 ${large} 1 ${x2} ${y2}` +
+        `L${x3} ${y3}A${R_IN} ${R_IN} 0 ${large} 0 ${x4} ${y4}Z`;
+    }
+
+    /* ---- 组装外壳 ---- */
+    const top = h('div', { cls: 'hr-top' }, [
+      h('div', { cls: 'hr-group' }, [h('label', { text: '分配规则' }),
+        h('div', { cls: 'seg', attrs: { 'data-hr-kinds': '' } })]),
+      h('div', { cls: 'hr-group' }, [h('label', { text: '节点数' }),
+        h('div', { cls: 'seg', attrs: { 'data-hr-sizes': '' } })]),
+    ]);
+    const svg = svgEl('svg', { viewBox: '0 0 280 280' });
+    const side = h('div', { cls: 'hr-side' }, [
+      h('div', { cls: 'hr-loads', attrs: { 'data-hr-loads': '' } }),
+      h('div', { cls: 'hr-verdict', attrs: { 'data-hr-verdict': '' } }),
+    ]);
+    const mount = root.querySelector('[data-mount]');
+    fill(mount, [h('div', { cls: 'hr' }, [
+      top,
+      h('div', { cls: 'hr-body' }, [
+        h('div', { cls: 'hr-ring' }, [svg]),
+        side,
+      ]),
+    ])]);
+
+    const kindsBox = root.querySelector('[data-hr-kinds]');
+    const sizesBox = root.querySelector('[data-hr-sizes]');
+    const loadsBox = root.querySelector('[data-hr-loads]');
+    const verdict = root.querySelector('[data-hr-verdict]');
+    const statusEl = root.querySelector('[data-status]');
+
+    cfg.kinds.forEach((k, i) => {
+      const b = h('button', { cls: 'tone-blue', text: k.label, attrs: { 'data-hr-kind': String(i) } });
+      b.type = 'button';
+      b.addEventListener('click', () => { kindIdx = i; render(); });
+      kindsBox.appendChild(b);
+    });
+    cfg.sizes.forEach((n) => {
+      const b = h('button', { cls: 'tone-violet', text: n + ' 台', attrs: { 'data-hr-size': String(n) } });
+      b.type = 'button';
+      b.addEventListener('click', () => { size = n; render(); });
+      sizesBox.appendChild(b);
+    });
+
+    function render() {
+      const k = kind();
+      Array.prototype.forEach.call(kindsBox.children, (b) =>
+        b.classList.toggle('on', Number(b.getAttribute('data-hr-kind')) === kindIdx));
+      Array.prototype.forEach.call(sizesBox.children, (b) =>
+        b.classList.toggle('on', Number(b.getAttribute('data-hr-size')) === size));
+
+      const sp = spans(k, size);
+      /* 和上一档节点数比，哪些 key 换了主人 */
+      const base = cfg.sizes.indexOf(size) > 0 ? cfg.sizes[cfg.sizes.indexOf(size) - 1] : null;
+      const moved = base === null ? [] : KEYS.map((v) => ownerOf(v, k, base) !== ownerOf(v, k, size));
+      const movedCount = moved.filter(Boolean).length;
+
+      /* 环 */
+      const kids = [];
+      sp.forEach(([a, b, node]) => {
+        kids.push(svgEl('path', {
+          class: 'hr-seg',
+          d: donut(a, b),
+          fill: `color-mix(in srgb, var(--${COLORS[node % COLORS.length]}) 34%, var(--surface))`,
+          stroke: 'var(--border-strong)',
+          'stroke-width': 1,
+        }));
+      });
+      /* key 点 */
+      KEYS.forEach((v, i) => {
+        const node = ownerOf(v, k, size);
+        const [x, y] = pt(v, R_KEY);
+        kids.push(svgEl('circle', {
+          class: 'hr-keyspot' + (moved[i] ? ' moved' : ''),
+          cx: x, cy: y, r: moved[i] ? 4.2 : 3.2,
+          fill: `var(--${COLORS[node % COLORS.length]})`,
+        }));
+      });
+      /* 节点标记（取模没有「点」，就不画） */
+      const ps = points(k, size);
+      /* 取模模式没有「节点」这个点，扇区就是节点 —— 所以把标签打在扇区中点，
+         否则环上光是有颜色，看不出哪段归谁。 */
+      if (!ps) {
+        sp.forEach(([a, b, node]) => {
+          const [tx, ty] = pt((a + b) / 2, R_NODE + 13);
+          const t = svgEl('text', {
+            class: 'hr-nodetext', x: tx, y: ty,
+            style: `--tone: var(--${COLORS[node % COLORS.length]})`,
+          });
+          t.textContent = NAMES[node];
+          kids.push(t);
+        });
+      }
+      if (ps) {
+        const vn = k.vnodes || 1;
+        ps.forEach((p) => {
+          const [x, y] = pt(p.v, R_NODE);
+          const [tx, ty] = pt(p.v, R_NODE + 13);
+          kids.push(svgEl('circle', {
+            class: 'hr-nodepos', cx: x, cy: y,
+            r: vn === 1 ? 5.5 : 3.4,
+            style: `--tone: var(--${COLORS[p.node % COLORS.length]})`,
+          }));
+          if (vn === 1) {
+            const t = svgEl('text', {
+              class: 'hr-nodetext', x: tx, y: ty,
+              style: `--tone: var(--${COLORS[p.node % COLORS.length]})`,
+            });
+            t.textContent = NAMES[p.node];
+            kids.push(t);
+          }
+        });
+      }
+      fill(svg, kids);
+
+      /* 负载条 */
+      const counts = new Array(size).fill(0);
+      KEYS.forEach((v) => counts[ownerOf(v, k, size)]++);
+      const max = Math.max(1, ...counts);
+      fill(loadsBox, counts.map((c, i) => h('div', {
+        cls: 'hr-load',
+        attrs: { style: `--tone: var(--${COLORS[i % COLORS.length]})` },
+      }, [
+        h('i', { text: NAMES[i] }),
+        h('span', { text: String(c) }),
+        h('div', { cls: 'bar' }, [h('span', { attrs: { style: `width:${(c / max) * 100}%` } })]),
+        h('em', { text: Math.round((c / KEYS.length) * 100) + '%' }),
+      ])));
+
+      /* 结论 */
+      const worst = Math.max(...counts), best = Math.min(...counts);
+      verdict.className = 'hr-verdict tone-' + (movedCount > KEYS.length * 0.5 ? 'red' : 'green');
+      if (base === null) {
+        fill(verdict, [
+          h('span', { text: '当前：' }),
+          h('b', { text: k.label + ' · ' + size + ' 台' }),
+          h('span', { text: '。把节点数切到 ' + cfg.sizes[cfg.sizes.length - 1] +
+            ' 台，环上会标出哪些 key 换了主人。' }),
+        ]);
+      } else {
+        fill(verdict, [
+          h('span', { text: '从 ' + base + ' 台加到 ' + size + ' 台：' }),
+          h('b', { text: movedCount + ' / ' + KEYS.length + ' 个 key 换了主人' }),
+          h('span', { text: `（${Math.round((movedCount / KEYS.length) * 100)}%）。节点负载 ${best}~${worst} 个 key。` }),
+        ]);
+      }
+      if (statusEl) {
+        statusEl.textContent = k.label + ' · ' + size + ' 台 · 换了主人 ' + movedCount + '/' + KEYS.length;
+      }
+    }
+
+    render();
   };
 
   /* ---------- 挂载 ---------- */

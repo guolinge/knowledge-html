@@ -29,6 +29,18 @@
       <a href="#一段七行的代码藏着七个假设">一段七行的代码，藏着七个假设</a>
       <a href="#假设①-只有一个执行者-数据该分给谁">假设① 只有一个执行者 —— 数据该分给谁</a>
       <a href="#但取模有个致命伤" class="sub">但「取模」有个致命伤</a>
+      <a href="#一致性哈希为什么扩容只搬一小段">一致性哈希：为什么扩容只搬一小段</a>
+      <a href="#31-取模的病根它把节点数写进了路由公式" class="sub">3.1 取模的病根：它把「节点数」写进了路由公式</a>
+      <a href="#32-换个做法把-key-和节点放进同一个空间" class="sub">3.2 换个做法：把 key 和节点放进同一个空间</a>
+      <a href="#33-归属规则从-key-出发顺时针找第一个节点" class="sub">3.3 归属规则：从 key 出发，顺时针找第一个节点</a>
+      <a href="#34-加一个节点到底搬走了哪一段" class="sub">3.4 加一个节点，到底搬走了哪一段</a>
+      <a href="#35-本质差别n-到底有没有参与路由" class="sub">3.5 本质差别：N 到底有没有参与路由</a>
+      <a href="#36-但一台机器只放一个点会严重不均" class="sub">3.6 但一台机器只放一个点，会严重不均</a>
+      <a href="#但它不解决热点四个别混在一起的问题">但它不解决热点：四个别混在一起的问题</a>
+      <a href="#41-一个很自然的疑问" class="sub">4.1 一个很自然的疑问</a>
+      <a href="#42-第一种假集中原始值集中-哈希值集中" class="sub">4.2 第一种「假集中」：原始值集中 ≠ 哈希值集中</a>
+      <a href="#43-第二种点位不均-虚拟节点" class="sub">4.3 第二种：点位不均 → 虚拟节点</a>
+      <a href="#44-第三种真热-key-这一种虚拟节点也没用" class="sub">4.4 第三种：真·热 key —— 这一种虚拟节点也没用</a>
       <a href="#假设②-内存随手可及-数据必须走网络">假设② 内存随手可及 —— 数据必须走网络</a>
       <a href="#最麻烦的是最后一条" class="sub">最麻烦的是最后一条</a>
       <a href="#假设③-顺序执行-同一秒改同一个-key">假设③ 顺序执行 —— 同一秒改同一个 key</a>
@@ -169,8 +181,196 @@
       <div><p><strong>判断一个分片方案好不好，别只看「能不能路由对」——要看扩容时要搬多少东西。</strong></p>
 <p><code>hash % N</code> 满足前半句，输在后半句。一致性哈希的价值不在「哈希更高级」，
 而在<mark class="mk-blue">它保证「加一个节点，只影响一小段 key」</mark>。</p>
+<p>下一节就把这个「只影响一小段」拆开讲：环是怎么造的、为什么它就能只动一小段。</p>
 </div>
-    </div><h2 id="假设②-内存随手可及-数据必须走网络"><span class="num">03</span>假设② 内存随手可及 —— 数据必须走网络</h2>
+    </div><h2 id="一致性哈希为什么扩容只搬一小段"><span class="num">03</span>一致性哈希：为什么扩容只搬一小段</h2>
+<p>上一节最后那张对比图留了个结论：<strong>取模 3→5 要搬约 2/3 的 key，一致性哈希只搬一小段。</strong> 这一节讲清楚它凭什么。</p>
+<h3 id="31-取模的病根它把节点数写进了路由公式">3.1 取模的病根：它把「节点数」写进了路由公式</h3>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">owner(key) = hash(key) % N
+</code></pre></div>
+<p>问题就出在这个 <code>N</code> 上：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">hash(key) = 17
+
+17 % 3 = 2   →  C        ← N 从 3 变成 4
+17 % 4 = 1   →  B        ← 同一个 key，立刻换了主人
+</code></pre></div>
+<p><mark class="mk-blue">key 的哈希值一个 bit 都没变，变的是除数。</mark> 所以 N 一改，几乎每个 key 都得重算、重新搬家。</p>
+<p>一句话：<strong>N 一旦参与路由计算，N 变 = 路由全变。</strong></p>
+<h3 id="32-换个做法把-key-和节点放进同一个空间">3.2 换个做法：把 key 和节点放进同一个空间</h3>
+<p>一致性哈希不取模。它只做一件事：<strong>把「key」和「节点」都哈希成同一个大空间里的坐标</strong>。</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">key  的哈希值  →  0 ~ 2³²-1 里的一个数
+节点 的哈希值  →  同一个空间里的一个数
+</code></pre></div>
+<p>而哈希值到上限后会从头开始，所以这个空间逻辑上是一个<strong>环</strong>：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">0 → 1 → 2 → … → 99
+↑                 ↓
+└─────────────────┘
+</code></pre></div>
+<p>注意节点的位置<strong>不是人为编号的<strong>（不是「A 是 0 号、B 是 1 号」），而是</strong>算出来的</strong>：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">hash(&quot;server-A&quot;) = 10
+hash(&quot;server-B&quot;) = 40
+hash(&quot;server-C&quot;) = 80
+</code></pre></div>
+<h3 id="33-归属规则从-key-出发顺时针找第一个节点">3.3 归属规则：从 key 出发，顺时针找第一个节点</h3>
+<div class="callout tone-green quote">
+      <span class="ic">🎯</span>
+      <div><p>从 key 在环上的位置出发，<strong>沿顺时针走，遇到的第一个节点，就是它的归属节点</strong>。</p>
+</div>
+    </div><p>下面这台可以亲手切。先看「一致性哈希 · 3 台」，再切到「4 台」—— 注意 <strong>A / B / C 三个点一动没动</strong>，只是中间插进来一个 D：</p>
+<div class="demo" data-widget="hashring" data-config="{&quot;keys&quot;:&quot;even&quot;,&quot;kinds&quot;:[{&quot;id&quot;:&quot;mod&quot;,&quot;label&quot;:&quot;取模 % N&quot;,&quot;mode&quot;:&quot;mod&quot;},{&quot;id&quot;:&quot;ring&quot;,&quot;label&quot;:&quot;一致性哈希&quot;,&quot;mode&quot;:&quot;ring&quot;,&quot;vnodes&quot;:1}],&quot;sizes&quot;:[3,4]}">
+      <div class="demo-head">
+        <span class="title">同一个环，两种分配规则</span>
+        <span class="status" data-status>切「分配规则」和「节点数」，看环上哪些 key 换了主人</span>
+        <span class="spacer"></span>
+        
+      </div>
+      <div class="demo-body custom" data-mount></div>
+    </div><p>三个值得盯的地方：</p>
+<ul>
+<li><strong>切到「取模 % N」</strong>：环被<strong>等分</strong>成 N 段，边界由 N 直接决定 —— 所以 N 一改，所有边界一起挪位，key 大面积换主。</li>
+<li><strong>切到「一致性哈希」</strong>：节点是<strong>算出来的点</strong>，N 从 3 到 4 时 A(10) / B(40) / C(80) 一动不动，只是插进一个 D(65)。</li>
+<li><strong>标红的 key</strong>：就是这次扩容里换了主人的。<mark class="mk-blue">取模那一档红一大片，一致性哈希只红一小段。</mark></li>
+</ul>
+<h3 id="34-加一个节点到底搬走了哪一段">3.4 加一个节点，到底搬走了哪一段</h3>
+<p>D 落在 65，按「顺时针第一个」的规则：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">扩容前：(40, 80]  →  C          整段都是 C 的
+
+扩容后：(40, 65]  →  D          ← 只有这一小段换了主人
+        (65, 80]  →  C          ← 剩下还是 C 的
+</code></pre></div>
+<p>四段一起看：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">(80, 10]  →  A        ✓ 没动
+(10, 40]  →  B        ✓ 没动
+(65, 80]  →  C        ✓ 没动
+(40, 65]  →  C ➜ D    ← 只有这一段
+</code></pre></div>
+<p><mark class="mk-blue">D 只接管「它自己，到它前一个节点之间」的那一段。</mark> 远处的 A 不受影响，B 和 C 的大部分也不受影响。</p>
+<p>（记号 <code>(40, 80]</code> 读作「大于 40、小于等于 80」。）</p>
+<h3 id="35-本质差别n-到底有没有参与路由">3.5 本质差别：N 到底有没有参与路由</h3>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>维度</th><th>取模 hash % N</th><th>一致性哈希</th></tr></thead><tbody><tr><th>路由公式</th><td data-label="取模 hash % N"><code>hash(key) % N</code> —— N 是公式的一部分</td><td data-label="一致性哈希">环上顺时针找第一个节点 —— <strong>N 不参与计算</strong></td></tr><tr><th>加一个节点时</th><td data-label="取模 hash % N">除数变了，几乎所有 key 的余数都跟着变</td><td data-label="一致性哈希">A / B / C 的位置不变，只是环上多了一个点</td></tr><tr><th>平均迁移比例</th><td data-label="取模 hash % N"><span class="tag tone-red">约 N/(N+1)：3→4 搬 75%，10→11 搬 90.9%</span></td><td data-label="一致性哈希"><span class="tag tone-green">约 1/(N+1)：3→4 搬 25%，100→101 搬 1%</span></td></tr><tr><th>根因</th><td data-label="取模 hash % N">节点数出现在计算里，改它 = 改所有结果</td><td data-label="一致性哈希">节点只是环上的坐标，改它 = 只影响相邻一段</td></tr></tbody></table></div><div class="callout tone-blue">
+      <span class="ic">🧭</span>
+      <div><p><strong>「一致性」不是「结果永远不变」的意思。</strong> 它说的是：</p>
+<p><mark class="mk-blue">节点集合发生<strong>小</strong>变化时，key 的映射关系也只有<strong>小</strong>范围跟着变。</mark></p>
+<p>换一批节点 → 当然要搬家；但<strong>加一台机器</strong> → 平均只搬 <code>1/(N+1)</code>。</p>
+</div>
+    </div><h3 id="36-但一台机器只放一个点会严重不均">3.6 但一台机器只放一个点，会严重不均</h3>
+<p>环上放几个点全靠哈希运气，运气不好就长这样：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">A(5)     负责 (90, 5]    →   15% 的环
+B(10)    负责 (5, 10]    →    5% 的环
+C(90)    负责 (10, 90]   →   80% 的环     ← 一台扛八成
+</code></pre></div>
+<p>C 被压死，另两台闲着。怎么解？<strong>别让一台物理机在环上只放一个点</strong> —— 这就是虚拟节点。</p>
+<p>下一节接着讲：虚拟节点能治哪一类不均，以及<mark class="mk-blue">哪一类它压根治不了</mark>。</p>
+<h2 id="但它不解决热点四个别混在一起的问题"><span class="num">04</span>但它不解决热点：四个别混在一起的问题</h2>
+<h3 id="41-一个很自然的疑问">4.1 一个很自然的疑问</h3>
+<blockquote>
+<p>「如果我的 key 哈希之后都集中在 45~65，那顺时针找第一个节点，不就老是落在同一台机器上了吗？」</p>
+</blockquote>
+<p><mark class="mk-blue">这个担心是对的 —— 而且它逼出了一个必须讲清的边界：</mark></p>
+<div class="callout tone-amber tinted">
+      <span class="ic">⚠</span>
+      <div><p><strong>一致性哈希不解决「数据分布不均」，它解决的是「节点增减时少搬数据」。</strong></p>
+<p>这是两个完全不同的问题，经常被混成一个。</p>
+</div>
+    </div><p>不过在动手之前，先分清<strong>到底是哪一种不均</strong> —— 四种情况的解法完全不同：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>你观察到的现象</th><th>真正的原因</th><th>该用什么</th></tr></thead><tbody><tr><th>原始 key 看起来很集中（user_10001 到 user_20000）</th><td data-label="真正的原因"><span class="tag tone-green">正常，不是问题</span></td><td data-label="该用什么">好的哈希有雪崩效应，输出会散开。先看哈希之后的分布再说</td></tr><tr><th>哈希之后仍然集中在 45~65</th><td data-label="真正的原因">哈希函数质量差，或者取值方式不对</td><td data-label="该用什么">换高质量哈希（MurmurHash / xxHash / CityHash），并对<strong>完整的 key</strong> 做哈希</td></tr><tr><th>很多不同的 key 都落在某个局部区间</th><td data-label="真正的原因">环上点位太少，区间划得太粗</td><td data-label="该用什么"><span class="tag tone-green">虚拟节点</span></td></tr><tr><th>某一个 key 本身就占了很大流量</th><td data-label="真正的原因"><span class="tag tone-red">热 key —— 和哈希无关</span></td><td data-label="该用什么">加盐分片 / 专用资源 / 业务分片</td></tr></tbody></table></div><h3 id="42-第一种假集中原始值集中-哈希值集中">4.2 第一种「假集中」：原始值集中 ≠ 哈希值集中</h3>
+<p>用户 ID 是连续的，看着确实集中：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">user_10001 / user_10002 / user_10003 / …
+</code></pre></div>
+<p>但<strong>好的哈希函数有雪崩效应</strong> —— 输入改一点，输出像随机数：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">hash(&quot;user_10001&quot;) = 13
+hash(&quot;user_10002&quot;) = 87
+hash(&quot;user_10003&quot;) = 31
+hash(&quot;user_10004&quot;) = 62
+</code></pre></div>
+<p><mark class="mk-blue">「输入看起来集中」和「哈希值集中」是两件事。</mark> 先看哈希后的实际分布，再决定要不要处理。</p>
+<p><strong>真正会出问题的是这么用</strong>：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-java">int h = userId % 100;    // ✗ 拿原始值取模，等于没哈希
+</code></pre></div>
+<p>如果 userId 本身有规律（自增、带业务前缀、只取某几位），取模结果就跟着有规律。
+正确做法是<strong>对整个 key 做一次高质量哈希</strong>：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">MurmurHash · xxHash · CityHash · SipHash
+（SHA-256 也行，但对路由来说太重了）
+</code></pre></div>
+<h3 id="43-第二种点位不均-虚拟节点">4.3 第二种：点位不均 → 虚拟节点</h3>
+<p>一台物理机在环上只放<strong>一个</strong>点的话，「它负责多大一段」纯看哈希运气：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">A(5) → 15%        B(10) → 5%        C(90) → 80%
+</code></pre></div>
+<p>解法是让<strong>一台物理机在环上放很多个点</strong>：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">物理机 A：  A#0  A#1  A#2  …  A#5      ← 每个都单独哈希
+物理机 B：  B#0  B#1  B#2  …  B#5
+物理机 C：  C#0  C#1  C#2  …  C#5
+</code></pre></div>
+<p>环上就不再是「三大块」，而是十几个小块交错：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">… A#1 → C#0 → B#2 → A#3 → B#0 → C#1 → A#0 …
+</code></pre></div>
+<p>这样即使 key 只落在<strong>一小段区间</strong>里，也会被摊到不同物理机上 —— 因为这一段里穿插了好几个不同机器的虚拟节点。</p>
+<p>下面这个可以验证。key 故意<strong>挤在 40~65 这一小段</strong>：</p>
+<div class="demo" data-widget="hashring" data-config="{&quot;keys&quot;:&quot;hot&quot;,&quot;kinds&quot;:[{&quot;id&quot;:&quot;one&quot;,&quot;label&quot;:&quot;每台一个点&quot;,&quot;mode&quot;:&quot;ring&quot;,&quot;vnodes&quot;:1},{&quot;id&quot;:&quot;vnode&quot;,&quot;label&quot;:&quot;每台 6 个虚拟节点&quot;,&quot;mode&quot;:&quot;ring&quot;,&quot;vnodes&quot;:6}],&quot;sizes&quot;:[3,4]}">
+      <div class="demo-head">
+        <span class="title">key 挤在一小段，虚拟节点怎么救</span>
+        <span class="status" data-status>切「每台一个点 / 每台 6 个虚拟节点」看负载条</span>
+        <span class="spacer"></span>
+        
+      </div>
+      <div class="demo-body custom" data-mount></div>
+    </div><ul>
+<li><strong>「每台一个点」那一档</strong>：所有 key 顺时针撞到的都是同一个节点，负载条会明显歪掉。</li>
+<li><strong>切到虚拟节点</strong>：同一批 key 被摊到三台上，负载条接近持平。</li>
+</ul>
+<div class="callout tone-green">
+      <span class="ic">📦</span>
+      <div><p>虚拟节点还顺手解决了另外三件事：</p>
+<ul>
+<li><strong>扩容迁移更均匀</strong> —— 新节点接管的是很多<strong>小块</strong>，而不是一整大块</li>
+<li><strong>节点故障恢复更均匀</strong> —— 一台挂掉，它的许多小块会被<strong>多台</strong>机器分别接走，不会全压给邻居</li>
+<li><strong>异构机器可以按性能加权</strong> —— 高配放 300 个虚拟节点、普通放 100 个，它就自然多扛 3 倍</li>
+</ul>
+</div>
+    </div><h3 id="44-第三种真热-key-这一种虚拟节点也没用">4.4 第三种：真·热 key —— 这一种虚拟节点也没用</h3>
+<p>这是最本质、也最常见的一种：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">所有流量都属于同一个 key —— 大促时的 iPhone_17，或者统计里的 country = China
+</code></pre></div>
+<p>不管环上有多少个虚拟节点，<mark class="mk-blue"><strong>同一个 key 的哈希值永远是固定的</strong>，它只会落到一个地方。</mark></p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">hash(&quot;iPhone_17&quot;) = 52     ← 永远落在 52 后面那个节点上
+</code></pre></div>
+<p>为什么不能简单地「把这个 key 打散到多台机器」？因为大量分布式状态计算要求：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">同一个 key 的状态，必须由同一个地方顺序更新
+</code></pre></div>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">key = iPhone_17，库存 = 100
+
+机器 A：读到 100，写回 99
+机器 B：读到 100，写回 99      ← 卖了两件，库存只减了一件
+</code></pre></div>
+<p>所以默认的分区方式<strong>必然</strong>让「同一个 key → 同一个分区 → 同一个处理者」。这是<strong>为了正确性</strong>，不是设计缺陷。</p>
+<p><strong>那热 key 怎么办？</strong> 三种思路，适用场景完全不同：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>思路</th><th>怎么做</th><th>什么场景能用</th></tr></thead><tbody><tr><th>加盐分片</th><td data-label="怎么做">把逻辑 key 拆成 N 个子 key（<code>iPhone_17#0</code> … <code>iPhone_17#15</code>），撒到多台机器上各算局部值，最后汇总</td><td data-label="什么场景能用"><span class="tag tone-green">只适用于可合并的统计（sum / count / max / min）</span></td></tr><tr><th>单独分流</th><td data-label="怎么做">热点 key 单独路由到专用机器 / 专用分区 / 更大资源池</td><td data-label="什么场景能用">热点数量少，又必须严格顺序（比如库存扣减）</td></tr><tr><th>业务分片</th><td data-label="怎么做">把「一个总数」拆成多个分片各自维护（总库存 10 万 → 100 个分片各 1000 件）</td><td data-label="什么场景能用">要设计跨分片的超卖、限购、重试、幂等 —— 已经是业务模型问题了</td></tr></tbody></table></div><div class="callout tone-violet">
+      <span class="ic">🍰</span>
+      <div><p><strong>为什么加盐分片只能用于「可合并的统计」？</strong></p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">iPhone_17#0  →  100 件      ← 局部聚合，可以并行
+iPhone_17#1  →  120 件
+iPhone_17#2  →   80 件
+──────────────────────
+汇总         →  300 件      ← sum 可以合并
+</code></pre></div>
+<p>但「库存扣减」不能这么算：三个分片各扣各的，加起来对不上总量，还会超卖。
+<mark class="mk-blue">可合并的运算可以分片；可变的共享状态不行。</mark></p>
+</div>
+    </div><div class="callout tone-blue tinted">
+      <span class="ic">🧭</span>
+      <div><p>把这四层分开记：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">一致性哈希      →  解决「扩缩容时少迁移」
+虚拟节点        →  解决「机器在环上的位置不均」
+高质量哈希      →  解决「不同 key 的散列不均」
+加盐 / 业务分片  →  解决「单个 key 太热」
+</code></pre></div>
+<p><mark class="mk-blue">它们不是同一件事的四种做法，而是四个不同层次的问题。</mark></p>
+<p>搞混的代价很具体：拿「换个更好的哈希函数」去治热 key，
+或者拿「多加虚拟节点」去治「只有一个 key 热」—— 都是白费力气。</p>
+</div>
+    </div><hr>
+<p>（回到主线）假设① 到这里讲完了：<strong>先分片决定「谁负责哪些 key」，再让分片规则在扩容时少动。</strong> 接下来回到七个假设的第二个。</p>
+<h2 id="假设②-内存随手可及-数据必须走网络"><span class="num">05</span>假设② 内存随手可及 —— 数据必须走网络</h2>
 <p>单机里这一句，就是一次内存读写：</p>
 <div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-java">total += amount;   // total 就在当前进程地址空间里
 </code></pre></div>
@@ -234,7 +434,7 @@ user_1 的累计状态在机器 B
         </div></div><div class="scell"><div class="spart tone-violet" data-id="b">
           <b>机器 B</b><small>user_1 的 total 在这里</small>
         </div></div></div>
-      <div class="seqd-body"><div class="smsg" data-from="a" data-to="b" data-kind="sync" data-i="1" data-note="① 发出"><span class="slabel">total += 100</span></div><div class="smsg is-self" data-from="b" data-to="b" data-kind="self" data-i="2" data-note="② 但回包丢了"><span class="slabel">执行了，total = 100</span></div><div class="smsg is-self" data-from="a" data-to="a" data-kind="self" data-i="3" data-note="③ 不知道"><span class="slabel">超时了：它到底做没做？</span></div><div class="smsg" data-from="a" data-to="b" data-kind="sync" data-i="4" data-note="④ 重试"><span class="slabel">重试 total += 100</span></div><div class="smsg is-self" data-from="b" data-to="b" data-kind="self" data-i="5" data-note="⑤ 重复了"><span class="slabel">total = 200 —— 多算了一次</span></div></div>
+      <div class="seqd-body"><div class="smsg" data-from="a" data-to="b" data-kind="sync" data-i="1" data-note="① 发出"><span class="snote">① 发出</span><span class="slabel">total += 100</span></div><div class="smsg is-self" data-from="b" data-to="b" data-kind="self" data-i="2" data-note="② 但回包丢了"><span class="snote">② 但回包丢了</span><span class="slabel">执行了，total = 100</span></div><div class="smsg is-self" data-from="a" data-to="a" data-kind="self" data-i="3" data-note="③ 不知道"><span class="snote">③ 不知道</span><span class="slabel">超时了：它到底做没做？</span></div><div class="smsg" data-from="a" data-to="b" data-kind="sync" data-i="4" data-note="④ 重试"><span class="snote">④ 重试</span><span class="slabel">重试 total += 100</span></div><div class="smsg is-self" data-from="b" data-to="b" data-kind="self" data-i="5" data-note="⑤ 重复了"><span class="snote">⑤ 重复了</span><span class="slabel">total = 200 —— 多算了一次</span></div></div>
     </div><p>重试可能重复累加，不重试可能漏算。<strong>这个两难没有便宜的解法</strong>，只能把语义摊开来选：</p>
 <div class="compare-wrap"><table class="compare"><thead><tr><th>投递语义</th><th>会不会丢</th><th>会不会重</th><th>怎么做到</th></tr></thead><tbody><tr><th>至多一次 At-most-once</th><td data-label="会不会丢"><span class="tag tone-red">可能丢</span></td><td data-label="会不会重"><span class="tag tone-green">不会重</span></td><td data-label="怎么做到">发出去就不管了。实现最省事，但会丢数据</td></tr><tr><th>至少一次 At-least-once</th><td data-label="会不会丢"><span class="tag tone-green">尽量不丢</span></td><td data-label="会不会重"><span class="tag tone-red">可能重</span></td><td data-label="怎么做到">失败就重试。<mark class="mk-blue">这是绝大多数系统的默认选择</mark></td></tr><tr><th>恰好一次 Exactly-once</th><td data-label="会不会丢"><span class="tag tone-green">不丢</span></td><td data-label="会不会重"><span class="tag tone-green">不重</span></td><td data-label="怎么做到">不是「一种协议」，而是「事务 + 幂等 + 去重」组合出来的效果，最贵</td></tr></tbody></table></div><div class="callout tone-red">
       <span class="ic">⚠</span>
@@ -249,7 +449,7 @@ Flink 有 <code>TwoPhaseCommitSinkFunction</code> —— 但它们都有边界�
 <mark class="mk-blue"><strong>Kafka 的恰好一次只管 Kafka-to-Kafka</strong></mark>，写数据库、调接口、发短信不在保护范围内。</p>
 </div>
     </div><p><strong>那业界怎么补上「至少一次」的缺口</strong>：</p>
-<ul class="check"><li>幂等写入 —— 让「重复写一次」和「写一次」结果相同，最省心的做法</li><li>去重表 / 唯一键 —— 每条消息带唯一 ID，处理前查一下，处理完记一笔</li><li>事务 —— 靠外部系统的事务能力，把「写结果」和「记位点」绑成一个原子操作</li><li>两阶段提交 —— 一个 checkpoint 对应一个事务：先预提交，checkpoint 成功才正式提交</li></ul><h2 id="假设③-顺序执行-同一秒改同一个-key"><span class="num">04</span>假设③ 顺序执行 —— 同一秒改同一个 key</h2>
+<ul class="check"><li>幂等写入 —— 让「重复写一次」和「写一次」结果相同，最省心的做法</li><li>去重表 / 唯一键 —— 每条消息带唯一 ID，处理前查一下，处理完记一笔</li><li>事务 —— 靠外部系统的事务能力，把「写结果」和「记位点」绑成一个原子操作</li><li>两阶段提交 —— 一个 checkpoint 对应一个事务：先预提交，checkpoint 成功才正式提交</li></ul><h2 id="假设③-顺序执行-同一秒改同一个-key"><span class="num">06</span>假设③ 顺序执行 —— 同一秒改同一个 key</h2>
 <p>单机这个循环是顺序的，永远不会有两个线程同时执行 <code>total += amount</code>。</p>
 <p>分布式里可以：</p>
 <div class="seqd has-grid" data-seq data-n="3">
@@ -272,7 +472,7 @@ Flink 有 <code>TwoPhaseCommitSinkFunction</code> —— 但它们都有边界�
         </div></div><div class="scell"><div class="spart tone-amber" data-id="b">
           <b>写者 B</b><small>user_1 +200</small>
         </div></div></div>
-      <div class="seqd-body"><div class="smsg" data-from="a" data-to="s" data-kind="sync" data-i="1" data-note="①"><span class="slabel">读 total</span></div><div class="smsg" data-from="b" data-to="s" data-kind="sync" data-i="2" data-note="② 也读"><span class="slabel">读 total</span></div><div class="smsg" data-from="s" data-to="b" data-kind="reply" data-i="3" data-note="③"><span class="slabel">返回 0</span></div><div class="smsg" data-from="s" data-to="a" data-kind="reply" data-i="4" data-note="④ 两边都拿到旧值"><span class="slabel">返回 0</span></div><div class="smsg" data-from="a" data-to="s" data-kind="sync" data-i="5" data-note="⑤"><span class="slabel">写 100</span></div><div class="smsg" data-from="b" data-to="s" data-kind="sync" data-i="6" data-note="⑥ 覆盖了 A"><span class="slabel">写 200</span></div><div class="smsg is-self" data-from="s" data-to="s" data-kind="self" data-i="7" data-note="⑦"><span class="slabel">最终 total = 200，A 的 100 丢了</span></div></div>
+      <div class="seqd-body"><div class="smsg" data-from="a" data-to="s" data-kind="sync" data-i="1" data-note="①"><span class="snote">①</span><span class="slabel">读 total</span></div><div class="smsg" data-from="b" data-to="s" data-kind="sync" data-i="2" data-note="② 也读"><span class="snote">② 也读</span><span class="slabel">读 total</span></div><div class="smsg" data-from="s" data-to="b" data-kind="reply" data-i="3" data-note="③"><span class="snote">③</span><span class="slabel">返回 0</span></div><div class="smsg" data-from="s" data-to="a" data-kind="reply" data-i="4" data-note="④ 两边都拿到旧值"><span class="snote">④ 两边都拿到旧值</span><span class="slabel">返回 0</span></div><div class="smsg" data-from="a" data-to="s" data-kind="sync" data-i="5" data-note="⑤"><span class="snote">⑤</span><span class="slabel">写 100</span></div><div class="smsg" data-from="b" data-to="s" data-kind="sync" data-i="6" data-note="⑥ 覆盖了 A"><span class="snote">⑥ 覆盖了 A</span><span class="slabel">写 200</span></div><div class="smsg is-self" data-from="s" data-to="s" data-kind="self" data-i="7" data-note="⑦"><span class="snote">⑦</span><span class="slabel">最终 total = 200，A 的 100 丢了</span></div></div>
     </div><p>这叫<strong>丢失更新（lost update）</strong>。正确结果应该是 300。</p>
 <h3 id="一个比加锁更深的洞察">一个比「加锁」更深的洞察</h3>
 <p>第一反应是「加锁」。但先看清 <mark class="mk-blue"><code>total += amount</code> 其实是三步：读、改、写</mark>。</p>
@@ -300,7 +500,7 @@ UPDATE counter SET value = 101;
 <p>这就是 <code>keyBy</code>、分区、shuffle、路由这一整套机制存在的真正原因：
 <mark class="mk-blue"><strong>它们不是为了「分发」而存在，是为了「让同一个 key 只有一个主人」而存在。</strong></mark></p>
 <div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code>
-## 05 · 假设④ 变量就在那儿 —— 状态得活过重启
+## 07 · 假设④ 变量就在那儿 —— 状态得活过重启
 
 单机里 `total` 放在 JVM 内存里，天经地义。但分布式里，一个进程随时可能：
 
@@ -354,7 +554,7 @@ UPDATE counter SET value = 101;
 </div>
     </div><p><mark class="mk-blue">这两行必须来自同一个时间点。</mark> 拿 10:00 的状态配 10:05 的位点，中间那 5 分钟的数据就永远算不进去了。</p>
 <div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code>
-## 06 · 假设⑤ 进程不会挂 —— 局部故障是常态
+## 08 · 假设⑤ 进程不会挂 —— 局部故障是常态
 
 单机只有一个进程，挂了就是「整个程序停了」，好理解也好处理。分布式是另一回事：
 
@@ -374,7 +574,7 @@ UPDATE counter SET value = 101;
 <p>这也解释了为什么「恰好一次」这么贵：真正的难点不在状态本身，
 而在<strong>把状态的变化和对外部世界的写入，绑成一个不会只做一半的动作</strong>。</p>
 </div>
-    </div><h2 id="假设⑥-快慢自然协调-反压"><span class="num">07</span>假设⑥ 快慢自然协调 —— 反压</h2>
+    </div><h2 id="假设⑥-快慢自然协调-反压"><span class="num">09</span>假设⑥ 快慢自然协调 —— 反压</h2>
 <p>单机循环里，<code>write()</code> 慢，<code>read()</code> 自然就跟着慢 —— <strong>这是一种天然的节流</strong>，你什么都不用做。</p>
 <p>分布式里，各步骤在不同进程里，谁也不知道谁的速度：</p>
 <div class="flowviz">
@@ -410,7 +610,7 @@ UPDATE counter SET value = 101;
    一个性能问题，滚成了一个可靠性问题。
 </code></pre></div>
 <p>1.5 之后改成了 <strong>credit-based 流控</strong>：下游主动告诉上游「我还有多少缓冲空间（credit）」，上游有 credit 才发数据。<mark class="mk-blue">这样每条 channel 独立受限，且 barrier 始终能穿过去。</mark></p>
-<h2 id="假设⑦-机器数量不变-状态要搬家"><span class="num">08</span>假设⑦ 机器数量不变 —— 状态要搬家</h2>
+<h2 id="假设⑦-机器数量不变-状态要搬家"><span class="num">10</span>假设⑦ 机器数量不变 —— 状态要搬家</h2>
 <p>最后一个假设最容易被忽略，因为单机时代根本不存在「扩容」这回事。</p>
 <p>现在假设按 <code>hash(userId) % 3</code> 分区，每台机器管着一部分用户的状态。你要把并行度从 3 改成 5：</p>
 <div class="keyspace">
@@ -455,7 +655,7 @@ UPDATE counter SET value = 101;
 <p>这是分布式系统里很典型的一种权衡：<mark class="mk-blue"><strong>用一个提前锁死的常量，换运行时的灵活。</strong></mark>
 类似的设计你在别处也见过 —— 比如 Kafka 的分区数一旦定了就不好改。</p>
 </div>
-    </div><h2 id="收束这些复杂性被算子封装了"><span class="num">09</span>收束：这些复杂性，被「算子」封装了</h2>
+    </div><h2 id="收束这些复杂性被算子封装了"><span class="num">11</span>收束：这些复杂性，被「算子」封装了</h2>
 <p>回头看：这七个问题，<strong>没有一个跟你的业务有关</strong>。它们全都来自「把单机程序放到多台机器上」这一件事。</p>
 <div class="cards" data-cols="2"><div class="ccard tone-violet">
           <span class="tag tone-violet">通用复杂性</span>
