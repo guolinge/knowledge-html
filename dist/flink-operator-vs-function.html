@@ -2578,7 +2578,13 @@ svg[data-preset="blueprint"] .c-security-group,
       <a href="#先给结论算子不是函数">先给结论：算子不是函数</a>
       <a href="#先把lambda这个词说清" class="sub">先把「lambda」这个词说清</a>
       <a href="#逐项对比" class="sub">逐项对比</a>
-      <a href="#先看清物理图景机器上到底有什么">先看清物理图景：机器上到底有什么</a>
+      <a href="#打开一层看一层机器上到底有什么">打开一层，看一层：机器上到底有什么</a>
+      <a href="#第-1-层-进程taskmanager" class="sub">第 1 层 · 进程：TaskManager</a>
+      <a href="#第-2-层-名额slot" class="sub">第 2 层 · 名额：Slot</a>
+      <a href="#第-3-层-线程task" class="sub">第 3 层 · 线程：Task</a>
+      <a href="#第-4-层-对象算子" class="sub">第 4 层 · 对象：算子</a>
+      <a href="#第-5-层-数据托管状态" class="sub">第 5 层 · 数据：托管状态</a>
+      <a href="#回头看五层拆开了五对东西" class="sub">回头看：五层，拆开了五对东西</a>
       <a href="#八个区别逐个拆">八个区别，逐个拆</a>
       <a href="#31-谁调用谁控制反转" class="sub">3.1 谁调用谁：控制反转</a>
       <a href="#32-生命周期函数是一次性的算子要上电和断电" class="sub">3.2 生命周期：函数是一次性的，算子要「上电」和「断电」</a>
@@ -2640,7 +2646,7 @@ Python  lambda o: o.amount &gt; 0        ← Python 直接用了 lambda 这个�
 <p>所以 Flink 代码看起来像在调方法，实际上是在<strong>填一张表格</strong> ——
 表格交上去之后，什么时候执行、在哪个线程执行、执行几份，都不再由你决定。</p>
 </div>
-    </div><h2 id="先看清物理图景机器上到底有什么"><span class="num">02</span>先看清物理图景：机器上到底有什么</h2>
+    </div><h2 id="打开一层看一层机器上到底有什么"><span class="num">02</span>打开一层，看一层：机器上到底有什么</h2>
 <p>抽象的词先放一边。一个跑起来的 Flink 作业，在机器上是这些<strong>具体的东西</strong>：</p>
 <div class="tree" data-tree><ul class="tlist"><li class="has-kids">
             <div class="tnode tone-muted" data-tree-node>
@@ -2706,12 +2712,88 @@ Python  lambda o: o.amount &gt; 0        ← Python 直接用了 lambda 这个�
           </li></ul>
           </li></ul>
           </li></ul>
-          </li></ul></div><p>对着这张图问三个问题，很多困惑就散了：</p>
-<ul class="check"><li>你的 lambda 在哪？→ 它是 StreamMap 对象里的一个字段，不是独立的东西</li><li>状态在哪？→ 挂在算子对象上，但实际存储由「状态后端」决定</li><li>线程是谁的？→ 框架的。你的代码只是被它调用的</li></ul><div class="callout tone-red">
+          </li></ul></div><div class="callout tone-violet tinted">
+      <span class="ic">🧭</span>
+      <div><p><strong>为什么要一层层看？</strong></p>
+<p>一个系统「分成几层」从来不是随意的 —— <mark class="mk-blue">每一层都在解决上一层解决不了的问题。</mark>
+看懂「为什么要在这一层切开」，比记住这一层叫什么名字重要得多。</p>
+<p>所以下面每讲一层，都会回答同一个问题：<strong>这一层，拆开了什么？</strong></p>
+</div>
+    </div><h3 id="第-1-层-进程taskmanager">第 1 层 · 进程：TaskManager</h3>
+<p><strong>是什么</strong>：一个 JVM 进程。集群里你 <code>start</code> 起来的那几个 worker 就是它。</p>
+<p>打开它看内存，会发现被<strong>刻意切成了三块</strong>：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">TaskManager 进程
+├── JVM Heap          ← 普通 Java 对象住这儿（你的算子对象就在里面）
+├── Managed Memory    ← 堆外，Flink 自己管（排序、哈希表这类活儿用）
+└── Network Buffers   ← 网络收发的缓冲池
+</code></pre></div>
+<p><strong>这一层拆开了什么</strong>：<mark class="mk-blue">故障和资源。</mark></p>
+<p>进程是「故障隔离」的单位 —— 一个 TaskManager 挂了，它上面跑的 subtask 会重启，别的 TaskManager 上的任务完全不受影响。在 YARN / K8s 上，一个 TaskManager 通常就是一个容器，资源是容器给的。</p>
+<p><strong>顺手记一个反直觉的地方<strong>：为什么 Flink 要自己管一块</strong>堆外</strong>内存？</p>
+<p>因为流处理里有大量「要一大块连续内存」的操作 —— 排序、哈希表、缓存。而 JVM 堆上的对象模型对这类活儿很不友好：对象头有开销、内存不连续、GC 还会到处搬。所以 Flink 干脆要一块自己管的地，按段分配，像 C 那样。</p>
+<p><mark class="mk-blue">这块地主要给批式算子（排序、哈希连接/聚合）和 RocksDB 状态后端用。</mark></p>
+<h3 id="第-2-层-名额slot">第 2 层 · 名额：Slot</h3>
+<p><strong>是什么<strong>：TaskManager 里划出来的</strong>一份资源名额</strong>。</p>
+<p>注意它<strong>不是线程，也不是 CPU 核</strong>。它回答的问题是：「这个 TaskManager 最多能接几个 subtask？」</p>
+<p><strong>这一层拆开了什么</strong>：<mark class="mk-blue">资源和执行。</mark></p>
+<p>不拆会怎样？如果每个 subtask 都得独占一份资源，那么「10 个算子、并行度 8」的作业就要 80 份名额 —— 而且 Source 和 Sink 的负载往往差好远，必然有的忙死、有的闲着。</p>
+<p>所以 Flink 默认开了 <strong>Slot Sharing</strong>：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">同一个 Job 的 subtask 可以共享一个 slot，
+于是「需要的 slot 数」= 作业的最大并行度，而不是所有算子并行度之和。
+</code></pre></div>
+<p>几条最容易搞错的细节：</p>
+<ul class="check"><li>需要的 slot 数 = 作业的<strong>最大并行度</strong>（默认 SlotSharingGroup 下），不用把各算子并行度加起来</li><li>一个 slot 里可以<strong>放下一整条 pipeline</strong>（多个 task 的 subtask 挤在一起）</li><li>但<strong>同一个 task 的两个 subtask 不能放进同一个 slot</strong> —— 共享只发生在「不同算子」之间</li><li>slot <strong>隔离内存，但不隔离 CPU</strong> —— 所以实践上建议 slot 数 ≈ CPU 核数</li></ul><h3 id="第-3-层-线程task">第 3 层 · 线程：Task</h3>
+<p><strong>是什么</strong>：<mark class="mk-blue">一个线程 + 一个 <code>StreamTask</code> 对象。</mark></p>
+<p>这一层是整张图里<strong>最需要纠正直觉</strong>的地方：</p>
+<div class="callout tone-red">
       <span class="ic">⚠</span>
-      <div><p><mark class="mk-amber">「一个算子一个线程」是错的。</mark>
-<mark class="mk-blue">一个 <strong>Task</strong> 一个线程，而一个 Task 里通常链了好几个算子。</mark>
+      <div><p><mark class="mk-amber">「一个算子一个线程」是错的。</mark></p>
+<p><mark class="mk-blue">一个 <strong>Task</strong> 一个线程，而一个 Task 里通常链了好几个算子。</mark>
 10 个算子如果全都能链在一起，那就只占 1 个线程。</p>
+</div>
+    </div><p><strong>这一层拆开了什么</strong>：<mark class="mk-blue">逻辑上的「算子」和物理上的「线程」。</mark></p>
+<p>为什么要把几个算子塞进同一个线程？<mark class="mk-blue">因为跨线程 / 跨进程传数据很贵。</mark></p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">同一个线程里：  算子 A → 算子 B     一次方法调用，对象引用直接传
+不同进程之间：  算子 A → 算子 B     序列化 → 网络缓冲 → 发送 → 反序列化
+</code></pre></div>
+<p>所以「算子链」不是一个排版问题，是<strong>性能问题</strong>。而 <code>keyBy</code> 是一条硬边界 —— 它必须重分区，链在这里断开，数据从这里开始要走网络。</p>
+<p><strong>写过 Go 的话，这里有个坑要提前避开</strong>：</p>
+<div class="callout tone-violet">
+      <span class="ic">🐹</span>
+      <div><p>Go 里 <code>go func() {}</code> 开 goroutine 几乎不要钱 —— 用户态调度，一个 OS 线程上能跑几万个。
+<mark class="mk-blue">但 Flink 的 Task 是<strong>真正的 OS 线程</strong></mark>（JVM 平台线程，1:1 绑到内核线程）。</p>
+<p>所以：<strong>并行度不是免费的</strong>，它是你要算的资源。
+并行度 100 就是 100 个 OS 线程，每个都要栈、都要被内核调度。
+Go 那套「随手就开」的直觉，放到这里会直接把容量算错。</p>
+</div>
+    </div><p><strong>用过数据库的话</strong>，这一层你应该已经见过 —— 只是名字不一样：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">数据库的执行计划：    尽量把相邻算子串成一条 pipeline，数据一条条流过，不落中间结果；
+                      只有当必须重分区时（比如 Hash Join 的 build 阶段），才插一个物化点。
+
+Flink 的算子链：      一模一样。算子链 = 数据库的 pipeline，keyBy = 数据库的 shuffle / 物化点。
+</code></pre></div>
+<p><mark class="mk-blue">这不是巧合。两边面对的是同一个物理约束：内存带宽和网络，比 CPU 慢得多。</mark> 谁能少搬一次数据，谁就快。</p>
+<h3 id="第-4-层-对象算子">第 4 层 · 对象：算子</h3>
+<p><strong>是什么</strong>：一个实现了接口的 Java 对象。你在代码里写的 lambda，被存成它的一个字段。</p>
+<p><strong>这一层拆开了什么</strong>：<mark class="mk-blue">你的业务逻辑，和框架的驱动逻辑。</mark></p>
+<p><mark class="mk-blue">框架不认识你的业务，它只认识一个对象。</mark> 它在这个对象上按顺序调 <code>open()</code>、<code>processElement()</code>、<code>snapshotState()</code>、<code>close()</code> —— 你的逻辑是这些方法里的实现，别的一概不归你管。</p>
+<p><strong>写过 Go 的话，这里能看出一个语言差异</strong>：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>你想做的事</th><th>Go 怎么写</th><th>Java 怎么写</th></tr></thead><tbody><tr><th>把一个「函数」当值传出去</th><td data-label="Go 怎么写"><code>f := func(o Order) bool { return o.Amount &gt; 0 }</code> —— 直接传 <code>f</code></td><td data-label="Java 怎么写"><code>(Order o) -&gt; o.getAmount() &gt; 0</code> —— 但它必须先<strong>实现某个接口</strong>才能存在</td></tr><tr><th>本质</th><td data-label="Go 怎么写"><code>func</code> 是一等公民，它本身就是个值</td><td data-label="Java 怎么写">JVM 上「方法」不是一等公民，只好用「<strong>只有一个方法的对象</strong>」来模拟函数</td></tr></tbody></table></div><p><mark class="mk-blue">所以「Java 的 lambda 是对象」不是谁的设计选择，是语言限制的产物。</mark> 而 Flink 干脆把它利用到底：函数接口除了 <code>@FunctionalInterface</code>，还额外继承了 <code>Serializable</code> —— 因为这些对象<strong>要被打包发到别的机器上去执行</strong>。</p>
+<h3 id="第-5-层-数据托管状态">第 5 层 · 数据：托管状态</h3>
+<p><strong>是什么</strong>：算子的状态。逻辑上它属于某个 key，物理上住在一块内存 / 本地磁盘 / 远端存储里。</p>
+<p><strong>这一层拆开了什么</strong>：<mark class="mk-blue">「状态是什么」和「状态存在哪」。</mark></p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>状态后端</th><th>状态物理上在哪</th><th>什么时候选它</th></tr></thead><tbody><tr><th>HashMapStateBackend</th><td data-label="状态物理上在哪">JVM 堆上的 Java 对象</td><td data-label="什么时候选它">状态小、要快</td></tr><tr><th>RocksDBStateBackend</th><td data-label="状态物理上在哪">TaskManager 本地磁盘上的 RocksDB</td><td data-label="什么时候选它">状态大到堆里放不下（只受磁盘限制）</td></tr><tr><th>分离式（ForSt）</th><td data-label="状态物理上在哪">远端存储（HDFS / S3），本地只留缓存</td><td data-label="什么时候选它">状态很大，或者要能快速扩缩容</td></tr></tbody></table></div><p><mark class="mk-blue">换后端不用改一行业务代码</mark> —— 因为它们实现的是同一个接口。这就是这一层拆开的价值：<strong>状态从 KB 涨到 TB，是运维问题，不是代码问题。</strong></p>
+<p><strong>用过数据库的话</strong>：这一层很像数据库的 <strong>Buffer Pool</strong> —— 数据逻辑上在表里，物理上在内存页里；什么时候从磁盘读、怎么缓存淘汰，是另一层的事。写 SQL 的人从来不用管这件事。</p>
+<h3 id="回头看五层拆开了五对东西">回头看：五层，拆开了五对东西</h3>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>层</th><th>它拆开了什么</th><th>拆开之后你能得到什么</th></tr></thead><tbody><tr><th>进程 TaskManager</th><td data-label="它拆开了什么">故障 · 资源</td><td data-label="拆开之后你能得到什么">一台机器挂掉，不影响别的机器上的任务</td></tr><tr><th>名额 Slot</th><td data-label="它拆开了什么">资源 · 执行</td><td data-label="拆开之后你能得到什么">改并行度不用改资源配置；不同算子的负载能混进同一个 slot</td></tr><tr><th>线程 Task</th><td data-label="它拆开了什么">逻辑算子 · 物理线程</td><td data-label="拆开之后你能得到什么">想省网络就把算子链起来，想重分区就断链</td></tr><tr><th>对象 算子</th><td data-label="它拆开了什么">你的逻辑 · 框架的驱动</td><td data-label="拆开之后你能得到什么">框架不用懂你的业务，只认一个接口</td></tr><tr><th>状态后端</th><td data-label="它拆开了什么">状态语义 · 存储介质</td><td data-label="拆开之后你能得到什么">状态从 KB 涨到 TB，业务代码一行不动</td></tr></tbody></table></div><div class="callout tone-blue tinted">
+      <span class="ic">🧭</span>
+      <div><p>把五层连起来看，会发现整个 Flink 的设计主线其实只有一条：</p>
+<p><mark class="mk-blue"><strong>把「逻辑上是什么」和「物理上在哪」拆开。</strong></mark></p>
+<p>逻辑上是一张算子图；物理上是进程、线程、一堆对象。
+逻辑上是「一个算子」；物理上是散在多台机器上的 N 个实例。
+逻辑上是「一份状态」；物理上是一块堆内存、一个 RocksDB、或者一个远端文件。</p>
+<p>拆开之后，上面那层可以随便变 —— 改并行度、换状态后端、加机器 ——
+下面那层不用动。<mark class="mk-blue">这也是它能在同一套模型上同时跑批和流的原因。</mark></p>
 </div>
     </div><h2 id="八个区别逐个拆"><span class="num">03</span>八个区别，逐个拆</h2>
 <h3 id="31-谁调用谁控制反转">3.1 谁调用谁：控制反转</h3>
@@ -2877,7 +2959,19 @@ while (true) {
             </div></div></div>
       
     </div><div class="compare-wrap"><table class="compare"><thead><tr><th>图</th><th>一个节点代表什么</th><th>在哪生成</th></tr></thead><tbody><tr><th>StreamGraph</th><td data-label="一个节点代表什么">一个<strong>算子</strong>（你代码里的 map / filter / keyBy）</td><td data-label="在哪生成">客户端</td></tr><tr><th>JobGraph</th><td data-label="一个节点代表什么">一个 <strong>JobVertex</strong> —— <mark class="mk-blue">可能包含好几个算子</mark>（被链在一起的）</td><td data-label="在哪生成">客户端</td></tr><tr><th>ExecutionGraph</th><td data-label="一个节点代表什么">一个 <strong>ExecutionVertex</strong> —— 即一个 subtask</td><td data-label="在哪生成">JobMaster</td></tr><tr><th>物理执行图</th><td data-label="一个节点代表什么">不是数据结构；就是实际跑在哪些机器/线程上</td><td data-label="在哪生成">运行时</td></tr></tbody></table></div><p><mark class="mk-blue">上一节说的「Task 常常不是算子，而是一串算子」，就发生在 StreamGraph → JobGraph 这一步。</mark></p>
-<h2 id="文中用过但没解释的词一次讲完"><span class="num">07</span>文中用过但没解释的词，一次讲完</h2>
+<div class="callout tone-violet">
+      <span class="ic">🗄</span>
+      <div><p><strong>用过数据库的话，这四层图你应该很熟</strong> —— 只是名字不同：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">数据库：  SQL  →  逻辑计划  →  物理计划  →  执行算子
+Flink：  算子代码 → StreamGraph → JobGraph → ExecutionGraph
+</code></pre></div>
+<p><mark class="mk-blue">两边都在做同一件事：先忠实记下「我要算什么」（逻辑），再决定「具体怎么算」（物理）。</mark></p>
+<p>为什么要分两步？因为<strong>分开了才有优化的余地</strong>。
+你写的是 <code>map → filter → map</code>，优化器看到的是「这三个不用重分区，能合成一个 vertex」——
+这个判断发生在你交完代码之后，而不是要你自己写在代码里。</p>
+<p>数据库的优化器帮你选 Hash Join 还是 Nested Loop，Flink 帮你决定链谁不链谁，本质相同。</p>
+</div>
+    </div><h2 id="文中用过但没解释的词一次讲完"><span class="num">07</span>文中用过但没解释的词，一次讲完</h2>
 <div class="cards" data-cols="2"><div class="ccard tone-blue">
           <span class="tag tone-blue">你写的代码在哪一层</span>
           <h4>DataStream 和执行环境</h4>
