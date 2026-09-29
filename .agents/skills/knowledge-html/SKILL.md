@@ -1269,7 +1269,99 @@ text: |
 
 这不是假设，是常态。所以有一套规则必须共同遵守。
 
-### 先说清矛盾在哪
+### 先搞清楚：这不是分支的问题
+
+```callout
+tone: red
+icon: ⚠
+quote: true
+text: |
+  ==多个会话**共用一个工作目录**，才是根因。==
+
+  开分支解决不了 —— `git checkout -b` 只改 HEAD 指向哪，
+  **工作区里的文件一个都没变**。两个 agent 在同一目录里，改的还是同一批文件。
+```
+
+**真实发生过**（2026-09-29）：
+
+```text
+提交 8575596
+信息：crm-local-stack：命令速查提到 01 节，原理和流程图往后挪
+
+实际：44 个文件，+39461 行，其中包括
+  notes/data-admin-to-ui/note.md        428 行   ← 另一个会话 17:41 建的
+  dist/data-admin-to-ui.html           6382 行
+  archify/data-admin-flow.json          112 行
+  assets/arch/data-admin-flow.svg       138 行
+```
+
+反向也一样：另一个提交用 `git add -A` 把别人做到一半的 13 个 `meta.json` 一并带走了。
+
+三个设计放大了它 —— 它们本身都没错，错的是**假设只有一个改动人**：
+
+| 设计 | 本意 | 共用目录时 |
+|---|---|---|
+| `git add -A` | 提交一个自洽快照 | **仓库级** —— 分不清谁改的 |
+| 产物是全量的 | clone 下来就能开 | 我 build 会重建**所有人**的产物 |
+| 保存即有竞态 | —— | A 保存、B 正在 build → B 构建出 A 的半成品 |
+
+### 先做这件事：每个会话一个 worktree
+
+```bash
+cd ~/works/codes/knowledge-html
+git worktree add ~/works/codes/kh-<会话名> -b <会话名>
+cd ~/works/codes/kh-<会话名>
+ln -s ~/works/codes/knowledge-html/node_modules node_modules
+```
+
+每个目录是**完整独立的工作区**：文件互不可见，`git add -A` 只会扫到自己的改动。
+==误提交从根上消失。==
+
+**三个实测出来的坑**：
+
+| 坑 | 怎么办 |
+|---|---|
+| `node_modules` 不跟着 worktree 来 | 软链过去（上面那条），或各自 `npm install` |
+| 软链显示成 `?? node_modules` | `.gitignore` 里写的是 `node_modules/`（带斜杠 = 目录），**匹配不上软链** —— 改成 `node_modules` |
+| skill 的符号链接固定在主目录 | worktree 里改 skill **不生效**。skill 只有一份，这是好事 |
+
+**合并时冲突面比想象的小**。量过：==全仓库只有 `index.html` 一个文件是全量的==
+（`dist/<slug>.html` 和 `notes/<slug>/index.html` 都是**每篇一个文件**，只有作者会动）：
+
+| 文件 | 合并时 |
+|---|---|
+| `dist/<slug>.html`、`notes/<slug>/index.html` | 各改各的 → **不冲突** |
+| `index.html`（首页树视图） | 所有人都动 → **必然冲突** |
+
+`index.html` 冲突时**别手动 merge** —— 它是生成的：
+
+```bash
+git checkout --theirs index.html   # 随便选一边，反正是生成的
+npm run build:standalone           # 用合并后的源重建
+git add index.html && git commit
+```
+
+### 没条件开 worktree 时：点名 add，别用 `-A`
+
+```callout
+tone: amber
+icon: ⚠
+text: |
+  ==把 `git add -A` 换成 `git add <具体路径>`。==
+```
+
+```bash
+git add notes/<你的 slug>/ archify/<你的名字>.json assets/arch/<你的名字>.svg
+git add assets/blocks.css assets/app.js      # 只在你确实改了它们时
+git add index.html dist/                     # 产物是全量的，必须一起带上
+```
+
+**为什么这样更安全**：`-A` 是仓库级的，它不问「这是谁改的」。
+点名 add 只带走你确认过的东西。
+
+### 还有第二个矛盾：产物是全量的
+
+即使分了 worktree，合并时还有一道坎。
 
 ```callout
 tone: red
@@ -1305,7 +1397,9 @@ npm run status
 并标出每项的修改时间。
 
 - 干净 → 直接干活
-- **有别人的改动** → 记住它们，提交时要一起带上（见下）
+- **有别人的改动** → 两种走法：
+  - 你在 worktree 里 → 与你无关，但合并时要注意
+  - 你在共用目录里 → 记住它们，但**不要用 `-A`**，点名 add
 - 有别人的改动**且明显是半成品**（写了一半、构建不过）→ **先问用户**
 
 ### 干活时
@@ -1321,16 +1415,26 @@ npm run status
 ### 提交时
 
 ```bash
-npm run status              # ① 分类看清
+npm run status              # ① 分类看清 —— 这一条不能省
 npm run check               # ② 校验（含 skill 一致性）
 npm run build:standalone    # ③ 重建全部产物
 npm run visual-check        # ④ 量图
-git add -A                  # ⑤ 此时已确认全部安全
-git commit                  # ⑥ 信息里注明哪些是别人的
+git add <点名清单>          # ⑤ 优先点名；确认过才用 `-A`
+node tools/status.mjs --cached   # ⑥ 再看一遍 staged 的
 ```
 
-**为什么这里可以用 `git add -A`**：因为第 ① 步已经确认了每一项都该提交。
-之前踩的坑不是「用了 `-A`」，是**没看清就 `-A`**。
+```callout
+tone: red
+icon: ⚠
+quote: true
+text: |
+  ==第 ⑤ 步优先点名 add。==
+
+  共用目录里 `git add -A` 会把你**没看过的**东西一起带走 ——
+  包括别人正在写的半成品。它不问「这是谁改的」。
+
+  只有在你确实逐项确认过（第 ① 和 ⑥ 步都看过）时，`-A` 才可以。
+```
 
 ```callout
 tone: amber
@@ -1455,11 +1559,14 @@ pre-push 会重建 + 量图。**它拦下来通常不是你的问题。**
 ```
 → 看是哪个积木、哪一篇。**如果是别人笔记里的图坏了，报告用户，别去改别人的内容。**
 
-### 三条硬规矩
+### 四条硬规矩
 
-1. **产物和源必须一起提交。** 只交产物 → 来源不明；只交源 → 构建过期。
-2. **不替别人改东西。** 发现问题 → 报告，不擅自改。
-3. **提交前跑 `npm run status`。** 别凭记忆判断哪些是自己的。
+1. **优先开 worktree。** 没条件就在共用目录里点名 `git add`，别用 `-A` ——
+   共用目录里 `-A` 会带走别人正在写的半成品。
+2. **产物和源必须一起提交。** 只交产物 → 来源不明；只交源 → 构建过期。
+3. **不替别人改东西。** 发现问题 → 报告，不擅自改。
+4. **提交前跑 `npm run status` —— 而且要看完。**
+   别 `| head -45` 只扫前面一截就往下走。
 
 ---
 
