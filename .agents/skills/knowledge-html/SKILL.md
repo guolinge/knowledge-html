@@ -705,9 +705,9 @@ text: |
 | `summary` | 小结 |
 | `raw` | 直接写 HTML |
 
-**交互控件 11 个**（在 `assets/app.js` 的 `WIDGETS` 里，供 `demo` 积木引用）：
+**交互控件 12 个**（在 `assets/app.js` 的 `WIDGETS` 里，供 `demo` 积木引用）：
 `polling-vs-cdc` `combination-count` `join-lab` `on-vs-where` `knex-chain`
-`stepper` `tuner` `diff` `stream-modes` `operator-lab` `hashring`
+`stepper` `tuner` `diff` `stream-modes` `operator-lab` `hashring` `partition-prune`
 
 **已知缺口**（按优先级）：
 

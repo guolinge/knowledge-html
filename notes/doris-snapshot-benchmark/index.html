@@ -1,0 +1,501 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-has-toc="1">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Doris 人群快照基准：为什么最后是「一张共享表」</title>
+<meta name="description" content="设计文档赌的是「一个快照一张表」，三轮实测把它和 Unique 都淘汰了。这篇讲清楚两次淘汰各自的原因：Unique 输在写入路径，分表输在元数据随快照数线性增长，而共享表靠「按天分区 + 主键前缀」把 14 亿行压成一次只扫 100 万行。" />
+<link rel="stylesheet" href="../../assets/theme.css" />
+  <link rel="stylesheet" href="../../assets/blocks.css" />
+  <link rel="stylesheet" href="../../assets/archify-embed.css" />
+</head>
+<body>
+<div id="progress"></div>
+<div id="tocScrim"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
+    <a class="brand" href="../../index.html"><span class="dot"></span>知识笔记</a>
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="toc" id="toc">
+      <p class="toc-title">目录</p>
+      <a href="../../index.html" class="sub">← 全部笔记</a>
+      <a href="#每天-100-份人群快照存-14-天">每天 100 份人群快照，存 14 天</a>
+      <a href="#先把三个概念说清楚">先把三个概念说清楚</a>
+      <a href="#表模型duplicate-和-unique" class="sub">表模型：Duplicate 和 Unique</a>
+      <a href="#存储单位分区桶tablet" class="sub">存储单位：分区、桶、tablet</a>
+      <a href="#第一轮三种存法同台">第一轮：三种存法同台</a>
+      <a href="#分表输在哪">分表输在哪</a>
+      <a href="#共享表凭什么不慢">共享表凭什么不慢</a>
+      <a href="#重试duplicate-会叠行怎么办">重试：Duplicate 会叠行，怎么办</a>
+      <a href="#结论边界上线看什么">结论、边界、上线看什么</a>
+      <a href="#它没有测什么" class="sub">它没有测什么</a>
+      <a href="#上线时盯什么" class="sub">上线时盯什么</a>
+      <a href="#一句话" class="sub">一句话</a>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow">● 从零理解 · 设计取舍</span>
+      <h1>Doris 人群快照基准：为什么最后是「一张共享表」</h1>
+      <p class="lede">设计文档赌的是「一个快照一张表」，三轮实测把它和 Unique 都淘汰了。这篇讲清楚两次淘汰各自的原因：Unique 输在写入路径，分表输在元数据随快照数线性增长，而共享表靠「按天分区 + 主键前缀」把 14 亿行压成一次只扫 100 万行。</p>
+    </div>
+
+    <div class="draft-banner">
+    <span>⚠</span>
+    <span>本页状态为 <b>draft</b>：内容尚未人工核对，引用前请自行验证。</span>
+  </div>
+
+    <div class="provenance"><span><b>来源</b> doris-snapshot-benchmark/report/综合报告.md · doris-snapshot-benchmark/report/benchmark-report.md（V1） · doris-snapshot-benchmark/v2/report/benchmark-report.md · doris-snapshot-benchmark/v3/report/benchmark-report.md · docs/feishu/Doris人群圈选快照任务设计-初版.md</span><span><b>生成</b> 2026-09-29</span><span><b>模型</b> claude-opus-4.6</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">Doris</span> <span class="tag tone-muted">数据仓库</span> <span class="tag tone-muted">基准测试</span> <span class="tag tone-muted">人群圈选</span></span></div>
+
+<h2 id="每天-100-份人群快照存-14-天"><span class="num">01</span>每天 100 份人群快照，存 14 天</h2>
+<p>运营要做<strong>人群圈选<strong>：提交一个条件（「最近 7 天加购过、AUM 大于 50 万的香港客户」），系统把符合条件的人圈出来。圈出来的这份名单叫</strong>快照</strong>。</p>
+<p>快照要每天存、留 14 天，用来做对比（「今天比昨天多了多少人」）和回溯（「上周三圈的是哪些人」）。</p>
+<p>数据量是这么长的：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">1 个快照  = 100 万人        （就是一堆 user_id）
+1 天      = 100 个快照      = 1 亿行
+14 天     = 1400 个快照     = 14 亿行
+</code></pre></div>
+<p>设计文档里最初定的是：<mark class="mk-blue">每个快照建一张独立的表</mark>。</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">snapshot_10001    100 万行
+snapshot_10002    100 万行
+...
+snapshot_14000    100 万行        ← 1400 张表
+</code></pre></div>
+<p>这个想法很自然 —— 像文件一样，一个快照一份。删起来一句 <code>DROP TABLE</code> 干净利落，一个快照写坏了也不影响别人。</p>
+<p>另外两种候选是把它塞进<strong>一张表</strong>，用一列标明「这一行属于哪个快照」，区别只在表模型：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>怎么存</th><th>① 共享 Duplicate 表</th><th>② 共享 Unique 表</th><th>③ 一快照一表</th></tr></thead><tbody><tr><th>表数量</th><td data-label="① 共享 Duplicate 表"><span class="tag tone-green">1 张</span></td><td data-label="② 共享 Unique 表"><span class="tag tone-green">1 张</span></td><td data-label="③ 一快照一表"><span class="tag tone-amber">1400 张</span></td></tr><tr><th>怎么区分快照</th><td data-label="① 共享 Duplicate 表">靠 <code>snapshot_id</code> 这一列</td><td data-label="② 共享 Unique 表">靠 <code>snapshot_id</code> 这一列</td><td data-label="③ 一快照一表">一张表就是快照本身</td></tr><tr><th>同一批人写两次</th><td data-label="① 共享 Duplicate 表"><span class="tag tone-red">叠成两行</span></td><td data-label="② 共享 Unique 表"><span class="tag tone-green">只留一行</span></td><td data-label="③ 一快照一表"><span class="tag tone-red">叠成两行</span></td></tr><tr><th>删掉一天的数据</th><td data-label="① 共享 Duplicate 表">一条命令</td><td data-label="② 共享 Unique 表">一条命令</td><td data-label="③ 一快照一表">要删 100 张表</td></tr></tbody></table></div><p>这张表里埋着三个概念 —— <strong>表模型<strong>、</strong>分区<strong>、</strong>tablet</strong>。<mark class="mk-blue">后面每一条结论都从它们长出来。</mark></p>
+<p>在建表之前得先知道这三个是什么。</p>
+<h2 id="先把三个概念说清楚"><span class="num">02</span>先把三个概念说清楚</h2>
+<h3 id="表模型duplicate-和-unique">表模型：Duplicate 和 Unique</h3>
+<p>建表时要选一种模型，区别就是<strong>同一行数据写两次会怎样</strong>。</p>
+<p>拿一个真实的例子。快照 <code>10001</code> 里有两个人，第一次写入：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">(10001, 8801)
+(10001, 8802)
+</code></pre></div>
+<p>然后<strong>再写一遍同样两行</strong>（模拟「提交成功但客户端没收到结果，于是重试」）：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">(10001, 8801)
+(10001, 8802)
+</code></pre></div>
+<div class="cards" data-cols="2"><div class="ccard tone-red">
+          <span class="tag tone-red">追加</span>
+          <h4>Duplicate —— 照单全收</h4>
+          <p>表里变成 <strong>4 行</strong>，8801 和 8802 各出现两次。</p>
+          <div class="cbody"><p>写入路径就是<strong>追加</strong>：不管这条数据以前有没有来过，直接写进去。</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">(10001, 8801)   ← 第一次
+(10001, 8802)   ← 第一次
+(10001, 8801)   ← 第二次
+(10001, 8802)   ← 第二次
+</code></pre></div>
+<p>好处是快。代价是<strong>重试会叠行</strong>，人数会凭空翻倍。</p>
+</div>
+          
+        </div><div class="ccard tone-green">
+          <span class="tag tone-green">合并</span>
+          <h4>Unique —— 按主键去重</h4>
+          <p>表里还是 <strong>2 行</strong>，第二次写入只是把主键上已有的行覆盖掉。</p>
+          <div class="cbody"><p>写入时要<strong>先知道这个主键上已经有什么</strong>，才能决定哪些旧行要让位。</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">(10001, 8801)
+(10001, 8802)
+</code></pre></div>
+<p>好处是天然幂等。代价写在写入路径上 —— 后面会看到具体多少。</p>
+</div>
+          
+        </div></div><h3 id="存储单位分区桶tablet">存储单位：分区、桶、tablet</h3>
+<p>这三个词是「为什么分表会输」的全部原因。</p>
+<div class="cards" data-cols="3"><div class="ccard tone-blue">
+          <span class="tag tone-blue">PARTITION</span>
+          <h4>分区</h4>
+          <p>按某一列的值，把<strong>一张表横着切几块</strong>。</p>
+          <div class="cbody"><p>共享表按 <code>snapshot_date</code> 切 —— 一天一块。</p>
+<p>查询里带上 <code>WHERE snapshot_date = '2026-09-28'</code> 时，
+Doris 直接跳过其他块，<strong>根本不读</strong>。这叫分区裁剪。</p>
+</div>
+          
+        </div><div class="ccard tone-violet">
+          <span class="tag tone-violet">BUCKET</span>
+          <h4>分桶</h4>
+          <p>每个分区内部，再按 <code>HASH(user_id)</code> <strong>竖着切 8 份</strong>。</p>
+          <div class="cbody"><div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-sql">DISTRIBUTED BY HASH(user_id) BUCKETS 8
+</code></pre></div>
+<p>同一份快照的数据被打散到 8 处，写入和查询可以并行。</p>
+</div>
+          
+        </div><div class="ccard tone-amber">
+          <span class="tag tone-amber">存储单元</span>
+          <h4>tablet</h4>
+          <p><strong>分区 × 分桶</strong>，Doris 真正落地存放、复制、做 compaction 的最小单位。</p>
+          <div class="cbody"><p>这是要记住的那个数：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">共享表：14 个分区 × 8 个桶  =  112 个 tablet
+分表：  1400 张表 × 8 个桶  =  11200 个 tablet
+</code></pre></div>
+<p><mark class="mk-blue">共享表的 tablet 数是「天数 × 8」，和快照有几个无关。</mark></p>
+</div>
+          
+        </div></div><h2 id="第一轮三种存法同台"><span class="num">03</span>第一轮：三种存法同台</h2>
+<p>第一轮把三个方案摆在同一条跑道上：每快照 10 万行、写 1000 个快照，三种各写完 1 亿行。</p>
+<table>
+<thead>
+<tr>
+<th>指标</th>
+<th style="text-align:right">共享 Duplicate</th>
+<th style="text-align:right">共享 Unique</th>
+<th style="text-align:right">一快照一表</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1000 个快照的 INSERT P95</td>
+<td style="text-align:right"><strong>48.1 ms</strong></td>
+<td style="text-align:right">183 ms</td>
+<td style="text-align:right">51.7 ms</td>
+</tr>
+<tr>
+<td>建表 P95</td>
+<td style="text-align:right">—</td>
+<td style="text-align:right">—</td>
+<td style="text-align:right">16.8 ms</td>
+</tr>
+<tr>
+<td>查询 P50</td>
+<td style="text-align:right">9.8 ms</td>
+<td style="text-align:right">11.4 ms</td>
+<td style="text-align:right"><strong>6.9 ms</strong></td>
+</tr>
+<tr>
+<td>Tablet 数</td>
+<td style="text-align:right"><strong>8</strong></td>
+<td style="text-align:right">8</td>
+<td style="text-align:right"><strong>8000</strong></td>
+</tr>
+<tr>
+<td>峰值 BE CPU</td>
+<td style="text-align:right">208%</td>
+<td style="text-align:right"><strong>411%</strong></td>
+<td style="text-align:right">144%</td>
+</tr>
+<tr>
+<td>峰值 FE CPU</td>
+<td style="text-align:right">152%</td>
+<td style="text-align:right">129%</td>
+<td style="text-align:right"><strong>232%</strong></td>
+</tr>
+<tr>
+<td>同一批人写两次，表里多少行</td>
+<td style="text-align:right"><strong>20 万行</strong></td>
+<td style="text-align:right"><strong>10 万行</strong></td>
+<td style="text-align:right">需要先 DROP</td>
+</tr>
+</tbody>
+</table>
+<p>三个读法：</p>
+<p><strong>① Duplicate 和分表的写入都是平的。</strong> 从第 1 个快照到第 1000 个，INSERT 一直在 40–60 ms，没有随快照数抬升。分表的建表时间也停在 7 ms 附近。</p>
+<p><strong>② Unique 是唯一一条会变陡的曲线。</strong> 前 20 次 P50 已经是 78 ms，到 100 个快照升到 103 ms，之后停在 110–120 ms；P95 从 88 ms 涨到 189 ms，单次最大 919 ms。同期它的 BE CPU 到 411% —— 是另外两个方案的两倍。</p>
+<p><mark class="mk-amber">Unique 慢不是因为它做错了什么，是因为它<strong>多做了事</strong>：按主键去重就得先知道主键上已有什么。</mark></p>
+<p><strong>③ 分表的 tablet 数，正好是 1000 × 8。</strong></p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">BE 上报的 tablet 数：8075
+
+8075 − 75（测试开始前就有的基线）= 8000
+8000 ÷ 1000 张表            = 8   ← 每张表 8 个桶
+</code></pre></div>
+<p>共享表同期是 <strong>8 个</strong>。两张表之间差了一千倍。</p>
+<h2 id="分表输在哪"><span class="num">04</span>分表输在哪</h2>
+<p>先把一个反直觉的事实摆上来：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>10M 行、100 张表时的查询</th><th>共享表</th><th>一快照一表</th></tr></thead><tbody><tr><th>SUM 的 P50</th><td data-label="共享表"><span class="tag tone-amber">57 ms</span></td><td data-label="一快照一表"><span class="tag tone-green">24 ms</span></td></tr><tr><th>实际扫了多少字节</th><td data-label="共享表">203 MB</td><td data-label="一快照一表">77 MB</td></tr><tr><th>为什么</th><td data-label="共享表">多扫了 <code>snapshot_date</code>、<code>snapshot_id</code> 两列</td><td data-label="一快照一表">一张表只有 <code>user_id</code> 一列</td></tr></tbody></table></div><p><mark class="mk-blue">分表的读，比共享表快一倍多。</mark></p>
+<p>原因很直白：共享表的每一行都得额外带上「我属于哪一天、哪个快照」，分表不用 —— 表名本身就是答案。</p>
+<p>写入也打平：10 万行那一档，两个方案的 INSERT P95 都在 50 ms 附近。</p>
+<p><strong>那分表输在哪？</strong> 输在 tablet 数会跟着快照数一起长。</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">共享表：加一天         →  +8 个 tablet        （和当天写几个快照无关）
+分表：  加一天         →  +800 个 tablet      （每天 100 个快照 × 8 个桶）
+</code></pre></div>
+<p>拖一下看它怎么长的 —— 这是一轮专门建表建到 10000 张的实测：</p>
+<div class="demo" data-widget="tuner" data-config="{&quot;param&quot;:{&quot;label&quot;:&quot;快照表数&quot;,&quot;unit&quot;:&quot;张&quot;,&quot;values&quot;:[100,500,1000,1400,2500,5000,10000]},&quot;outputs&quot;:[{&quot;label&quot;:&quot;FE 容器内存&quot;,&quot;unit&quot;:&quot;%&quot;,&quot;values&quot;:[73,77.1,81,82.1,79.7,88.2,91.1],&quot;tone&quot;:&quot;red&quot;},{&quot;label&quot;:&quot;建表 P95&quot;,&quot;unit&quot;:&quot;ms&quot;,&quot;values&quot;:[10.9,11,10.8,11.7,12.5,12.3,13.7],&quot;tone&quot;:&quot;blue&quot;},{&quot;label&quot;:&quot;SHOW TABLES P95&quot;,&quot;unit&quot;:&quot;ms&quot;,&quot;values&quot;:[1.5,2.3,2.9,3.5,6.7,14,28.8],&quot;tone&quot;:&quot;amber&quot;}]}">
+      <div class="demo-head">
+        <span class="title">快照表越建越多时，FE 在发生什么</span>
+        <span class="status" data-status>拖动滑块切换表数</span>
+        <span class="spacer"></span>
+        
+      </div>
+      <div class="demo-body custom" data-mount></div>
+    </div><p>从 100 张拖到 10000 张：</p>
+<ul>
+<li><strong>建表 P95 几乎不动</strong> —— 10.9 ms 到 13.7 ms，只涨了 1.25 倍</li>
+<li><strong>FE 容器内存从 73% 一路涨到 91.1%</strong></li>
+<li><strong><code>SHOW TABLES</code> 涨了 19 倍</strong> —— 1.5 ms 到 28.8 ms</li>
+</ul>
+<p><mark class="mk-amber">先撞到的不是「建表变慢」，是 FE 要记住的东西太多。</mark></p>
+<p>每多一张表，FE 就要多记住它的库名、表名、列定义、分区、以及每个 tablet 落在哪台 BE 上。这些元数据全都躺在内存里。所以表数一涨，内存就跟着涨，而 <code>SHOW TABLES</code> 这种「遍历所有表」的操作第一个变慢。</p>
+<div class="callout tone-amber">
+      <span class="ic">⚖️</span>
+      <div><p>这里要说句公道话：<strong>这台 FE 在共享表 15 亿行时也是 88% 内存。</strong></p>
+<p>所以「FE 内存高」不是分表独有的问题 —— 这台机器的 FE 容器只给了 3 GiB，
+本身就偏紧。</p>
+<p>真正的区别是<strong>增长方式</strong>：共享表的内存和快照数无关，分表的是正比关系。
+分表本身不是错的选择，它有一条明确的规模上限，而上限在哪要看你能给 FE 多少内存。</p>
+</div>
+    </div><p>分表的取舍，一句话：</p>
+<blockquote>
+<p>拿「元数据随快照数线性增长」，换「每次查询少扫两列」。</p>
+</blockquote>
+<h2 id="共享表凭什么不慢"><span class="num">05</span>共享表凭什么不慢</h2>
+<p>回到最开始那个疑问：</p>
+<blockquote>
+<p>14 亿行塞在一张表里，读一个快照难道不用扫全表吗？</p>
+</blockquote>
+<p>不用。因为读取时有两层裁剪，一层砍掉一大块，一层再砍掉一大块。</p>
+<p>先看表长什么样 —— 按天分区，主键是三个字段拼起来的：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-sql">CREATE TABLE snapshot_users (
+  snapshot_date date   NOT NULL,
+  snapshot_id   bigint NOT NULL,
+  user_id       bigint NOT NULL
+)
+DUPLICATE KEY(snapshot_date, snapshot_id, user_id)
+PARTITION BY RANGE(snapshot_date)          -- 一天一个分区
+DISTRIBUTED BY HASH(user_id) BUCKETS 8
+</code></pre></div>
+<p>主键里 <code>snapshot_date</code> 在最前、<code>snapshot_id</code> 第二 —— <mark class="mk-blue">这个顺序就是裁剪发生的地方</mark>。点一下看：</p>
+<div class="demo" data-widget="partition-prune" data-config="{&quot;days&quot;:14,&quot;snapshotsPerDay&quot;:100,&quot;rowsPerSnapshot&quot;:1000000}">
+      <div class="demo-head">
+        <span class="title">读一个快照，实际要扫多少行</span>
+        <span class="status" data-status>点一个分区，再点它里的一个快照</span>
+        <span class="spacer"></span>
+        
+      </div>
+      <div class="demo-body custom" data-mount></div>
+    </div><p><strong>第一层：分区裁剪。</strong> 查询里写了 <code>WHERE snapshot_date = '某一天'</code>，Doris 看分区定义就知道只需要读那一块，另外 13 个分区<strong>根本不打开</strong>。</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code>全表 14 亿行  →  只剩这一天 1 亿行       砍掉 93%
+</code></pre></div>
+<p><strong>第二层：主键前缀。</strong> <code>snapshot_id</code> 是主键的第二个字段 —— 在 Doris 里这叫前缀索引，数据在一个分区内部是按主键顺序排好的。所以定位到某个 <code>snapshot_id</code> 时，只需要读那一段连续的区域。</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code>这一天 1 亿行  →  只剩这个快照 100 万行    再砍掉 99%
+</code></pre></div>
+<p>实测的 Profile 印证了这条路：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">14 天稳态下，读一个快照的 SUM(user_id)：
+
+  ScanRows     1,000,000        ← 不是 14 亿
+  P50          11–17 ms
+  扫描字节      31 MB
+
+同一张表上查「某个人在不在这个快照里」：
+  ScanRows     1                  ← 就查一行
+  P50          4–5 ms
+</code></pre></div>
+<div class="callout tone-green">
+      <span class="ic">🎯</span>
+      <div><p><mark class="mk-blue">「一张表装 14 亿行」和「读一次要扫 14 亿行」是两件事。</mark></p>
+<p>前者是存储布局，后者是查询执行。分区决定读哪一块，主键顺序决定块里读哪一段。
+两张裁剪加起来是 1400 倍。</p>
+</div>
+    </div><p>顺带一提，删数据也是这个结构的好处：删除一天 = <code>DROP PARTITION</code>，实测 DDL 只要 <strong>3.2 ms</strong>，和表里有多少行无关。</p>
+<h2 id="重试duplicate-会叠行怎么办"><span class="num">06</span>重试：Duplicate 会叠行，怎么办</h2>
+<p>Duplicate 表有个绕不开的问题 —— 回到 02 节那个例子：<strong>同一批人写两次，表里就有两行</strong>。</p>
+<p>这在分布式里不是罕见情况。写入方提交完 SQL、Doris 也已经提交事务，但结果包在网络里丢了。客户端只知道自己超时了，不知道对方做没做。它只能重试。</p>
+<p>重试一次，人数就翻倍一次。这不能接受。</p>
+<p>Doris 的解法是 <strong>INSERT LABEL</strong>：给这一次业务写入起个名字，服务端记住这个名字做过什么。</p>
+<div class="seqd has-grid" data-seq data-n="2">
+      <svg class="seqd-svg" aria-hidden="true">
+        <defs>
+          <marker id="s-fill" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+          <marker id="s-open" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10" fill="none" stroke="currentColor" stroke-width="1.4"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="seqd-head"><div class="scell"><div class="spart tone-green has-icon" data-id="w">
+          <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5L3 8l3 4.5M10 3.5L13 8l-3 4.5"/></svg><b>写入方</b><small>Snapshot Worker</small>
+        </div></div><div class="scell"><div class="spart tone-violet has-icon" data-id="f">
+          <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="8" cy="4.2" rx="5" ry="1.9"/><path d="M3 4.2v7.6c0 1.05 2.24 1.9 5 1.9s5-.85 5-1.9V4.2"/></svg><b>Doris FE</b><small>事务管理</small>
+        </div></div></div>
+      <div class="seqd-body"><div class="smsg" data-from="w" data-to="f" data-kind="sync" data-i="1" data-note="①"><span class="snote">①</span><span class="slabel">INSERT ... LABEL 'snapshot_10001'</span></div><div class="smsg" data-from="f" data-to="w" data-kind="reply" data-i="2" data-note="②"><span class="snote">②</span><span class="slabel">提交成功 · 事务 VISIBLE（已生效可读）</span></div><div class="smsg is-self" data-from="w" data-to="w" data-kind="self" data-i="3" data-tone="red" data-note="③"><span class="snote">③</span><span class="slabel">结果包丢了 · 客户端只看到超时</span></div><div class="smsg" data-from="w" data-to="f" data-kind="sync" data-i="4" data-note="④"><span class="snote">④</span><span class="slabel">重试 · 同一个 LABEL</span></div><div class="smsg" data-from="f" data-to="w" data-kind="reply" data-i="5" data-tone="red" data-note="⑤"><span class="snote">⑤</span><span class="slabel">拒绝 · Label [snapshot_10001] has already been used</span></div></div>
+    </div><p>实测的四种丢包时机，结果全部一致：</p>
+<table>
+<thead>
+<tr>
+<th>情形</th>
+<th>结果</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>第一次写入成功</td>
+<td>事务 <code>VISIBLE</code>（已生效可读），表里 100 万行</td>
+</tr>
+<tr>
+<td>同一 LABEL 再提交</td>
+<td>拒绝。表里还是 100 万行</td>
+</tr>
+<tr>
+<td>提交完成、丢弃结果包后重试</td>
+<td>拒绝。表里仍是 100 万行</td>
+</tr>
+<tr>
+<td>查询刚发出就断开连接</td>
+<td>服务端仍然提交成功。重试被拒绝，校验通过</td>
+</tr>
+</tbody>
+</table>
+<div class="callout tone-red">
+      <span class="ic">⚠</span>
+      <div><p><mark class="mk-blue">Label 的窗口不是永久的。</mark></p>
+<p>这台 FE 的配置是 <code>label_keep_max_second = 259200</code>（3 天）、<code>label_num_threshold = 2000</code>。</p>
+<p>Label 挡住的是<strong>执行重试</strong>，不是「这个快照永远只能写一次」。窗口过了之后再写一遍，
+Duplicate 表照样会叠行。</p>
+<p>所以如果业务上需要「3 天以后整批重写同一个快照」，要么先删掉那个快照的数据再写，
+要么换 Unique 表 —— 那是它唯一值得付出 4 倍写入成本的时候。</p>
+</div>
+    </div><h2 id="结论边界上线看什么"><span class="num">07</span>结论、边界、上线看什么</h2>
+<p>三轮跑下来，方案定了：</p>
+<div class="spec tone-green">
+      <div class="spec-head"><b>快照表</b><span>共享 Duplicate + 按天分区 + INSERT LABEL</span></div>
+      <div class="spec-body"><div class="srow">
+          <div class="sk">表模型</div>
+          <div class="sv"><p><strong>一张 Shared Duplicate 表。</strong>
+14 天 × 100 个 × 100 万行写完，INSERT 和 SUM 都没有出现拐点。</p>
+</div>
+        </div><div class="srow">
+          <div class="sk">分区</div>
+          <div class="sv"><p><strong>每天一个 RANGE(<code>snapshot_date</code>) 分区。</strong>
+读一个快照时 ScanRows 是这一个快照，不是 14 亿。删一天是一次 DDL，3.2 ms。</p>
+</div>
+        </div><div class="srow">
+          <div class="sk">主键顺序</div>
+          <div class="sv"><p><strong><code>(snapshot_date, snapshot_id, user_id)</code>。</strong>
+Profile 实测：100 万行的 SUM 扫 100 万行 / 31 MB。</p>
+</div>
+        </div><div class="srow">
+          <div class="sk">分桶</div>
+          <div class="sv"><p><strong><code>HASH(user_id) BUCKETS 8</code>。</strong>
+分表对照里 1000 万行的 INSERT P95：1 个桶 2454 ms，8 个桶 610 ms。</p>
+</div>
+        </div><div class="srow">
+          <div class="sk">写入并发</div>
+          <div class="sv"><p><strong>2。</strong>
+1→2 吞吐 1.57 倍；2→4 只多 15%，P95 从 182 ms 涨到 317 ms；
+并发 8 时这台 3 GiB FE 停在 94% 内存。</p>
+</div>
+        </div><div class="srow">
+          <div class="sk">什么时候改用 Unique</div>
+          <div class="sv"><p>只在<strong>必须原地整批重写、而且不能先删再写</strong>的时候。
+代价是 100 万行时 INSERT P95 从 233 ms 涨到 980 ms（<strong>4.21 倍</strong>），
+而且加并发救不了它 —— 并发 2 / 4 的吞吐是 88.9 / 89.0 个每分钟，几乎不动。</p>
+</div>
+        </div></div>
+    </div><h3 id="它没有测什么">它没有测什么</h3>
+<p>一个基准报告的价值，一半在它测出了什么，另一半在它<strong>明确说自己没测什么</strong>。</p>
+<ul class="check warn"><li>共享表 BUCKETS 1 —— 没有测过，不能从分表的 4 倍差距反推共享表也该避免 1 个桶</li><li>分表 × 100 万行 × 超过 100 张表 —— 10000 张那一档用的是 10 万行</li><li>1000 万行 × 14 天</li><li>带业务宽列的快照 —— 三轮主要只有 user_id，磁盘和扫描量会小一个数量级以上</li><li>Label 过期之后的重试</li><li>多 BE、replication_num &gt; 1 —— 版本数、compaction 队列、FE 内存都要重测</li><li>单个快照远大于 1000 万行</li></ul><p><strong>尤其是最后一条关于分表的</strong>：报告里写得很清楚 ——「10 万行可以到 10000 张；百万行只证到 100 张」。<mark class="mk-blue">不能把 10000 张的结论挪到百万行快照上。</mark></p>
+<h3 id="上线时盯什么">上线时盯什么</h3>
+<p>这台机器的实测水位。换机器要重新标定。</p>
+<table>
+<thead>
+<tr>
+<th>指标</th>
+<th>这次的正常带</th>
+<th>需要看</th>
+<th>这次的停止线</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>FE 容器内存</td>
+<td>14 天稳态约 88%</td>
+<td>持续高于 90%</td>
+<td>高于 92% 后本轮停止后续阶段</td>
+</tr>
+<tr>
+<td>活跃分区版本数</td>
+<td>100 万行写完可到 75，60 秒后回到个位数</td>
+<td>空闲 60 秒后仍高于 80</td>
+<td>高于 1400</td>
+</tr>
+<tr>
+<td>Compaction score</td>
+<td>写入中可到约 100，60 秒后回到 7 左右</td>
+<td>停止写入 60 秒后仍高于 50</td>
+<td>连续 10 分钟只升不降</td>
+</tr>
+<tr>
+<td>100 万行 INSERT P95</td>
+<td>145–233 ms</td>
+<td>同一并发下持续高于约 400 ms</td>
+<td>高于上一档 3 倍</td>
+</tr>
+<tr>
+<td>错误码 -235 / -238</td>
+<td>0</td>
+<td>出现就查版本数</td>
+<td>连续出现</td>
+</tr>
+</tbody>
+</table>
+<div class="callout tone-red">
+      <span class="ic">⚠</span>
+      <div><p><mark class="mk-blue">绝对毫秒数不能外推。</mark></p>
+<p>这台是 Apple M4 单机、1 FE + 1 BE、<code>replication_num = 1</code>。
+生产是多 BE 集群，绝对时间没有参考价值。</p>
+<p>有参考价值的是<strong>倍数关系</strong>和<strong>「先撞到什么上限」</strong>：
+Unique 慢 4 倍、分表先撞 FE 内存、共享表 tablet 数不随快照数增长。</p>
+</div>
+    </div><div class="summary">
+      <h3 id="一句话">一句话</h3>
+      <p>快照之间靠 <code>snapshot_id</code> 分开、按天分区删除、写入方用 LABEL 保证同一次提交不会成功两次 ——
+共享 Duplicate，8 个桶，并发 2。</p>
+<p><mark class="mk-blue">分表不是读得慢，是 tablet 数会跟着快照数长。</mark></p>
+
+    </div><div class="quiz"><details>
+        <summary>「一张表装 14 亿行」为什么读一个快照只要扫 100 万行？</summary>
+        <div class="a"><p>两层裁剪叠在一起：</p>
+<p>① <strong>分区裁剪</strong> —— 表按 <code>snapshot_date</code> 分区，查询带上这个条件时，
+另外 13 天的分区根本不打开。14 亿 → 1 亿。
+② <strong>主键前缀</strong> —— 主键顺序是 <code>(snapshot_date, snapshot_id, user_id)</code>，
+<code>snapshot_id</code> 在第二位。数据在分区内按主键顺序排好，
+定位到某个 <code>snapshot_id</code> 只读那一段连续区域。1 亿 → 100 万。</p>
+<p>实测 Profile：ScanRows = 1,000,000 / 31 MB。</p>
+</div>
+      </details><details>
+        <summary>分表的查询比共享表更快，那它到底输在哪？</summary>
+        <div class="a"><p>输在 <strong>tablet 数会随快照数线性增长</strong>，而共享表不会。</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">共享表：14 个分区 × 8 个桶 = 112 个 tablet   （和快照个数无关）
+分表：  1400 张表 × 8 个桶 = 11200 个 tablet （每加一个快照就 +8）
+</code></pre></div>
+<p>实测：1000 张表时 BE 上报 8075 个 tablet（基线 75 + 1000×8），共享表同期是 8 个。
+建到 10000 张时，FE 容器内存到 91.1%，而建表 P95 只从 10.9 ms 涨到 13.7 ms ——
+<strong>先撑不住的是 FE 要记住的元数据，不是建表速度。</strong></p>
+<p>所以分表不是错的选择，它是在用「元数据线性增长」换「每次查询少扫两列」。</p>
+</div>
+      </details><details>
+        <summary>已经用了 INSERT LABEL，为什么还需要关心 Unique？</summary>
+        <div class="a"><p>因为 Label 的窗口不是永久的。这台 FE 是 3 天 / 2000 个 label，
+它保证的是<strong>执行重试</strong>不会成功两次，不是「这个快照永远只能写一次」。</p>
+<p>窗口过期后再写一遍，Duplicate 表照样叠行。所以如果业务上存在
+「3 天以后整批重写同一个快照」的需求，要么先删掉那个快照的数据再写，
+要么换 Unique —— 那是唯一值得付出 4.21 倍写入成本的时候。</p>
+</div>
+      </details><details>
+        <summary>为什么报告反复强调「绝对毫秒不能外推」？</summary>
+        <div class="a"><p>因为这是一台单机：Apple M4、1 FE + 1 BE、<code>replication_num = 1</code>。
+生产是多 BE 集群，版本数、compaction 队列、FE 内存的表现都会不一样。</p>
+<p>能带走的不是「233 ms」这个数，而是<strong>倍数关系</strong>（Unique 慢 4 倍）
+和<strong>「先撞到什么上限」</strong>（分表先撞 FE 内存，共享表 tablet 数不涨）。</p>
+</div>
+      </details></div>
+
+    <footer>
+      <span>Doris 人群快照基准：为什么最后是「一张共享表」</span>
+      <span>最后更新 2026-09-29 · 单文件可离线打开</span>
+    </footer>
+  </main>
+</div>
+
+<script src="../../assets/app.js"></script>
+</body>
+</html>

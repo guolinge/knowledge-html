@@ -1312,6 +1312,127 @@
     apply();
   };
 
+  /* —— 控件：分区裁剪 ——
+     一张按天分区的共享表。点一个分区，再点一天里的一个快照，
+     看这一次查询实际要扫多少行 —— 从「全表」一路降到「一个快照」。
+     讲透「一张表装了 14 亿行，为什么读一个快照不用扫 14 亿」。
+     config:
+       days:              14      # 分区数（一天一个）
+       snapshotsPerDay:   100     # 每天几个快照
+       rowsPerSnapshot:   1000000 # 每个快照几行
+  ------------------------------------------------ */
+  WIDGETS['partition-prune'] = (root) => {
+    const cfg = cfgOf(root);
+    const days = cfg.days || 14;
+    const perDay = cfg.snapshotsPerDay || 100;
+    const rowsPer = cfg.rowsPerSnapshot || 1000000;
+    const box = mountOf(root);
+    const statusEl = root.querySelector('[data-status]');
+
+    const TOTAL = days * perDay * rowsPer;   // 全表
+    const DAY = perDay * rowsPer;            // 一天
+    const fmt = (n) => n.toLocaleString('en-US');
+
+    // 当前选择：day = -1 表示没选分区（全表）；snap = -1 表示选了整天
+    // 默认停在「全表」—— 那正是读者的默认误解，点一下才看到裁剪生效
+    let day = -1;
+    let snap = -1;
+
+    /* ---------- 第一层：分区条 ---------- */
+    const stage1 = el('div', 'pp-stage');
+    stage1.append(el('div', 'pp-cap', `snapshot_users · 按 snapshot_date 分成 ${days} 个分区`));
+
+    const strip = el('div', 'pp-days');
+    const allBtn = el('button', 'pp-all');
+    allBtn.type = 'button';
+    allBtn.innerHTML = '<b>全表</b><span>不分分区</span>';
+    strip.append(allBtn);
+
+    const dayCells = [];
+    for (let i = 0; i < days; i += 1) {
+      const c = el('button', 'pp-day');
+      c.type = 'button';
+      c.innerHTML = `<b>D${i + 1}</b><span>${perDay} 个</span>`;
+      c.addEventListener('click', () => { day = i; snap = -1; apply(); });
+      dayCells.push(c);
+      strip.append(c);
+    }
+    allBtn.addEventListener('click', () => { day = -1; snap = -1; apply(); });
+    stage1.append(strip);
+    box.append(stage1);
+
+    /* ---------- 第二层：这一天里的快照 ---------- */
+    const stage2 = el('div', 'pp-stage');
+    const cap2 = el('div', 'pp-cap');
+    const snapStrip = el('div', 'pp-snaps');
+    const snapCells = [];
+    for (let i = 0; i < perDay; i += 1) {
+      const c = el('button', 'pp-snap');
+      c.type = 'button';
+      c.title = `第 ${i + 1} 个快照`;
+      c.addEventListener('click', () => { snap = i; apply(); });
+      snapCells.push(c);
+      snapStrip.append(c);
+    }
+    stage2.append(cap2, snapStrip);
+    box.append(stage2);
+
+    /* ---------- 第三层：这三档各要扫多少 ---------- */
+    const stair = el('div', 'pp-stair');
+    const levels = [
+      { n: TOTAL, label: '不分区 · 整张表',   hint: '基线',            tone: 'red' },
+      { n: DAY,   label: '分区裁剪 · 只扫一天', hint: `砍掉 ${days - 1}/${days}`, tone: 'amber' },
+      { n: rowsPer, label: '再按 snapshot_id 定位', hint: '只读那一段', tone: 'green' },
+    ].map((L, i) => {
+      const r = el('div', `pp-row tone-${L.tone}`);
+      r.append(el('span', 'pp-idx', String(i + 1)));
+      const mid = el('div', 'pp-mid');
+      mid.append(el('span', 'pp-lab', L.label));
+      mid.append(el('span', 'pp-hint', L.hint));
+      r.append(mid);
+      r.append(el('b', 'pp-num', fmt(L.n)));
+      r.append(el('span', 'pp-unit', '行'));
+      stair.append(r);
+      return r;
+    });
+    box.append(stair);
+
+    const foot = el('div', 'pp-foot');
+    box.append(foot);
+
+    /* ---------- 联动 ---------- */
+    function apply() {
+      const onAll = day < 0;
+
+      allBtn.classList.toggle('is-on', onAll);
+      dayCells.forEach((c, i) => c.classList.toggle('is-on', i === day));
+      snapCells.forEach((c, i) => c.classList.toggle('is-on', i === snap));
+
+      // 没选分区时，第二层整个不可用 —— 因为没有分区可展开
+      stage2.classList.toggle('is-off', onAll);
+      cap2.textContent = onAll
+        ? '选一个分区，才能看到它里面的快照'
+        : `D${day + 1} 里的 ${perDay} 个快照 · 点一个看只读那一个要扫多少`;
+
+      const lvl = onAll ? 0 : (snap < 0 ? 1 : 2);
+      levels.forEach((r, i) => r.classList.toggle('is-on', i === lvl));
+
+      const scan = onAll ? TOTAL : (snap < 0 ? DAY : rowsPer);
+      const pct = (scan / TOTAL * 100);
+      const shown = pct < 0.01 ? '< 0.01%' : (pct >= 1 ? pct.toFixed(0) : pct.toFixed(2)) + '%';
+
+      const what = onAll ? '整张表'
+        : (snap < 0 ? `D${day + 1} 这一天` : `D${day + 1} 的第 ${snap + 1} 个快照`);
+      // 这里直接拼 HTML，不走 markdown —— 控件渲染的是 DOM，`==` 不会被解析
+      foot.innerHTML = `这次查询读 <b>${what}</b>：实际扫描 <b>${fmt(scan)}</b> 行，`
+        + `<em>是全表量的 ${shown}</em>`;
+
+      if (statusEl) statusEl.textContent = `扫描 ${fmt(scan)} 行 · 全表的 ${shown}`;
+    }
+
+    apply();
+  };
+
   /* —— 控件：并排差异对比 ——
      行首写 `- ` / `+ ` 自动识别为删除/新增；悬停时两边对应行联动高亮。
      config:
