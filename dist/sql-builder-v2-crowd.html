@@ -5927,8 +5927,16 @@ uid / 人群包 / rawSql 基本没有转换逻辑。
     box.append(wrap2);
 
     /* ---- SQL 生成 ---- */
-    function render(pre, segs) {
-      fill(pre, segs.map((s) => (s[1] ? H('span', s[1], s[0]) : document.createTextNode(s[0]))));
+    /* segs 是一行内的片段；lines 是一行一个数组。
+       为什么要分行：真编译器吐出来的是一整行（省字节），但一整行读不了 ——
+       子句挤在一起，「权限 / 条件 / 派生表达式」三色也分不出来。 */
+    function render(pre, lines) {
+      const nodes = [];
+      lines.forEach((segs, i) => {
+        if (i) nodes.push(document.createTextNode('\n'));
+        segs.forEach((s) => nodes.push(s[1] ? H('span', s[1], s[0]) : document.createTextNode(s[0])));
+      });
+      fill(pre, nodes);
     }
 
     function universeSegs(a) {
@@ -5965,6 +5973,31 @@ uid / 人群包 / rawSql 基本没有转换逻辑。
       return out;
     }
 
+    /* WHERE 按谓词拆行：
+         WHERE <第一条>
+           AND <第二条>
+       开头是 WHERE / AND，不在同一行堆一串 AND。 */
+    function whereLines(indent, a, tree) {
+      const pad = ' '.repeat(indent);
+      const preds = [];
+      universeSegs(a).forEach((s) => preds.push([s]));
+      if (tree) {
+        preds.push(st.mode === 'include'
+          ? tree
+          : [['NOT COALESCE(', 'kw']].concat(tree, [[', FALSE)', 'kw']]));
+      }
+      return preds.map((p, i) => [[pad + (i === 0 ? 'WHERE ' : '  AND '), 'kw']].concat(p));
+    }
+
+    /* uidSql 拆成多行；indent 给 countSql 的内层用 */
+    function coreLines(indent, a, tree) {
+      const pad = ' '.repeat(indent);
+      return [
+        [[pad + 'SELECT ', 'kw'], ['`u`.`uid`', 'cond'], [' AS ', 'kw'], ['`uid`', 'cond']],
+        [[pad + 'FROM ', 'kw'], ['`' + TABLE + '`', 'cond'], [' AS ', 'kw'], ['`u`', 'cond']],
+      ].concat(whereLines(indent, a, tree));
+    }
+
     function draw() {
       const a = actors[st.actor];
       actorBtns.forEach((b, i) => b.classList.toggle('on', i === st.actor));
@@ -5978,31 +6011,19 @@ uid / 人群包 / rawSql 基本没有转换逻辑。
 
       const picked = conds.filter((c) => st.pick[c.key]);
       const condParts = picked.map(condSeg);
+      /* 条件树本身保持一行 —— 它本来就是一个括号组，
+         拆开反而看不出「这是一整块条件」。 */
       const tree = condParts.length ? groupSegs(condParts) : null;
 
-      /* WHERE = 权限 [AND include] [AND NOT COALESCE((exclude), FALSE)] */
-      function whereSegs() {
-        const out = [];
-        const uni = universeSegs(a);
-        uni.forEach((s, i) => { if (i) out.push([' AND ', 'kw']); out.push(s); });
-        if (tree) {
-          if (out.length) out.push([' AND ', 'kw']);
-          if (st.mode === 'include') {
-            out.push(...tree);
-          } else {
-            out.push(['NOT COALESCE(', 'kw'], ...tree, [', FALSE)', 'kw']);
-          }
-        }
-        return out;
-      }
-
-      const w = whereSegs();
-      const uidSql = [['SELECT ', 'kw'], ['`u`.`uid`', 'cond'], [' AS ', 'kw'], ['`uid`', 'cond'],
-        [' FROM ', 'kw'], ['`' + TABLE + '`', 'cond'], [' AS ', 'kw'], ['`u`', 'cond']];
-      if (w.length) uidSql.push([' WHERE ', 'kw'], ...w);
-      render(preUids, uidSql);
-      render(preCount, [['SELECT ', 'kw'], ['COUNT(*)', 'kw'], [' AS ', 'kw'], ['`count`', 'cond'],
-        [' FROM (', 'kw'], ...uidSql, [') AS ', 'kw'], ['`t`', 'cond']]);
+      render(preUids, coreLines(0, a, tree));
+      /* countSql：把 uidSql 缩进两格嵌进 FROM ( … ) 里，
+         跟真编译器的包装关系一致（它就是 uid 再包一层）。 */
+      render(preCount, [
+        [['SELECT ', 'kw'], ['COUNT(*)', 'kw'], [' AS ', 'kw'], ['`count`', 'cond']],
+        [['FROM (', 'kw']],
+      ].concat(coreLines(2, a, tree), [
+        [[') AS ', 'kw'], ['`t`', 'cond']],
+      ]));
 
       if (statusEl) {
         const n = picked.length;
