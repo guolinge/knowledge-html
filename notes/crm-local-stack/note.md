@@ -221,14 +221,15 @@ text: |
 ```flow
 grid: true
 nodes:
-  - { id: run,   label: running,  sub: "容器在跑",                 row: 0, tone: green, shape: pill }
-  - { id: stop,  label: exited,   sub: "容器还在，只是停了",       row: 1, tone: amber, shape: pill }
-  - { id: gone,  label: removed,  sub: "容器没了，卷还在",         row: 2, tone: red,   shape: pill }
+  - { id: run,  label: running, sub: "容器在跑",          row: 0, tone: green, shape: pill }
+  - { id: stop, label: exited,  sub: "容器还在，只是停了", row: 1, tone: amber, shape: pill }
+  - { id: gone, label: removed, sub: "容器没了，卷还在",   row: 2, tone: red,   shape: pill }
 edges:
+  # 回路只跨相邻两行 —— 跨两行的边会从中间那个节点身上穿过去
   - { from: run,  to: stop, on: "podman stop", tone: amber }
-  - { from: stop, to: run,  on: "podman start / up", tone: green }
+  - { from: stop, to: run,  on: "podman start", tone: green }
   - { from: stop, to: gone, on: "podman-compose down", tone: red }
-  - { from: gone, to: run,  on: "podman-compose up -d", tone: green }
+  - { from: gone, to: stop, on: "up -d 重建", tone: green }
 ```
 
 **这就是启动命令里用 `up` 而不是 `start` 的原因** —— `up` 三种状态都能处理：

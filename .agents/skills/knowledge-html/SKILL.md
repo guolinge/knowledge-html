@@ -573,6 +573,26 @@ npm run view -- <slug>     # 构建 + 在浏览器打开
 npm run visual-check       # 无头浏览器真的去量每个积木有没有溢出
 ```
 
+#### 但真正的回路是「写完一块就看一块」
+
+```bash
+npm run block -- <slug> --list    # 这一篇有哪些块（编号 + 行号 + 语言）
+npm run block -- <slug> 3         # 只看第 3 个块：截图到 /tmp/kb-<slug>-3.png + 打开
+```
+
+```callout
+tone: red
+icon: ⚠
+quote: true
+text: |
+  ==写完一整篇才第一次看图，是最贵的错。==
+
+  一篇 22 个积木的笔记，问题会**一次性**暴露，然后每个都要单独一轮
+  「改 → 构建 → 截图 → 看」。实测：22 个积木、19 张截图、8 个问题。
+
+  所以写图的时候不要往下写 —— **停一下，跑 `npm run block` 看一眼**。
+```
+
 `npm run check` 必须过。它报的每一类问题都对应一个真实踩过的坑：
 
 - **积木名拼错** → 会静默退化成普通代码块，页面看着正常但图没了
@@ -583,9 +603,42 @@ npm run visual-check       # 无头浏览器真的去量每个积木有没有溢
 tone: red
 icon: ⚠
 text: |
-  ==构建通过 ≠ 画对了。== 这条踩过三次，每次 `npm run check` 都是绿的。
+  ==构建通过 ≠ 画对了。== 这条踩过五次，每次 `npm run check` 都是绿的。
 
   **改了样式之后必须跑 `visual-check`，再截图看一眼。**
+```
+
+#### 绿灯是怎么做到「真的对」的
+
+`visual-check` 不只看溢出。它还会查这些**所谓「渲染出来但不是你想的那样」**：
+
+| 查什么 | 不查会怎样 |
+|---|---|
+| `flow` 的边有没有穿过无关节点 | 看着像流程真的从那个节点走过 |
+| 边标签有没有压在节点上 | 字被框挡住 |
+| 两个边标签有没有叠在一起 | 叠成乱码（「podmup.pod重建down」） |
+| 有没有真的画出来 | 绘制抛异常 → 空 SVG，而布局检查全绿 |
+
+#### 已知问题基线：`tools/visual-baseline.json`
+
+有些问题**不是笔记写错了，是积木画不了**（例如 `flow` 画不了「阶梯 + 公共出口」）。
+
+```compare
+first: 情况
+head: [会怎样, 怎么做]
+rows:
+  - 不在基线里的问题: [{ text: ✗ 阻塞推送, tone: red }, 去修笔记]
+  - 在基线里的问题: [{ text: "⚠ 报出来但不阻塞", tone: amber }, 不用管，或者重画图]
+  - 基线里已不成立的条目: [{ text: ✗ 阻塞推送, tone: red }, 删掉那条 —— 基线只能变小]
+```
+
+```callout
+tone: amber
+icon: ⚠
+text: |
+  **加基线之前先问自己**：这是「作者写错了」还是「积木画不了」？
+
+  写错 → ==修笔记，别加基线==。基线不是绕过检查的口子。
 ```
 
 ### 第 8 步 · 交付前的四次复盘
@@ -1298,6 +1351,8 @@ pre-push 会重建 + 量图。**它拦下来通常不是你的问题。**
 | `npm run status` | **开工前 / 提交前先跑这个** —— 把改动分类列出来 |
 | `npm run check` | 校验积木语法 + YAML + 约定 + skill 与代码一致 |
 | `npm run view -- <slug>` | 构建单篇 + 打开 |
+| **`npm run block -- <slug> <n>`** | **只看第 n 个积木**（截图+打开）。写完一块就查一块 |
+| `npm run block -- <slug> --list` | 列出这一篇的块（编号 + 行号 + 语言） |
 | `npm run build:standalone` | 重建全部产物（`dist/*.html` + 首页） |
 | `npm run visual-check` | 无头浏览器量每个积木有没有溢出 |
 | `npm run skill` | **把这份 skill 渲染成 HTML 看**（用我们自己的工具链） |
@@ -1311,6 +1366,8 @@ pre-push 会重建 + 量图。**它拦下来通常不是你的问题。**
 - `tools/lib/home.mjs` —— 首页：树视图 + 未归类区
 - [`references/blocks.md`](references/blocks.md) —— 17 个积木的完整 DSL
 - [`references/extend.md`](references/extend.md) —— 积木不够用时怎么加一个
+- `tools/probe/visual-check.js` —— 浏览器探针（独立文件，不是模板字符串）
+- `tools/visual-baseline.json` —— 已知问题基线（积木画不了的那些）
 - `notes/blocks-cheatsheet/note.md` —— 可运行的积木示例
 - `notes/data-warehouse-cdc-flink/note.md` —— 长文转图的实战案例
 
