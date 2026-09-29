@@ -21,6 +21,7 @@ const SKILL = path.join(ROOT, '.agents/skills/knowledge-html');
 const OUT = path.join(ROOT, '.preview');
 
 const md = new MarkdownIt({ html: true, linkify: true }).use(blocksPlugin);
+const CHECK = process.argv.includes('--check');
 
 const DEFAULT_PAGES = [
   {
@@ -119,9 +120,25 @@ for (const p of PAGES) {
     backHref: './index.html',
   });
 
-  fs.writeFileSync(path.join(OUT, `${p.slug}.html`), full);
-  built.push({ ...p, toc: toc.length });
-  console.log(`  ✓ ${p.file.padEnd(24)} ${toc.length} 个章节`);
+  /* --check：只渲染 + 检验，不写文件。
+     挂进 `npm run check` —— 否则「check 绿了、skill 才报错」要跑两趟才发现。 */
+  if (!CHECK) {
+    fs.writeFileSync(path.join(OUT, `${p.slug}.html`), full);
+    built.push({ ...p, toc: toc.length });
+  } else {
+    built.push({ ...p, toc: toc.length });
+  }
+  if (!CHECK) console.log(`  ✓ ${p.file.padEnd(24)} ${toc.length} 个章节`);
+}
+
+if (CHECK) {
+  for (const b of built) console.log(`  ✓ ${b.file.padEnd(24)} ${b.toc} 个章节`);
+  if (failed || warned) {
+    console.error(`\n  ✗ skill 文档渲染有问题（${failed} 个失败，${warned} 个警告）`);
+    process.exit(1);
+  }
+  console.log('  ✓ skill 文档渲染干净');
+  process.exit(0);
 }
 
 if (!built.length) {

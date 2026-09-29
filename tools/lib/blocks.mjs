@@ -687,6 +687,27 @@ const KIND_TONE = {
             '\n  💡 裸标量不能以反引号等特殊字符开头。给这个值加双引号：\n' +
             '     - q: "`xxx` 是什么？"   ← 外面包一层 " " 就行\n';
         }
+        /* “块标量内容忘了缩进”—— 第二个高频坑，而且 YAML 自己的报错完全看不懂
+           （会说 Implicit keys need to be on a single line）。
+           判据：某个 `key: |` 后面第一个非空行的缩进 <= 这个 key 的缩进。 */
+        const lines = token.content.split('\n');
+        for (let i = 0; i < lines.length && !hint; i++) {
+          const m = /^(\s*)[\w."'-]+:\s*[|>][-+]?\s*$/.exec(lines[i]);
+          if (!m) continue;
+          for (let j = i + 1; j < lines.length; j++) {
+            if (!lines[j].trim()) continue;
+            const ind = lines[j].length - lines[j].trimStart().length;
+            if (ind <= m[1].length) {
+              hint =
+                `\n  💡 块标量（第 ${i + 1} 行的 \`${lines[i].trim()}\`）里的内容没缩进。\n` +
+                `     它的内容必须比这一行多缩进：\n` +
+                `       text: |\n` +
+                `         ==这一行要缩进==\n` +
+                `     现在第 ${j + 1} 行顶在 ${ind} 列，YAML 会把它当成新的键。\n`;
+            }
+            break;
+          }
+        }
 
         throw new Error(
           `${at} 积木 \`${lang}\` 解析失败\n` +

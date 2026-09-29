@@ -20,13 +20,18 @@ const STATUS_TONE = { verified: 'green', reviewed: 'blue', draft: 'amber' };
 const circled = (n) =>
   n >= 1 && n <= 20 ? String.fromCodePoint(0x245f + n) : String(n);
 
-/** 把一条笔记渲染成一张卡片（未归类区用） */
+/** 把一条笔记渲染成一张卡片（未归类区用）
+    排序/分组都在前端做（见下面的 JS），所以这里只把要用的字段挂到 data-* 上 ——
+    切控件不用重新构建页面，也不用把检索 JSON 再塞一遍。 */
 function card(e) {
   return `<a class="ncard" href="notes/${esc(e.slug)}/" data-slug="${esc(e.slug)}"
-      data-tags="${esc((e.tags || []).join(','))}">
+      data-tags="${esc((e.tags || []).join(','))}"
+      data-topic="${esc(e.topic || '')}"
+      data-date="${esc(e.generated || e.updated || '')}"
+      data-title="${esc(e.title || '')}">
     <div class="ncard-top">
       <span class="tag tone-${STATUS_TONE[e.status] || 'muted'}">${esc(e.status || 'draft')}</span>
-      <span class="ncard-date">${esc(e.updated || e.generated || '')}</span>
+      <span class="ncard-date">${esc(e.generated || e.updated || '')}</span>
     </div>
     <h3>${esc(e.title)}</h3>
     <p>${esc(e.summary || '')}</p>
@@ -180,6 +185,31 @@ export function renderHome(entries, { site, assetPrefix = '', plans = [] }) {
 .orphan-head { margin: 0 0 16px; }
 .orphan-head h2 { font-size: 22px; letter-spacing: -.02em; margin: 0 0 6px; }
 .orphan-head p { margin: 0; font-size: 14px; color: var(--text-2); }
+
+/* 排序 / 分组控制条 */
+.obar { display: flex; flex-wrap: wrap; gap: 8px 20px; align-items: center; margin-bottom: 22px; }
+.obar > .seg { display: inline-flex; gap: 4px; align-items: center; }
+.obar > .seg::before {
+  content: attr(data-label); margin-right: 5px;
+  font: 600 11px/1 var(--sans); color: var(--muted); letter-spacing: .06em;
+}
+.obar button {
+  font: 550 12.5px/1 var(--sans); color: var(--text-2);
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 100px; padding: 7px 12px; cursor: pointer; transition: .15s;
+}
+.obar button:hover { border-color: var(--border-strong); color: var(--text); }
+.obar button.on { background: var(--blue-soft); border-color: var(--blue); color: var(--blue); }
+
+/* 分组块 */
+.tgroup { margin-bottom: 32px; }
+.tgroup > h3 {
+  display: flex; align-items: baseline; gap: 9px;
+  margin: 0 0 14px; padding-bottom: 9px; border-bottom: 1px solid var(--border);
+  font-size: 15px; letter-spacing: -.01em; color: var(--text);
+}
+.tgroup > h3 > .n { font: 500 11.5px/1 var(--mono); color: var(--muted); }
+
 .ngrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); gap: 16px; }
 .ncard {
   display: block; text-decoration: none; color: inherit;
@@ -222,9 +252,20 @@ export function renderHome(entries, { site, assetPrefix = '', plans = [] }) {
     orphans.length
       ? `<div class="orphan-head">
     <h2>未归类</h2>
-    <p>还没挂到任何一棵产物树上的笔记。</p>
+    <p>还没挂到任何一棵产物树上的笔记。按「主题」分组看，或切回平铺按时间扫。</p>
   </div>
-  <div class="ngrid" id="grid">${cards}</div>`
+  <div class="obar">
+    <span class="seg" data-ctrl="sort" data-label="排序">
+      <button data-v="new" class="on">最新在前</button>
+      <button data-v="old">最早在前</button>
+      <button data-v="title">按标题</button>
+    </span>
+    <span class="seg" data-ctrl="group" data-label="分组">
+      <button data-v="topic" class="on">按主题</button>
+      <button data-v="none">不分组</button>
+    </span>
+  </div>
+  <div id="grid" class="ngrid">${cards}</div>`
       : ''
   }
   <div class="empty" id="empty" hidden>没有匹配的笔记</div>
@@ -278,10 +319,17 @@ export function renderHome(entries, { site, assetPrefix = '', plans = [] }) {
       if (show) shown++;
     });
 
+    // 空的分组块也要藏起来 —— 否则筛选后会留一排只有标题的空章
+    [].slice.call(document.querySelectorAll('#grid .tgroup')).forEach(function (sec) {
+      sec.hidden = ![].slice.call(sec.querySelectorAll('.ncard')).some(function (c) { return !c.hidden; });
+    });
+
+    var anyCard = cards.some(function (c) { return !c.hidden; });
     var head = document.querySelector('.orphan-head');
-    if (head) head.hidden = !cards.some(function (c) { return !c.hidden; });
-    if (document.getElementById('grid'))
-      document.getElementById('grid').hidden = !cards.some(function (c) { return !c.hidden; });
+    var bar = document.querySelector('.obar');
+    if (head) head.hidden = !anyCard;
+    if (bar) bar.hidden = !anyCard;
+    if (document.getElementById('grid')) document.getElementById('grid').hidden = !anyCard;
 
     count.textContent = shown;
     empty.hidden = shown !== 0;
@@ -304,6 +352,88 @@ export function renderHome(entries, { site, assetPrefix = '', plans = [] }) {
     root.setAttribute('data-theme', next);
     try { localStorage.setItem('kh-theme', next); } catch (e) {}
   });
+
+  /* ── 未分类区：排序 + 分组 ────────────────────────────
+     节点是**移动**而不是重建 —— 卡片本身已经由服务端转义好了，
+     重建 HTML 反而要担一次转义责任。 */
+  (function arrange() {
+    var grid = document.getElementById('grid');
+    if (!grid) return;
+    var pool = [].slice.call(grid.querySelectorAll('.ncard'));
+    if (!pool.length) return;
+
+    var mode = { sort: 'new', group: 'topic' };
+    var byCmp = function (a, b) {
+      var da = a.getAttribute('data-date') || '', db = b.getAttribute('data-date') || '';
+      var ta = a.getAttribute('data-title') || '', tb = b.getAttribute('data-title') || '';
+      if (mode.sort === 'title') return ta.localeCompare(tb, 'zh');
+      // 同一天的按标题定序 —— 否则顺序取决于文件系统，每次构建都可能变
+      var byDate = da < db ? -1 : da > db ? 1 : 0;
+      return (mode.sort === 'new' ? -byDate : byDate) || ta.localeCompare(tb, 'zh');
+    };
+
+    function build() {
+      var list = pool.slice().sort(byCmp);
+      var frag = document.createDocumentFragment();
+
+      function gridOf(items) {
+        var g = document.createElement('div');
+        g.className = 'ngrid';
+        items.forEach(function (c) { g.appendChild(c); });
+        return g;
+      }
+
+      if (mode.group === 'none') {
+        frag.appendChild(gridOf(list));
+      } else {
+        var groups = new Map();
+        list.forEach(function (c) {
+          var t = c.getAttribute('data-topic') || '其他';
+          if (!groups.has(t)) groups.set(t, []);
+          groups.get(t).push(c);
+        });
+        // 注意用 Array.from —— entries() 是 Iterator，没有 length，
+        // 写成 [].slice.call(...) 会静默得到空数组（不报错，只是什么都不渲染）
+        Array.from(groups.entries())
+          // 篇数多的在前；同数的按组名 —— 否则小改动会让组跳来跳去
+          .sort(function (a, b) {
+            return b[1].length - a[1].length || a[0].localeCompare(b[0], 'zh');
+          })
+          .forEach(function (pair) {
+            var sec = document.createElement('section');
+            sec.className = 'tgroup';
+            sec.setAttribute('data-topic', pair[0]);
+            var h = document.createElement('h3');
+            h.appendChild(document.createTextNode(pair[0]));
+            var n = document.createElement('span');
+            n.className = 'n';
+            n.textContent = pair[1].length + ' 篇';
+            h.appendChild(n);
+            sec.appendChild(h);
+            sec.appendChild(gridOf(pair[1]));
+            frag.appendChild(sec);
+          });
+      }
+      while (grid.firstChild) grid.removeChild(grid.firstChild);
+      grid.className = '';
+      grid.appendChild(frag);
+      apply();   // 重排后要把当前的搜索/标签筛选重新盖上去
+    }
+
+    document.querySelector('.obar').addEventListener('click', function (e) {
+      var b = e.target.closest('button');
+      if (!b) return;
+      var seg = b.closest('.seg');
+      var ctrl = seg.getAttribute('data-ctrl');
+      mode[ctrl] = b.getAttribute('data-v');
+      [].slice.call(seg.querySelectorAll('button')).forEach(function (o) {
+        o.classList.toggle('on', o === b);
+      });
+      build();
+    });
+
+    build();
+  })();
 
   // 复用页面级的主题偏好
   try {
