@@ -2,8 +2,9 @@
 /* ============================================================
    block.mjs — 只看一个积木
    ------------------------------------------------------------
-   node tools/block.mjs <slug> <n>        # 预览第 n 个积木（1 起）
-   node tools/block.mjs <slug> --list     # 列出这一篇有哪些块
+   node tools/block.mjs <slug> <n>            # 只看第 n 个积木（1 起）：量高 + 截图
+   node tools/block.mjs <slug> <n> --open     # 顺便在浏览器里打开（人看时才用）
+   node tools/block.mjs <slug> --list         # 列出这一篇有哪些块
 
    为什么需要它
    -----------
@@ -24,8 +25,11 @@
    2. 用一个**完整的页面外壳**渲染它 —— 不是裸 HTML：
       theme.css + blocks.css + archify-embed.css + app.js 全都在，
       所以积木的 JS 测量（flow 的连线、seq 的 lifeline）会真的跑。
-   3. 截图到 /tmp/kb-<slug>-<n>.png，并打印路径
-   4. 同时打开浏览器（--no-open 关掉）
+   3. 先量内容高度、再截图 —— 写死高度会把高积木截断
+   4. 截图到 /tmp/kb-<slug>-<n>.png，并打印路径
+
+   **默认不开浏览器。** agent 看的是截图文件，开标签页对它没用，
+   只会给你留下一个个要手动关的标签。人要看时加 --open。
    ============================================================ */
 
 import { execFileSync } from 'node:child_process';
@@ -48,7 +52,7 @@ const BLOCK_LANGS = [
 ];
 
 const [, , slug, nthArg] = process.argv;
-const NO_OPEN = process.argv.includes('--no-open');
+const OPEN = process.argv.includes('--open');
 
 if (!slug) {
   console.error('用法：npm run block -- <slug> <n>');
@@ -170,7 +174,33 @@ const issues = [...lintFences(body, target.text), ...lintLinkifyStars(body, targ
 const assets = ['theme.css', 'blocks.css', 'archify-embed.css']
   .map((f) => `<link rel="stylesheet" href="file://${path.join(ROOT, 'assets', f)}">`)
   .join('\n');
-const script = `<script src="file://${path.join(ROOT, 'assets', 'app.js')}"></script>`;
+const script = `<script>
+  /* 把内容真实高度写进 <title>，让 block.mjs 先量后截。
+
+     为什么不只监听 load：外链资源（字体、嵌图）只要有一个没回来，
+     load 就永远不触发 —— 实测过，那会让高度静默地回退成默认值，
+     而截图看着又「没问题」，很难发现。
+
+     所以挂三个钩子，谁先跑算谁。后跑的会覆盖前面的，
+     所以测量本身是幂等的（量的都是同一个文档高度）。 */
+  function kbMeasure() {
+    const m = document.querySelector('main');
+    const h = Math.max(
+      document.documentElement.scrollHeight,
+      document.body ? document.body.scrollHeight : 0,
+      m ? m.getBoundingClientRect().bottom + window.scrollY : 0,
+    );
+    if (h > 0) document.title = 'H=' + Math.ceil(h);
+  }
+  /* 积木的 JS（flow 的连线、seq 的 lifeline）在 DOMContentLoaded 之后才画 SVG，
+     所以第一次测要等一帧，否则量到的是没画线的媫个子。 */
+  document.addEventListener('DOMContentLoaded', () => {
+    requestAnimationFrame(kbMeasure);
+    setTimeout(kbMeasure, 600);
+  });
+  window.addEventListener('load', () => requestAnimationFrame(kbMeasure));
+  setTimeout(kbMeasure, 2500);
+<\/script><script src="file://${path.join(ROOT, 'assets', 'app.js')}"></script>`;
 
 const OUT = path.join(ROOT, 'node_modules', '.block-preview.html');
 fs.writeFileSync(
@@ -194,14 +224,42 @@ ${script}
 </body></html>`,
 );
 
-/* ---------- ④ 截图 + 打开 ---------- */
+/* ---------- ④ 截图 + 打开 ----------
+   截图分两趟，**先量高度再截** ——
+   写死高度会把高积木截断（写完一块看一眼，结果看的是半块，等于没看）。
+   第一趟只量 [data-mount] 底部到文档顶的距离，第二趟用量的高度重新截。 */
 const SHOT = `/tmp/kb-${slug}-${n}.png`;
+const WIDTH = 1280;
+
+function contentHeight() {
+  /* 第一趟：把量到的高度写进 <title>，再从 --dump-dom 里读回来 */
+  try {
+    const dump = execFileSync(
+      CHROME,
+      ['--headless', '--disable-gpu', '--hide-scrollbars',
+       /* 必须和截图那趟同宽 —— 不同宽度会重排，量出来的高度就对不上。
+          高度故意给得很矮：scrollHeight 至少等于视口高，
+          给 900 的话短积木会被量成 900，截图就多出一大截空白。 */
+       `--window-size=${WIDTH},200`,
+       '--virtual-time-budget=4000', '--dump-dom', `file://${OUT}`],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 30000, maxBuffer: 32 << 20 },
+    );
+    const m = dump.match(/<title>H=(\d+)<\/title>/);
+    if (m) return Math.min(20000, Math.max(400, Number(m[1]) + 48));
+  } catch {
+    /* 量不到就用默认 —— 不能因为量高度失败就看不到图 */
+  }
+  console.error('  ⚠ 量不到内容高度，截图按 900 高。高积木可能被截断。');
+  return 900;
+}
+
 if (fs.existsSync(CHROME)) {
+  const h = contentHeight();
   try {
     execFileSync(
       CHROME,
       ['--headless', '--disable-gpu', '--hide-scrollbars', '--screenshot=' + SHOT,
-       '--window-size=1280,900', '--virtual-time-budget=4000', `file://${OUT}`],
+       `--window-size=${WIDTH},${h}`, '--virtual-time-budget=4000', `file://${OUT}`],
       { stdio: ['ignore', 'ignore', 'ignore'], timeout: 30000 },
     );
   } catch {
@@ -221,9 +279,9 @@ if (issues.length) {
   console.log('  ✓ 渲染结果的约定检查通过');
 }
 
-if (!NO_OPEN) {
+if (OPEN) {
   execFileSync('open', [OUT]);
-  console.log('\n  → 已打开\n');
+  console.log('\n  → 已打开（收尾时自己关掉）\n');
 } else {
   console.log('');
 }

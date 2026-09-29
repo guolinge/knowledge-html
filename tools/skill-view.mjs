@@ -171,7 +171,12 @@ console.log(`  ✓ .preview/index.html (${built.length} 页)`);
 if (warned) console.log(`  ⚠ ${warned} 个渲染问题（见上）—— 这些正是文档会「看着对、实际错位」的原因`);
 if (failed) process.exitCode = 1;
 
-if (!process.argv.includes('--no-open')) {
+/* 默认不开浏览器。agent 看的是这里的构建结果和退出码，
+   每跑一次留一个标签页给它，只会让人收拾。人要看时加 --open。
+   （block.mjs 同此约定。）*/
+if (process.argv.includes('--open')) {
   execFileSync('open', [path.join(OUT, 'index.html')]);
-  console.log('\n  → 已在浏览器打开\n');
+  console.log('\n  → 已在浏览器打开（收尾时自己关掉）\n');
+} else {
+  console.log(`\n  页面  .preview/index.html\n`);
 }

@@ -1,8 +1,100 @@
 > 本机跑这个项目要同时伺候**四个东西** —— 前端、后端、一个装元数据的 MySQL、一个装业务数据的 Doris。
 >
-> 这篇只回答三件事：==怎么起、怎么停、停完数据还在不在==。所有命令都在本机冷启动实测过。
+> ==想直接开工 → 看 01 节抄命令。想知道为什么这么写 → 从 02 节开始读。==
+>
+> 所有命令都在本机冷启动实测过。
 
-## 01 · 机器上跑着四个东西
+## 01 · 命令速查
+
+```callout
+tone: blue
+icon: 🧭
+text: |
+  这一节是给你**直接抄**的，不讲道理。
+
+  ==每条命令的**右上角**悬停会出现「复制」按钮==，点一下就进剪贴板。想看「为什么要这样」，
+  从 02 节开始 —— 那里解释了这四样东西怎么协作、命令里的每个动作在干什么。
+
+  ==如果只有 30 秒：抄「启动」，跑完开 `localhost:5173`。==
+```
+
+### 启动
+
+```bash
+podman machine start >/dev/null 2>&1; podman-compose -f metadata/docker-compose.yml up -d >/dev/null 2>&1; podman start doris_fe_1 doris_be_1 >/dev/null 2>&1; printf '等待 元数据 MySQL'; until podman exec crm-dc-mysql mysqladmin ping -uroot -pcrm_meta --silent >/dev/null 2>&1; do printf '.'; sleep 2; done; echo ' ✓'; printf '等待 Doris FE'; until podman exec doris_fe_1 mysql -h127.0.0.1 -P9030 -uroot -e 'SHOW DATABASES' >/dev/null 2>&1; do printf '.'; sleep 2; done; echo ' ✓'; pnpm run dev
+```
+
+期望输出：
+
+```text
+等待 元数据 MySQL... ✓
+等待 Doris FE. ✓
+apps/client dev:  ➜  Local:   http://localhost:5173/
+apps/server dev:  Server listening at http://127.0.0.1:8787
+```
+
+然后开 `http://localhost:5173/`。
+
+### 停止
+
+```compare
+first: 命令
+head: [停掉什么, 数据还在吗, 下次怎么起]
+rows:
+  - "`Ctrl+C`": ["只停 dev（前端 + 后端）", { text: 在, tone: green }, "只要 `pnpm run dev`"]
+  - "`podman stop crm-dc-mysql doris_fe_1 doris_be_1`": ["三个容器（容器保留）", { text: 在, tone: green }, "完整那条启动命令"]
+  - "`podman-compose -f metadata/docker-compose.yml down`": ["MySQL 容器被**删掉**", { text: 在, tone: green }, "同上（走 `up` 重建）"]
+  - "`podman machine stop`": ["整台虚拟机，四个全停", { text: 在, tone: green }, "同上"]
+```
+
+==四个层次全都不丢数据==，怎么选看你要停多彻底。原理见 05 节。
+
+### 确认环境是好的
+
+```bash
+# 后端活着吗
+curl -s http://127.0.0.1:8787/api/health
+# → {"ok":true}
+
+# 元数据读得到吗（这一步证明 MySQL 通了）
+curl -s http://127.0.0.1:8787/api/meta/catalog | head -c 80
+# → {"universeTable":"user_portraits_wide","fields":[...],"relations":[...]}
+
+# Doris 通了吗（这一步证明业务数据能查）
+curl -s -X POST http://127.0.0.1:8787/api/preview \
+  -H 'Content-Type: application/json' -H 'X-Staff-Id: 301' \
+  -d '{"query":{"version":1,"scope":{"type":"scope","kind":"all"},"include":null,"exclude":null},"page":1,"pageSize":3}'
+# → {"count":1000000, "rows":[{"uid":"10001","customerName":"向治文",...}]}
+```
+
+**三条依次通过，说明整条链路都对。** 第三条返回 `count: 1000000`
+就是你当初灌进去的那个数，对得上说明 Doris 没被动过。
+
+```callout
+tone: blue
+icon: 🧭
+text: |
+  **卡住了按这个顺序查**：
+
+  1. `podman ps` —— 三个容器都在吗？（`crm-dc-mysql` 最容易忘）
+  2. `podman machine start` —— 虚拟机在跑吗？
+  3. 上面三条 `curl` —— 卡在哪一条，就是哪个部件的问题
+```
+
+### 一次性的两条
+
+只有**重装环境**后才需要跑。日常启动不用。
+
+```checklist
+tone: warn
+items:
+  - "`pnpm --filter @insight/server metadata:seed` —— 重新灌元数据（3 数据源 / 46 字段 / 18 算子），0.3 秒"
+  - "`pnpm run seed` —— 重建 Doris 的 100 万行，很慢，除非数据坏了否则别碰"
+```
+
+---
+
+## 02 · 机器上跑着四个东西
 
 ```flow
 grid: true
@@ -56,26 +148,11 @@ await getCatalog();        // → MySQL 3307，读元数据
 await ensureSnapshotEnv(); // → Doris 9030，建快照环境
 ```
 
-任何一步连不上，进程直接退出。**缺一个都不行。**
+任何一步连不上，进程直接退出。**缺一个都不行** —— 这也是 01 节那条启动命令里要等两个 `until` 的原因。
 
-## 02 · 启动：一条命令
+## 03 · 那条命令的六个动作
 
-```bash
-podman machine start >/dev/null 2>&1; podman-compose -f metadata/docker-compose.yml up -d >/dev/null 2>&1; podman start doris_fe_1 doris_be_1 >/dev/null 2>&1; printf '等待 元数据 MySQL'; until podman exec crm-dc-mysql mysqladmin ping -uroot -pcrm_meta --silent >/dev/null 2>&1; do printf '.'; sleep 2; done; echo ' ✓'; printf '等待 Doris FE'; until podman exec doris_fe_1 mysql -h127.0.0.1 -P9030 -uroot -e 'SHOW DATABASES' >/dev/null 2>&1; do printf '.'; sleep 2; done; echo ' ✓'; pnpm run dev
-```
-
-看到的应该是这样：
-
-```text
-等待 元数据 MySQL... ✓
-等待 Doris FE. ✓
-apps/client dev:  ➜  Local:   http://localhost:5173/
-apps/server dev:  Server listening at http://127.0.0.1:8787
-```
-
-然后开 `http://localhost:5173/`。
-
-### 这条命令在干什么
+### 每一步在干什么
 
 ```spec
 title: 一条命令的六个动作
@@ -93,7 +170,7 @@ rows:
       `podman-compose ... up -d` —— 起元数据 MySQL。
 
       ==用 `up` 而不是 `podman start`== —— `up` 是幂等的：容器在就起、不在就建。
-      见「停止」一节，`down` 会把容器删掉。
+      见 05 节，`down` 会把容器删掉。
   - k: ③
     v: |
       `podman start doris_fe_1 doris_be_1` —— 起 Doris。
@@ -117,7 +194,7 @@ rows:
       # 两个 dev server 并行跑
 ```
 
-## 03 · 为什么要用 `until` 等 —— 端口在听，不等于能用
+## 04 · 为什么要用 `until` 等 —— 端口在听，不等于能用
 
 !!这一步不能省。我省过一次，冷启动连撞两次，报的错还各不相同。!!
 
@@ -191,32 +268,11 @@ rows:
 > **第二次那个错更难查** —— 它出现在 `apps/server/src/doris.ts`，
 > 看起来像「Doris 挂了」，但 Doris 其实活得好好的，只是慢了 7 秒。
 
-## 04 · 停止：挑一个层次
+## 05 · 停止：`down` 和 `stop` 的区别
 
-有四个层次，从轻到重。
+01 节那张表说了「哪条命令停掉什么」。这一节说**为什么它们不一样**。
 
-```compare
-first: 命令
-head: [停掉什么, 数据还在吗, 下次怎么起]
-rows:
-  - "`Ctrl+C`": ["只停 dev（前端 + 后端）", { text: 在, tone: green }, "只要 `pnpm run dev`"]
-  - "`podman stop crm-dc-mysql doris_fe_1 doris_be_1`": ["三个容器（容器保留）", { text: 在, tone: green }, "完整那条启动命令"]
-  - "`podman-compose -f metadata/docker-compose.yml down`": ["MySQL 容器被**删掉**", { text: 在, tone: green }, "同上（走 `up` 重建）"]
-  - "`podman machine stop`": ["整台虚拟机，四个全停", { text: 在, tone: green }, "同上"]
-```
-
-```callout
-tone: green
-icon: ✅
-quote: true
-text: |
-  ==四个层次全都**不丢数据**。==
-
-  因为数据库的文件不在容器里 —— 容器只是「跑起来的那份进程」，
-  真正存东西的地方在别处（见下一节）。
-```
-
-### `down` 和 `stop` 的区别
+### 容器的三种状态
 
 ```flow
 grid: true
@@ -267,7 +323,7 @@ text: |
   ++用 `podman-compose -f metadata/docker-compose.yml up -d` 代替。++
 ```
 
-## 05 · 数据到底存在哪
+## 06 · 数据到底存在哪
 
 ```tree
 - label: 宿主机（你的 Mac）
@@ -305,49 +361,6 @@ text: |
   删了之后 `metadata:seed` 能重新灌回元数据（0.3 秒），
   但 Doris 那 100 万行要重跑 `npm run seed`，很慢。
 ````
-
-## 06 · 两条一次性的命令
-
-只有**重装环境**后才需要。日常启动不用跑。
-
-```checklist
-tone: warn
-items:
-  - "`pnpm --filter @insight/server metadata:seed` —— 重新灌元数据（3 数据源 / 46 字段 / 18 算子），0.3 秒"
-  - "`pnpm run seed` —— 重建 Doris 的 100 万行，很慢，除非数据坏了否则别碰"
-```
-
-### 怎么确认环境是好的
-
-```bash
-# 后端活着吗
-curl -s http://127.0.0.1:8787/api/health
-# → {"ok":true}
-
-# 元数据读得到吗（这一步证明 MySQL 通了）
-curl -s http://127.0.0.1:8787/api/meta/catalog | head -c 80
-# → {"universeTable":"user_portraits_wide","fields":[...],"relations":[...]}
-
-# Doris 通了吗（这一步证明业务数据能查）
-curl -s -X POST http://127.0.0.1:8787/api/preview \
-  -H 'Content-Type: application/json' -H 'X-Staff-Id: 301' \
-  -d '{"query":{"version":1,"scope":{"type":"scope","kind":"all"},"include":null,"exclude":null},"page":1,"pageSize":3}'
-# → {"count":1000000, "rows":[{"uid":"10001","customerName":"向治文",...}]}
-```
-
-**三条依次通过，说明整条链路都对。** 第三条返回 `count: 1000000`
-就是你当初灌进去的那个数，对得上说明 Doris 没被动过。
-
-```callout
-tone: blue
-icon: 🧭
-text: |
-  **卡住了按这个顺序查**：
-
-  1. `podman ps` —— 三个容器都在吗？（`crm-dc-mysql` 最容易忘）
-  2. `podman machine start` —— 虚拟机在跑吗？
-  3. 上面三条 `curl` —— 卡在哪一条，就是哪个部件的问题
-```
 
 ```quiz
 - q: 前端页面上的「查询」按钮，数据是经过几个进程才拿到的？
@@ -388,4 +401,6 @@ text: |
   - **起**：`machine start` → `compose up -d` → `podman start doris` → 等两个 until → `pnpm run dev`
   - **停**：`Ctrl+C` 最常用；`podman machine stop` 最彻底。都不丢数据。
   - **查**：三条 curl 依次过，卡在哪条就是哪个部件的问题。
+
+  ++忘了命令长什么样，回 01 节抄。++
 ```
