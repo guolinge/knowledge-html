@@ -939,7 +939,7 @@ text: |
 |---|---|
 | 图里出现大块黑色三角/色块 | `archify-embed.css` 缺了某个 class 的规则，`fill` 回退成黑色 |
 
-```callout
+````callout
 tone: green
 icon: ✅
 text: |
@@ -951,7 +951,7 @@ text: |
 
   `npm run check` 有专门检查（对比 SVG 用到的 class 和 CSS 里定义的 class），
   缺了会直接报出来并告诉你重跑哪条命令。
-```
+````
 
 #### 三条硬规矩
 

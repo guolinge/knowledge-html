@@ -143,11 +143,18 @@ export function blocksPlugin(md) {
 
   /* ===== 积木 3 · compare ===== */
   function cell(c, label) {
+    /* 三种写法都走 inline() —— 包括带 tone 的标签。
+
+       ⚠️ 带 tone 的格子以前用的 esc()（纯文本）。后果：全仓库 8 篇笔记里
+       `{ text: "**注入漏洞**", tone: red }` 这种写法，页面上显示的就是
+       字面的 `**注入漏洞**`。
+
+       8 篇、19 处、多个会话都这么写 —— 说明错的是实现不是作者：
+       写单元格的人的直觉就是「这里能写 markdown」，而 `tone` 的作用只是上色，
+       不该顺手把 markdown 也关掉。 */
     const inner =
       c && typeof c === 'object'
-        ? c.tone
-          ? `<span class="tag tone-${c.tone}">${esc(c.text)}</span>`
-          : inline(c.text)
+        ? `<span class="tag tone-${c.tone || 'muted'}">${inline(c.text)}</span>`
         : inline(c);
     return `<td data-label="${esc(label || '')}">${inner}</td>`;
   }
@@ -908,4 +915,75 @@ export function addAnchors(html) {
   });
 
   return { html: out, toc };
+}
+
+/* ============================================================
+   渲染结果的约定检查（不是语法错，是「渲染出来但不是你想的那样」）
+
+   放在这里而不是 render.mjs，是因为 **skill 自己的文档也要查**
+   （`skill-view.mjs` 渲染 SKILL.md / blocks.md）。
+   以前只有笔记查，于是 blocks.md 自己踩了「围栏里嵌围栏」而没人发现 ——
+   那篇文档正是教人别踩这个坑的。
+   ============================================================ */
+
+/** 把「第一个内容行」回到源码里找行号 —— 只说内容不够用，得说在哪一行 */
+function whereIn(srcLines, needle) {
+  if (!srcLines.length || !needle) return '';
+  const hit = srcLines.findIndex((l) => l.trim() && l.includes(needle));
+  return hit >= 0 ? `note.md:${hit + 1} 附近 → ` : '';
+}
+
+/**
+ * 检查「围栏里嵌围栏」—— 外层 ``` 会被内层的裸 ``` 提前闭合。
+ *
+ * 症状很隐蔽：页面看着正常，只是后面的段落错位、`**加粗**` 字面显示。
+ * 因为剩下的 markdown 全被当成代码块的正文了。
+ *
+ * 信号：一个**没有语言标注**的代码块，内容里却出现了 markdown 强调标记。
+ * 正常写的代码示例不会这样（已全站扫描确认无例外）。
+ */
+export function lintFences(html, src = '') {
+  const issues = [];
+  const srcLines = src ? src.split('\n') : [];
+  for (const m of html.matchAll(/<pre><code>([^<]*)<\/code><\/pre>/g)) {
+    const text = m[1]
+      .replace(/&quot;/g, '"')
+      .replace(/&amp;/g, '&')
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>');
+    if (/(==|!!|\+\+|(?<!\*)\*\*[^\s*])/.test(text)) {
+      const first = (text.split('\n').find((l) => l.trim()) || '').trim();
+      issues.push(
+        `${whereIn(srcLines, first.slice(0, 30))}有 markdown 被困在代码块里` +
+          `（第一个内容行：${first.slice(0, 40)}）—— ` +
+          `多半是「围栏里嵌围栏」：外层 \`\`\` 被内层的裸 \`\`\` 提前闭合了。\n` +
+          `      → 把那个外层围栏换成四个反引号 \`\`\`\``,
+      );
+    }
+  }
+  return issues;
+}
+
+/**
+ * 检查链接被 `**` 污染 —— `**https://x/**。` 这种写法。
+ *
+ * linkify-it 只在 `*` 位于字符串**末尾**时才把它从 URL 里裁掉。
+ * 后面跟个中文句号，`*` 就不再是末尾，于是 `**。` 一起被算进 URL：
+ * 加粗丢了，href 里还带着 `**` —— 链接是坏的。
+ */
+export function lintLinkifyStars(html, src = '') {
+  const issues = [];
+  const srcLines = src ? src.split('\n') : [];
+  for (const m of html.matchAll(/<a href="([^"]*\*\*[^"]*)"/g)) {
+    const href = m[1].replace(/&amp;/g, '&');
+    issues.push(
+      `${whereIn(srcLines, href.slice(0, 24))}链接里混进了 \`**\`（href = ${href.slice(0, 60)}）—— ` +
+        `把 \`**URL**\` 后面直接跟了中文标点。\n` +
+        `      → 两个改法：\n` +
+        `        ① 去掉加粗，改成 \`URL\`（等宽，URL 本来就更适合）\n` +
+        `        ② 保留加粗就在中间垫一个空格：\`**URL **\`\n` +
+        `        （中文标点不是问题；问题是 linkify 把 \`**\` 当成了 URL 的一部分）`,
+    );
+  }
+  return issues;
 }

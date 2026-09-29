@@ -13,7 +13,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import MarkdownIt from 'markdown-it';
-import { blocksPlugin, addAnchors } from './lib/blocks.mjs';
+import { blocksPlugin, addAnchors, lintFences, lintLinkifyStars } from './lib/blocks.mjs';
 import { renderPage } from './lib/page.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -76,6 +76,7 @@ fs.mkdirSync(OUT, { recursive: true });
 
 const built = [];
 let failed = 0;
+let warned = 0;
 
 for (const p of PAGES) {
   const src = stripLeadingH1(stripFrontmatter(fs.readFileSync(path.join(p.root, p.file), 'utf8')));
@@ -93,6 +94,17 @@ for (const p of PAGES) {
   }
 
   // 相对链接在预览里会 404（reference 指向 SKILL.md 这类），标注一下不阻断
+  /* skill 自己的文档也要查渲染结果。
+
+     教训：blocks.md 是「教人别把围栏套围栏」的那篇，它自己就套了 ——
+     而当时只有笔记跑 lint，于是这份文档的下半截全被困在代码块里，没人发现。 */
+  const issues = [...lintFences(anchored, src), ...lintLinkifyStars(anchored, src)];
+  if (issues.length) {
+    warned += issues.length;
+    console.error(`\n  ⚠ ${p.file}`);
+    for (const it of issues) console.error(`      ${it.replace(/\n/g, '\n      ')}`);
+  }
+
   const full = renderPage({
     meta: {
       site: 'knowledge-html skill',
@@ -156,6 +168,7 @@ ${nav}
 );
 
 console.log(`  ✓ .preview/index.html (${built.length} 页)`);
+if (warned) console.log(`  ⚠ ${warned} 个渲染问题（见上）—— 这些正是文档会「看着对、实际错位」的原因`);
 if (failed) process.exitCode = 1;
 
 if (!process.argv.includes('--no-open')) {
