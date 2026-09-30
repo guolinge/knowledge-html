@@ -3158,6 +3158,97 @@
     draw();
   };
 
+
+  /* ============================================================
+     控件：row-to-catalog —— 数据库的一行怎么变成一个下拉项
+     左：MySQL 里的原始行      中：5 条转换规则      右：Catalog 里的条目
+     点中间任一条规则 → 高亮它读了什么、写出了什么。
+     config:
+       srcLabel, outLabel
+       src:  [[key, value]]
+       out:  [[key, value]]
+       rules: [{ id, title, to, from: [srcKey], out: [outKey], note, code }]
+     ============================================================ */
+  WIDGETS['row-to-catalog'] = (root) => {
+    const cfg = cfgOf(root);
+    const box = mountOf(root);
+    const statusEl = root.querySelector('[data-status]');
+    const rules = cfg.rules || [];
+    if (!rules.length) return;
+
+    const el = (tag, cls, text) => {
+      const n = document.createElement(tag);
+      if (cls) n.className = cls;
+      if (text !== undefined) n.textContent = text;
+      return n;
+    };
+
+    const wrap = el('div', 'r2c');
+    // 左
+    const L = el('div', 'r2c-col');
+    L.appendChild(el('div', 'r2c-colhead', cfg.srcLabel || 'MySQL 原始行'));
+    const srcBox = el('div', 'r2c-box');
+    const srcRows = {};
+    (cfg.src || []).forEach(([k, v]) => {
+      const r = el('div', 'r2c-row');
+      r.appendChild(el('code', 'r2c-k', k));
+      r.appendChild(el('code', 'r2c-v', v));
+      srcBox.appendChild(r);
+      srcRows[k] = r;
+    });
+    L.appendChild(srcBox);
+    // 中
+    const M = el('div', 'r2c-mid');
+    M.appendChild(el('div', 'r2c-colhead', '转换'));
+    // 右
+    const R = el('div', 'r2c-col');
+    R.appendChild(el('div', 'r2c-colhead', cfg.outLabel || 'Catalog 条目'));
+    const outBox = el('div', 'r2c-box');
+    const outRows = {};
+    (cfg.out || []).forEach(([k, v]) => {
+      const r = el('div', 'r2c-row');
+      r.appendChild(el('code', 'r2c-k', k));
+      r.appendChild(el('code', 'r2c-v', v));
+      outBox.appendChild(r);
+      outRows[k] = r;
+    });
+    R.appendChild(outBox);
+    wrap.appendChild(L); wrap.appendChild(M); wrap.appendChild(R);
+    box.appendChild(wrap);
+
+    // 说明区
+    const note = el('div', 'r2c-note');
+    note.innerHTML = '<span class="r2c-hint">点上面任一条规则，看它读了什么、写出了什么</span>';
+    box.appendChild(note);
+
+    function clear() {
+      wrap.querySelectorAll('.is-hot, .is-warm').forEach((n) => n.classList.remove('is-hot', 'is-warm'));
+    }
+    function pick(i) {
+      clear();
+      const r = rules[i];
+      (r.from || []).forEach((k) => srcRows[k] && srcRows[k].classList.add('is-hot'));
+      (r.out || []).forEach((k) => outRows[k] && outRows[k].classList.add('is-hot'));
+      M.querySelectorAll('.r2c-rule').forEach((n, j) => n.classList.toggle('is-hot', j === i));
+      note.innerHTML =
+        '<b class="r2c-rt">' + r.title + '</b> ' +
+        '<span class="r2c-from">' + (r.from || []).join(' + ') + '</span>' +
+        '<span class="r2c-arrow">→</span>' +
+        '<span class="r2c-to">' + (r.out || []).join(' + ') + '</span>' +
+        '<div class="r2c-note1">' + (r.note || '') + '</div>' +
+        (r.code ? '<pre class="r2c-code">' + r.code + '</pre>' : '');
+      if (statusEl) statusEl.textContent = r.title;
+    }
+    rules.forEach((r, i) => {
+      const n = el('div', 'r2c-rule');
+      n.appendChild(el('span', 'r2c-n', String(i + 1)));
+      n.appendChild(el('span', 'r2c-t', r.title));
+      n.addEventListener('click', () => pick(i));
+      M.appendChild(n);
+    });
+    pick(rules.length - 1);
+  };
+
   /* ---------- 挂载 ---------- */
   document.querySelectorAll('[data-widget]').forEach((root) => {
     var name = root.getAttribute('data-widget');

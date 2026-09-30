@@ -420,7 +420,235 @@ text: |
 
 ---
 
-## 06 · 为什么要隔这么一层
+## 06 · 中间那层：5 张表怎么拼成一份 catalog
+
+上一节说「前端是个哑渲染器，只认 `catalog.fields`」。
+
+**但 MySQL 里没有叫 `catalog.fields` 的东西。** 数据库里是 5 张分开的表，
+每张一个形状。那份 `catalog` 是**后端启动时现拼的**。
+
+这一节就把中间那段接上 —— ==**拉取 → 转换 → 一份前端直接能用的 JSON**==。
+
+```lane-stack
+- badge: "01 · MySQL"
+  title: 5 张表
+  desc: 原始行，按表分开
+  tone: violet
+  nodes:
+    - { title: crm_dc_data_field, sub: "47 行 · 字段字典", tag: 中心 }
+    - { title: crm_dc_data_source, sub: "3 行 · 逻辑源 → 物理表" }
+    - { title: crm_dc_operator, sub: "30 行 · 类型 → 操作符" }
+    - { title: crm_dc_value_set, sub: "2 行 · 共享值集" }
+    - { title: business_domain, sub: "7 行 · 业务域" }
+  next: "load.ts :: 5 条 SELECT + 行转对象 :: snake_case 变 camelCase"
+
+- badge: "02 · 拉"
+  title: MetadataRows
+  desc: 形状**没变** —— 还是按表分的 5 个数组
+  tone: blue
+  nodes:
+    - { title: "sources[]", sub: "3 个对象" }
+    - { title: "operators[]", sub: "30 个" }
+    - { title: "fields[]", sub: "47 个" }
+    - { title: "valueSets[]", sub: "2 个" }
+    - { title: "domains[]", sub: "7 个" }
+  next: "project.ts :: rowsToCatalog() :: 就是这一层"
+
+- badge: "03 · 转"
+  title: rowsToCatalog()
+  desc: 一趟 map 里做 5 种转换
+  tone: amber
+  nodes:
+    - { title: "① 联表", sub: "data_source_id → table_name" }
+    - { title: "② i18n 取值", sub: "display_name_i18n + locale → label" }
+    - { title: "③ 类型推导", sub: "semantic_type + physical_type → valueType + derive" }
+    - { title: "④ 挑操作符", sub: "semantic_type → ops[]" }
+    - { title: "⑤ 解析值集", sub: "value_source_type + value_set_id → options[]" }
+  next: "拼成前端要的形状"
+
+- badge: "04 · 结果"
+  title: Catalog
+  desc: 前端直接就用这个
+  tone: green
+  nodes:
+    - { title: "fields[39]", sub: "{ name, label, table, column, valueType, ops, options }" }
+    - { title: "relations[2]", sub: "带 objectSource 和 props[]" }
+  next: "HTTP :: GET /api/meta/catalog :: 一次请求拿全量"
+
+- badge: "05 · 界面"
+  title: 下拉选项
+  desc: v-for 一遍就完事
+  tone: muted
+  nodes:
+    - { title: 年龄 · age, sub: "来自 catalog.fields[0].label" }
+    - { title: 地区 · region, sub: "来自 catalog.fields[2].label" }
+```
+
+```callout
+tone: blue
+icon: 🧭
+text: |
+  **整条链只有两段代码：**
+
+  | 文件 | 行数 | 干什么 |
+  |---|---|---|
+  | `metadata/load.ts` | 164 | 5 条 `SELECT` + 行转对象（`snake_case` → `camelCase`） |
+  | `metadata/project.ts` | **895** | `rowsToCatalog()` —— **就是这一层** |
+
+  ==注意 02 和 03 之间：**形状没变，只是换了名字**。==
+  `load.ts` 干的是体力活（搬运 + 改命名），`project.ts` 才真正在**拼**。
+```
+
+### 6.1 一趟 map 里做了 5 种转换
+
+`rowsToCatalog()` 的核心就是一个 `.map()`。**点下面任一条规则**，看它读了哪些列、写出了哪些字段：
+
+```demo
+widget: row-to-catalog
+title: 数据库的一行 → 一个下拉项
+hint: 点中间任一条规则
+actions: false
+config:
+  srcLabel: MySQL · crm_dc_data_field 的 age 那一行
+  outLabel: Catalog · fields[0]
+  src:
+    - [field_key, age]
+    - [column_name, birthday]
+    - [display_name_i18n, '{"zh-CN":"年龄", "en":"Age"}']
+    - [data_source_id, '1']
+    - [semantic_type, '4  (NUMBER)']
+    - [physical_type, DATE]
+    - [value_source_type, '0  (NONE)']
+    - [value_mapping, 'NULL']
+  out:
+    - [name, '"age"']
+    - [label, '"年龄"']
+    - [table, '"user_portraits_wide"']
+    - [column, '"birthday"']
+    - [valueType, '"int"']
+    - [derive, '{ kind: "age_years" }']
+    - [ops, '[eq, neq, lt, lte, gt, gte, between, …]']
+    - [options, '(没有 — value_source_type = 0)']
+  rules:
+    - title: ① 直接搬
+      from: [field_key, column_name]
+      out: [name, column]
+      note: 这两列不改，原样搬过去。前端的 `v-for` 就是按 `name` 索引的。
+      code: "name:   field.fieldKey\ncolumn: requireColumn(field)   // 空就报错"
+    - title: ② 联表
+      from: [data_source_id]
+      out: [table]
+      note: "**这是唯一一次跨表**。`data_source_id` 去 `crm_dc_data_source` 里查，拿到 `table_name`。"
+      code: "const source = requireSource(sources, field);\n// sources 是个 Map<id, DataSourceRow>\ntable: source.tableName"
+    - title: ③ i18n 取值
+      from: [display_name_i18n]
+      out: [label]
+      note: "三语文案里挑出当前 locale 那一份。挑不到就退回 `field_key` —— 所以界面上永远不会出现空白选项。"
+      code: "labelOf(field.displayNameI18n, field.fieldKey, 'zh-CN')\n// → pickLabel(i18n, locale, fallback)"
+    - title: ④ 类型推导
+      from: [semantic_type, physical_type, field_key]
+      out: [valueType, derive]
+      note: "**这条最绕**：`semantic_type=4(NUMBER)` + `physical_type=DATE` → 「这是个从日期算出来的数」。再按字段名猜单位（`age` → 年，其余 → 天）。"
+      code: "if (semanticType === NUMBER) {\n  if (physical === 'DATE' || physical.startsWith('DATETIME'))\n    return { valueType: 'int',\n             derive: { kind: fieldKey === 'age' ? 'age_years' : 'days_since' } };\n  if (physical.startsWith('DECIMAL')) return { valueType: 'decimal' };\n}"
+    - title: ⑤ 挑操作符
+      from: [semantic_type]
+      out: [ops]
+      note: "拿 `semantic_type` 去 `crm_dc_operator` 里筛，再按 `sort_order` 排。**界面上那个操作符下拉的选项就是它。**"
+      code: "operators.filter((op) => op.semanticType === field.semanticType)\n  .sort((a, b) => a.sortOrder - b.sortOrder || a.id - b.id)\n  .map((op) => asOp(op.operatorKey))"
+    - title: ⑥ 解析值集
+      from: [value_source_type, value_mapping]
+      out: [options]
+      note: "`0` 不用值 → 没有选项；`1` 用字段自己内嵌的；`2` 去 `crm_dc_value_set` 里按 `value_set_id` 取。取到的还要按 locale 翻译、按 `sortOrder` 排、过滤掉停用的。"
+      code: "mappingOf(field)\n// value_source_type === 2 时去 valueSets.get(field.valueSetId)\noptionsOf(mapping, locale)\n// 过滤 status / 排序 / 翻译 label"
+```
+
+````callout
+tone: violet
+icon: 💡
+text: |
+  ==**这 6 条规则加起来的长度，就是这个「转换层」的全部。**==
+
+  它不神秘 —— 就是**一次跨表查字典 + 四次按规则筛**。
+  难的部分不是逻辑，是**知道每条规则读哪一列、写哪个字段**。
+
+  对照着看：
+
+  ```
+  MySQL 的列                     Catalog 的字段
+  ─────────────────────────      ────────────────────
+  field_key                  →   name
+  column_name                →   column
+  data_source_id  ──联表──→      table
+  display_name_i18n          →   label
+  semantic_type ┐
+  physical_type ┴─推导──────→    valueType + derive
+  semantic_type ──筛选──────→    ops
+  value_source_type ┐
+  value_set_id      ┴─解析──→    options
+  ```
+````
+
+### 6.2 它还是个校验器
+
+`rowsToCatalog()` 里散着 **8 处 `throw`** —— 都是「配置写错了」的检查点：
+
+```compare
+first: 检查
+head: [拦什么, 报什么错]
+rows:
+  - 数据源存在: ["`data_source_id` 指向一个不存在的源", "`missing data source 1 for age`"]
+  - 列名非空: ["画像字段没填 `column_name`", "`age is missing column_name`"]
+  - 语义类型非空: ["没填 `semantic_type`，无法挑操作符", "`age is missing semantic_type`"]
+  - 操作符非空: ["某个 `semantic_type` 下一条操作符都没配", "`no operators for age`"]
+  - 操作符合法: ["`operator_key` 不在 DSL 认识的集合里", "`unknown operator eqq`"]
+  - 值集存在: ["`value_source_type=2` 但 `value_set_id` 是空的/查不到", "`missing value set for city`"]
+  - 源类型对得上: ["画像字段挂在一个关系源上", "`portrait age is not on a portrait source`"]
+  - 关系结构合法: ["一个关系不是恰好 1 个 OBJECT 子项", "`relation holding has 2 OBJECT items`"]
+```
+
+```callout
+tone: green
+icon: ✅
+text: |
+  **为什么要在这里报错，而不是等到查数据的时候？**
+
+  因为 `Catalog` 是**前端信任的形状**。
+
+  ==一旦它拼出来了，后面所有环节都假定它是对的：==
+  前端直接拿 `label` 渲染、拿 `ops` 填下拉、拿 `table` + `column` 去编 SQL。
+
+  一个坏的 `column_name` 会一路走到 Doris 才炸，那时候的报错是
+  「列不存在」—— **你根本不知道是元数据写错了。**
+
+  所以这一层把错误**提前到启动时**：后端启动会先 `getCatalog()`，
+  配错了就直接起不来，而不是等到运营点「查询」才发现。
+```
+
+### 6.3 那缓存呢
+
+````callout
+tone: amber
+icon: ⚠
+text: |
+  这一整套只跑**一次**。
+
+  ```ts
+  // metadata/source.ts
+  let cached: MetadataRows | null = null;
+  export function getMetadataRows() {
+    if (!cached) cached = await loadMetadataRows();   // 只读一次
+    return cached;
+  }
+  ```
+
+  后面每次 `/api/meta/catalog` 都是直接返回内存里那份。
+
+  ==所以改了元数据要重启后端才生效 —— 这个坑在 09 节展开。==
+````
+
+---
+
+## 07 · 为什么要隔这么一层
 
 直接在前端写死不是更简单吗？三个理由：
 
@@ -502,7 +730,7 @@ text: |
 
 ---
 
-## 07 · 那这个 demo 里，Data Admin 在哪
+## 08 · 那这个 demo 里，Data Admin 在哪
 
 **它不存在。** 架构文档里写得很直白：
 
@@ -570,7 +798,7 @@ edges:
 
 ---
 
-## 08 · 一个真实的坑：改了配置，界面不变
+## 09 · 一个真实的坑：改了配置，界面不变
 
 我在做上面那个实验时撞到的：改完 MySQL，**接口仍然返回旧值**。
 
