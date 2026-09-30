@@ -4,7 +4,7 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>@insight/dsl：把「圈选条件」翻译成 SQL</title>
-<meta name="description" content="运营在界面上点出来的条件，怎么变成数据库能跑的 SQL？这个 1717 行的包（10 个文件）只做这一件事，而且做得非常克制 —— 它不认识数据库、不认识 HTTP，输入三个纯对象、输出四段字符串。这篇讲清它由什么组成、怎么工作，以及三处反直觉的设计：为什么校验要分两段、为什么 include 和 exclude 不对称、为什么「年龄」在数据库里根本不存在。" />
+<meta name="description" content="运营在界面上点出来的条件，怎么变成数据库能跑的 SQL？这个 1507 行的包（11 个文件）只做这一件事，而且做得非常克制 —— 它不连数据库、不做 IO，输入 DSL 和字段字典，输出四条 SQL。这篇讲清它由什么组成、怎么工作，重点是三段管道各自的检查点和编译逻辑。" />
 <style>
 /* ============================================================
    theme.css — 设计 token 与页面骨架
@@ -2526,6 +2526,81 @@ a.need:hover { color: var(--blue); }
   }
 
   /* ============================================================
+     控件：validate-lab —— 喂几个坏输入，看它在哪一段被拦
+     左栏选一个坏条件，右栏看：第几段拦的、错误码、为什么。
+     ============================================================ */
+  .vl-wrap { display: flex; flex-direction: column; gap: 16px; }
+
+  .vl-pick { display: flex; flex-wrap: wrap; gap: 6px; }
+  .vl-pick > button {
+    border: 1px solid var(--border); background: var(--surface);
+    border-radius: 8px; padding: 7px 12px; cursor: pointer;
+    font: 600 12px var(--sans); color: var(--text-2);
+    transition: border-color .15s, background .15s, color .15s;
+  }
+  .vl-pick > button:hover { border-color: var(--border-strong); color: var(--text); }
+  .vl-pick > button.on {
+    border-color: var(--blue); color: var(--blue);
+    background: color-mix(in srgb, var(--blue) 9%, var(--surface));
+  }
+
+  .vl-flow { display: flex; align-items: stretch; gap: 0; }
+  .vl-step {
+    flex: 1; min-width: 0; border: 1px solid var(--border); background: var(--surface);
+    padding: 10px 12px; text-align: center;
+    font: 600 12px/1.4 var(--sans); color: var(--muted);
+    transition: background .15s, color .15s, border-color .15s;
+  }
+  .vl-step:first-child { border-radius: 9px 0 0 9px; }
+  .vl-step:last-child { border-radius: 0 9px 9px 0; }
+  .vl-step + .vl-step { border-left: none; }
+  .vl-step > small { display: block; font: 500 10.5px/1.3 var(--mono); color: var(--muted); }
+  .vl-step.blocked {
+    background: color-mix(in srgb, var(--red) 12%, var(--surface));
+    border-color: var(--red); color: var(--red);
+  }
+  .vl-step.passed {
+    background: color-mix(in srgb, var(--green) 10%, var(--surface));
+    border-color: var(--green); color: var(--green);
+  }
+  .vl-step.notreached { opacity: .45; }
+
+  .vl-out {
+    border: 1px solid var(--border); border-left: 3px solid var(--tone, var(--red));
+    border-radius: 9px; background: var(--surface-2); padding: 13px 15px;
+    display: flex; flex-direction: column; gap: 9px;
+  }
+  .vl-code {
+    align-self: flex-start; font: 700 12px var(--mono); color: var(--tone, var(--red));
+    background: color-mix(in srgb, var(--tone, var(--red)) 12%, transparent);
+    border: 1px solid color-mix(in srgb, var(--tone, var(--red)) 40%, transparent);
+    border-radius: 100px; padding: 4px 10px;
+  }
+  .vl-why { font-size: 12.5px; line-height: 1.75; color: var(--text-2); }
+  .vl-where { font: 600 11.5px/1 var(--sans); color: var(--muted); letter-spacing: .04em; }
+  .vl-input { border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: var(--bg); }
+  .vl-input > pre {
+    margin: 0; padding: 10px 12px; overflow-x: auto;
+    font: 500 11.5px/1.7 var(--mono); color: var(--text-2);
+    white-space: pre-wrap; word-break: break-word;
+  }
+  .vl-input > pre .bad { color: var(--red); font-weight: 700; }
+  .vl-input > pre .ok { color: var(--green); }
+  .vl-legend {
+    display: flex; flex-wrap: wrap; gap: 6px 16px;
+    font: 500 11.5px var(--sans); color: var(--muted);
+  }
+  .vl-legend > span { display: inline-flex; align-items: center; gap: 5px; }
+  .vl-legend i { width: 9px; height: 9px; border-radius: 3px; display: inline-block; }
+
+  @media (max-width: 720px) {
+    .vl-flow { flex-direction: column; }
+    .vl-step { border-radius: 0; border-left: 1px solid var(--border); }
+    .vl-step:first-child { border-radius: 9px 9px 0 0; }
+    .vl-step:last-child { border-radius: 0 0 9px 9px; }
+  }
+
+  /* ============================================================
      控件：count-dedup-lab —— 「包一层」到底去不去重
      同一批数据（一个人持 5 个标的），四种写法看结果差多少。
      ============================================================ */
@@ -3479,20 +3554,15 @@ svg[data-preset="blueprint"] .c-security-group,
       <a href="#走一遍完整编译">走一遍完整编译</a>
       <a href="#三个值得亲手试的东西" class="sub">三个值得亲手试的东西</a>
       <a href="#三段管道">三段管道</a>
-      <a href="#一个条件走完三段" class="sub">一个条件走完三段</a>
-      <a href="#为什么要分两段" class="sub">为什么要分两段</a>
-      <a href="#那错误码长什么样" class="sub">那错误码长什么样</a>
-      <a href="#三处反直觉的设计">三处反直觉的设计</a>
-      <a href="#51-为什么-include-和-exclude-写法不一样" class="sub">5.1 为什么 include 和 exclude 写法不一样</a>
-      <a href="#52-为什么年龄在数据库里不存在" class="sub">5.2 为什么「年龄」在数据库里不存在</a>
-      <a href="#53-权限不是过滤是编进-where" class="sub">5.3 权限不是「过滤」，是「编进 WHERE」</a>
+      <a href="#第一段-形状校验" class="sub">第一段 · 形状校验</a>
+      <a href="#第二段-语义校验" class="sub">第二段 · 语义校验</a>
+      <a href="#第三段-拼-sql" class="sub">第三段 · 拼 SQL</a>
+      <a href="#组装从一段-where-到四条-sql" class="sub">组装：从一段 WHERE 到四条 SQL</a>
       <a href="#它由什么组成">它由什么组成</a>
       <a href="#依赖是单向的" class="sub">依赖是单向的</a>
-      <a href="#一个诚实的问题" class="sub">一个诚实的问题</a>
       <a href="#怎么保证它是对的">怎么保证它是对的</a>
-      <a href="#第一层单元测试" class="sub">第一层：单元测试</a>
-      <a href="#第二层夹具-这是最有意思的一层" class="sub">第二层：夹具 —— 这是最有意思的一层</a>
-      <a href="#第三层真库验证-一个数据体检闸门" class="sub">第三层：真库验证 + 一个「数据体检」闸门</a>
+      <a href="#夹具为什么值得单独说" class="sub">夹具为什么值得单独说</a>
+      <a href="#真库验证之前有一道闸门" class="sub">真库验证之前有一道闸门</a>
       <a href="#它现在缺什么">它现在缺什么</a>
       <a href="#自测">自测</a>
   </aside>
@@ -3501,7 +3571,7 @@ svg[data-preset="blueprint"] .c-security-group,
     <div class="hero">
       <span class="eyebrow">● 从零理解 · 模块</span>
       <h1>@insight/dsl：把「圈选条件」翻译成 SQL</h1>
-      <p class="lede">运营在界面上点出来的条件，怎么变成数据库能跑的 SQL？这个 1717 行的包（10 个文件）只做这一件事，而且做得非常克制 —— 它不认识数据库、不认识 HTTP，输入三个纯对象、输出四段字符串。这篇讲清它由什么组成、怎么工作，以及三处反直觉的设计：为什么校验要分两段、为什么 include 和 exclude 不对称、为什么「年龄」在数据库里根本不存在。</p>
+      <p class="lede">运营在界面上点出来的条件，怎么变成数据库能跑的 SQL？这个 1507 行的包（11 个文件）只做这一件事，而且做得非常克制 —— 它不连数据库、不做 IO，输入 DSL 和字段字典，输出四条 SQL。这篇讲清它由什么组成、怎么工作，重点是三段管道各自的检查点和编译逻辑。</p>
     </div>
 
     <div class="draft-banner">
@@ -3512,7 +3582,7 @@ svg[data-preset="blueprint"] .c-security-group,
       <p class="needs-title">读这篇之前，你需要先知道</p>
       <a class="need" href="../insight-data-map/">← <b>2. 数据层</b><span>11 张表、每张的关键列、一次查询的完整旅程</span></a>
     </aside>
-    <div class="provenance"><span><b>来源</b> 本仓库 packages/dsl/src/ 全部 10 个文件（1717 行，wc -l 实测） · packages/dsl/test/ 332 个测试（实测全绿，553ms） · packages/dsl/test/fixtures/*.json 十条夹具（6100 行 SQL 快照） · packages/dsl/test/doris/gate.ts 数据体检闸门 + doris/expected-counts.json</span><span><b>生成</b> 2026-09-29</span><span><b>模型</b> claude-opus-4-6</span></div>
+    <div class="provenance"><span><b>来源</b> 本仓库 packages/dsl/src/ 全部 11 个文件（1507 行，wc -l 实测） · packages/dsl/test/ 332 个测试（实测全绿，553ms） · packages/dsl/test/fixtures/*.json 十条夹具（6100 行 SQL 快照） · packages/dsl/test/doris/gate.ts 数据体检闸门 + doris/expected-counts.json</span><span><b>生成</b> 2026-09-29</span><span><b>模型</b> claude-opus-4-6</span></div>
     <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">SQL</span> <span class="tag tone-muted">编译器</span> <span class="tag tone-muted">圈选</span> <span class="tag tone-muted">TypeScript</span> <span class="tag tone-muted">架构</span></span></div>
 
 <p>运营同学在界面上点几下：<strong>年龄 ≥ 18、地区 = 美国、总资产 ≥ 1000</strong>，然后点「查询」。</p>
@@ -3567,8 +3637,8 @@ svg[data-preset="blueprint"] .c-security-group,
         <span class="tag tone-violet">要字段字典</span>
       </div><div class="pnode">
         <b>生成 SQL</b>
-        <small>4 段字符串</small>
-        <span class="tag tone-violet">纯字符串拼接</span>
+        <small>用 Knex 构造</small>
+        <span class="tag tone-violet">不自己拼字符串</span>
       </div></div>
       </div><div class="conn">
       <span class="stem"></span>
@@ -3632,7 +3702,7 @@ svg[data-preset="blueprint"] .c-security-group,
   &quot;valueType&quot;: &quot;int&quot;, &quot;ops&quot;: [&quot;gt&quot;,&quot;gte&quot;,&quot;lt&quot;,&quot;lte&quot;,&quot;eq&quot;,&quot;between&quot;],
   &quot;derive&quot;: { &quot;kind&quot;: &quot;age_years&quot; } }
 </code></pre></div>
-<p><mark class="mk-amber">注意 <code>name</code> 是 <code>age</code>，而 <code>column</code> 是 <code>birthday</code>。</mark> 这两者不一样 —— 第 05 节会讲为什么。</p>
+<p><mark class="mk-amber">注意 <code>name</code> 是 <code>age</code>，而 <code>column</code> 是 <code>birthday</code>。</mark> 这两者不一样 —— 第 04 节会讲为什么。</p>
 </div>
           
         </div><div class="ccard tone-amber">
@@ -3907,7 +3977,7 @@ SELECT COUNT(DISTINCT u.uid) AS count FROM users u JOIN rel_holding h ON …
 exclude:  NOT COALESCE((cond1 AND cond2), FALSE)
 </code></pre></div>
 <p><mark class="mk-blue">两个方向不对称 —— 一个裸着，一个包了 <code>NOT COALESCE</code>。</mark></p>
-<p>为什么必须这样，是第 05 节的主题。</p>
+<p>为什么必须这样，见第 04 节的「第三段 · 拼 SQL」。</p>
 </div>
           
         </div><div class="ccard tone-muted">
@@ -3939,13 +4009,18 @@ exclude:  NOT COALESCE((cond1 AND cond2), FALSE)
 </div>
     </div><hr>
 <h2 id="三段管道"><span class="num">04</span>三段管道</h2>
-<p><code>compile()</code> 这个函数开头只有两行，但它们是整个包最重要的设计：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">validateStructure(query)              ← ① 只看形状
-validateSemantics(query, catalog)     ← ② 只看字段字典
+<p><code>compile()</code> 开头这几行，是整个包的结构：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-ts">validateStructure(query);                  // ① 只看形状
+validateSemantics(query, catalog);         // ② 只看字段字典
 // 两步都过了。后面不再重新判断形状或字段规则。
-...拼 SQL
+
+const includeApply = compileTree(query.include, ctx);
+const excludeApply = compileTree(query.exclude, ctx);
 </code></pre></div>
-<div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;ast&quot;,&quot;to&quot;:&quot;v1&quot;},{&quot;from&quot;:&quot;v1&quot;,&quot;to&quot;:&quot;v2&quot;,&quot;label&quot;:&quot;过了&quot;},{&quot;from&quot;:&quot;v2&quot;,&quot;to&quot;:&quot;gen&quot;,&quot;label&quot;:&quot;过了&quot;},{&quot;from&quot;:&quot;gen&quot;,&quot;to&quot;:&quot;out&quot;},{&quot;from&quot;:&quot;v1&quot;,&quot;to&quot;:&quot;err1&quot;,&quot;dashed&quot;:true},{&quot;from&quot;:&quot;v2&quot;,&quot;to&quot;:&quot;err2&quot;,&quot;dashed&quot;:true}]">
+<p><code>compileTree</code> 返回的不是 SQL 字符串，是一个 <code>Apply</code> —— 一个「怎么把这段条件加到某个查询上」的函数。调用方拿到它之后，把它挂到 Knex 的查询对象上，最后 <code>renderSql()</code> 把整个查询转成字符串。</p>
+<p>三段的边界很硬：<strong>第一段不知道字段字典存在，第二段不知道 SQL 存在，第三段不做任何判断。</strong></p>
+<p>第二步要拿字段字典对一遍 —— 字典由 Data Admin 维护，通过 <code>Catalog</code> 对象传进来。</p>
+<div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;ast&quot;,&quot;to&quot;:&quot;v1&quot;},{&quot;from&quot;:&quot;v1&quot;,&quot;to&quot;:&quot;e1&quot;,&quot;dashed&quot;:true},{&quot;from&quot;:&quot;v1&quot;,&quot;to&quot;:&quot;v2&quot;,&quot;label&quot;:&quot;过了&quot;},{&quot;from&quot;:&quot;v2&quot;,&quot;to&quot;:&quot;e2&quot;,&quot;dashed&quot;:true},{&quot;from&quot;:&quot;v2&quot;,&quot;to&quot;:&quot;gen&quot;,&quot;label&quot;:&quot;过了&quot;},{&quot;from&quot;:&quot;gen&quot;,&quot;to&quot;:&quot;out&quot;}]">
       <svg class="flowd-svg" aria-hidden="true">
         <defs>
           <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
@@ -3959,311 +4034,398 @@ validateSemantics(query, catalog)     ← ② 只看字段字典
               
               <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="2.5" width="7.5" height="7.5" rx="1"/><path d="M8.5 9.5l4.5 4.5M13 9.8V13H9.8"/></svg>
               <b>条件树</b>
-              <small>用户圈了什么</small>
+              <small>界面传过来的 JSON</small>
             </div></div><div class="flowd-row"><div class="fnode tone-amber" data-id="v1">
               
               
               <b>① 形状校验</b>
-              <small>不需要字段字典</small>
-            </div><div class="fnode tone-red shape-note" data-id="err1">
+              <small>不需要字典（也会查值的形状）</small>
+            </div><div class="fnode tone-red shape-note" data-id="e1">
               
               
-              <b>① EMPTY_GROUP</b>
-              <small>组是空的</small>
+              <b>EMPTY_GROUP</b>
+              <small>组里一个孩子都没有</small>
+            </div><div class="fnode tone-red shape-note" data-id="e1b">
+              
+              
+              <b>INCOMPLETE_LEAF</b>
+              <small>少了 field 或 op</small>
             </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="v2">
               
               
               <b>② 语义校验</b>
               <small>要字段字典</small>
-            </div><div class="fnode tone-red shape-note" data-id="err2">
+            </div><div class="fnode tone-red shape-note" data-id="e2">
               
               
-              <b>② UNKNOWN_FIELD</b>
-              <small>没有这个字段</small>
+              <b>UNKNOWN_FIELD</b>
+              <small>字典里没这个字段</small>
+            </div><div class="fnode tone-red shape-note" data-id="e2b">
+              
+              
+              <b>VALUE_TYPE</b>
+              <small>值跟字段类型对不上</small>
             </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="gen">
               
               <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5L3 8l3 4.5M10 3.5L13 8l-3 4.5"/></svg>
-              <b>③ 拼 SQL</b>
-              <small>不再判断任何规则</small>
+              <b>③ compileTree</b>
+              <small>返回 Apply，不再判断规则</small>
             </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="out">
               
               
               <b>四条 SQL</b>
-              <small>纯字符串</small>
+              <small>renderSql() 转成字符串</small>
             </div></div></div>
       
-    </div><h3 id="一个条件走完三段">一个条件走完三段</h3>
-<div class="demo" data-widget="stepper" data-config="{&quot;steps&quot;:[{&quot;label&quot;:&quot;拿到条件树&quot;,&quot;code&quot;:&quot;{ \&quot;type\&quot;: \&quot;portrait\&quot;,\n  \&quot;field\&quot;: \&quot;age\&quot;, \&quot;op\&quot;: \&quot;gte\&quot;, \&quot;value\&quot;: 18 }\n&quot;,&quot;note&quot;:&quot;界面传过来的就是这段 JSON。此刻它没有任何含义。&quot;},{&quot;label&quot;:&quot;① 形状校验&quot;,&quot;code&quot;:&quot;version === 1            ✓\nfield 和 op 都在         ✓\nop=gte 要一个值，有       ✓\nvalue 是数字，不是数组    ✓\n&quot;,&quot;note&quot;:&quot;这一步完全不知道「age」是什么。它只回答「这棵树的形状合法吗」。&quot;},{&quot;label&quot;:&quot;② 语义校验&quot;,&quot;code&quot;:&quot;字段字典里找 \&quot;age\&quot;        ✓ 找到了\ngte 在 age 的 ops 里      ✓ 允许\nvalue 类型匹配 int        ✓ 18 是整数\n&quot;,&quot;note&quot;:&quot;这一步需要字段字典，但不重新检查形状。&quot;},{&quot;label&quot;:&quot;③ 拼 SQL&quot;,&quot;code&quot;:&quot;age 的 column 是 birthday\nderive 是 age_years\n  ↓\nTIMESTAMPDIFF(YEAR, `u`.`birthday`, CURRENT_DATE()) &gt;= 18\n&quot;,&quot;note&quot;:&quot;到这里才开始生成字符串。前面两步已经把「不合法的输入」全都挡掉了。&quot;}]}">
-      <div class="demo-head">
-        <span class="title">「年龄 ≥ 18」走完三段管道</span>
-        <span class="status" data-status></span>
-        <span class="spacer"></span>
-        
-      </div>
-      <div class="demo-body custom" data-mount></div>
-    </div><h3 id="为什么要分两段">为什么要分两段</h3>
-<p>这是这个包<strong>最容易被误解</strong>的设计。看起来「两次校验」是重复劳动 —— 一次遍历就能全查完。</p>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>好处</th><th>说明</th><th>谁受益</th></tr></thead><tbody><tr><th>不需要字段字典</th><td data-label="说明">① 只看形状，所以<strong>前端能在本地跑</strong></td><td data-label="谁受益">前端：输入框失焦就能报错，不用往返后端</td></tr><tr><th>错误码不串味</th><td data-label="说明"><code>EMPTY_GROUP</code> 一定来自 ①，<code>UNKNOWN_FIELD</code> 一定来自 ②</td><td data-label="谁受益">排障：看到错误码就知道是哪一段</td></tr><tr><th>职责不重叠</th><td data-label="说明">② 假定形状已合法，<strong>不重复检查空的 children / uids</strong></td><td data-label="谁受益">维护：改一段不会误伤另一段</td></tr><tr><th>测试能分开写</th><td data-label="说明">44 个用例专测校验器，不掺 SQL</td><td data-label="谁受益">测试：<code>validate.spec.ts</code> 一个文件搞定</td></tr></tbody></table></div><div class="callout tone-amber">
-      <span class="ic">⚠</span>
-      <div><p><mark class="mk-blue">边界的写法是硬性的，不是「尽量」。</mark></p>
-<p><code>validate.ts</code> 里两个函数的注释就在划这条线：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-ts">// 不需要 catalog。检查非空 children / uids / groupIds / detail.objects / in 值。
-export function validateStructure(query: InsightQuery): void
-
-// 只看 catalog：字段、关系、属性、允许的操作符、值类型、枚举。
-// 必须先调 validateStructure。这一步不重新检查空列表。
-export function validateSemantics(query: InsightQuery, catalog: Catalog): void
-</code></pre></div>
-<p><mark class="mk-green">「不重新检查」是写进注释的承诺。</mark> 谁违反了，测试会红。</p>
-</div>
-    </div><h3 id="那错误码长什么样">那错误码长什么样</h3>
-<p>12 个错误码，按来源分成两组：</p>
-<div class="cards" data-cols="2"><div class="ccard tone-amber">
-          <span class="tag tone-amber">不需要字段字典</span>
-          <h4>形状类（来自 ①）</h4>
-          
-          <div class="cbody"><table>
+    </div><h3 id="第一段-形状校验">第一段 · 形状校验</h3>
+<p>入口是 <code>validateStructure(query)</code>。它递归走完整棵树，只回答一个问题：<strong>这棵树的形状合法吗。</strong></p>
+<p>它不看字段字典。所以 <code>{ &quot;type&quot;: &quot;portrait&quot;, &quot;field&quot;: &quot;根本不存在的字段&quot;, &quot;op&quot;: &quot;gte&quot;, &quot;value&quot;: 1 }</code> 在这一段是<strong>合法</strong>的 —— 名字对不对是第二段的事。</p>
+<p>它查的东西分四组：</p>
+<table>
 <thead>
 <tr>
-<th>码</th>
-<th>什么时候</th>
+<th>组</th>
+<th>查什么</th>
+<th>什么情况报错</th>
+<th>错误码</th>
 </tr>
 </thead>
 <tbody>
 <tr>
+<td><strong>scope</strong></td>
+<td><code>version</code></td>
+<td>不是 <code>1</code></td>
 <td><code>UNSUPPORTED_VERSION</code></td>
-<td><code>version</code> 不是 1</td>
 </tr>
 <tr>
+<td></td>
+<td><code>scope</code> 存在且 kind 认识</td>
+<td>缺失或 kind 不认识</td>
 <td><code>MISSING_SCOPE</code></td>
-<td>没给 <code>scope</code></td>
 </tr>
 <tr>
+<td></td>
+<td><code>kind: 'team'</code> 要有 <code>groupIds</code></td>
+<td>空数组</td>
 <td><code>EMPTY_TEAM</code></td>
-<td><code>kind: team</code> 但 <code>groupIds</code> 是空的</td>
 </tr>
 <tr>
-<td><code>EMPTY_GROUP</code></td>
-<td>一个 <code>AND</code> 组里一个孩子都没有</td>
-</tr>
-<tr>
-<td><code>INCOMPLETE_LEAF</code></td>
-<td><code>field</code> 或 <code>op</code> 少了一个</td>
-</tr>
-<tr>
-<td><code>UNKNOWN_NODE</code></td>
-<td><code>include</code> 不是组</td>
-</tr>
-</tbody>
-</table>
-</div>
-          
-        </div><div class="ccard tone-violet">
-          <span class="tag tone-violet">要字段字典</span>
-          <h4>语义类（来自 ②）</h4>
-          
-          <div class="cbody"><table>
-<thead>
-<tr>
-<th>码</th>
-<th>什么时候</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td><code>UNKNOWN_FIELD</code></td>
-<td>字段字典里没这个字段</td>
-</tr>
-<tr>
-<td><code>UNKNOWN_RELATION</code></td>
-<td>没有这个关系</td>
-</tr>
-<tr>
-<td><code>UNKNOWN_RELATION_PROP</code></td>
-<td>关系里没这个属性</td>
-</tr>
-<tr>
-<td><code>OP_NOT_ALLOWED</code></td>
-<td>这个字段不允许这个操作符</td>
-</tr>
-<tr>
+<td></td>
+<td><code>groupIds</code> 元素类型</td>
+<td>有非整数</td>
 <td><code>VALUE_TYPE</code></td>
-<td>值类型不对（枚举值不在选项里、整数给成了字符串）</td>
 </tr>
 <tr>
+<td></td>
+<td><code>kind: 'self'</code> / <code>'all'</code></td>
+<td>却带了 <code>groupIds</code></td>
 <td><code>INVALID_SCOPE</code></td>
-<td><code>kind: self</code> 却带了 <code>groupIds</code></td>
+</tr>
+<tr>
+<td><strong>树结构</strong></td>
+<td><code>include</code> / <code>exclude</code> 的根</td>
+<td>不是 group</td>
+<td><code>UNKNOWN_NODE</code></td>
+</tr>
+<tr>
+<td></td>
+<td>每个 group 的 <code>children</code></td>
+<td>空数组</td>
+<td><code>EMPTY_GROUP</code></td>
+</tr>
+<tr>
+<td></td>
+<td>节点 <code>type</code></td>
+<td>不认识</td>
+<td><code>UNKNOWN_NODE</code></td>
+</tr>
+<tr>
+<td><strong>各叶子的字段</strong></td>
+<td><code>portrait</code> 的 <code>field</code> 和 <code>op</code></td>
+<td>少任何一个</td>
+<td><code>INCOMPLETE_LEAF</code></td>
+</tr>
+<tr>
+<td></td>
+<td><code>relation</code> 的 <code>relation</code> / <code>formula</code> / <code>op</code></td>
+<td>少任何一个</td>
+<td><code>INCOMPLETE_LEAF</code></td>
+</tr>
+<tr>
+<td></td>
+<td><code>uid</code> 的 <code>uids</code></td>
+<td>不是数组 / 空数组</td>
+<td><code>INCOMPLETE_LEAF</code></td>
+</tr>
+<tr>
+<td></td>
+<td><code>uid</code> 的每个元素</td>
+<td>不是十进制整数字符串</td>
+<td><code>VALUE_TYPE</code></td>
+</tr>
+<tr>
+<td><strong>关系专属</strong></td>
+<td><code>formula: 'detail'</code> 的 <code>op</code></td>
+<td>不是 <code>in</code> / <code>not_in</code></td>
+<td><code>OP_NOT_ALLOWED</code></td>
+</tr>
+<tr>
+<td></td>
+<td><code>formula: 'detail'</code> 的 <code>value</code></td>
+<td>带了 value（detail 不看值）</td>
+<td><code>INCOMPLETE_LEAF</code></td>
+</tr>
+<tr>
+<td></td>
+<td><code>formula: 'detail'</code> 的 <code>objects</code></td>
+<td>空数组</td>
+<td><code>INCOMPLETE_LEAF</code></td>
+</tr>
+<tr>
+<td></td>
+<td><code>formula: 'times'</code> 的 <code>op</code></td>
+<td>不是六个比较符或 <code>between</code></td>
+<td><code>OP_NOT_ALLOWED</code></td>
+</tr>
+<tr>
+<td></td>
+<td><code>formula: 'times'</code> 的 <code>value</code></td>
+<td>不是非负整数</td>
+<td><code>INCOMPLETE_LEAF</code></td>
+</tr>
+<tr>
+<td></td>
+<td><code>between</code> 的区间</td>
+<td><code>min &gt; max</code></td>
+<td><code>VALUE_TYPE</code></td>
+</tr>
+<tr>
+<td></td>
+<td><code>props.logic</code> / <code>props.items</code></td>
+<td>不是 AND/OR、空数组</td>
+<td><code>INCOMPLETE_LEAF</code></td>
+</tr>
+<tr>
+<td><strong>谓词的值</strong></td>
+<td><code>isNull</code> / <code>isNotNull</code></td>
+<td>却带了 value</td>
+<td><code>VALUE_TYPE</code></td>
+</tr>
+<tr>
+<td></td>
+<td><code>in</code> / <code>not_in</code></td>
+<td>不是数组、空数组、元素不是标量</td>
+<td><code>VALUE_TYPE</code> / <code>INCOMPLETE_LEAF</code></td>
+</tr>
+<tr>
+<td></td>
+<td><code>between</code></td>
+<td>不是两元、端点不是标量</td>
+<td><code>VALUE_TYPE</code></td>
+</tr>
+<tr>
+<td></td>
+<td>相对时间操作符</td>
+<td>不是正整数</td>
+<td><code>VALUE_TYPE</code></td>
 </tr>
 </tbody>
 </table>
-</div>
-          
-        </div></div><p><strong>两组各自负责的事情，从错误码上就能看出来。</strong> 这就是「分两段」最实际的好处。</p>
-<hr>
-<h2 id="三处反直觉的设计"><span class="num">05</span>三处反直觉的设计</h2>
-<p>前面都是「它是什么」。这一节讲<strong>它为什么这么做</strong> —— 三处不看源码就想不到的地方。</p>
-<h3 id="51-为什么-include-和-exclude-写法不一样">5.1 为什么 include 和 exclude 写法不一样</h3>
-<p>先看真代码里那个函数，一共四行：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">function whereSql(universe, includeExpr, excludeExpr) {
-  const parts = [...universe];
-  if (includeExpr) parts.push(includeExpr);                              // ← 裸的
-  if (excludeExpr) parts.push(`NOT COALESCE((${excludeExpr}), FALSE)`);  // ← 包了两层
-  ...
-}
-</code></pre></div>
-<div class="callout tone-red">
-      <span class="ic">⚠</span>
-      <div><p><mark class="mk-blue">一个裸着，一个包了 <code>NOT COALESCE</code>。这不是笔误。</mark></p>
-<p>正常人第一次看到都会觉得「应该统一一下」。
-<mark class="mk-blue">但统一会引入一个只在 NULL 上暴露的 bug。</mark></p>
-</div>
-    </div><h4>亲手试一遍</h4>
-<p>下面 6 行数据，其中两行「性别」是<strong>未知（NULL）</strong>。</p>
-<p>条件固定是 <code>gender = 'M'</code>。<strong>换「放进哪边」和「包不包 COALESCE」，看哪几行留下来。</strong></p>
-<div class="demo" data-widget="null-lab" data-config="{&quot;col&quot;:&quot;gender&quot;,&quot;label&quot;:&quot;性别&quot;,&quot;matchVal&quot;:&quot;M&quot;,&quot;rows&quot;:[{&quot;id&quot;:1,&quot;name&quot;:&quot;张三&quot;,&quot;v&quot;:&quot;M&quot;},{&quot;id&quot;:2,&quot;name&quot;:&quot;李四&quot;,&quot;v&quot;:&quot;F&quot;},{&quot;id&quot;:3,&quot;name&quot;:&quot;王五&quot;,&quot;v&quot;:null},{&quot;id&quot;:4,&quot;name&quot;:&quot;赵六&quot;,&quot;v&quot;:&quot;M&quot;},{&quot;id&quot;:5,&quot;name&quot;:&quot;孙七&quot;,&quot;v&quot;:&quot;F&quot;},{&quot;id&quot;:6,&quot;name&quot;:&quot;周八&quot;,&quot;v&quot;:null}]}">
+<blockquote>
+<p>这些检查分散在 6 个函数里：<code>validateScope</code>、<code>validateNodeStructure</code>、<code>validatePortraitStructure</code>、<code>validateRelationStructure</code>、<code>validatePropsStructure</code>、<code>validateUid</code>、<code>validatePredicateShape</code>。前两个管 scope 和树，后五个各管一种叶子。</p>
+</blockquote>
+<p><strong>一个细节</strong>：<code>INCOMPLETE_LEAF</code> 和 <code>VALUE_TYPE</code> 在这一段都会出现 —— 前者是「少了东西」，后者是「东西在但不对」（比如 <code>uids</code> 里有个 <code>&quot;abc&quot;</code>）。</p>
+<p>下面可以点。八种坏输入，看它在哪一段停下来：</p>
+<div class="demo" data-widget="validate-lab" data-config="{&quot;cases&quot;:[{&quot;label&quot;:&quot;空组&quot;,&quot;stage&quot;:&quot;shape&quot;,&quot;code&quot;:&quot;{ \&quot;type\&quot;: \&quot;group\&quot;, \&quot;logic\&quot;: \&quot;AND\&quot;, \&quot;children\&quot;: [] }&quot;,&quot;mark&quot;:&quot;\&quot;children\&quot;: []&quot;,&quot;err&quot;:&quot;EMPTY_GROUP&quot;,&quot;why&quot;:&quot;一个组里一个孩子都没有，界面上不该产生这种输入，所以当成 bug 拦掉，而不是当成「空条件」放过。&quot;},{&quot;label&quot;:&quot;缺 op&quot;,&quot;stage&quot;:&quot;shape&quot;,&quot;code&quot;:&quot;{ \&quot;type\&quot;: \&quot;portrait\&quot;, \&quot;field\&quot;: \&quot;age\&quot;, \&quot;value\&quot;: 18 }&quot;,&quot;mark&quot;:&quot;\&quot;value\&quot;: 18 }&quot;,&quot;err&quot;:&quot;INCOMPLETE_LEAF&quot;,&quot;why&quot;:&quot;field 有、value 有，但 op 没给。这一段只看到「少了一个必填项」，不知道 age 是什么。&quot;},{&quot;label&quot;:&quot;between 给一个值&quot;,&quot;stage&quot;:&quot;shape&quot;,&quot;code&quot;:&quot;{ \&quot;type\&quot;: \&quot;portrait\&quot;, \&quot;field\&quot;: \&quot;age\&quot;, \&quot;op\&quot;: \&quot;between\&quot;, \&quot;value\&quot;: [18] }&quot;,&quot;mark&quot;:&quot;[18]&quot;,&quot;err&quot;:&quot;VALUE_TYPE&quot;,&quot;why&quot;:&quot;between 要两个端点。注意这里是 VALUE_TYPE 不是 INCOMPLETE_LEAF —— value 在，只是形状不对。&quot;},{&quot;label&quot;:&quot;uids 不是数字&quot;,&quot;stage&quot;:&quot;shape&quot;,&quot;code&quot;:&quot;{ \&quot;type\&quot;: \&quot;uid\&quot;, \&quot;op\&quot;: \&quot;in\&quot;, \&quot;uids\&quot;: [\&quot;1001\&quot;, \&quot;abc\&quot;] }&quot;,&quot;mark&quot;:&quot;\&quot;abc\&quot;&quot;,&quot;err&quot;:&quot;VALUE_TYPE&quot;,&quot;why&quot;:&quot;uids 必须是十进制整数字符串。原因是这些值会被直接拼进 SQL 的 IN 列表，不能带引号和反斜杠。&quot;},{&quot;label&quot;:&quot;字段不存在&quot;,&quot;stage&quot;:&quot;semantic&quot;,&quot;code&quot;:&quot;{ \&quot;type\&quot;: \&quot;portrait\&quot;, \&quot;field\&quot;: \&quot;user_age\&quot;, \&quot;op\&quot;: \&quot;gte\&quot;, \&quot;value\&quot;: 18 }&quot;,&quot;mark&quot;:&quot;\&quot;user_age\&quot;&quot;,&quot;err&quot;:&quot;UNKNOWN_FIELD&quot;,&quot;why&quot;:&quot;形状没问题，是拿字段字典查不到这个 field_key。&quot;},{&quot;label&quot;:&quot;操作符不允许&quot;,&quot;stage&quot;:&quot;semantic&quot;,&quot;code&quot;:&quot;{ \&quot;type\&quot;: \&quot;portrait\&quot;, \&quot;field\&quot;: \&quot;region\&quot;, \&quot;op\&quot;: \&quot;gte\&quot;, \&quot;value\&quot;: \&quot;US\&quot; }&quot;,&quot;mark&quot;:&quot;\&quot;gte\&quot;&quot;,&quot;err&quot;:&quot;OP_NOT_ALLOWED&quot;,&quot;why&quot;:&quot;region 是枚举类型，允许的操作符里没有 gte。允许哪些是字段定义里带的 ops 数组。&quot;},{&quot;label&quot;:&quot;枚举值不在候选里&quot;,&quot;stage&quot;:&quot;semantic&quot;,&quot;code&quot;:&quot;{ \&quot;type\&quot;: \&quot;portrait\&quot;, \&quot;field\&quot;: \&quot;region\&quot;, \&quot;op\&quot;: \&quot;eq\&quot;, \&quot;value\&quot;: \&quot;XX\&quot; }&quot;,&quot;mark&quot;:&quot;\&quot;XX\&quot;&quot;,&quot;err&quot;:&quot;VALUE_TYPE&quot;,&quot;why&quot;:&quot;region 的 options 里没有 XX。枚举字段会逐个比对候选值，所以拼不出意料之外的字符串。&quot;},{&quot;label&quot;:&quot;年龄给了字符串&quot;,&quot;stage&quot;:&quot;semantic&quot;,&quot;code&quot;:&quot;{ \&quot;type\&quot;: \&quot;portrait\&quot;, \&quot;field\&quot;: \&quot;age\&quot;, \&quot;op\&quot;: \&quot;gte\&quot;, \&quot;value\&quot;: \&quot;18\&quot; }&quot;,&quot;mark&quot;:&quot;\&quot;18\&quot;&quot;,&quot;err&quot;:&quot;VALUE_TYPE&quot;,&quot;why&quot;:&quot;age 的 valueType 是 int，字符串 18 不匹配。&quot;}]}">
       <div class="demo-head">
-        <span class="title">6 行数据 · 一个条件 · 四种写法</span>
+        <span class="title">喂几个坏输入，看它在哪一段被拦</span>
         <span class="status" data-status></span>
         <span class="spacer"></span>
         
       </div>
       <div class="demo-body custom" data-mount></div>
-    </div><h4>试出来的是什么</h4>
-<p><strong>把 <code>gender = 'M'</code> 放进 exclude，期望是「排除掉男性，留下其余 4 人」。</strong></p>
+    </div><h3 id="第二段-语义校验">第二段 · 语义校验</h3>
+<p>入口是 <code>validateSemantics(query, catalog)</code>。它按同样的方式再走一遍树，但这次每片叶子都要跟字段字典对。</p>
+<p>三类检查，顺序固定：</p>
+<p><strong>① 名字存在吗</strong> —— <code>fieldByName(catalog, leaf.field)</code> / <code>relationByName(...)</code> / <code>rel.props.find(...)</code>。找不到就报 <code>UNKNOWN_FIELD</code> / <code>UNKNOWN_RELATION</code> / <code>UNKNOWN_RELATION_PROP</code>。</p>
+<p><strong>② 操作符允许吗</strong> —— 看字段定义里的 <code>ops</code> 数组。</p>
 <table>
 <thead>
 <tr>
-<th>写法</th>
-<th>NULL 那两行</th>
-<th>为什么</th>
+<th>字段类型</th>
+<th><code>ops</code> 是怎么来的</th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td><code>NOT COALESCE((gender = 'M'), FALSE)</code></td>
-<td><strong>留下</strong> ✓</td>
-<td><code>COALESCE</code> 把 UNKNOWN 压成 FALSE，<code>NOT FALSE</code> = TRUE</td>
+<td>数值 / 日期</td>
+<td><code>eq</code> <code>neq</code> <code>lt</code> <code>lte</code> <code>gt</code> <code>gte</code> <code>between</code> <code>isNull</code> <code>isNotNull</code></td>
 </tr>
 <tr>
-<td><code>NOT (gender = 'M')</code></td>
-<td><strong>丢掉</strong> ✗</td>
-<td><code>NOT UNKNOWN</code> 还是 UNKNOWN，而 WHERE 把 UNKNOWN 当 false</td>
+<td>枚举</td>
+<td><code>eq</code> <code>neq</code> <code>in</code> <code>notIn</code> <code>isNull</code> <code>isNotNull</code></td>
+</tr>
+<tr>
+<td>布尔</td>
+<td><code>eq</code> <code>isNull</code> <code>isNotNull</code></td>
 </tr>
 </tbody>
 </table>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>值</th><th>为什么 include 不用包</th><th>为什么 exclude 必须包</th></tr></thead><tbody><tr><th>想要的语义</th><td data-label="为什么 include 不用包">「满足条件的才进来」→ 不满足就该被挡在外面</td><td data-label="为什么 exclude 必须包">「满足条件的出去」→ <mark class="mk-blue">不满足的（包括不知道的）应该留下</mark></td></tr><tr><th>UNKNOWN 该怎么办</th><td data-label="为什么 include 不用包">当成「不满足」→ 不进来</td><td data-label="为什么 exclude 必须包">当成「不在 E 里」→ 留下</td></tr><tr><th>SQL 默认行为</th><td data-label="为什么 include 不用包"><span class="tag tone-green">WHERE 天然把 UNKNOWN 当 false ✓</span></td><td data-label="为什么 exclude 必须包"><span class="tag tone-red">NOT UNKNOWN 还是 UNKNOWN → 被当成 false ✗</span></td></tr><tr><th>结论</th><td data-label="为什么 include 不用包"><span class="tag tone-green">不用包，语义已经对了</span></td><td data-label="为什么 exclude 必须包"><span class="tag tone-amber">必须包，否则误伤</span></td></tr></tbody></table></div><div class="callout tone-violet">
-      <span class="ic">💡</span>
-      <div><p><strong>用集合的说法</strong>：<code>include</code> 要的是 <code>U ∩ I</code>，<code>exclude</code> 要的是 <code>U − E</code>。</p>
-<p><mark class="mk-blue">减法必须二值 —— 一个人要么在 E 里，要么不在，不能「不知道」。</mark>
-而 <code>gender = 'M'</code> 对 NULL 行给的是「不知道」，不是「不在」。
-<code>COALESCE</code> 的作用就是把这个「不知道」强行归到「不在」那一侧。</p>
-</div>
-    </div><h4>这个约定被测试钉死了</h4>
-<p>包里有一个专门的文件看着它：<code>test/includeCoalesce.spec.ts</code>。</p>
-<p>它甚至带了一对<strong>构造反例</strong>的工具（<code>wrapIncludeCoalesce</code> / <code>unwrapIncludeCoalesce</code>），
-专门用来验证两件事：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">it('does not wrap include-only trees')                              // include 不该包
-it('still wraps exclude with NOT COALESCE so missing rows stay')    // exclude 必须包
-</code></pre></div>
-<p><mark class="mk-blue">将来谁「顺手统一一下」，测试立刻红。</mark> 这就是把设计意图写进测试的样子。</p>
-<h3 id="52-为什么年龄在数据库里不存在">5.2 为什么「年龄」在数据库里不存在</h3>
-<p>字段字典里 <code>age</code> 这一行长这样：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-json">{ &quot;name&quot;: &quot;age&quot;, &quot;label&quot;: &quot;年龄&quot;,
-  &quot;column&quot;: &quot;birthday&quot;,
-  &quot;valueType&quot;: &quot;int&quot;,
-  &quot;derive&quot;: { &quot;kind&quot;: &quot;age_years&quot; } }
-</code></pre></div>
-<p><strong><code>name</code> 和 <code>column</code> 不是一回事。</strong></p>
-<div class="jcard">
-          <div class="jcard-head">
-            <span class="tag tone-muted">① 界面说</span>
-            <span class="name">逻辑字段</span>
-            <span class="spacer"></span>
-            <span class="tag tone-muted">用户看到的</span>
-          </div>
-          <div class="rec"><div class="">
-            <b>name</b><span>age</span></div><div class="">
-            <b>label</b><span>年龄</span></div></div>
-          
-          <p class="jnote">界面上的下拉框写的是「年龄」。<strong>用户不知道 birthday 是什么。</strong></p>
-        </div><div class="conn">
-      <span class="stem"></span>
-      <span class="pill">查字段字典<span class="note">这一步发生在服务端</span></span>
-      <span class="stem"></span><span class="head"></span>
-    </div><div class="jcard">
-          <div class="jcard-head">
-            <span class="tag tone-violet">② 字典说</span>
-            <span class="name">物理列 + 变换</span>
-            <span class="spacer"></span>
-            <span class="tag tone-violet">推导规则</span>
-          </div>
-          <div class="rec"><div class="ok">
-            <b>column</b><span>birthday</span><em>真实存在的列</em></div><div class="">
-            <b>derive</b><span>age_years</span><em>不是直接读，要算</em></div></div>
-          
-          <p class="jnote">字典把「逻辑字段」翻译成「物理列 + 一个变换」。</p>
-        </div><div class="conn">
-      <span class="stem"></span>
-      <span class="pill">编译<span class="note">变换决定 SQL 长什么样</span></span>
-      <span class="stem"></span><span class="head"></span>
-    </div><div class="jcard">
-          <div class="jcard-head">
-            <span class="tag tone-green">③ SQL 里</span>
-            <span class="name">表达式</span>
-            <span class="spacer"></span>
-            
-          </div>
-          
-          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>TIMESTAMPDIFF(YEAR, `u`.`birthday`, CURRENT_DATE())
-</pre></div>
-          <p class="jnote"><mark class="mk-blue">数据库里没有「年龄」这一列，它是每次查询现算的。</mark></p>
-        </div><p><strong>为什么绕这一圈？</strong> 因为「年龄」有两个麻烦：</p>
-<div class="cards" data-cols="2"><div class="ccard tone-amber">
-          
-          <h4>它会变</h4>
-          <p>生日是不变的，年龄每年涨一岁。存年龄就要每天刷一遍全表。</p>
-          <div class="cbody"><p>如果真存一列 <code>age</code>：</p>
-<ul>
-<li>每个人生日那天要 UPDATE</li>
-<li>忘了刷就会推出「这个人 30 岁」而实际 31</li>
-<li>跨时区还要考虑「算哪一天」</li>
-</ul>
-<p><mark class="mk-blue">存生日，年龄每次算 —— 只有一处逻辑，永远不会过期。</mark></p>
-</div>
-          
-        </div><div class="ccard tone-violet">
-          
-          <h4>口径必须唯一</h4>
-          <p>「年龄」可能是周岁、可能是虚岁、可能按自然年算。三处各写一遍就会不一致。</p>
-          <div class="cbody"><p><code>derive</code> 只有两个取值，<strong>整个系统里「年龄怎么算」只有一处定义</strong>：</p>
+<p>这三个数组在 <code>catalog.ts</code> 里叫 <code>RANGE</code> / <code>SET</code> / <code>BOOL</code>。元数据从 MySQL 读的时候，是按 <code>semantic_type</code> 从 <code>crm_dc_operator</code> 查出来的。</p>
+<p><strong>③ 值类型对吗</strong> —— <code>isValidValue(value, valueType, options)</code> 的五个分支：</p>
 <table>
 <thead>
 <tr>
-<th>kind</th>
-<th>生成什么</th>
+<th><code>valueType</code></th>
+<th>怎么判</th>
+<th>例子</th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td><code>age_years</code></td>
-<td><code>TIMESTAMPDIFF(YEAR, col, CURRENT_DATE())</code></td>
+<td><code>int</code></td>
+<td><code>typeof === 'number'</code> 且是整数</td>
+<td><code>18</code> ✓，<code>&quot;18&quot;</code> ✗</td>
 </tr>
 <tr>
-<td><code>days_since</code></td>
-<td><code>DATEDIFF(CURRENT_DATE(), col)</code></td>
+<td><code>decimal</code></td>
+<td><code>typeof === 'number'</code> 且有限</td>
+<td><code>1000.5</code> ✓</td>
+</tr>
+<tr>
+<td><code>string</code></td>
+<td><code>typeof === 'string'</code></td>
+<td>任何字符串都过</td>
+</tr>
+<tr>
+<td><code>bool</code></td>
+<td><code>typeof === 'boolean'</code></td>
+<td><code>true</code> ✓，<code>1</code> ✗</td>
+</tr>
+<tr>
+<td><code>enum</code></td>
+<td><strong>有 <code>options</code> 就逐个比对</strong>；没有就只查类型</td>
+<td><code>&quot;US&quot;</code> 在候选里 ✓，<code>&quot;XX&quot;</code> ✗</td>
 </tr>
 </tbody>
 </table>
-<p><mark class="mk-blue">所以「距上次成交天数」和「年龄」用的是同一套机制。</mark></p>
-</div>
-          
-        </div></div><p><strong>同一个 <code>days_since</code> 用在四个字段上</strong>，它们各自映射到不同的物理列：</p>
+<p>注意 <code>enum</code> 那一行：<strong>有候选值列表时，校验会收紧</strong>。这是枚举字段拼不出任意字符串的原因。</p>
+<p><strong>关系对象走的是另一条路。</strong> <code>relations[].objectType</code> 决定值类型，候选值来自 <code>objectSource</code>：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">holding 的 objectSource 是 { kind: 'provider', key: 'stock_search' }
+  → 没有本地候选值，只查是不是字符串
+
+product 的 objectSource 是 { kind: 'inline', options: [...] }
+  → 有候选值，逐个比对
+</code></pre></div>
+<p><code>times</code> 分支的值不走 <code>isValidValue</code> —— 它是计数，另外判「非负整数」和「<code>between</code> 时 min ≤ max」。</p>
+<h3 id="第三段-拼-sql">第三段 · 拼 SQL</h3>
+<h4>挂载点：返回一个函数，而不是字符串</h4>
+<p><code>compileTree</code> 的返回类型是：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-ts">type Gate = 'and' | 'or';
+type Apply = (query: Knex.QueryBuilder, gate: Gate) =&gt; void;
+</code></pre></div>
+<p><strong>它不返回 SQL 文本，返回一个「怎么加条件」的函数。</strong> 调用方决定什么时候、以什么方式调用它。</p>
+<p>原因是 Knex 拼嵌套条件时的形状：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-js">// AND 组：第一个用 where，后面的也用 where（Knex 默认就是 AND）
+qb.where(a).where(b)
+
+// OR 组：第一个用 where，后面的用 orWhere
+qb.where(a).orWhere(b)
+
+// 嵌套：每一层要开一个括号，括号里重新数第一个
+qb.where(function () {
+  this.where(a).orWhere(b)
+})
+</code></pre></div>
+<p><strong>递归函数不知道自己是第几个。</strong> 这个信息只有父层有。所以父层在循环里决定，通过 <code>gate</code> 传下去：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-ts">const grouped = function (this: Knex.QueryBuilder) {
+  children.forEach((child, index) =&gt; {
+    child(this, index === 0 ? 'and' : logic === 'OR' ? 'or' : 'and');
+  });
+};
+if (gate === 'or') query.orWhere(grouped);
+else query.where(grouped);
+</code></pre></div>
+<p>第一个孩子永远拿到 <code>'and'</code> —— 因为在它前面没有东西可以 <code>or</code>。</p>
+<p>这样安排之后，叶子那一层完全不知道 <code>where</code> / <code>andWhere</code> / <code>orWhere</code> 的存在，它只管「我加什么条件」。好处是叶子能单独测，新增节点类型时不用碰挂载逻辑。</p>
+<h4>四种叶子各自的形状</h4>
+<table>
+<thead>
+<tr>
+<th>叶子</th>
+<th>生成的 SQL</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>portrait</code></td>
+<td><code>`u`.`region` = ?</code></td>
+</tr>
+<tr>
+<td><code>portrait</code> + <code>derive</code></td>
+<td><code>TIMESTAMPDIFF(YEAR, `u`.`birthday`, CURRENT_DATE()) &gt;= ?</code></td>
+</tr>
+<tr>
+<td><code>relation</code> + <code>detail</code></td>
+<td><code>`u`.`uid` IN (SELECT `rel_holding`.`uid` FROM `rel_holding` AS `rel_holding` WHERE ...)</code></td>
+</tr>
+<tr>
+<td><code>relation</code> + <code>detail</code> + <code>not_in</code></td>
+<td><code>NOT EXISTS (SELECT 1 FROM `rel_holding` AS `rel_holding` WHERE `rel_holding`.`uid` = `u`.`uid` AND ...)</code></td>
+</tr>
+<tr>
+<td><code>relation</code> + <code>times</code></td>
+<td><code>`u`.`uid` IN (SELECT uid FROM ... GROUP BY uid HAVING COUNT(*) &gt;= ?)</code></td>
+</tr>
+<tr>
+<td><code>uid</code></td>
+<td><code>`u`.`uid` IN (?, ?, ...)</code></td>
+</tr>
+</tbody>
+</table>
+<p><code>detail</code> 的 <code>objects</code> 和 <code>props</code> 都进子查询的 WHERE：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-sql">-- objects：落在 object_id 列
+WHERE `rel_holding`.`object_id` IN ('00700.HK')
+
+-- props：落在各自的物理列，按 logic 组合
+WHERE (`rel_holding`.`qty` &gt;= ? AND `rel_holding`.`market` = ?)
+</code></pre></div>
+<h4>派生字段走的不是普通比较</h4>
+<p><code>portraitExpr(field)</code> 决定这个字段的「表达式」是什么：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-ts">if (field.derive?.kind === 'days_since')
+  return db.raw('DATEDIFF(CURRENT_DATE(), ??)', [ref])          // 距上次 X 天数
+if (field.derive?.kind === 'age_years')
+  return db.raw('TIMESTAMPDIFF(YEAR, ??, CURRENT_DATE())', [ref]) // 年龄
+return { kind: 'column', ref }                                   // 普通列
+</code></pre></div>
+<p>返回值有两种形态：<code>{ kind: 'column' }</code> 和 <code>{ kind: 'sql' }</code>。后面 <code>applyIn</code> / <code>applyBetween</code> / <code>applyScalar</code> 都要按这两种形态分叉：</p>
+<table>
+<thead>
+<tr>
+<th>形态</th>
+<th>怎么加条件</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>column</code></td>
+<td>用 Knex 的 <code>where(ref, op, value)</code> / <code>whereIn</code> / <code>whereBetween</code></td>
+</tr>
+<tr>
+<td><code>sql</code></td>
+<td>用 <code>whereRaw(sql, values)</code>，表达式里用 <code>??</code> 占位列、<code>?</code> 占位值</td>
+</tr>
+</tbody>
+</table>
+<p><strong>这就是「年龄」在数据库里不存在的原因。</strong> 字段字典里 <code>age</code> 的 <code>column_name</code> 是 <code>birthday</code>、<code>derive_kind</code> 是 <code>age_years</code>，编译时现算。</p>
+<p>好处是它不会过期（存年龄要每天刷全表），口径也只有一处（周岁还是虚岁、按哪天算，只有一个答案）。</p>
+<p>同一个机制还用在四个「距上次 X 天数」的字段上，它们都是 <code>days_since</code>：</p>
 <div class="tree" data-tree><ul class="tlist"><li class="has-kids">
             <div class="tnode tone-green" data-tree-node>
               <span class="tcaret" aria-hidden="true"></span>
-              <b>derive: days_since</b>
+              <b>derive_kind: days_since</b>
               <code>DATEDIFF(CURRENT_DATE(), col)</code>
-              <span class="tnote">一个变换，四个字段在用</span>
+              <span class="tnote">一个模板，四个字段在用</span>
             </div>
             <ul class="tlist"><li>
             <div class="tnode tone-muted" data-tree-node>
@@ -4298,85 +4460,181 @@ it('still wraps exclude with NOT COALESCE so missing rows stay')    // exclude �
             </div>
             
           </li></ul>
-          </li></ul></div><h3 id="53-权限不是过滤是编进-where">5.3 权限不是「过滤」，是「编进 WHERE」</h3>
-<p>直觉上，权限应该是「查完再筛掉不该看的」。真代码不是这样：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">function universePreds(actor, scope) {
-  const preds = [];
-  if (scope.kind === 'team' &amp;&amp; actor.dataLevel === 'team') {
-    pushGroups(preds, scope.groupIds.filter(id =&gt; actor.groupIds.includes(id)));  // 取交集
-  } else if (scope.kind === 'team') {
-    pushGroups(preds, scope.groupIds);
-  } else if (actor.dataLevel === 'team') {
-    pushGroups(preds, actor.groupIds);
-  }
-  if (actor.dataLevel === 'self' || scope.kind === 'self') {
-    preds.push(`\`u\`.\`staff_id\` = ${actor.staffId}`);
-  }
-  return preds;
-}
+          </li></ul></div><h4>权限谓词插在最前面</h4>
+<p><code>applyUniverse(query, actor, scope)</code> 在拼条件之前先跑一遍。它的输入 <code>actor</code> 不是 DSL 里的东西，是调用方传进来的：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-ts">actor = { staffId: number; dataLevel: 'self' | 'team' | 'all'; groupIds: number[] }
 </code></pre></div>
-<p><strong>它产出的是一段 WHERE 谓词，和用户圈的条件拼在一起。</strong></p>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>做法</th><th>查完再过滤</th><th>编进 WHERE</th></tr></thead><tbody><tr><th>SQL 长什么样</th><td data-label="查完再过滤">两段：先查全量，再筛</td><td data-label="编进 WHERE">一段：<code>WHERE u.staff_id = 101 AND (用户条件)</code></td></tr><tr><th>扫描的数据量</th><td data-label="查完再过滤"><span class="tag tone-red">全表 100 万行</span></td><td data-label="编进 WHERE"><span class="tag tone-green">只有自己名下那部分</span></td></tr><tr><th>「忘了过滤」的后果</th><td data-label="查完再过滤"><span class="tag tone-red">越权数据已经查出来了，只是没显示</span></td><td data-label="编进 WHERE"><span class="tag tone-green"><mark class="mk-blue">数据库层面就不可能返回</mark>，没有这个 bug 类型</span></td></tr><tr><th>谁能绕过</th><td data-label="查完再过滤">任何一个走捷径的新接口</td><td data-label="编进 WHERE">绕过不了 —— 谓词是 <code>compile()</code> 的必经步骤</td></tr></tbody></table></div><div class="callout tone-green">
-      <span class="ic">✅</span>
-      <div><p><mark class="mk-blue">这是「让错误的做法写不出来」，不是「提醒大家别写错」。</mark></p>
-<p><code>compile()</code> 的签名就决定了：<strong>你不给它 actor，它就没法工作。</strong></p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-ts">export function compile(query: InsightQuery, options: CompileOptions): CompileResult
-//                                    options 里 actor 是必填的
+<table>
+<thead>
+<tr>
+<th><code>scope.kind</code></th>
+<th><code>actor.dataLevel</code></th>
+<th>加什么谓词</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>team</code></td>
+<td><code>team</code></td>
+<td><code>group_id IN (scope 和 actor 的交集)</code></td>
+</tr>
+<tr>
+<td><code>team</code></td>
+<td>其它</td>
+<td><code>group_id IN (scope.groupIds)</code></td>
+</tr>
+<tr>
+<td>其它</td>
+<td><code>team</code></td>
+<td><code>group_id IN (actor.groupIds)</code></td>
+</tr>
+<tr>
+<td><code>self</code> 或 <code>actor</code> 是 <code>self</code></td>
+<td></td>
+<td><code>staff_id = ?</code></td>
+</tr>
+</tbody>
+</table>
+<p><strong>它是编进 WHERE 的，不是查完再筛。</strong> 所以不存在「某个接口忘了过滤」这种漏洞 —— 想绕过就得改 <code>compile()</code> 本身。</p>
+<p>两个细节：</p>
+<ul>
+<li><strong>交集那个分支</strong>：组长传 <code>groupIds: [1, 2, 3]</code> 但他只有组 1，交集之后只剩 <code>[1]</code>。越权的组不是被拒绝，是从谓词里消失了。</li>
+<li><strong>空交集</strong>：<code>applyGroups</code> 拿到空数组时生成 <code>FALSE</code>。一个恒假条件，等于查不到任何人 —— 这比生成一个空 <code>IN ()</code>（语法错误）安全。</li>
+</ul>
+<h4>include 和 exclude 的写法不一样</h4>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code>include  →  谓词本身                          (cond1 AND cond2)
+exclude  →  NOT COALESCE((谓词), FALSE)
 </code></pre></div>
-<p>不存在「这个接口先不接权限，以后再补」的路径。</p>
-</div>
-    </div><p><strong>还有一个细节</strong>：<code>team</code> 身份只能圈自己的组。看第一段那个 <code>filter</code>：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-js">scope.groupIds.filter(id =&gt; actor.groupIds.includes(id))
+<p>exclude 外面套了一层 <code>COALESCE</code>。原因是 SQL 的三值逻辑：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code>gender = 'M' 对 NULL 行求值 → UNKNOWN（不是 TRUE 也不是 FALSE）
+NOT UNKNOWN                 → 还是 UNKNOWN
+WHERE 里的 UNKNOWN          → 按 false 处理 → 这行被丢掉
 </code></pre></div>
-<p>组长传 <code>{ kind: 'team', groupIds: [1, 2, 3] }</code>，但他只有组 1 —— <strong>交集之后只剩 [1]</strong>。
-越权的那部分不是被拒绝，是<strong>悄悄消失了</strong>。</p>
-<hr>
-<h2 id="它由什么组成"><span class="num">06</span>它由什么组成</h2>
-<p><code>src/</code> 下 <strong>10 个文件、1717 行</strong>。按行数排：</p>
+<p>所以「排除男性」写成 <code>NOT (gender = 'M')</code> 时，<strong>性别为 NULL 的人会被一并排除</strong> —— 他们既不满足「是男性」，也不满足「不是男性」。</p>
+<p><code>COALESCE</code> 把 UNKNOWN 归到 FALSE 一侧，排除集恢复成二值判断：要么在里面，要么不在。</p>
+<p>include 不需要这一层。「满足条件的进来」和 WHERE 的默认行为一致。</p>
+<p>这个约定有个测试文件专门看着它（<code>includeCoalesce.spec.ts</code>），里面带了一对构造反例的工具 —— 将来谁想把两边写法统一，测试会红。</p>
+<h4>关系为什么用 <code>IN</code> 子查询，不用 <code>LEFT JOIN</code></h4>
+<p>三个分支（<code>detail</code> / <code>detail + not_in</code> / <code>times</code>）全走子查询，没有一个是 JOIN。</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-sql">-- 一个人持 5 个标的
+LEFT JOIN rel_holding 之后  →  出 5 行
+COUNT(*)                   →  把「1 个人」数成「5」
+</code></pre></div>
+<p><code>IN</code> 子查询只回答「这个 uid 在不在结果集里」，一行对应一个人。</p>
+<p><strong>有一件事容易搞错</strong>：包一层 COUNT 解决不了这个问题。</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-sql">-- 结果还是 5，不是 1
+SELECT COUNT(*) FROM (
+  SELECT u.uid FROM users u LEFT JOIN rel_holding h ON h.uid = u.uid
+) t
+</code></pre></div>
+<p>子查询里只写 <code>SELECT u.uid</code> <strong>不会自动去重</strong>，要去重得写 <code>DISTINCT</code> 或 <code>GROUP BY</code>。</p>
+<p>本设计从语句形状上避免重复行产生，而不是在统计时去重。</p>
+<h4><code>not_in</code> 为什么是 <code>NOT EXISTS</code></h4>
+<p><code>not_in</code> 是<strong>关系集合级</strong>的否定，不是对象列上的否定。</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code>需求：「不持有腾讯」
+
+✅ NOT EXISTS (SELECT 1 FROM rel_holding
+               WHERE rel_holding.uid = u.uid AND object_id IN ('00700.HK'))
+   → 不存在「这个人与腾讯的关系记录」
+
+❌ WHERE object_id NOT IN ('00700.HK')
+   → 变成「这条关系记录不是腾讯」——行级否定，语义完全不同
+</code></pre></div>
+<p>用一句话验：<strong>同时持有腾讯和阿里的人，不满足「不持有腾讯」。</strong></p>
+<p>写成 <code>NOT EXISTS</code> 时结论正确。写成对象列上的 <code>NOT IN</code> 时，那个人会因为有阿里这条记录而被留下 —— 错的。</p>
+<p>代码里那句注释就是记这个：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-ts">// Set negation. filters stay a positive match; object_id is never NOT IN.
+</code></pre></div>
+<h3 id="组装从一段-where-到四条-sql">组装：从一段 WHERE 到四条 SQL</h3>
+<p>四段条件都准备好之后，<code>compile()</code> 用一个内部函数 <code>filtered()</code> 把它们拼到一个 Knex 查询上：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-ts">const filtered = (joins, seek) =&gt; {
+  const builder = db(`${universeTable} as u`);
+  if (seek) crossJoin(builder, seek);
+  for (const table of joins) builder.leftJoin(...);
+  applyUniverse(builder, actor, scope);       // 权限
+  if (includeApply) includeApply(builder, 'and');
+  if (exclude) builder.whereRaw(`NOT COALESCE((${exclude.sql}), FALSE)`, [...exclude.bindings]);
+  return builder;
+};
+</code></pre></div>
+<p>四条 SQL 都是从这个函数长出来的：</p>
+<table>
+<thead>
+<tr>
+<th>输出</th>
+<th>怎么来</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>uidsSql</code></td>
+<td><code>filtered(filterJoins).select('u.uid')</code></td>
+</tr>
+<tr>
+<td><code>countSql</code></td>
+<td><code>count(*) from (uidsSql) as t</code></td>
+</tr>
+<tr>
+<td><code>listSql</code></td>
+<td><code>filtered(listJoins)</code> + 展示列 + 排序 + 分页</td>
+</tr>
+<tr>
+<td><code>droppedUidsSql</code></td>
+<td>把点名的 uid 拼成派生表，再 <code>NOT EXISTS</code> 反查</td>
+</tr>
+</tbody>
+</table>
+<p><strong><code>countSql</code> 外面包一层子查询</strong>，统计的是 <code>uidsSql</code> 返回的行数。本期 <code>uidsSql</code> 不产生重复行（关系条件用子查询而非 JOIN，宽表的 <code>uid</code> 是唯一键），所以包一层不改变结果。它的作用是把「人数」定义成「<code>uidsSql</code> 这个集合的大小」，后续 <code>uidsSql</code> 里加入会改变行数的逻辑时，外层不用动。</p>
+<p>两个构造细节：</p>
+<ul>
+<li><strong><code>filterJoins</code> 和 <code>listJoins</code> 是两个不同的集合。</strong> 前者是条件里用到的表，后者是展示列用到的表。<code>uidsSql</code> 和 <code>countSql</code> 只需要前者，<code>listSql</code> 两个都要。</li>
+<li><strong><code>droppedUidsSql</code> 只在用过 <code>uid</code> 叶子时才有值</strong>，否则返回 <code>null</code>。它是给界面回话用的：「你点名的 100 个人里，有 20 个不在你的数据范围内」。代码里那句注释说明了它只核对 <code>in</code>：</li>
+</ul>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-ts">// droppedUidsSql 只核对 in 点名要纳入的人。not_in 的 id 不是纳入请求。
+</code></pre></div>
+<p><strong>分页走 uid 游标。</strong> <code>listSql</code> 有三种分页形态：</p>
+<table>
+<thead>
+<tr>
+<th>情况</th>
+<th>生成的 SQL</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>第一页</td>
+<td><code>ORDER BY u.uid LIMIT ?</code></td>
+</tr>
+<tr>
+<td>带 <code>afterUid</code></td>
+<td><code>WHERE u.uid &gt; ? ORDER BY u.uid LIMIT ?</code></td>
+</tr>
+<tr>
+<td>只有页码、没有游标</td>
+<td><code>CROSS JOIN (SELECT u.uid ... LIMIT 1 OFFSET ?) AS prev</code> 再 <code>WHERE u.uid &gt; prev.after_uid</code></td>
+</tr>
+</tbody>
+</table>
+<p>第三种是为了兼容「跳页」：先查目标页前一行的 uid，再按游标取。<strong>深分页时 <code>OFFSET</code> 会越翻越慢，所以正常翻页走游标。</strong></p>
+<p>还有两处 Knex 的补偿（都在 <code>knex.ts</code> 里）：</p>
+<ul>
+<li><strong><code>applyOffset</code></strong> —— Knex 在 offset 为 0 时会省略 <code>OFFSET</code>，而夹具要求它显式出现。</li>
+<li><strong><code>crossJoin</code></strong> —— Knex 没有 cross join 的一等 API，用 <code>joinRaw</code> 补。</li>
+</ul>
+<h2 id="它由什么组成"><span class="num">05</span>它由什么组成</h2>
+<p><code>src/</code> 下 <strong>11 个文件、1507 行</strong>。按行数排：</p>
 <div class="tree" data-tree><ul class="tlist"><li class="has-kids">
             <div class="tnode tone-violet" data-tree-node>
               <span class="tcaret" aria-hidden="true"></span>
               <b>packages/dsl/src</b>
               
-              <span class="tnote">10 个文件 · 1717 行（wc -l 实测）</span>
+              <span class="tnote">11 个文件 · 1507 行（wc -l 实测）</span>
             </div>
             <ul class="tlist"><li class="has-kids">
-            <div class="tnode tone-amber" data-tree-node>
-              <span class="tcaret" aria-hidden="true"></span>
-              <b>catalog.ts</b>
-              <code>474 行</code>
-              <span class="tnote">最大。字段字典的<strong>默认值</strong>（测试夹具），外加两个查名字的小函数</span>
-            </div>
-            <ul class="tlist"><li>
-            <div class="tnode tone-muted" data-tree-node>
-              <span class="tdot" aria-hidden="true"></span>
-              <b>defaultCatalog</b>
-              
-              <span class="tnote">46 个字段 + 2 个关系的硬编码副本</span>
-            </div>
-            
-          </li><li>
-            <div class="tnode tone-muted" data-tree-node>
-              <span class="tdot" aria-hidden="true"></span>
-              <b>fieldByName</b>
-              
-              <span class="tnote">找不到就返回 undefined —— 由调用方决定怎么办</span>
-            </div>
-            
-          </li><li>
-            <div class="tnode tone-muted" data-tree-node>
-              <span class="tdot" aria-hidden="true"></span>
-              <b>relationByName</b>
-              
-              <span class="tnote">同上</span>
-            </div>
-            
-          </li></ul>
-          </li><li class="has-kids">
             <div class="tnode tone-muted" data-tree-node>
               <span class="tcaret" aria-hidden="true"></span>
               <b>compile.ts</b>
-              <code>424 行</code>
+              <code>533 行</code>
               <span class="tnote">编排者。三段管道都在这里串起来</span>
             </div>
             <ul class="tlist"><li>
@@ -4392,31 +4650,31 @@ it('still wraps exclude with NOT COALESCE so missing rows stay')    // exclude �
               <span class="tdot" aria-hidden="true"></span>
               <b>compileNode</b>
               
-              <span class="tnote">递归展开条件树 —— 一个 switch 分派四种节点</span>
+              <span class="tnote">递归展开条件树，返回 Apply</span>
             </div>
             
           </li><li>
             <div class="tnode tone-muted" data-tree-node>
               <span class="tdot" aria-hidden="true"></span>
-              <b>whereSql</b>
+              <b>compileRelation</b>
               
-              <span class="tnote">拼 WHERE。include/exclude 的不对称就写在这里</span>
+              <span class="tnote">关系条件的三个分支</span>
             </div>
             
           </li><li>
             <div class="tnode tone-muted" data-tree-node>
               <span class="tdot" aria-hidden="true"></span>
-              <b>universePreds</b>
+              <b>applyUniverse</b>
               
-              <span class="tnote">权限下推</span>
+              <span class="tnote">权限谓词</span>
             </div>
             
           </li><li>
             <div class="tnode tone-muted" data-tree-node>
               <span class="tdot" aria-hidden="true"></span>
-              <b>compileListSql</b>
+              <b>filtered</b>
               
-              <span class="tnote">分页 —— 走 uid 游标，不走 OFFSET</span>
+              <span class="tnote">内部函数 —— 四条 SQL 都从它长出来</span>
             </div>
             
           </li></ul>
@@ -4424,7 +4682,7 @@ it('still wraps exclude with NOT COALESCE so missing rows stay')    // exclude �
             <div class="tnode tone-blue" data-tree-node>
               <span class="tcaret" aria-hidden="true"></span>
               <b>validate.ts</b>
-              <code>356 行</code>
+              <code>357 行</code>
               <span class="tnote">两段校验器。<strong>不含任何 SQL</strong></span>
             </div>
             <ul class="tlist"><li>
@@ -4448,7 +4706,7 @@ it('still wraps exclude with NOT COALESCE so missing rows stay')    // exclude �
             <div class="tnode tone-green" data-tree-node>
               <span class="tcaret" aria-hidden="true"></span>
               <b>schema.ts</b>
-              <code>319 行</code>
+              <code>320 行</code>
               <span class="tnote">类型定义 + 类型守卫 + 几个构造器</span>
             </div>
             <ul class="tlist"><li>
@@ -4456,7 +4714,7 @@ it('still wraps exclude with NOT COALESCE so missing rows stay')    // exclude �
               <span class="tdot" aria-hidden="true"></span>
               <b>Ops</b>
               
-              <span class="tnote">14 个操作符常量</span>
+              <span class="tnote">15 个操作符常量</span>
             </div>
             
           </li><li>
@@ -4479,43 +4737,99 @@ it('still wraps exclude with NOT COALESCE so missing rows stay')    // exclude �
           </li><li class="has-kids">
             <div class="tnode tone-muted" data-tree-node>
               <span class="tcaret" aria-hidden="true"></span>
-              <b>sql.ts</b>
-              <code>53 行</code>
-              <span class="tnote">只干一件事：<strong>安全地拼字符串</strong>。不做任何规则判断</span>
+              <b>knex.ts</b>
+              <code>129 行</code>
+              <span class="tnote">Knex 的包装层。四处补偿</span>
             </div>
             <ul class="tlist"><li>
             <div class="tnode tone-muted" data-tree-node>
               <span class="tdot" aria-hidden="true"></span>
-              <b>ident</b>
+              <b>db</b>
               
-              <span class="tnote">加反引号，内部反引号翻倍</span>
+              <span class="tnote">client 是 mysql，<strong>不连库</strong>，只用来拼 SQL</span>
             </div>
             
           </li><li>
             <div class="tnode tone-muted" data-tree-node>
               <span class="tdot" aria-hidden="true"></span>
-              <b>sqlString</b>
+              <b>_escapeBinding（覆盖）</b>
               
-              <span class="tnote">单引号翻倍 —— 转义</span>
+              <span class="tnote">布尔输出大写 TRUE/FALSE，字符串用 ANSI 的 ''</span>
             </div>
             
           </li><li>
             <div class="tnode tone-muted" data-tree-node>
               <span class="tdot" aria-hidden="true"></span>
-              <b>sqlLiteral</b>
+              <b>whereFragment</b>
               
-              <span class="tnote">按值类型给字面量：数字不加引号、布尔给 TRUE/FALSE</span>
+              <span class="tnote">把一段条件单独编译成 { sql, bindings } —— exclude 要套 NOT COALESCE</span>
+            </div>
+            
+          </li><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>renderSql</b>
+              
+              <span class="tnote">toString() 之后把关键字转大写（Knex 输出小写）</span>
+            </div>
+            
+          </li><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>crossJoin</b>
+              
+              <span class="tnote">Knex 没有 cross join 的一等 API</span>
             </div>
             
           </li></ul>
+          </li><li class="has-kids">
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>metadata.ts</b>
+              <code>61 行</code>
+              <span class="tnote">Catalog 的类型定义 + 两个查名字的函数</span>
+            </div>
+            <ul class="tlist"><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>FieldDef / RelationDef / Catalog</b>
+              
+              <span class="tnote">纯类型</span>
+            </div>
+            
           </li><li>
             <div class="tnode tone-muted" data-tree-node>
               <span class="tdot" aria-hidden="true"></span>
-              <b>metadata.ts</b>
-              <code>53 行</code>
-              <span class="tnote">字段字典、关系、Catalog 的<strong>类型定义</strong>。纯类型，运行时是空的</span>
+              <b>fieldByName / relationByName</b>
+              
+              <span class="tnote">找不到返回 undefined，由调用方决定怎么报错</span>
             </div>
             
+          </li></ul>
+          </li><li class="has-kids">
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>sql.ts</b>
+              <code>52 行</code>
+              <span class="tnote">重构前是唯一的拼 SQL 入口，<strong>现在不在生成路径上</strong></span>
+            </div>
+            <ul class="tlist"><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>compileScalarOp</b>
+              
+              <span class="tnote">把 op 映射成 = / != / &lt; / &lt;= / &gt; / &gt;=</span>
+            </div>
+            
+          </li><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>ident / qualify / sqlString / sqlLiteral / joinSql / inList</b>
+              
+              <span class="tnote">旧的手拼辅助函数，测试还在跑，生产不再调用</span>
+            </div>
+            
+          </li></ul>
           </li><li>
             <div class="tnode tone-muted" data-tree-node>
               <span class="tdot" aria-hidden="true"></span>
@@ -4524,6 +4838,22 @@ it('still wraps exclude with NOT COALESCE so missing rows stay')    // exclude �
               <span class="tnote">12 个错误码 + 一个 CompileError 类</span>
             </div>
             
+          </li><li class="has-kids">
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>page.ts</b>
+              <code>17 行</code>
+              <span class="tnote">只有一个函数，处理分页游标的入参</span>
+            </div>
+            <ul class="tlist"><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>parseAfterUid</b>
+              
+              <span class="tnote">把 bigint / number / string 统一成十进制整数字符串，不合法返回 undefined</span>
+            </div>
+            
+          </li></ul>
           </li><li>
             <div class="tnode tone-muted" data-tree-node>
               <span class="tdot" aria-hidden="true"></span>
@@ -4554,7 +4884,7 @@ it('still wraps exclude with NOT COALESCE so missing rows stay')    // exclude �
         <div class="lane-meta">
           <span class="ln">LAYER 01</span>
           <b>底层</b>
-          <small>一个依赖都没有 —— 所以任何一层都能引用它们</small>
+          <small>一个依赖都没有，任何一层都能引用</small>
         </div>
         <div class="lane-body"><div class="pnode">
         <b>context.ts</b>
@@ -4566,7 +4896,7 @@ it('still wraps exclude with NOT COALESCE so missing rows stay')    // exclude �
         <span class="tag tone-muted">错误码</span>
       </div><div class="pnode">
         <b>schema.ts</b>
-        <small>319 行</small>
+        <small>320 行</small>
         <span class="tag tone-muted">四种节点 + 类型守卫</span>
       </div></div>
       </div><div class="conn">
@@ -4577,20 +4907,24 @@ it('still wraps exclude with NOT COALESCE so missing rows stay')    // exclude �
         <div class="lane-meta">
           <span class="ln">LAYER 02</span>
           <b>类型与工具</b>
-          <small>只依赖 LAYER 01。三个文件彼此不引用</small>
+          <small>只依赖 LAYER 01</small>
         </div>
         <div class="lane-body"><div class="pnode">
         <b>metadata.ts</b>
-        <small>53 行</small>
-        <span class="tag tone-green">纯类型定义</span>
+        <small>61 行</small>
+        <span class="tag tone-green">类型 + 查名字</span>
+      </div><div class="pnode">
+        <b>page.ts</b>
+        <small>17 行</small>
+        <span class="tag tone-green">分页入参</span>
       </div><div class="pnode">
         <b>sql.ts</b>
-        <small>53 行</small>
-        <span class="tag tone-green">转义与字面量</span>
+        <small>52 行</small>
+        <span class="tag tone-green">比较符映射</span>
       </div><div class="pnode">
-        <b>catalog.ts</b>
-        <small>474 行</small>
-        <span class="tag tone-green">查名字</span>
+        <b>knex.ts</b>
+        <small>129 行</small>
+        <span class="tag tone-green">外部库的包装</span>
       </div></div>
       </div><div class="conn">
       <span class="stem"></span>
@@ -4604,7 +4938,7 @@ it('still wraps exclude with NOT COALESCE so missing rows stay')    // exclude �
         </div>
         <div class="lane-body"><div class="pnode">
         <b>validate.ts</b>
-        <small>356 行</small>
+        <small>357 行</small>
         <span class="tag tone-blue">形状 + 语义</span>
       </div></div>
       </div><div class="conn">
@@ -4619,208 +4953,115 @@ it('still wraps exclude with NOT COALESCE so missing rows stay')    // exclude �
         </div>
         <div class="lane-body"><div class="pnode">
         <b>compile.ts</b>
-        <small>424 行</small>
+        <small>533 行</small>
         <span class="tag tone-violet">对外唯一入口</span>
       </div></div>
       </div></div><div class="callout tone-green">
       <span class="ic">✅</span>
       <div><p><mark class="mk-blue"><strong>每一层只依赖它下面那层，没有回环。</strong></mark></p>
-<p>这个形状换来一个很实际的好处：</p>
-<p><strong><code>sql.ts</code> 只负责「怎么安全地拼一个字符串」，它不判断任何规则。</strong>
-所以 <code>compile.ts</code> 可以随便复用它，而不会产生「编译器 ↔ 校验器互相依赖」。</p>
-<p><strong>三个底层文件（<code>context</code> / <code>errors</code> / <code>schema</code>）一个依赖都没有</strong> ——
-所以它们能被任何一层引用，包括测试。</p>
+<p>三个底层文件（<code>context</code> / <code>errors</code> / <code>schema</code>）一个依赖都没有，所以能被任何一层引用，包括测试。</p>
+<p><code>knex.ts</code> 的位置也在这里 —— 它包着外部库，被 <code>compile.ts</code> 用，<strong>校验器完全不碰它</strong>。
+所以校验逻辑可以脱离 Knex 单独测。</p>
 </div>
-    </div><h3 id="一个诚实的问题">一个诚实的问题</h3>
-<p><code>catalog.ts</code> 是最大的文件（474 行），但它的注释写着：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-ts">// Seed and compiler-test fixture. The server loads the live catalog from MySQL.
-</code></pre></div>
-<p><strong>它是测试夹具，不是运行时真相。</strong> 但同一个文件里也导出了 <code>fieldByName</code> / <code>relationByName</code> ——
-而这两个函数<strong>生产代码在用</strong>（<code>compile.ts</code> 和 <code>validate.ts</code> 都 import）。</p>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>混在一起的问题</th><th>实际情况</th><th>更好的做法</th></tr></thead><tbody><tr><th>474 行里是什么</th><td data-label="实际情况">约 460 行是硬编码的 46 个字段 + 2 个关系</td><td data-label="更好的做法">那些应该搬去 test/fixtures/</td></tr><tr><th>谁在用这个文件</th><td data-label="实际情况">生产代码用两个查找函数；测试用整个 defaultCatalog</td><td data-label="更好的做法">两个查找函数留在 src/，夹具搬走</td></tr><tr><th>后果</th><td data-label="实际情况">读源码的人会以为字段字典是写死的</td><td data-label="更好的做法">一眼能看出「字典是运行时的，这只是测试数据」</td></tr></tbody></table></div><p><strong>这不是 bug，是组织问题。</strong> 但它会让第一次读代码的人多花几分钟 —— 所以值得指出。</p>
-<hr>
-<h2 id="怎么保证它是对的"><span class="num">07</span>怎么保证它是对的</h2>
-<p>332 个测试，553ms 跑完。分三层，每层管不同的事。</p>
-<h3 id="第一层单元测试">第一层：单元测试</h3>
-<div class="cards" data-cols="3"><div class="ccard tone-blue">
-          
-          <h4>按特性分文件</h4>
-          <p>一个特性一个 spec，共 11 个文件 163 个用例。</p>
-          <div class="cbody"><table>
+    </div><h2 id="怎么保证它是对的"><span class="num">06</span>怎么保证它是对的</h2>
+<p>334 个测试，878ms 跑完。分三层，每层管的事不一样。</p>
+<table>
 <thead>
 <tr>
-<th>文件</th>
-<th>测什么</th>
-<th>用例</th>
+<th>层</th>
+<th>规模</th>
+<th>管什么</th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td><code>validate.spec.ts</code></td>
-<td>两段校验器</td>
-<td>44</td>
+<td>单元测试</td>
+<td>11 个文件 166 个用例</td>
+<td>一个特性一个文件，断言「抛的是哪个错误码」而不是「抛没抛」</td>
 </tr>
 <tr>
-<td><code>compile.relation.spec.ts</code></td>
-<td>关系节点</td>
-<td>24</td>
+<td>夹具</td>
+<td>168 条</td>
+<td>锁住输出 —— 每条夹具是一份 <code>{ query, expected }</code>，<code>expected</code> 里是<strong>逐字符</strong>的 SQL 快照</td>
 </tr>
 <tr>
-<td><code>compile.operators.spec.ts</code></td>
-<td>14 个操作符</td>
-<td>16</td>
-</tr>
-<tr>
-<td><code>compile.sql.spec.ts</code></td>
-<td>生成的 SQL 形状</td>
-<td>16</td>
-</tr>
-<tr>
-<td><code>compile.scope.spec.ts</code></td>
-<td>权限口径</td>
-<td>13</td>
-</tr>
-<tr>
-<td><code>compile.formula.spec.ts</code></td>
-<td>detail vs times</td>
-<td>11</td>
-</tr>
-<tr>
-<td><code>compile.uid.spec.ts</code></td>
-<td>指定 UID</td>
-<td>11</td>
-</tr>
-<tr>
-<td><code>compile.null.spec.ts</code></td>
-<td>NULL 语义</td>
-<td>8</td>
-</tr>
-<tr>
-<td><code>includeCoalesce.spec.ts</code></td>
-<td>那个不对称</td>
-<td>9</td>
-</tr>
-<tr>
-<td><code>schema.spec.ts</code></td>
-<td>类型守卫与构造器</td>
-<td>9</td>
-</tr>
-<tr>
-<td><code>sql.spec.ts</code></td>
-<td>转义</td>
-<td>2</td>
+<td>真库验证</td>
+<td>单独一套配置</td>
+<td>同一批夹具喂给真 Doris 跑，跟快照对账</td>
 </tr>
 </tbody>
 </table>
-</div>
-          
-        </div><div class="ccard tone-violet">
-          
-          <h4>断言的是错误码</h4>
-          <p>不是「抛了异常」，而是「抛了带这个码的异常」。</p>
-          <div class="cbody"><div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-ts">export function expectCode(fn, code) {
-  try { fn(); expect.fail(`expected ${code}`) }
-  catch (e) {
-    expect(e).toBeInstanceOf(CompileError)
-    expect((e as CompileError).code).toBe(code)
-  }
-}
+<h3 id="夹具为什么值得单独说">夹具为什么值得单独说</h3>
+<p>一份用例，两处验证：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code>test/fixtures/cases.ts          ← 用例的唯一真相源（TS，能调构造器，写起来短）
+        │  npx tsx scripts/update-fixtures.ts
+        ▼
+test/fixtures/*.json            ← 10 个文件，6100 行 SQL 快照
+        │
+        ├── fixtures.spec.ts    → 断言「现在的编译器输出 === 快照」
+        └── test/doris/*.spec.ts → 真的连 Doris 执行，跟快照对账
 </code></pre></div>
-<p><mark class="mk-blue">这让「校验器有没有换过分类」变得可测。</mark>
-如果哪天 <code>EMPTY_GROUP</code> 被改成了 <code>INCOMPLETE_LEAF</code>，测试会红。</p>
-</div>
-          
-        </div><div class="ccard tone-amber">
-          
-          <h4>三个现成的身份</h4>
-          <p>每个测试用例都从三个演员里挑一个，不用自己构造。</p>
-          <div class="cbody"><div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-ts">export const selfRm  = { staffId: 101, dataLevel: 'self', groupIds: [1] }
-export const leader  = { staffId: 201, dataLevel: 'team', groupIds: [1] }
-export const ops     = { staffId: 301, dataLevel: 'all',  groupIds: [1,2,3] }
-</code></pre></div>
-<p>跟 <code>doris/seed.mjs</code> 里灌的那 10 个员工是同一批人。</p>
-</div>
-          
-        </div></div><h3 id="第二层夹具-这是最有意思的一层">第二层：夹具 —— 这是最有意思的一层</h3>
-<p><strong>一份用例，两处验证。</strong></p>
-<div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;cases&quot;,&quot;to&quot;:&quot;json&quot;,&quot;label&quot;:&quot;update-fixtures 生成&quot;},{&quot;from&quot;:&quot;json&quot;,&quot;to&quot;:&quot;unit&quot;,&quot;label&quot;:&quot;读&quot;},{&quot;from&quot;:&quot;json&quot;,&quot;to&quot;:&quot;doris&quot;,&quot;label&quot;:&quot;读&quot;},{&quot;from&quot;:&quot;unit&quot;,&quot;to&quot;:&quot;doris&quot;,&quot;dashed&quot;:true}]">
-      <svg class="flowd-svg" aria-hidden="true">
-        <defs>
-          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
-                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
-            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
-          </marker>
-        </defs>
-      </svg>
-      <div class="flowd-groups"></div>
-      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-violet" data-id="cases">
-              
-              
-              <b>test/fixtures/cases.ts</b>
-              <small>用例的唯一真相源</small>
-            </div></div><div class="flowd-row"><div class="fnode tone-amber" data-id="json">
-              
-              
-              <b>test/fixtures/*.json</b>
-              <small>10 个文件 · 6100 行 SQL 快照</small>
-            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="unit">
-              
-              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5L3 8l3 4.5M10 3.5L13 8l-3 4.5"/></svg>
-              <b>fixtures.spec.ts</b>
-              <small>169 个断言：输出 === 快照吗</small>
-            </div><div class="fnode tone-violet" data-id="doris">
-              
-              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="8" cy="4.2" rx="5" ry="1.9"/><path d="M3 4.2v7.6c0 1.05 2.24 1.9 5 1.9s5-.85 5-1.9V4.2"/></svg>
-              <b>test/doris/*.spec.ts</b>
-              <small>真连 Doris 跑，跟快照对账</small>
-            </div></div></div>
-      
-    </div><p><strong>一条夹具长这样：</strong></p>
+<p>一条夹具长这样：</p>
 <div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-json">{ &quot;id&quot;: &quot;count-joins-used-tables&quot;,
   &quot;from&quot;: &quot;compile.sql.spec.ts#countSql joins only tables used in filters&quot;,
   &quot;actorStaffId&quot;: 101,
   &quot;query&quot;: { &quot;version&quot;: 1, &quot;scope&quot;: {...}, &quot;include&quot;: {...}, &quot;exclude&quot;: null },
   &quot;expected&quot;: {
-    &quot;countSql&quot;: &quot;SELECT COUNT(*) AS `count` FROM (SELECT `u`.`uid` AS `uid` FROM `user_portraits_wide` AS `u` WHERE `u`.`staff_id` = 101 AND (TIMESTAMPDIFF(YEAR, `u`.`birthday`, CURRENT_DATE()) &gt; 18)) AS `t`&quot;,
-    &quot;listSql&quot;: &quot;SELECT `u`.`uid` AS `uid`, ... ORDER BY `u`.`uid` LIMIT 10 OFFSET 0&quot;,
+    &quot;countSql&quot;: &quot;SELECT COUNT(*) AS `count` FROM (SELECT `u`.`uid` AS `uid` FROM `user_portraits_wide` AS `u` WHERE ...) AS `t`&quot;,
+    &quot;listSql&quot;: &quot;...&quot;,
     &quot;uidsSql&quot;: &quot;...&quot;,
     &quot;usedTables&quot;: [&quot;user_portraits_wide&quot;],
     &quot;listColumns&quot;: [{ &quot;key&quot;: &quot;age&quot;, &quot;label&quot;: &quot;年龄&quot;, ... }]
   }}
 </code></pre></div>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>设计</th><th>为什么这样</th><th>换来什么</th></tr></thead><tbody><tr><th><code>from</code> 字段回指源头</th><td data-label="为什么这样">夹具不是凭空长出来的，每个都能追溯到一条真实断言</td><td data-label="换来什么">排查时知道该去看哪个 spec</td></tr><tr><th>SQL 是逐字符快照</th><td data-label="为什么这样">精确到括号和空格</td><td data-label="换来什么"><mark class="mk-blue">改一行编译器，169 个夹具立刻告诉你「哪些 SQL 变了」</mark></td></tr><tr><th>同一批夹具喂给真 Doris</th><td data-label="为什么这样">编译器输出 → 直接执行</td><td data-label="换来什么">验证的不只是「SQL 长得对」，还有「SQL 跑得对」</td></tr><tr><th>用例写在 TS 里而不是 JSON 里</th><td data-label="为什么这样">TS 能调 <code>and()</code> / <code>portrait()</code> 这些构造器，写起来短</td><td data-label="换来什么">JSON 只是<strong>产物</strong>，可以随时重新生成</td></tr></tbody></table></div><h3 id="第三层真库验证-一个数据体检闸门">第三层：真库验证 + 一个「数据体检」闸门</h3>
-<p><code>test/doris/</code> 是单独一套配置（跑得慢，120 秒超时，文件串行）。</p>
-<p><strong>但在跑任何测试之前，先过一道闸门</strong> —— <code>assertSeed()</code>：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">✓ 三张该有的表都在（user_portraits_wide / rel_holding / rel_product）
-✓ 五张早该删掉的表确实没有了
-✓ user_portraits_wide 一共 1000000 行
+<p>两点设计：</p>
+<ul>
+<li><strong><code>from</code> 字段回指源头测试</strong>。夹具不是凭空长出来的，每个都能追溯到一条真实断言，排查时知道该去看哪个 spec。</li>
+<li><strong>SQL 是逐字符快照</strong>。改一行编译器，168 条夹具立刻告诉你哪些 SQL 变了。</li>
+</ul>
+<p>用 Knex 之后这层更值钱 —— 链式 API 调用的顺序会影响生成的 SQL，光看代码不容易发现。</p>
+<h3 id="真库验证之前有一道闸门">真库验证之前有一道闸门</h3>
+<p><code>test/doris/gate.ts</code> 在跑任何测试之前，先核对数据是不是那一份：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code>✓ user_portraits_wide 一共 1000000 行
 ✓ uid 范围是 10001 ~ 1010000
 ✓ 去重后有 10 个 staff_id
 ✓ 101 / 201 / 301 三个人的客户数分别对得上
 ✓ 年龄 ≥ 18 的人数是 136655
-✗ 持有 SEMI 的人数是 10256
 </code></pre></div>
-<div class="callout tone-violet">
-      <span class="ic">💡</span>
-      <div><p><mark class="mk-blue"><strong>它不只检查「数据对不对」，还检查「数据是不是够脏」。</strong></mark></p>
-<p>这一段是我见过最反直觉、也最有道理的测试设计：</p>
+<p>它还检查数据<strong>够不够脏</strong>：</p>
 <div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-ts">const missingGender = ... WHERE gender IS NULL
 if (missingGender &lt;= 0 || missingGender &gt;= expected.universe_total)
   throw new Error('messy seed must leave some portrait columns empty')
 </code></pre></div>
-</div>
-    </div><p><strong>为什么故意要脏数据？</strong> 因为第 5.1 节那个 <code>COALESCE</code> 的不对称，<strong>只有在「有些行画像列是 NULL」时才会暴露</strong>。</p>
-<p>干净数据会让所有边界测试<strong>假绿</strong>。</p>
-<p>同样套路的还有三条：</p>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>断言</th><th>要求什么</th><th>为什么必须有</th></tr></thead><tbody><tr><th>有些行 <code>gender IS NULL</code></th><td data-label="要求什么">NULL 不能是 0 行，也不能是全部</td><td data-label="为什么必须有">否则测不出 NULL 三值逻辑</td></tr><tr><th>画像标记 ≠ 关系表</th><td data-label="要求什么"><code>hold_semiconductor = 1</code> 但关系表里没有 SEMI 的人必须 &gt; 0</td><td data-label="为什么必须有">否则测不出「两处数据不一致时以谁为准」</td></tr><tr><th>组长名下有跨组脏数据</th><td data-label="要求什么">staff 101 名下有 <code>group_id &lt;&gt; 1</code> 的客户</td><td data-label="为什么必须有">否则测不出权限交集那个 <code>filter</code></td></tr><tr><th>标的代码和市场要对得上</th><td data-label="要求什么"><code>.HK</code> 结尾的必须是港股，<code>.US</code> 的必须是美股</td><td data-label="为什么必须有"><mark class="mk-blue">前三条要脏，这一条要干净 —— 数据得脏得讲道理</mark></td></tr></tbody></table></div><div class="callout tone-green">
-      <span class="ic">✅</span>
-      <div><p><mark class="mk-blue">这四条断言锁住的是「测试数据的病态程度」。</mark></p>
-<p>如果谁重灌了一批太干净的数据，所有边界测试都会通过 ——
-但那是<strong>因为边界不存在了</strong>，不是因为代码没问题。</p>
-<p>这些断言会拦住他。</p>
-</div>
-    </div><hr>
-<h2 id="它现在缺什么"><span class="num">08</span>它现在缺什么</h2>
+<p>「性别」全空或全不空，测试数据都测不出 NULL 三值逻辑那类问题（见第 04 节 include / exclude 那一段）。同一套思路还有三条：</p>
+<table>
+<thead>
+<tr>
+<th>断言</th>
+<th>要求</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>有些行 <code>gender IS NULL</code></td>
+<td>不能是 0 行，也不能是全部</td>
+</tr>
+<tr>
+<td>画像标记 ≠ 关系表</td>
+<td><code>hold_semiconductor = 1</code> 但关系表里没有 SEMI 的人必须 &gt; 0</td>
+</tr>
+<tr>
+<td>组长名下有跨组脏数据</td>
+<td>staff 101 名下有 <code>group_id &lt;&gt; 1</code> 的客户</td>
+</tr>
+<tr>
+<td>标的代码和市场要对得上</td>
+<td><code>.HK</code> 结尾的必须是港股 —— <strong>这条要干净，前三条要脏</strong></td>
+</tr>
+</tbody>
+</table>
+<p>这四条锁住的是「测试数据的病态程度」。谁重灌一批太干净的数据，边界测试会通过 —— 但那是<strong>因为边界不存在了</strong>，不是因为代码没问题。</p>
+<h2 id="它现在缺什么"><span class="num">07</span>它现在缺什么</h2>
 <p>诚实说几处。不是 bug，是「现在这样也能跑，但迟早要处理」。</p>
 <div class="cards" data-cols="2"><div class="ccard tone-red">
           <span class="tag tone-red">最要紧</span>
@@ -4889,7 +5130,7 @@ export function getMetadataRows() {
 <p><mark class="mk-blue">修复也不难：给 <code>resetCatalogCache</code> 挂一个接口，或者加个 TTL。</mark></p>
 </div>
     </div><hr>
-<h2 id="自测"><span class="num">09</span>自测</h2>
+<h2 id="自测"><span class="num">08</span>自测</h2>
 <div class="quiz"><details>
         <summary>为什么校验要分两段，一段遍历不是更快吗？</summary>
         <div class="a"><p>因为两段需要的东西不同：<strong>形状校验不需要字段字典</strong>。</p>
@@ -8241,6 +8482,104 @@ export function getMetadataRows() {
         n.addEventListener('click', () => pick(i, true));
         M.appendChild(n);
       });
+    }
+    draw();
+  };
+
+  /* ============================================================
+     控件：validate-lab —— 喂几个坏输入，看它在哪一段被拦
+
+     它对应的是「一个条件到底被哪一段挡下的」这个问题 ——
+     光看两张校验清单表很难记住边界在哪，但看几个真实的反例就清楚了。
+
+     config:
+       cases: [{ label, stage: 'shape'|'semantic', code, mark, err, why }]
+  ============================================================ */
+  WIDGETS['validate-lab'] = (root) => {
+    const cfg = cfgOf(root);
+    const box = mountOf(root);
+    const statusEl = root.querySelector('[data-status]');
+    const cases = cfg.cases || [];
+    if (!cases.length) return;
+
+    const H_ = (tag, cls, text) => el(tag, cls, text);
+    let cur = 0;
+
+    const pick = H_('div', 'vl-pick');
+    const btns = cases.map((c, i) => {
+      const b = H_('button', null, c.label);
+      b.addEventListener('click', () => { cur = i; draw(); });
+      pick.append(b);
+      return b;
+    });
+
+    /* 三段流程条：当前案例会在其中一段停住 */
+    const STAGES = [
+      { k: 'shape', name: '① 形状校验', sub: '不看字段字典' },
+      { k: 'semantic', name: '② 语义校验', sub: '看字段字典' },
+      { k: 'compile', name: '③ 拼 SQL', sub: '不再判断规则' },
+    ];
+    const flow = H_('div', 'vl-flow');
+    const steps = STAGES.map((s) => {
+      const d = H_('div', 'vl-step');
+      d.append(H_('span', null, s.name), H_('small', null, s.sub));
+      flow.append(d);
+      return d;
+    });
+
+    const out = H_('div', 'vl-out');
+    const where = H_('div', 'vl-where');
+    const codeEl = H_('span', 'vl-code');
+    const inp = H_('div', 'vl-input');
+    const pre = document.createElement('pre');
+    inp.append(pre);
+    const why = H_('div', 'vl-why');
+    out.append(where, codeEl, inp, why);
+
+    const legend = H_('div', 'vl-legend');
+    [['var(--green)', '这一段过去了'], ['var(--red)', '在这里被拦下'], ['var(--muted)', '根本没走到']]
+      .forEach(([c, t]) => {
+        const sp = H_('span');
+        const i = H_('i'); i.style.background = c;
+        sp.append(i, H_('span', null, t));
+        legend.append(sp);
+      });
+
+    box.append(pick, flow, out, legend);
+
+    function draw() {
+      const c = cases[cur];
+      btns.forEach((b, i) => b.classList.toggle('on', i === cur));
+
+      const order = STAGES.map((s) => s.k);
+      const at = order.indexOf(c.stage);
+      steps.forEach((d, i) => {
+        d.classList.toggle('passed', i < at);
+        d.classList.toggle('blocked', i === at);
+        d.classList.toggle('notreached', i > at);
+      });
+
+      where.textContent = c.stage === 'shape'
+        ? '第 ① 段拦下的 —— 它不需要字段字典'
+        : '第 ② 段拦下的 —— 形状没问题，是跟字段字典对不上';
+      codeEl.textContent = c.err;
+      out.style.setProperty('--tone', 'var(--red)');
+
+      /* 输入：把出问题的那一段标红 */
+      const code = c.code || '';
+      if (c.mark && code.includes(c.mark)) {
+        const i = code.indexOf(c.mark);
+        fill(pre, [
+          document.createTextNode(code.slice(0, i)),
+          H_('span', 'bad', c.mark),
+          document.createTextNode(code.slice(i + c.mark.length)),
+        ]);
+      } else {
+        pre.textContent = code;
+      }
+      why.textContent = c.why;
+
+      if (statusEl) statusEl.textContent = c.label + ' → ' + c.err;
     }
     draw();
   };

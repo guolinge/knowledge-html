@@ -3266,6 +3266,104 @@
     draw();
   };
 
+  /* ============================================================
+     控件：validate-lab —— 喂几个坏输入，看它在哪一段被拦
+
+     它对应的是「一个条件到底被哪一段挡下的」这个问题 ——
+     光看两张校验清单表很难记住边界在哪，但看几个真实的反例就清楚了。
+
+     config:
+       cases: [{ label, stage: 'shape'|'semantic', code, mark, err, why }]
+  ============================================================ */
+  WIDGETS['validate-lab'] = (root) => {
+    const cfg = cfgOf(root);
+    const box = mountOf(root);
+    const statusEl = root.querySelector('[data-status]');
+    const cases = cfg.cases || [];
+    if (!cases.length) return;
+
+    const H_ = (tag, cls, text) => el(tag, cls, text);
+    let cur = 0;
+
+    const pick = H_('div', 'vl-pick');
+    const btns = cases.map((c, i) => {
+      const b = H_('button', null, c.label);
+      b.addEventListener('click', () => { cur = i; draw(); });
+      pick.append(b);
+      return b;
+    });
+
+    /* 三段流程条：当前案例会在其中一段停住 */
+    const STAGES = [
+      { k: 'shape', name: '① 形状校验', sub: '不看字段字典' },
+      { k: 'semantic', name: '② 语义校验', sub: '看字段字典' },
+      { k: 'compile', name: '③ 拼 SQL', sub: '不再判断规则' },
+    ];
+    const flow = H_('div', 'vl-flow');
+    const steps = STAGES.map((s) => {
+      const d = H_('div', 'vl-step');
+      d.append(H_('span', null, s.name), H_('small', null, s.sub));
+      flow.append(d);
+      return d;
+    });
+
+    const out = H_('div', 'vl-out');
+    const where = H_('div', 'vl-where');
+    const codeEl = H_('span', 'vl-code');
+    const inp = H_('div', 'vl-input');
+    const pre = document.createElement('pre');
+    inp.append(pre);
+    const why = H_('div', 'vl-why');
+    out.append(where, codeEl, inp, why);
+
+    const legend = H_('div', 'vl-legend');
+    [['var(--green)', '这一段过去了'], ['var(--red)', '在这里被拦下'], ['var(--muted)', '根本没走到']]
+      .forEach(([c, t]) => {
+        const sp = H_('span');
+        const i = H_('i'); i.style.background = c;
+        sp.append(i, H_('span', null, t));
+        legend.append(sp);
+      });
+
+    box.append(pick, flow, out, legend);
+
+    function draw() {
+      const c = cases[cur];
+      btns.forEach((b, i) => b.classList.toggle('on', i === cur));
+
+      const order = STAGES.map((s) => s.k);
+      const at = order.indexOf(c.stage);
+      steps.forEach((d, i) => {
+        d.classList.toggle('passed', i < at);
+        d.classList.toggle('blocked', i === at);
+        d.classList.toggle('notreached', i > at);
+      });
+
+      where.textContent = c.stage === 'shape'
+        ? '第 ① 段拦下的 —— 它不需要字段字典'
+        : '第 ② 段拦下的 —— 形状没问题，是跟字段字典对不上';
+      codeEl.textContent = c.err;
+      out.style.setProperty('--tone', 'var(--red)');
+
+      /* 输入：把出问题的那一段标红 */
+      const code = c.code || '';
+      if (c.mark && code.includes(c.mark)) {
+        const i = code.indexOf(c.mark);
+        fill(pre, [
+          document.createTextNode(code.slice(0, i)),
+          H_('span', 'bad', c.mark),
+          document.createTextNode(code.slice(i + c.mark.length)),
+        ]);
+      } else {
+        pre.textContent = code;
+      }
+      why.textContent = c.why;
+
+      if (statusEl) statusEl.textContent = c.label + ' → ' + c.err;
+    }
+    draw();
+  };
+
   /* ---------- 挂载 ---------- */
   document.querySelectorAll('[data-widget]').forEach((root) => {
     var name = root.getAttribute('data-widget');

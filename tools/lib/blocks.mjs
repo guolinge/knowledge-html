@@ -1058,7 +1058,8 @@ export function lintFences(html, src = '') {
       .replace(/&amp;/g, '&')
       .replace(/&lt;/g, '<')
       .replace(/&gt;/g, '>');
-    if (/(==|!!|\+\+|(?<!\*)\*\*[^\s*])/.test(text)) {
+    /* `==` 不能是 `===` 的一部分 —— 写 `typeof x === 'string'` 的示例会误报。 */
+    if (/(?<!=)==(?!=)|!!|\+\+|(?<!\*)\*\*[^\s*]/.test(text)) {
       const first = (text.split('\n').find((l) => l.trim()) || '').trim();
       issues.push(
         `${whereIn(srcLines, first.slice(0, 30))}有 markdown 被困在代码块里` +
