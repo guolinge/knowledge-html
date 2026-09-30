@@ -658,6 +658,27 @@ text: |
   **改了样式之后必须跑 `visual-check`，再截图看一眼。**
 ```
 
+#### 但它量不了「挤不挤」
+
+````callout
+tone: amber
+icon: ⚠
+text: |
+  ==`visual-check` 判的是**有没有重叠**（TOL = 2px），不是**读起来顺不顺**。==
+
+  真实例子：一张 `flow` 上有两条边标签，横向间隙 **9px** —— 检测器判 ✓，
+  但两条语义不同的标签读起来像**一句**（「只能进「值」的位置 决定这支行不行」）。
+
+  ```
+  只影响「值」      决定行不行        ← 间隙 9px，检测器过，但读着像一句
+  ```
+
+  ++所以「检测器过了」不等于「这图好看」。还得自己看一眼。++
+
+  一个实用的经验判据：**把相邻的标签连起来读一遍**。
+  如果读成了一句有语义的话，就该把其中一个改短（或删）。
+````
+
 #### 绿灯是怎么做到「真的对」的
 
 `visual-check` 不只看溢出。它还会查这些**所谓「渲染出来但不是你想的那样」**：
@@ -1020,10 +1041,10 @@ text: |
 | `summary` | 小结 |
 | `raw` | 直接写 HTML |
 
-**交互控件 17 个**（在 `assets/app.js` 的 `WIDGETS` 里，供 `demo` 积木引用）：
+**交互控件 18 个**（在 `assets/app.js` 的 `WIDGETS` 里，供 `demo` 积木引用）：
 `polling-vs-cdc` `combination-count` `join-lab` `on-vs-where` `knex-chain`
 `stepper` `tuner` `diff` `stream-modes` `operator-lab` `hashring` `partition-prune`
-`dsl-lab` `null-lab` `config-to-ui` `field-lineage` `count-dedup-lab`
+`dsl-lab` `null-lab` `config-to-ui` `field-lineage` `count-dedup-lab` `sql-inject-lab`
 
 **已知缺口**（按优先级）：
 

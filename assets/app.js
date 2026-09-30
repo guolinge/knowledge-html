@@ -3023,6 +3023,141 @@
     draw();
   };
 
+  /* ============================================================
+     控件：sql-inject-lab —— 同一个值，两种进 SQL 的方式
+
+     左边「内联」用的是**现有实现的转义规则**（只把单引号翻倍）；
+     右边「参数绑定」模拟 Knex 的输出形状（? + bindings）。
+
+     两边的行数不是算出来的 —— 是拿真 Doris（crm_insight，100 万行）
+     跑出来的，写在 config 里。所以页面上展示的“1000000 行”是实测值。
+     config:
+       table, field, totalRows
+       cases: [{ tag, input, inline: <行数|null=语法错>, bound: <行数> }]
+  ============================================================ */
+  WIDGETS['sql-inject-lab'] = (root) => {
+    const cfg = cfgOf(root);
+    const box = mountOf(root);
+    const statusEl = root.querySelector('[data-status]');
+    const T = cfg.table || 'user_portraits_wide';
+    const F = cfg.field || 'region';
+    const cases = cfg.cases || [];
+    if (!cases.length) return;
+
+    const H_ = (tag, cls, text) => el(tag, cls, text);
+
+    /* 现有实现的转义：只把单引号翻倍。**故意保留这个缺陷** —— 它就是被演示的东西。 */
+    const inlineEsc = (v) => "'" + v.replace(/'/g, "''") + "'";
+
+    let idx = 0;
+    let typed = null;                       // 用户手输时用它
+
+    const wrap = H_('div', 'si-wrap');
+
+    /* 输入行 */
+    const row = H_('div', 'si-input');
+    row.append(H_('label', null, '用户填的值'));
+    const inp = document.createElement('input');
+    inp.type = 'text';
+    inp.spellcheck = false;
+    inp.addEventListener('input', () => { typed = inp.value; draw(); });
+    row.append(inp);
+    const presets = H_('div', 'si-presets');
+    const pbtns = cases.map((c, i) => {
+      const b = H_('button', null, c.tag);
+      b.addEventListener('click', () => { idx = i; typed = null; draw(); });
+      presets.append(b);
+      return b;
+    });
+    row.append(presets);
+    wrap.append(row);
+
+    /* 两个面板 */
+    const panes = H_('div', 'si-panes');
+    function pane(tone, head, sub) {
+      const p = H_('div', 'si-pane');
+      p.style.setProperty('--tone', tone);
+      const h = document.createElement('header');
+      h.append(H_('b', null, head), H_('span', null, sub));
+      const pre = document.createElement('pre');
+      const foot = H_('div', 'si-foot');
+      p.append(h, pre, foot);
+      panes.append(p);
+      return { pre, foot };
+    }
+    const L = pane('var(--red)', '内联', '现在的实现：把值抄进 SQL');
+    const R = pane('var(--green)', '参数绑定', 'Knex：值单独给');
+    wrap.append(panes);
+
+    const verdict = H_('div', 'si-verdict');
+    wrap.append(verdict);
+    box.append(wrap);
+
+    function segs(nodes) { return nodes; }
+    function render(pre, nodes) {
+      fill(pre, nodes.map((n) =>
+        n[1] ? H_('span', n[1], n[0]) : document.createTextNode(n[0])));
+    }
+
+    function draw() {
+      const c = typed === null ? cases[idx] : null;
+      const value = typed === null ? c.input : typed;
+      inp.value = value;
+      pbtns.forEach((b, i) => b.classList.toggle('on', typed === null && i === idx));
+
+      const lit = inlineEsc(value);
+      render(L.pre, segs([
+        ['SELECT COUNT(*) ', 'kw'], ['FROM ', 'kw'], [T + ' AS u'],
+        ['\nWHERE ', 'kw'], ['u.`' + F + '` = '], [lit, 'bad'],
+      ]));
+      render(R.pre, segs([
+        ['SELECT COUNT(*) ', 'kw'], ['FROM ', 'kw'], [T + ' AS u'],
+        ['\nWHERE ', 'kw'], ['u.`' + F + '` = '], ['?', 'ph'],
+        ['\nbindings: ', 'kw'], [JSON.stringify([value]), 'ok'],
+      ]));
+
+      /* 行数：预设的看实测值；手输的说明“没实测过” */
+      const inlineRows = c ? c.inline : null;
+      const boundRows = c ? c.bound : null;
+      const fmt = (n) => (n === null ? '—' : n.toLocaleString('en-US'));
+
+      fill(L.foot, c
+        ? [H_('small', null, '实测行数'),
+           H_('b', null, inlineRows === null ? '语法错' : fmt(inlineRows)),
+           H_('em', null, inlineRows === null
+             ? '整条查询挂了'
+             : inlineRows >= cfg.totalRows ? '全表！条件被绕过了' : '（这一条碰巧是对的）')]
+        : [H_('small', null, '手输的值没实测过'), H_('em', null, '点上面的预设看真实数据')]);
+      fill(R.foot, c
+        ? [H_('small', null, '实测行数'), H_('b', null, fmt(boundRows)),
+           H_('em', null, '正确答案：没人叫这个值')]
+        : [H_('small', null, '手输的值没实测过'), H_('em', null, '点上面的预设看真实数据')]);
+
+      /* 判词 */
+      let tone = 'var(--blue)';
+      let v = [];
+      if (!c) {
+        tone = 'var(--muted)';
+        v = [h('span', { text: '手输的值只能看 SQL 长什么样 —— 行数是实测数据，只对上面四个预设有效。' })];
+      } else if (c.tag === '正常值') {
+        v = [h('span', {}, [h('b', { text: '两边一样。' }), h('span', { text: ' 正常值上看不出区别 —— 所以这个问题在测试环境里很容易漏掉。' })])];
+      } else if (c.tag === '带单引号') {
+        v = [h('span', {}, [h('b', { text: '两边还是一样。' }), h('span', { text: ' 因为单引号翻倍这一步做对了 —— ' }), h('code', { text: "'O''Brien'" }), h('span', { text: ' 在 SQL 里就是一个合法的字符串字面量。' })])];
+      } else if (c.tag === '带反斜杠') {
+        tone = 'var(--amber)'; L.pre.parentElement.style.setProperty('--tone', 'var(--amber)');
+        v = [h('span', {}, [h('b', { text: '内联炸了 —— 而且这不是恶意输入。' }), h('span', { text: ' 一个以反斜杠结尾的值（比如某个自由文本字段）会把结尾的单引号转义掉，整条 SQL 变成未闭合字符串。' }), h('code', { text: ' 只把单引号翻倍不够，反斜杠也要处理。' })])];
+      } else {
+        tone = 'var(--red)';
+        v = [h('span', {}, [h('b', { text: '内联返回了 100 万行 —— 全表。' }), h('span', { text: ' 输入里的 ' }), h('code', { text: '\\\'' }), h('span', { text: ' 把结尾单引号转义掉，于是后面的 ' }), h('code', { text: 'OR 1=1' }), h('span', { text: ' 变成了真正的 SQL 命令。右边因为值不参与解析，什么都不发生。' })])];
+      }
+      verdict.style.setProperty('--tone', tone);
+      fill(verdict, v);
+
+      if (statusEl) statusEl.textContent = c ? c.tag : '手输';
+    }
+    draw();
+  };
+
   /* ---------- 挂载 ---------- */
   document.querySelectorAll('[data-widget]').forEach((root) => {
     var name = root.getAttribute('data-widget');
