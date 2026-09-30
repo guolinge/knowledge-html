@@ -140,7 +140,227 @@ text: |
 
 ---
 
-## 04 · 前端代码里其实什么都没有
+## 04 · 再往下钻：那张表到底在哪
+
+上一节停在 `column_name: birthday`。但那只是个**列名** —— 它没说在哪张表里。
+
+真实的链条还要往下接两段：元数据里存着**表名**，表名指向 Doris 里**真的存在的表**，
+那个表里**真的存着生日**。而「年龄」这个数字，是最后一段代码现算出来的。
+
+把五层摊开看 —— **点上面那排标签换字段**：
+
+```demo
+widget: field-lineage
+title: 一个字段的五层血缘
+hint: 点标签换字段
+actions: false
+config:
+  tabs:
+    - key: age
+      ui:
+        label: 年龄 · age
+        src: 'display_name_i18n.zh-CN = "年龄"'
+      field:
+        rows:
+          - [field_key, age]
+          - [column_name, birthday]
+          - [data_source_id, '1']
+          - [semantic_type, 4 （NUMBER）]
+        hint: 真列名在这 —— column_name
+      source:
+        rows:
+          - [source_key, user_portrait]
+          - [table_name, user_portraits_wide]
+        hint: 真表名在这 —— table_name
+      table:
+        name: user_portraits_wide
+        cols:
+          - [birthday, DATE, '2002-06-11']
+        absent: age —— 这张表里根本没有这一列
+      code:
+        rows:
+          - [project.ts, "fieldKey === 'age' → derive: age_years"]
+          - [compile.ts, 'TIMESTAMPDIFF(YEAR, birthday, CURRENT_DATE())']
+    - key: region
+      ui:
+        label: 地区 · region
+        src: 'display_name_i18n.zh-CN = "地区"'
+      field:
+        rows:
+          - [field_key, region]
+          - [column_name, region]
+          - [data_source_id, '1']
+          - [semantic_type, 1 （ENUM）]
+        hint: 这个字段列名和字段名碰巧一样
+      source:
+        rows:
+          - [source_key, user_portrait]
+          - [table_name, user_portraits_wide]
+        hint: 同一张表 —— 画像字段都在这
+      table:
+        name: user_portraits_wide
+        cols:
+          - [region, VARCHAR(8), SG]
+      code:
+        rows:
+          - ['—', 不需要代码：列名直接用]
+    - key: last_trade_days
+      ui:
+        label: 距上次成交天数
+        src: 'display_name_i18n.zh-CN'
+      field:
+        rows:
+          - [field_key, last_trade_days]
+          - [column_name, last_trade_time]
+          - [data_source_id, '1']
+          - [semantic_type, 4 （NUMBER）]
+        hint: 又是 NUMBER + DATE —— 和 age 走同一条代码分支
+      source:
+        rows:
+          - [source_key, user_portrait]
+          - [table_name, user_portraits_wide]
+        hint: 还是同一张表
+      table:
+        name: user_portraits_wide
+        cols:
+          - [last_trade_time, DATE, '2026-03-14']
+        absent: last_trade_days —— 也没有这一列
+      code:
+        rows:
+          - [project.ts, "fieldKey !== 'age' → derive: days_since"]
+          - [compile.ts, 'DATEDIFF(CURRENT_DATE(), last_trade_time)']
+```
+
+```callout
+tone: blue
+icon: 🧱
+text: |
+  **前四层是数据，第五层是代码。**
+
+  | 层 | 在哪 | Data Admin 改得动吗 |
+  |---|---|---|
+  | ① 界面文字 | 前端运行时拼的 | 改 ② 就跟着变 |
+  | ② `crm_dc_data_field` | MySQL | ✅ 就是它的地盘 |
+  | ③ `crm_dc_data_source` | MySQL | ✅ |
+  | ④ Doris 表 | 真实存储 | ❌ 不是配置，是数据 |
+  | ⑤ 派生规则 | **代码里** | ❌ ==管不到== |
+```
+
+### 4.1 那张表里的真实数据
+
+`user_portraits_wide` 宽表一共 43 列。上面三个字段落在里面的样子：
+
+| uid | birthday | region | last_trade_time | 算出来 |
+|---|---|---|---|---|
+| `10001` | `2002-06-11` | `SG` | `2026-03-14` | 24 岁，距上次成交 200 天 |
+
+**「年龄 24」这个数字，表里没有。** 表里只有 `2002-06-11`。
+
+```compare
+first: 字段
+head: [表里真实存在的东西, 界面上看到的东西]
+rows:
+  - 年龄: ['`birthday` = `2002-06-11`', '24']
+  - 距上次成交天数: ['`last_trade_time` = `2026-03-14`', '200']
+  - 地区: [{ text: '`region` = `SG`', tone: green }, 'SG（原样）']
+  - 总资产(USD): [{ text: '`aum_usd` = `4903.00`', tone: green }, '4,903']
+```
+
+==前三行是「算出来的」，第四行是「直接读的」。== 这就是 `derive` 的差别。
+
+### 4.2 `age` 为什么是特例
+
+`derive` 不在数据库里 —— 它在 `apps/server/src/metadata/project.ts` 里**按字段名硬编码**：
+
+```ts
+if (physical === 'DATE' || physical.startsWith('DATETIME')) {
+  // age is the only NUMBER-on-DATE field measured in years; the rest are day counts.
+  return {
+    valueType: 'int',
+    derive: { kind: field.fieldKey === 'age' ? 'age_years' : 'days_since' },
+  };
+}
+```
+
+规则很短：
+
+```text
+semantic_type = NUMBER 且 physical_type 是日期
+        │
+        ├── field_key === 'age'  →  age_years   →  TIMESTAMPDIFF(YEAR, …)
+        └── 其它一切             →  days_since  →  DATEDIFF(…)
+```
+
+实际走这条分支的字段有 7 个：
+
+```cards
+cols: 2
+items:
+  - title: 走 age_years（按年）
+    tag: 只有 1 个
+    tone: amber
+    body: |
+      判据只有一个：`field_key === 'age'`。
+
+      | 字段 | 真实列 | 界面上叫 |
+      |---|---|---|
+      | `age` | `birthday` | 年龄 |
+
+      生成的 SQL：
+
+      ```text
+      TIMESTAMPDIFF(YEAR, birthday, CURRENT_DATE())
+      ```
+
+  - title: 走 days_since（按天）
+    tag: 其它 6 个
+    tone: green
+    body: |
+      判据是「**不叫 age**」—— 注意字段名里都带 `_days`，但代码**没读那个后缀**。
+
+      | 字段 | 真实列 |
+      |---|---|
+      | `register_days` | `register_time` |
+      | `last_deposit_days` | `last_deposit_time` |
+      | `last_trade_days` | `last_trade_time` |
+      | `last_touch_days` | `last_touch_time` |
+      | `last_call_days` | `last_call_time` |
+      | `last_meet_days` | `last_meet_time` |
+
+      生成的 SQL：
+
+      ```text
+      DATEDIFF(CURRENT_DATE(), last_trade_time)
+      ```
+```
+
+````callout
+tone: red
+icon: ⚠
+text: |
+  ==**坑：改 `field_key` 会静默改单位。**==
+
+  唯一区分「年」和「天」的东西，是那个字符串 `'age'`。
+
+  如果有人在 Data Admin 里把它改成 `age_years`（听起来更清楚），
+  代码会走 `days_since` 分支：
+
+  ```sql
+  -- 改之前
+  TIMESTAMPDIFF(YEAR, birthday, CURRENT_DATE()) >= 18   -- 成年
+  -- 改之后
+  DATEDIFF(CURRENT_DATE(), birthday) >= 18              -- 出生满 18 天
+  ```
+
+  **不报错，不警告，人数从几百万变成几乎全部。**
+
+  而且这事在 demo 里必然发生 —— **Data Admin 存在的意义就是让人改这个字段。**
+
+  ==修法只有一条：把单位也变成数据（元数据里加一列 `derive_unit`），
+  而不是让代码去猜字段名。==
+````
+
+## 05 · 前端代码里其实什么都没有
 
 这是最反直觉的地方。你以为前端是这样写的：
 
@@ -200,7 +420,7 @@ text: |
 
 ---
 
-## 05 · 为什么要隔这么一层
+## 06 · 为什么要隔这么一层
 
 直接在前端写死不是更简单吗？三个理由：
 
@@ -282,7 +502,7 @@ text: |
 
 ---
 
-## 06 · 那这个 demo 里，Data Admin 在哪
+## 07 · 那这个 demo 里，Data Admin 在哪
 
 **它不存在。** 架构文档里写得很直白：
 
@@ -350,7 +570,7 @@ edges:
 
 ---
 
-## 07 · 一个真实的坑：改了配置，界面不变
+## 08 · 一个真实的坑：改了配置，界面不变
 
 我在做上面那个实验时撞到的：改完 MySQL，**接口仍然返回旧值**。
 

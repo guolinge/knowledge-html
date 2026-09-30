@@ -2739,6 +2739,84 @@ a.need:hover { color: var(--blue); }
 .c2u-note b { font-family: var(--mono); color: var(--violet); font-size: 12px; }
 .c2u-note-hi { color: var(--blue); font-weight: 600; }
 
+/* ============================================================
+   控件：field-lineage —— 一个字段的五层血缘
+   界面 → 元数据字段表 → 元数据数据源表 → 真实表 → 代码
+   纵向下钻：每层是横向一条，层与层之间用箭头接。
+   ============================================================ */
+.fl-tabs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 15px; }
+.fl-tab {
+  font: 600 11.5px var(--mono);
+  padding: 5px 12px;
+  border: 1px solid var(--border); border-radius: 7px;
+  background: var(--surface); color: var(--text-2);
+  cursor: pointer;
+  transition: border-color .15s, background .15s, color .15s;
+}
+.fl-tab:hover { border-color: var(--border-strong); }
+.fl-tab.on {
+  border-color: var(--blue);
+  background: color-mix(in srgb, var(--blue) 13%, transparent);
+  color: var(--blue);
+}
+
+.fl-layer {
+  padding: 11px 14px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--tone, var(--border-strong));
+  border-radius: 11px;
+  background: var(--surface);
+}
+.fl-head { display: flex; align-items: center; gap: 8px; margin-bottom: 9px; }
+.fl-n { font: 700 11px var(--mono); color: var(--tone, var(--muted)); }
+.fl-head b { font: 700 12.5px var(--mono); color: var(--text); }
+.fl-tag { margin-left: auto; font: 400 10.5px var(--sans); color: var(--muted); }
+
+.fl-row {
+  display: grid; grid-template-columns: 150px minmax(0, 1fr);
+  gap: 12px; align-items: baseline;
+  padding: 2px 0; font-size: 11.5px;
+}
+.fl-k { font: 400 10.5px var(--mono); color: var(--muted); }
+.fl-v { font: 400 11.5px var(--mono); color: var(--text); word-break: break-all; }
+.fl-file { font: 700 11px var(--mono); color: var(--red); }
+.fl-note { margin-top: 8px; font: 400 11px var(--sans); color: var(--muted); }
+
+.fl-ui { display: block; }
+.fl-ui-label {
+  display: inline-block;
+  font: 600 12.5px var(--sans);
+  padding: 6px 15px;
+  border: 1.5px solid var(--blue); border-radius: 7px;
+  background: var(--surface); color: var(--text);
+}
+
+.fl-arrow { display: flex; align-items: center; gap: 9px; padding: 5px 0 5px 17px; }
+.fl-arrow-line { font: 700 15px/1 var(--mono); color: var(--border-strong); }
+.fl-arrow-t { font: 400 10.5px var(--mono); color: var(--muted); }
+.fl-arrow.up .fl-arrow-line { color: var(--red); }
+.fl-arrow.up .fl-arrow-t { color: color-mix(in srgb, var(--red) 70%, var(--muted)); }
+
+.fl-table { width: 100%; border-collapse: collapse; font: 400 11.5px var(--mono); }
+.fl-table th {
+  text-align: left; padding: 3px 8px 5px 0;
+  font: 600 10px var(--sans); color: var(--muted);
+  border-bottom: 1px solid var(--border);
+}
+.fl-table td { padding: 4px 8px 4px 0; border-bottom: 1px solid var(--border); color: var(--text-2); }
+.fl-table tr:last-child td { border-bottom: none; }
+.fl-table .fl-sample { color: var(--green); }
+.fl-absent {
+  margin-top: 9px; font: 600 11px var(--sans); color: var(--red);
+  padding: 5px 9px; border-radius: 6px;
+  background: color-mix(in srgb, var(--red) 9%, transparent);
+}
+
+@media (max-width: 700px) {
+  .fl-row { grid-template-columns: 110px minmax(0, 1fr); gap: 8px; }
+  .fl-tag { display: none; }
+}
+
 </style>
   <style>
 /* ==========================================================
@@ -6298,6 +6376,136 @@ isNormalExpr    → 'value' in rule &amp;&amp; 'column' in rule
     renderRecs();
     renderUI();
     setHot(null);
+  };
+
+
+  /* ============================================================
+     控件：field-lineage —— 一个字段的五层血缘
+     界面上的字 → 元数据字段表 → 元数据数据源表 → 真实表 → 代码
+     只回答一件事：**这个界面元素，底下到底连着哪张表、哪一列、哪段代码**。
+     config:
+       tabs: [{
+         key,
+         ui:     { label, src }                       界面那一格
+         field:  { rows: [[k,v]], hint }              crm_dc_data_field
+         source: { rows: [[k,v]], hint }              crm_dc_data_source
+         table:  { name, cols: [[col,type,sample]], absent }   物理表
+         code:   { rows: [[file,rule]] }              代码（不在数据库里）
+       }]
+     ============================================================ */
+  WIDGETS['field-lineage'] = (root) => {
+    const cfg = cfgOf(root);
+    const box = mountOf(root);
+    const statusEl = root.querySelector('[data-status]');
+    const tabs = cfg.tabs || [];
+    if (!tabs.length) return;
+    let cur = 0;
+
+    const el = (tag, cls, text) => {
+      const n = document.createElement(tag);
+      if (cls) n.className = cls;
+      if (text !== undefined) n.textContent = text;
+      return n;
+    };
+    const row = (k, v, cls) => {
+      const r = el('div', 'fl-row');
+      r.appendChild(el('span', 'fl-k', k));
+      r.appendChild(el('code', 'fl-v' + (cls ? ' ' + cls : ''), v));
+      return r;
+    };
+
+    // —— 层外壳 ——
+    function layer(n, name, tag, tone) {
+      const L = el('div', 'fl-layer tone-' + tone);
+      const h = el('div', 'fl-head');
+      h.appendChild(el('span', 'fl-n', n));
+      h.appendChild(el('b', '', name));
+      if (tag) h.appendChild(el('span', 'fl-tag', tag));
+      L.appendChild(h);
+      return L;
+    }
+
+    // —— 箭头 ——
+    function arrow(text, down) {
+      const a = el('div', 'fl-arrow' + (down ? '' : ' up'));
+      a.appendChild(el('span', 'fl-arrow-line', down ? '↓' : '↑'));
+      if (text) a.appendChild(el('span', 'fl-arrow-t', text));
+      return a;
+    }
+
+    function render() {
+      box.textContent = '';
+      const t = tabs[cur];
+
+      // 切换标签
+      const bar = el('div', 'fl-tabs');
+      tabs.forEach((x, i) => {
+        const b = el('button', 'fl-tab' + (i === cur ? ' on' : ''), x.key);
+        b.addEventListener('click', () => { cur = i; render(); });
+        bar.appendChild(b);
+      });
+      box.appendChild(bar);
+
+      const body = el('div', 'fl-body');
+
+      // ① 界面
+      const L1 = layer('①', '界面', t.ui.tag || '前端实时渲染', 'blue');
+      const uiBox = el('div', 'fl-ui');
+      uiBox.appendChild(el('span', 'fl-ui-label', t.ui.label));
+      L1.appendChild(uiBox);
+      L1.appendChild(el('div', 'fl-note', '← ' + t.ui.src));
+      body.appendChild(L1);
+
+      body.appendChild(arrow('前端不认识业务，照配置渲染', true));
+
+      // ② crm_dc_data_field
+      const L2 = layer('②', 'crm_dc_data_field', '元数据 · Data Admin 改这里', 'violet');
+      (t.field.rows || []).forEach((r) => L2.appendChild(row(r[0], r[1])));
+      if (t.field.hint) L2.appendChild(el('div', 'fl-note', '← ' + t.field.hint));
+      body.appendChild(L2);
+
+      body.appendChild(arrow('data_source_id 指向', true));
+
+      // ③ crm_dc_data_source
+      const L3 = layer('③', 'crm_dc_data_source', '元数据 · 逻辑名 → 物理表', 'violet');
+      (t.source.rows || []).forEach((r) => L3.appendChild(row(r[0], r[1])));
+      if (t.source.hint) L3.appendChild(el('div', 'fl-note', '← ' + t.source.hint));
+      body.appendChild(L3);
+
+      body.appendChild(arrow('table_name 指向', true));
+
+      // ④ 真实表
+      const L4 = layer('④', 'Doris 真实表', t.table.name, 'amber');
+      const tb = el('table', 'fl-table');
+      const th = el('tr');
+      ['列名', '类型', '真实值'].forEach((x) => th.appendChild(el('th', '', x)));
+      tb.appendChild(th);
+      (t.table.cols || []).forEach((c) => {
+        const tr = el('tr');
+        c.forEach((x, i) => tr.appendChild(el('td', i === 2 ? 'fl-sample' : '', x)));
+        tb.appendChild(tr);
+      });
+      L4.appendChild(tb);
+      if (t.table.absent) L4.appendChild(el('div', 'fl-absent', '✗ ' + t.table.absent));
+      body.appendChild(L4);
+
+      // ⑤ 代码（向上指）
+      body.appendChild(arrow('这一层不在数据库里', false));
+      const L5 = layer('⑤', '代码', '硬编码 · Data Admin 管不到', 'red');
+      (t.code.rows || []).forEach((r) => {
+        const x = el('div', 'fl-row');
+        x.appendChild(el('code', 'fl-file', r[0]));
+        x.appendChild(el('code', 'fl-v', r[1]));
+        L5.appendChild(x);
+      });
+      body.appendChild(L5);
+
+      box.appendChild(body);
+
+      if (statusEl) statusEl.textContent = t.key + ' —— 五层，前四层是数据，第五层是代码';
+    }
+
+    render();
   };
 
   /* ---------- 挂载 ---------- */

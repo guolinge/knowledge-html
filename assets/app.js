@@ -2732,6 +2732,136 @@
     setHot(null);
   };
 
+
+  /* ============================================================
+     控件：field-lineage —— 一个字段的五层血缘
+     界面上的字 → 元数据字段表 → 元数据数据源表 → 真实表 → 代码
+     只回答一件事：**这个界面元素，底下到底连着哪张表、哪一列、哪段代码**。
+     config:
+       tabs: [{
+         key,
+         ui:     { label, src }                       界面那一格
+         field:  { rows: [[k,v]], hint }              crm_dc_data_field
+         source: { rows: [[k,v]], hint }              crm_dc_data_source
+         table:  { name, cols: [[col,type,sample]], absent }   物理表
+         code:   { rows: [[file,rule]] }              代码（不在数据库里）
+       }]
+     ============================================================ */
+  WIDGETS['field-lineage'] = (root) => {
+    const cfg = cfgOf(root);
+    const box = mountOf(root);
+    const statusEl = root.querySelector('[data-status]');
+    const tabs = cfg.tabs || [];
+    if (!tabs.length) return;
+    let cur = 0;
+
+    const el = (tag, cls, text) => {
+      const n = document.createElement(tag);
+      if (cls) n.className = cls;
+      if (text !== undefined) n.textContent = text;
+      return n;
+    };
+    const row = (k, v, cls) => {
+      const r = el('div', 'fl-row');
+      r.appendChild(el('span', 'fl-k', k));
+      r.appendChild(el('code', 'fl-v' + (cls ? ' ' + cls : ''), v));
+      return r;
+    };
+
+    // —— 层外壳 ——
+    function layer(n, name, tag, tone) {
+      const L = el('div', 'fl-layer tone-' + tone);
+      const h = el('div', 'fl-head');
+      h.appendChild(el('span', 'fl-n', n));
+      h.appendChild(el('b', '', name));
+      if (tag) h.appendChild(el('span', 'fl-tag', tag));
+      L.appendChild(h);
+      return L;
+    }
+
+    // —— 箭头 ——
+    function arrow(text, down) {
+      const a = el('div', 'fl-arrow' + (down ? '' : ' up'));
+      a.appendChild(el('span', 'fl-arrow-line', down ? '↓' : '↑'));
+      if (text) a.appendChild(el('span', 'fl-arrow-t', text));
+      return a;
+    }
+
+    function render() {
+      box.textContent = '';
+      const t = tabs[cur];
+
+      // 切换标签
+      const bar = el('div', 'fl-tabs');
+      tabs.forEach((x, i) => {
+        const b = el('button', 'fl-tab' + (i === cur ? ' on' : ''), x.key);
+        b.addEventListener('click', () => { cur = i; render(); });
+        bar.appendChild(b);
+      });
+      box.appendChild(bar);
+
+      const body = el('div', 'fl-body');
+
+      // ① 界面
+      const L1 = layer('①', '界面', t.ui.tag || '前端实时渲染', 'blue');
+      const uiBox = el('div', 'fl-ui');
+      uiBox.appendChild(el('span', 'fl-ui-label', t.ui.label));
+      L1.appendChild(uiBox);
+      L1.appendChild(el('div', 'fl-note', '← ' + t.ui.src));
+      body.appendChild(L1);
+
+      body.appendChild(arrow('前端不认识业务，照配置渲染', true));
+
+      // ② crm_dc_data_field
+      const L2 = layer('②', 'crm_dc_data_field', '元数据 · Data Admin 改这里', 'violet');
+      (t.field.rows || []).forEach((r) => L2.appendChild(row(r[0], r[1])));
+      if (t.field.hint) L2.appendChild(el('div', 'fl-note', '← ' + t.field.hint));
+      body.appendChild(L2);
+
+      body.appendChild(arrow('data_source_id 指向', true));
+
+      // ③ crm_dc_data_source
+      const L3 = layer('③', 'crm_dc_data_source', '元数据 · 逻辑名 → 物理表', 'violet');
+      (t.source.rows || []).forEach((r) => L3.appendChild(row(r[0], r[1])));
+      if (t.source.hint) L3.appendChild(el('div', 'fl-note', '← ' + t.source.hint));
+      body.appendChild(L3);
+
+      body.appendChild(arrow('table_name 指向', true));
+
+      // ④ 真实表
+      const L4 = layer('④', 'Doris 真实表', t.table.name, 'amber');
+      const tb = el('table', 'fl-table');
+      const th = el('tr');
+      ['列名', '类型', '真实值'].forEach((x) => th.appendChild(el('th', '', x)));
+      tb.appendChild(th);
+      (t.table.cols || []).forEach((c) => {
+        const tr = el('tr');
+        c.forEach((x, i) => tr.appendChild(el('td', i === 2 ? 'fl-sample' : '', x)));
+        tb.appendChild(tr);
+      });
+      L4.appendChild(tb);
+      if (t.table.absent) L4.appendChild(el('div', 'fl-absent', '✗ ' + t.table.absent));
+      body.appendChild(L4);
+
+      // ⑤ 代码（向上指）
+      body.appendChild(arrow('这一层不在数据库里', false));
+      const L5 = layer('⑤', '代码', '硬编码 · Data Admin 管不到', 'red');
+      (t.code.rows || []).forEach((r) => {
+        const x = el('div', 'fl-row');
+        x.appendChild(el('code', 'fl-file', r[0]));
+        x.appendChild(el('code', 'fl-v', r[1]));
+        L5.appendChild(x);
+      });
+      body.appendChild(L5);
+
+      box.appendChild(body);
+
+      if (statusEl) statusEl.textContent = t.key + ' —— 五层，前四层是数据，第五层是代码';
+    }
+
+    render();
+  };
+
   /* ---------- 挂载 ---------- */
   document.querySelectorAll('[data-widget]').forEach((root) => {
     var name = root.getAttribute('data-widget');
