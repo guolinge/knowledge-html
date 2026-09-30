@@ -655,14 +655,52 @@ const KIND_TONE = {
     if (render) {
       // YAML 预检：裸标量以保留字符开头是最常见的坑，而 YAML 自己的报错很难懂
       // 同时覆盖块式（行首 key:）和流式（{ key: ... } 里）两种写法
-      const badLine = token.content
-        .split('\n')
-        .findIndex((l) => /(?:^|[{,]\s*)[\w."'-]+:\s+[*&!%@]/.test(l));
-      if (badLine >= 0) {
-        const at = `${env?.file || 'note.md'}${line ? ':' + (line + badLine) : ''}`;
+      const lines4yaml = token.content.split('\n');
+
+      /* ① 值以保留字符开头：`desc: **加粗**开头` */
+      const badValue = lines4yaml.findIndex((l) => /(?:^|[{,]\s*)[\w."'-]+:\s+[*&!%@]/.test(l));
+      /* ② 键以保留字符开头：`- **工具问题**:`（块式）或 `- **工具问题**: [...]`（流式）
+
+         两个坑踩过：
+
+         a. **块标量里的行不能当 YAML 看。** `text: |` / `body: |` 里的内容
+            是字符串，里面写 `- **重点**: 为什么…` 完全合法。
+            第一版没管这个，一下误报了 23 处 —— 而误报会阻塞全仓库的 check。
+
+         b. 保留字符表里不能放 `{` / `[` —— `- { title: x, desc: y }` 是合法的流式映射。 */
+      const scalarLines = new Array(lines4yaml.length).fill(false);
+      {
+        let base = -1;
+        for (let i = 0; i < lines4yaml.length; i++) {
+          const m = /^(\s*)[\w."'-]+:\s*[|>][-+]?\s*$/.exec(lines4yaml[i]);
+          if (m) { base = m[1].length; continue; }
+          if (base < 0) continue;
+          if (!lines4yaml[i].trim()) { scalarLines[i] = true; continue; }
+          const ind = lines4yaml[i].length - lines4yaml[i].trimStart().length;
+          if (ind > base) scalarLines[i] = true;
+          else base = -1;
+        }
+      }
+      const badKey = lines4yaml.findIndex(
+        (l, i) => !scalarLines[i] && /^\s*-\s+[*&!%@][^:]*:\s*(\S.*)?$/.test(l),
+      );
+
+      if (badKey >= 0) {
+        const at = `${env?.file || 'note.md'}${line ? ':' + (line + badKey) : ''}`;
+        throw new Error(
+          `${at} 积木 \`${lang}\` 的 YAML 里有「以保留字符开头的键」\n` +
+            `  ${lines4yaml[badKey].trim()}\n` +
+            `  💡 \`*\` 是别名、\`&\` 是锚点、\`!\` 是标签 —— 它们不能直接当键的开头。\n` +
+            `     键想加粗就加引号：\n` +
+            `       - "**机制**（因果关系）": [...]\n`,
+        );
+      }
+
+      if (badValue >= 0) {
+        const at = `${env?.file || 'note.md'}${line ? ':' + (line + badValue) : ''}`;
         throw new Error(
           `${at} 积木 \`${lang}\` 的 YAML 有裸标量以保留字符开头\n` +
-            `  ${token.content.split('\n')[badLine].trim()}\n` +
+            `  ${lines4yaml[badValue].trim()}\n` +
             `  💡 \`*\` \`&\` \`!\` 在 YAML 里是别名/锚点/标签的起始符。给这个值加双引号：\n` +
             `     desc: "**加粗**开头也要加引号"\n`,
         );
@@ -966,6 +1004,54 @@ function whereIn(srcLines, needle) {
 export function lintFences(html, src = '') {
   const issues = [];
   const srcLines = src ? src.split('\n') : [];
+
+  /* ── ① 源码层面的围栏嵌套检查（确定性，不猜）──
+
+     一个围栏块里，如果出现了「缩进 ≤3 且反引号数 ≥ 外层」的围栏，
+     它就会**提前关掉外层** —— 因为 md 的关围栏规则是：
+       行首 ≤3 空格 + ≥ 开围栏长度 的反引号 + 后面只有空白
+
+     必须缩进 ≤3 的才算 —— 块标量里的内容（比如 YAML 里缩进 6 的代码块）
+     关不掉外层，那是合法的。
+
+     为什么需要这条：下面那个启发式（「代码块里出现 markdown 强调」）
+     只看**渲染结果**，而围栏被提前关掉之后，被困的内容如果恰好没有 `**` / `==`，
+     它就一声不响。实测漏报了 8 处真问题 —— 那些 ASCII 图全都渲染成了缩进段落。 */
+  let i = 0;
+  while (i < srcLines.length) {
+    const open = /^(`{3,})(\S+)\s*$/.exec(srcLines[i]);
+    if (!open) { i++; continue; }
+    const ticks = open[1].length;
+    let j = i + 1;
+    while (j < srcLines.length && !new RegExp('^`{' + ticks + ',}\\s*$').test(srcLines[j])) j++;
+    if (j >= srcLines.length) { i = j; continue; }
+
+    let worst = 0;
+    for (let k = i + 1; k < j; k++) {
+      const m = /^( {0,3})(`{3,})/.exec(srcLines[k]);
+      if (m) worst = Math.max(worst, m[2].length);
+    }
+    if (worst >= ticks) {
+      /* 报第一处「真的会关掉外层」的那行的行号 —— 作者能直接跳过去改 */
+      let at = i + 2;
+      for (let k = i + 1; k < j; k++) {
+        const m = /^ {0,3}(`{3,})/.exec(srcLines[k]);
+        if (m && m[1].length >= ticks) { at = k + 1; break; }
+      }
+      issues.push(
+        `note.md:${at} 附近 → 这一行的围栏会提前关掉外层「${open[2]}」\n` +
+          `      外层在第 ${i + 1} 行，用了 ${ticks} 个反引号；\n` +
+          `      而第 ${at} 行的围栏（缩进 ≤3）有 ${worst} 个 —— ` +
+          `关围栏只要「不少于外层长度」，所以它把外层关了。\n` +
+          `      → 把外层改成 ${worst + 1} 个反引号，或跑 npm run fix-fence`,
+      );
+    }
+    i = j + 1;
+  }
+
+  /* ── ② 渲染结果的启发式（上一层的补充）──
+     上一段已经能确定性地捉到嵌套；这一条留着兜「其他原因把 markdown 闷在代码块里」——
+     但它是猜的，所以排在后面。 */
   for (const m of html.matchAll(/<pre><code>([^<]*)<\/code><\/pre>/g)) {
     const text = m[1]
       .replace(/&quot;/g, '"')
@@ -984,6 +1070,7 @@ export function lintFences(html, src = '') {
   }
   return issues;
 }
+
 
 /**
  * 检查链接被 `**` 污染 —— `**https://x/**。` 这种写法。

@@ -67,7 +67,7 @@ rows:
 
 ## 02 · 组织：六个类的共同形状
 
-```callout
+````callout
 tone: green
 icon: ✅
 quote: true
@@ -78,7 +78,7 @@ text: |
   list(condition, decode)   →  一段能查出 uid 列表的 SQL
   count(condition)          →  一段能数出人数的 SQL
   ```
-```
+````
 
 ```compare
 first: 类
@@ -480,7 +480,7 @@ text: |
     ==「有且只有」用正向条件表达不了，必须反过来。==
 ```
 
-```callout
+````callout
 tone: amber
 icon: ⚠
 text: |
@@ -494,7 +494,7 @@ text: |
   ==这是个向后兼容的默认值，但它有真实的行为差异== ——
   老调用方不传这个字段，拿到的就是「有且只有」语义。
   调这个接口时**明确传 `isStrictMatch`**，别依赖默认。
-```
+````
 
 ### 还有两处现场注释
 

@@ -170,7 +170,7 @@ _rules.sort((a, b) => bOrder - aOrder);   // 降序
 const bulkSql = _rules.reduce((sql, rule) => { ... }, majorSql);
 ```
 
-```callout
+````callout
 tone: amber
 icon: ⚠
 text: |
@@ -188,7 +188,7 @@ text: |
   ```
 
   ==这种「注释和代码要合起来读才对得上」的地方，是读代码最容易卡住的。==
-```
+````
 
 ### 一个设计上的小细节
 

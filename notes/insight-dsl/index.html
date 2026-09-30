@@ -370,12 +370,63 @@
 </div>
     </div><h3 id="四条-sql-各是什么样">四条 SQL 各是什么样</h3>
 <p>用「年龄 ≥ 18」这一个条件，三条 SQL 分别长这样：</p>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>名字</th><th>长什么样</th><th>干什么用</th></tr></thead><tbody><tr><th><code>uidsSql</code></th><td data-label="长什么样"><code>SELECT u.uid AS uid FROM user_portraits_wide AS u WHERE u.staff_id = 101 AND (TIMESTAMPDIFF(YEAR, u.birthday, CURRENT_DATE()) &gt;= 18)</code></td><td data-label="干什么用">把命中的 uid 全捞出来。<strong>冻名单</strong>（做快照）用的就是它</td></tr><tr><th><code>countSql</code></th><td data-label="长什么样"><code>SELECT COUNT(*) AS count FROM ( &lt;上面那句&gt; ) AS t</code></td><td data-label="干什么用">界面上的「共 1413 人」。<mark class="mk-blue">包一层是因为展示列会 LEFT JOIN 出重复行</mark>，包一层才数的是人不数行</td></tr><tr><th><code>listSql</code></th><td data-label="长什么样">比 uidsSql 多几列：<code>u.uid, u.customer_name, u.staff_name, TIMESTAMPDIFF(...) AS age</code>，末尾 <code>ORDER BY u.uid LIMIT 10 OFFSET 0</code></td><td data-label="干什么用">表格那一屏。分页走 uid 游标，不走 OFFSET</td></tr><tr><th><code>droppedUidsSql</code></th><td data-label="长什么样"><span class="tag tone-muted">只有用了「指定 UID」才有，否则是 null</span></td><td data-label="干什么用">你点名了 100 个人，权限只让你看 80 个 —— 用它查出剩下 20 个，好回话</td></tr></tbody></table></div><div class="callout tone-amber">
+<div class="compare-wrap"><table class="compare"><thead><tr><th>名字</th><th>长什么样</th><th>干什么用</th></tr></thead><tbody><tr><th><code>uidsSql</code></th><td data-label="长什么样"><code>SELECT u.uid AS uid FROM user_portraits_wide AS u WHERE u.staff_id = 101 AND (TIMESTAMPDIFF(YEAR, u.birthday, CURRENT_DATE()) &gt;= 18)</code></td><td data-label="干什么用">把命中的 uid 全捞出来。<strong>冻名单</strong>（做快照）用的就是它</td></tr><tr><th><code>countSql</code></th><td data-label="长什么样"><code>SELECT COUNT(*) AS count FROM ( &lt;上面那句&gt; ) AS t</code></td><td data-label="干什么用">界面上的「共 1413 人」。它数的就是 <code>uidsSql</code> 定义的那个集合 —— <mark class="mk-amber">包一层不去重，这个代码里也没东西需要去重</mark></td></tr><tr><th><code>listSql</code></th><td data-label="长什么样">比 uidsSql 多几列：<code>u.uid, u.customer_name, u.staff_name, TIMESTAMPDIFF(...) AS age</code>，末尾 <code>ORDER BY u.uid LIMIT 10 OFFSET 0</code></td><td data-label="干什么用">表格那一屏。分页走 uid 游标，不走 OFFSET</td></tr><tr><th><code>droppedUidsSql</code></th><td data-label="长什么样"><span class="tag tone-muted">只有用了「指定 UID」才有，否则是 null</span></td><td data-label="干什么用">你点名了 100 个人，权限只让你看 80 个 —— 用它查出剩下 20 个，好回话</td></tr></tbody></table></div><div class="callout tone-red">
       <span class="ic">⚠</span>
-      <div><p><mark class="mk-blue">别被 <code>countSql</code> 的「包一层」骗了，它不是脱裤子放屁。</mark></p>
-<p>展示列要从 <code>rel_holding</code> 这类关系表 LEFT JOIN 过来 —— 一个人持有 5 个标的就出 5 行。
-直接 <code>COUNT(*)</code> 会把「1 个人」数成「5 行」。
-包一层子查询（里面只选 uid），数出来才是人数。</p>
+      <div><p><mark class="mk-blue"><strong>「包一层」不是去重 —— 它防不住重复行。</strong></mark></p>
+<p>这是个高频误解，值得单独说清。继续读之前，先确认三件事实：</p>
+<table>
+<thead>
+<tr>
+<th>事实</th>
+<th>怎么核实的</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>关系条件编译成 <code>IN (子查询)</code>，<strong>不是 JOIN</strong></td>
+<td>读 <code>compileRelation</code> —— detail / times / not_in 三个分支全是 <code>IN</code> / <code>EXISTS</code></td>
+</tr>
+<tr>
+<td>全库 318 条夹具 SQL 里只有 1 条含 JOIN</td>
+<td>而且那 1 条是分页用的 <code>CROSS JOIN</code>，不是关系表</td>
+</tr>
+<tr>
+<td>宽表的 <code>uid</code> 是 <code>UNIQUE KEY</code></td>
+<td><code>SHOW CREATE TABLE</code>；实测 100 万行 = 100 万去重后</td>
+</tr>
+</tbody>
+</table>
+<p>所以 <code>COUNT(*) FROM (uidsSql)</code> 在这个代码里是个<strong>语义 no-op</strong> ——
+它数出来的人数，跟直接数宽表行数一样。</p>
+<p><mark class="mk-green">它真正的价值是<strong>结构上的一致</strong>：把「人数」定义成「<code>uidsSql</code> 这个集合的元素个数」，
+而不是「宽表的行数」。将来 <code>uidsSql</code> 里加了会改变行数的东西，外层不用动。</mark></p>
+<p><mark class="mk-amber">但如果是<strong>真的</strong>出现了重复行（比如某个字段落在 1:N 的表上），包一层救不了它。</mark>
+下面这个可以点，看四种写法差多少。</p>
+</div>
+    </div><div class="demo" data-widget="count-dedup-lab" data-config="{&quot;universe&quot;:&quot;user_portraits_wide&quot;,&quot;joinTable&quot;:&quot;rel_holding&quot;,&quot;users&quot;:[{&quot;uid&quot;:1001,&quot;name&quot;:&quot;张三&quot;,&quot;holdings&quot;:[&quot;AAPL&quot;,&quot;TSLA&quot;,&quot;NVDA&quot;,&quot;MSFT&quot;,&quot;META&quot;]},{&quot;uid&quot;:1002,&quot;name&quot;:&quot;李四&quot;,&quot;holdings&quot;:[&quot;AAPL&quot;]},{&quot;uid&quot;:1003,&quot;name&quot;:&quot;王五&quot;,&quot;holdings&quot;:[]}]}">
+      <div class="demo-head">
+        <span class="title">「包一层」到底去不去重</span>
+        <span class="status" data-status></span>
+        <span class="spacer"></span>
+        
+      </div>
+      <div class="demo-body custom" data-mount></div>
+    </div><div class="callout tone-green">
+      <span class="ic">✅</span>
+      <div><p><strong>怎么判断一段 SQL 该不该担心重复？</strong> 看两件事：</p>
+<ol>
+<li><strong>有没有 <code>JOIN</code> 一张一对多的表？</strong> 有 → 行会变多。</li>
+<li><strong>重复的 key 会不会被 <code>DISTINCT</code> / <code>GROUP BY</code> / <code>UNION</code> 折掉？</strong> 不会 → 它就一直多着。</li>
+</ol>
+<p>修法只有两种：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-sql">-- 写法一：内层 DISTINCT
+SELECT COUNT(*) FROM (SELECT DISTINCT u.uid FROM users u JOIN rel_holding h ON …) t
+
+-- 写法二：直接 COUNT(DISTINCT)（通常更简洁）
+SELECT COUNT(DISTINCT u.uid) AS count FROM users u JOIN rel_holding h ON …
+</code></pre></div>
+<p><mark class="mk-blue">回到这个库：因为关系条件走 <code>IN (子查询)</code>、画像字段全在宽表上，
+它<strong>根本不会产生重复行</strong> —— 所以那个「包一层」不是在补这个坑。</mark></p>
 </div>
     </div><hr>
 <h2 id="走一遍完整编译"><span class="num">03</span>走一遍完整编译</h2>
@@ -1405,8 +1456,34 @@ export function getMetadataRows() {
 <p>注释里那句「这一步不重新检查空列表」是硬性承诺，不是「尽量」。</p>
 </div>
       </details><details>
+        <summary><code>countSql</code> 的「包一层」是在去重吗？</summary>
+        <div class="a"><p><strong>不是。</strong> 而且在这个代码里它没有东西可去 —— 它是个<strong>语义 no-op</strong>。</p>
+<p>三条证据：</p>
+<ol>
+<li>关系条件编译成 <code>IN (子查询)</code>，不是 JOIN（读 <code>compileRelation</code>）</li>
+<li>全库 318 条夹具 SQL 里只有 1 条含 JOIN，而且是分页的 <code>CROSS JOIN</code></li>
+<li>宽表的 <code>uid</code> 是 <code>UNIQUE KEY</code>（<code>SHOW CREATE TABLE</code>）</li>
+</ol>
+<p><mark class="mk-blue">「子查询里只选 uid 就会去重」是个很常见的错觉。</mark> 不会 —— 去重必须写
+<code>DISTINCT</code> 或 <code>GROUP BY</code>。一个人持 5 个标的，<code>LEFT JOIN</code> 之后就是 5 行，
+包一层之后还是 5 行。</p>
+<p>它真正的价值是<strong>结构上的一致</strong>：把「人数」定义成「<code>uidsSql</code> 这个集合的元素个数」，
+而不是「宽表的行数」。</p>
+</div>
+      </details><details>
+        <summary>那什么情况下要担心重复？</summary>
+        <div class="a"></div>
+      </details><details>
         <summary>为什么 include 是裸谓词，exclude 要包 NOT COALESCE？</summary>
-        <div class="a"><p>因为 SQL 的三值逻辑：<code>NOT UNKNOWN</code> 还是 <code>UNKNOWN</code>，而 WHERE 把 UNKNOWN 当 false。</p>
+        <div class="a"><p>看两件事：</p>
+<ol>
+<li><strong>有没有 <code>JOIN</code> 一张一对多的表？</strong> 有 → 行会变多</li>
+<li><strong>重复的 key 会不会被 <code>DISTINCT</code> / <code>GROUP BY</code> / <code>UNION</code> 折掉？</strong> 不会 → 它就一直多着</li>
+</ol>
+<p>修法两种：内层 <code>SELECT DISTINCT</code> 再外层 <code>COUNT(*)</code>，或者直接 <code>COUNT(DISTINCT uid)</code>。</p>
+<p><mark class="mk-blue">回到这个库：因为关系条件走 <code>IN (子查询)</code>、画像字段全在宽表上，
+它根本不会产生重复行。</mark>
+因为 SQL 的三值逻辑：<code>NOT UNKNOWN</code> 还是 <code>UNKNOWN</code>，而 WHERE 把 UNKNOWN 当 false。</p>
 <p>拿「排除男性」<code>NOT (gender = 'M')</code> 举例，性别未知的那一行：</p>
 <ul>
 <li><code>gender = 'M'</code> → UNKNOWN</li>

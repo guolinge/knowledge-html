@@ -715,6 +715,53 @@ grep -oE '`[A-Za-z_][A-Za-z0-9_.]{2,}`' notes/<slug>/note.md | sort -u
 真实事故：文档里写「这个接口有 14 个方法」，实际 **17 个**。
 同一个错误在架构图、正文、速查表里各出现一次，**三轮都没人发现**。
 
+```callout
+tone: red
+icon: ⚠
+text: |
+  ==**但光数数字不够 —— 机制也要核。**==
+
+  第二个真实事故：文档里写「`countSql` 包一层是因为展示列会 LEFT JOIN 出重复行」。
+  数字都对、术语都对、句子通顺 —— **但机制是编的**。
+
+  回源码一看，两个错：
+
+  | 我写的 | 事实 |
+  |---|---|
+  | 展示列会 LEFT JOIN 出重复行 | 展示列**根本不参与** `countSql`，它用的是 `uidsSql` |
+  | 包一层才数的是人不数行 | ==包一层**不会去重**==；而且这里也没有东西需要去重 |
+
+  怎么发现的？别人看了图觉得不对，去问了一圈才确认。
+  ==靠外部反馈才发现，说明自己那一轮核实是缺的。==
+```
+
+**两类要核的东西，别只核第一类：**
+
+```compare
+first: 写下的东西
+head: [长什么样, 怎么核]
+rows:
+  - 数字:
+      - "「14 个方法」「1700 行」「5 种类型」"
+      - "`grep -c` / `wc -l` —— 命令一跑就知道"
+  - "**机制**（因果关系）":
+      - "「包一层**因为**…」「校验分两段**是因为**…」"
+      - { text: "==把那条代码路径读出来，看它到底会不会那样==", tone: amber }
+```
+
+```callout
+tone: violet
+icon: 💡
+text: |
+  **机制比数字危险，因为它看着更有道理。**
+
+  数字错了读者会怀疑（「真的 17 个？」），但机制错了读者**会信** ——
+  因为它语法通、逻辑顺、还带着解释力。
+
+  ++判别方法：写下「因为…」之前，问自己「我是读到的，还是推出来的？」++
+  推出来的，就得回去读。
+```
+
 容易写错的几类数字：**接口方法数、文件行数、枚举取值数、调用点数量**。
 
 ```bash
@@ -973,10 +1020,10 @@ text: |
 | `summary` | 小结 |
 | `raw` | 直接写 HTML |
 
-**交互控件 15 个**（在 `assets/app.js` 的 `WIDGETS` 里，供 `demo` 积木引用）：
+**交互控件 16 个**（在 `assets/app.js` 的 `WIDGETS` 里，供 `demo` 积木引用）：
 `polling-vs-cdc` `combination-count` `join-lab` `on-vs-where` `knex-chain`
 `stepper` `tuner` `diff` `stream-modes` `operator-lab` `hashring` `partition-prune`
-`dsl-lab` `null-lab` `config-to-ui`
+`dsl-lab` `null-lab` `config-to-ui` `count-dedup-lab`
 
 **已知缺口**（按优先级）：
 

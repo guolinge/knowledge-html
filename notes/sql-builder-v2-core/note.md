@@ -141,7 +141,7 @@ export interface GeneralTree {
 }
 ```
 
-```callout
+````callout
 tone: violet
 icon: 💡
 text: |
@@ -158,7 +158,7 @@ text: |
   ```
 
   ==第二个参数就是 `TreeForkKey`。==
-```
+````
 
 ```text
 // define.ts（全文 6 行）

@@ -2732,6 +2732,168 @@
     setHot(null);
   };
 
+  /* ============================================================
+     控件：count-dedup-lab —— 「包一层」到底去不去重
+
+     数据集：3 个人，其中一个人持 5 个标的。LEFT JOIN 之后是 7 行。
+     四种写法对比：
+       JOIN 后直接 COUNT(*)   → 7（数的是行）
+       包一层（只选 uid）      → 7（==没变！这就是重点==）
+       DISTINCT 再包一层       → 3（数的是人）
+       COUNT(DISTINCT uid)    → 3
+
+     为什么值得单做一块：这是 SQL 里高频的误解 ——
+     「子查询里只 select uid 就去重了」是错的，去重必须写 DISTINCT 或 GROUP BY。
+     config:
+       universe: 宽表名
+       joinTable: 关系表名
+       users: [{ uid, name, holdings: [...] }]
+  ============================================================ */
+  WIDGETS['count-dedup-lab'] = (root) => {
+    const cfg = cfgOf(root);
+    const box = mountOf(root);
+    const statusEl = root.querySelector('[data-status]');
+    const U = cfg.universe || 'user_portraits_wide';
+    const H = cfg.joinTable || 'rel_holding';
+    const users = cfg.users || [];
+    if (!users.length) return;
+
+    const H_ = (tag, cls, text) => el(tag, cls, text);
+
+    /* 展开成 LEFT JOIN 之后的行 —— 没持仓的也留一行（object 为 null） */
+    const rows = [];
+    users.forEach((u) => {
+      if (u.holdings && u.holdings.length) {
+        u.holdings.forEach((o) => rows.push({ uid: u.uid, name: u.name, obj: o }));
+      } else {
+        rows.push({ uid: u.uid, name: u.name, obj: null });
+      }
+    });
+    const people = users.length;
+    const joined = rows.length;
+
+    const MODES = [
+      { k: 'join',      label: 'JOIN 后直接 COUNT(*)', n: joined,  ok: false },
+      { k: 'wrap',      label: '包一层（只选 uid）',    n: joined,  ok: false },
+      { k: 'distinct',  label: 'DISTINCT 再包一层',     n: people,  ok: true  },
+      { k: 'cd',        label: 'COUNT(DISTINCT uid)',   n: people,  ok: true  },
+    ];
+    let mode = 'wrap';
+
+    const modes = H_('div', 'cd-modes');
+    MODES.forEach((m) => {
+      const b = H_('button', null, m.label);
+      b.addEventListener('click', () => { mode = m.k; draw(); });
+      m.btn = b;
+      modes.append(b);
+    });
+
+    const wrap = H_('div', 'cd-wrap');
+    wrap.append(modes);
+
+    const sqlBox = H_('div', 'cd-sql');
+    const sqlPre = document.createElement('pre');
+    sqlBox.append(sqlPre);
+    wrap.append(sqlBox);
+
+    const cols = H_('div', 'cd-cols');
+    const rowsBox = H_('div', 'cd-rows');
+    const table = document.createElement('table');
+    const thead = document.createElement('thead');
+    const trh = document.createElement('tr');
+    ['uid', '客户', 'object_id'].forEach((t) => trh.append(H_('th', null, t)));
+    thead.append(trh);
+    const tbody = document.createElement('tbody');
+    table.append(thead, tbody);
+    rowsBox.append(table);
+    const out = H_('div', 'cd-out');
+    cols.append(rowsBox, out);
+    wrap.append(cols);
+
+    const verdict = H_('div', 'cd-verdict');
+    wrap.append(verdict);
+    box.append(wrap);
+
+    function sqlLines(k) {
+      const S = (t, c) => [t, c];
+      const join = 'LEFT JOIN ' + H + ' AS `h` ON `h`.`uid` = `u`.`uid`';
+      const from = [S('FROM ', 'kw'), S(U + ' AS `u`', null)];
+      if (k === 'cd') {
+        return [
+          [S('SELECT ', 'kw'), S('COUNT(DISTINCT `u`.`uid`)', 'good'), S(' AS `count`', null)],
+          from,
+          [S(join, null)],
+        ];
+      }
+      const inner = (sel) => [
+        [S('SELECT ', 'kw'), S(sel, sel === 'DISTINCT `u`.`uid`' ? 'good' : 'bad')],
+        [S('FROM ', 'kw'), S(U + ' AS `u`', null)],
+        [S(join, null)],
+      ];
+      if (k === 'join') {
+        return [
+          [S('SELECT ', 'kw'), S('COUNT(*)', 'bad'), S(' AS `count`', null)],
+          from,
+          [S(join, null)],
+        ];
+      }
+      return [
+        [S('SELECT ', 'kw'), S('COUNT(*)', null), S(' AS `count`', null)],
+        [S('FROM (', 'kw')],
+        /* 注意展开：inner() 返回的是**多行**（行数组），
+           直接放进去会变成「一行里的一个片段是数组」，渲染出来就是 ",kw" 那种乱码。
+           展开后每行只给第一个片段加缩进。 */
+        ...inner(k === 'distinct' ? 'DISTINCT `u`.`uid`' : '`u`.`uid`').map((line) =>
+          line.map((s, i) => [i === 0 ? '  ' + s[0] : s[0], s[1]])),
+        [S(') AS `t`', 'kw')],
+      ];
+    }
+
+    function draw() {
+      const m = MODES.find((x) => x.k === mode);
+      MODES.forEach((x) => x.btn.classList.toggle('on', x.k === mode));
+
+      const nodes = [];
+      sqlLines(mode).forEach((line, i) => {
+        if (i) nodes.push(document.createTextNode('\n'));
+        line.forEach((s) => nodes.push(s[1] ? H_('span', s[1], s[0]) : document.createTextNode(s[0])));
+      });
+      fill(sqlPre, nodes);
+
+      /* 哪几行被「合并」了 —— DISTINCT / COUNT(DISTINCT) 会把重复 uid 折掉 */
+      const seen = new Set();
+      fill(tbody, rows.map((r) => {
+        const dup = seen.has(r.uid);
+        seen.add(r.uid);
+        const tr = document.createElement('tr');
+        if (dup && m.ok) tr.className = 'dup';
+        tr.append(H_('td', null, String(r.uid)), H_('td', null, r.name));
+        tr.append(H_('td', 'mk', r.obj === null ? 'NULL' : r.obj));
+        if (dup && m.ok) tr.append(H_('td', '', ''));
+        return tr;
+      }));
+
+      out.className = 'cd-out ' + (m.ok ? 'good' : 'bad');
+      fill(out, [
+        H_('small', null, 'COUNT 结果'),
+        H_('b', null, String(m.n)),
+        H_('em', null, m.ok ? `= 人数（${people} 人）` : `✗ 不是人数（${people} 人）`),
+      ]);
+
+      fill(verdict, [
+        h('div', {}, [m.ok
+          ? h('span', {}, [h('b', { text: '对的。' }), h('span', { text: ' DISTINCT 或 GROUP BY 才会去重 —— 内层先把 uid 折成一群人，外层再数。' })])
+          : (mode === 'wrap'
+            ? h('span', {}, [h('b', { text: '关键点：包一层没用。' }), h('span', { text: ' 子查询里只写 ' }), h('code', { text: 'SELECT `u`.`uid`' }), h('span', { text: ' 不会自动去重 —— 它还是原样吐出 ' + joined + ' 行。' })])
+            : h('span', {}, [h('b', { text: '数的是行，不是人。' }), h('span', { text: ' 张三持 5 个标的就占 5 行，直接 COUNT(*) 把他算成了 5 个人。' })]))]),
+        h('div', {}, [h('span', { text: '这批数据：' }), h('code', { text: String(people) }), h('span', { text: ' 个人，LEFT JOIN 之后 ' }), h('code', { text: String(joined) }), h('span', { text: ' 行。' })]),
+      ]);
+
+      if (statusEl) statusEl.textContent = m.label + ' → ' + m.n;
+    }
+    draw();
+  };
+
   /* ---------- 挂载 ---------- */
   document.querySelectorAll('[data-widget]').forEach((root) => {
     var name = root.getAttribute('data-widget');
