@@ -156,7 +156,7 @@ edges:
   - { from: date, to: out }
 ```
 
-```callout
+````callout
 tone: green
 icon: ✅
 text: |
@@ -170,7 +170,7 @@ text: |
 
   「2026-03-01 那天」就是一个值，不需要算。
   ==只有相对时间才需要「展开成多个条件」。==
-```
+````
 
 ### 谁在调它
 

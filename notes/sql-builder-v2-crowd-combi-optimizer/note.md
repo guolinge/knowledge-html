@@ -12,7 +12,7 @@ text: |
 
 ## 01 · 概念：在翻译之前，还有一步
 
-```callout
+````callout
 tone: red
 icon: ⚠
 quote: true
@@ -28,7 +28,7 @@ text: |
     ↓ ③ buildWhere 编译
   SQL
   ```
-```
+````
 
 **它在代码里的位置**：
 

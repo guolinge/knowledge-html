@@ -230,7 +230,7 @@ rows:
       - "把命中的 uid 全捞出来。**冻名单**（做快照）用的就是它"
   - "`countSql`":
       - "`SELECT COUNT(*) AS count FROM ( <上面那句> ) AS t`"
-      - "界面上的「共 1413 人」。==包一层是因为展示列会 LEFT JOIN 出重复行==，包一层才数的是人不数行"
+      - "界面上的「共 1413 人」。它数的就是 `uidsSql` 定义的那个集合 —— !!包一层不去重，这个代码里也没东西需要去重!!"
   - "`listSql`":
       - "比 uidsSql 多几列：`u.uid, u.customer_name, u.staff_name, TIMESTAMPDIFF(...) AS age`，末尾 `ORDER BY u.uid LIMIT 10 OFFSET 0`"
       - "表格那一屏。分页走 uid 游标，不走 OFFSET"
@@ -240,15 +240,64 @@ rows:
 ```
 
 ```callout
-tone: amber
+tone: red
 icon: ⚠
 text: |
-  ==别被 `countSql` 的「包一层」骗了，它不是脱裤子放屁。==
+  ==**「包一层」不是去重 —— 它防不住重复行。**==
 
-  展示列要从 `rel_holding` 这类关系表 LEFT JOIN 过来 —— 一个人持有 5 个标的就出 5 行。
-  直接 `COUNT(*)` 会把「1 个人」数成「5 行」。
-  包一层子查询（里面只选 uid），数出来才是人数。
+  这是个高频误解，值得单独说清。继续读之前，先确认三件事实：
+
+  | 事实 | 怎么核实的 |
+  |---|---|
+  | 关系条件编译成 `IN (子查询)`，**不是 JOIN** | 读 `compileRelation` —— detail / times / not_in 三个分支全是 `IN` / `EXISTS` |
+  | 全库 318 条夹具 SQL 里只有 1 条含 JOIN | 而且那 1 条是分页用的 `CROSS JOIN`，不是关系表 |
+  | 宽表的 `uid` 是 `UNIQUE KEY` | `SHOW CREATE TABLE`；实测 100 万行 = 100 万去重后 |
+
+  所以 `COUNT(*) FROM (uidsSql)` 在这个代码里是个**语义 no-op** ——
+  它数出来的人数，跟直接数宽表行数一样。
+
+  ++它真正的价值是**结构上的一致**：把「人数」定义成「`uidsSql` 这个集合的元素个数」，
+  而不是「宽表的行数」。将来 `uidsSql` 里加了会改变行数的东西，外层不用动。++
+
+  !!但如果是**真的**出现了重复行（比如某个字段落在 1:N 的表上），包一层救不了它。!!
+  下面这个可以点，看四种写法差多少。
 ```
+
+```demo
+widget: count-dedup-lab
+title: 「包一层」到底去不去重
+actions: false
+config:
+  universe: user_portraits_wide
+  joinTable: rel_holding
+  users:
+    - { uid: 1001, name: 张三, holdings: [AAPL, TSLA, NVDA, MSFT, META] }
+    - { uid: 1002, name: 李四, holdings: [AAPL] }
+    - { uid: 1003, name: 王五, holdings: [] }
+```
+
+````callout
+tone: green
+icon: ✅
+text: |
+  **怎么判断一段 SQL 该不该担心重复？** 看两件事：
+
+  1. **有没有 `JOIN` 一张一对多的表？** 有 → 行会变多。
+  2. **重复的 key 会不会被 `DISTINCT` / `GROUP BY` / `UNION` 折掉？** 不会 → 它就一直多着。
+
+  修法只有两种：
+
+  ```sql
+  -- 写法一：内层 DISTINCT
+  SELECT COUNT(*) FROM (SELECT DISTINCT u.uid FROM users u JOIN rel_holding h ON …) t
+
+  -- 写法二：直接 COUNT(DISTINCT)（通常更简洁）
+  SELECT COUNT(DISTINCT u.uid) AS count FROM users u JOIN rel_holding h ON …
+  ```
+
+  ==回到这个库：因为关系条件走 `IN (子查询)`、画像字段全在宽表上，
+  它**根本不会产生重复行** —— 所以那个「包一层」不是在补这个坑。==
+````
 
 ---
 
@@ -1162,8 +1211,33 @@ text: |
     4. 测试能分开写 —— 44 个用例专测校验器，不掺 SQL
 
     注释里那句「这一步不重新检查空列表」是硬性承诺，不是「尽量」。
+- q: "`countSql` 的「包一层」是在去重吗？"
+  a: |
+    **不是。** 而且在这个代码里它没有东西可去 —— 它是个**语义 no-op**。
+
+    三条证据：
+    1. 关系条件编译成 `IN (子查询)`，不是 JOIN（读 `compileRelation`）
+    2. 全库 318 条夹具 SQL 里只有 1 条含 JOIN，而且是分页的 `CROSS JOIN`
+    3. 宽表的 `uid` 是 `UNIQUE KEY`（`SHOW CREATE TABLE`）
+
+    ==「子查询里只选 uid 就会去重」是个很常见的错觉。== 不会 —— 去重必须写
+    `DISTINCT` 或 `GROUP BY`。一个人持 5 个标的，`LEFT JOIN` 之后就是 5 行，
+    包一层之后还是 5 行。
+
+    它真正的价值是**结构上的一致**：把「人数」定义成「`uidsSql` 这个集合的元素个数」，
+    而不是「宽表的行数」。
+- q: 那什么情况下要担心重复？
 - q: 为什么 include 是裸谓词，exclude 要包 NOT COALESCE？
   a: |
+    看两件事：
+
+    1. **有没有 `JOIN` 一张一对多的表？** 有 → 行会变多
+    2. **重复的 key 会不会被 `DISTINCT` / `GROUP BY` / `UNION` 折掉？** 不会 → 它就一直多着
+
+    修法两种：内层 `SELECT DISTINCT` 再外层 `COUNT(*)`，或者直接 `COUNT(DISTINCT uid)`。
+
+    ==回到这个库：因为关系条件走 `IN (子查询)`、画像字段全在宽表上，
+    它根本不会产生重复行。==
     因为 SQL 的三值逻辑：`NOT UNKNOWN` 还是 `UNKNOWN`，而 WHERE 把 UNKNOWN 当 false。
 
     拿「排除男性」`NOT (gender = 'M')` 举例，性别未知的那一行：
