@@ -1,0 +1,927 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-has-toc="1">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>数据地图：11 张表，和一次圈选查询的完整旅程</title>
+<meta name="description" content="圈选页点一下「查询」，0.2 秒出结果 —— 中间 SQL 打在哪些表上、数据怎么被找出来的？这篇把底下那层全部摊开：11 张表分两半（MySQL 7 张是定义、Doris 4 张是事实）、每张表的关键列、它们之间怎么连、三种条件编译成三种 SQL 形状，最后还有一个「同一件事两种存法、答案对不上」的真实例子。" />
+<link rel="stylesheet" href="../../assets/theme.css" />
+  <link rel="stylesheet" href="../../assets/blocks.css" />
+  <link rel="stylesheet" href="../../assets/archify-embed.css" />
+</head>
+<body>
+<div id="progress"></div>
+<div id="tocScrim"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
+    <a class="brand" href="../../index.html"><span class="dot"></span>知识笔记</a>
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="toc" id="toc">
+      <p class="toc-title">目录</p>
+      <a href="../../index.html" class="sub">← 全部笔记</a>
+      <a href="#11-张表分成两半">11 张表，分成两半</a>
+      <a href="#11-先看-mysql-这-5-张配置表" class="sub">1.1 先看 MySQL 这 5 张「配置表」</a>
+      <a href="#12-再看两张任务表" class="sub">1.2 再看两张「任务表」</a>
+      <a href="#13-doris-那-4-张" class="sub">1.3 Doris 那 4 张</a>
+      <a href="#一次查询数据是怎么走完的">一次查询，数据是怎么走完的</a>
+      <a href="#21-编译这一步三种条件三种写法" class="sub">2.1 编译这一步：三种条件，三种写法</a>
+      <a href="#22-数据怎么被找到" class="sub">2.2 数据怎么被「找」到</a>
+      <a href="#23-uid唯一的钥匙" class="sub">2.3 uid：唯一的钥匙</a>
+      <a href="#同一件事两种存法-而且答案不一样">同一件事，两种存法 —— 而且答案不一样</a>
+      <a href="#三句话" class="sub">三句话</a>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow">● 从零理解 · 数据层</span>
+      <h1>数据地图：11 张表，和一次圈选查询的完整旅程</h1>
+      <p class="lede">圈选页点一下「查询」，0.2 秒出结果 —— 中间 SQL 打在哪些表上、数据怎么被找出来的？这篇把底下那层全部摊开：11 张表分两半（MySQL 7 张是定义、Doris 4 张是事实）、每张表的关键列、它们之间怎么连、三种条件编译成三种 SQL 形状，最后还有一个「同一件事两种存法、答案对不上」的真实例子。</p>
+    </div>
+
+    <div class="draft-banner">
+    <span>⚠</span>
+    <span>本页状态为 <b>draft</b>：内容尚未人工核对，引用前请自行验证。</span>
+  </div>
+
+    <div class="provenance"><span><b>来源</b> crm-dsl-stru metadata/schema.sql —— 7 张配置表的建表语句（134 行） · crm-dsl-stru docs/架构与调用.md —— 三服务切分与交接时序 · crm-dsl-stru packages/dsl/src/compile.ts —— 条件树 → SQL 的编译（关系走子查询） · 本地 MySQL crm_dc + Doris crm_insight 实例（行数/列数/样本值全部实测） · 实测：/api/preview 跑带关系条件的查询，看 usedTables 与 countSql 原文</span><span><b>生成</b> 2026-09-30</span><span><b>模型</b> claude-opus-4-6</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">数据地图</span> <span class="tag tone-muted">元数据</span> <span class="tag tone-muted">Doris</span> <span class="tag tone-muted">SQL</span> <span class="tag tone-muted">圈选</span></span></div>
+
+<p>你在圈选页点一下「查询」，<strong>0.2 秒</strong>后看到「共 53,208 人」。</p>
+<p>中间发生了什么？SQL 打在哪些表上？数据怎么被找出来的？</p>
+<p>这篇把底下那层全部摊开：<strong>11 张表</strong>、每张表干什么、它们之间怎么连、一次查询怎么从界面走到 Doris 再走回来。</p>
+<div class="callout tone-blue">
+      <span class="ic">🎯</span>
+      <div><p><strong>读完你应该能回答</strong>：</p>
+<ul>
+<li>这个系统里有几张表？哪些能改、哪些不能？</li>
+<li>「年龄」这个筛选项，最终打在 Doris 的哪张表、哪一列？</li>
+<li>为什么同一个人，用两种方式问「持不持有半导体」，答案不一样？</li>
+</ul>
+<p><mark class="mk-blue">这是一张<strong>数据地图</strong>，不是 API 文档。</mark></p>
+</div>
+    </div><hr>
+<h2 id="11-张表分成两半"><span class="num">01</span>11 张表，分成两半</h2>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>维度</th><th>MySQL <code>crm_dc</code>（7 张）</th><th>Doris <code>crm_insight</code>（4 张）</th></tr></thead><tbody><tr><th>是什么</th><td data-label="MySQL `crm_dc`（7 张）"><strong>配置</strong> —— 有哪些字段、叫什么、怎么筛</td><td data-label="Doris `crm_insight`（4 张）"><strong>数据</strong> —— 真正的人、持仓、开通产品</td></tr><tr><th>谁写</th><td data-label="MySQL `crm_dc`（7 张）">Data Admin（运营在界面上配）</td><td data-label="Doris `crm_insight`（4 张）">离线任务灌进来（<code>doris/seed.mjs</code>）</td></tr><tr><th>谁读</th><td data-label="MySQL `crm_dc`（7 张）">后端启动时读一次，缓存在进程里</td><td data-label="Doris `crm_insight`（4 张）">每次查询都真去扫</td></tr><tr><th>改一行会怎样</th><td data-label="MySQL `crm_dc`（7 张）">界面跟着变（要重启后端）</td><td data-label="Doris `crm_insight`（4 张）"><span class="tag tone-muted"></span></td></tr><tr><th>量级</th><td data-label="MySQL `crm_dc`（7 张）">几十行</td><td data-label="Doris `crm_insight`（4 张）">100 万 ~ 133 万行</td></tr><tr><th>丢了会怎样</th><td data-label="MySQL `crm_dc`（7 张）">界面空了</td><td data-label="Doris `crm_insight`（4 张）">人都查不出来</td></tr></tbody></table></div><div class="callout tone-violet">
+      <span class="ic">💡</span>
+      <div><p><mark class="mk-blue">这两半的性质完全不同，这是理解整个系统最重要的一条。</mark></p>
+<p>MySQL 那边是<strong>定义</strong>：你可以随便改，改完界面就变。
+Doris 那边是<strong>事实</strong>：改它就是在改数据本身。</p>
+<p>一次圈选查询 = <strong>拿 MySQL 的定义，去 Doris 里筛事实。</strong></p>
+</div>
+    </div><h3 id="11-先看-mysql-这-5-张配置表">1.1 先看 MySQL 这 5 张「配置表」</h3>
+<figure class="archfig" data-arch>
+      <svg viewBox="0 0 972 398" role="img" aria-labelledby="archify-diagram-title archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
+        <title id="archify-diagram-title">配置那 5 张表：中心是字段字典</title>
+        <desc id="archify-diagram-description">A architecture diagram generated by Archify.</desc>
+        <!-- Definitions -->
+        <defs>
+          <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-default" />
+          </marker>
+          <marker id="arrowhead-emphasis" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-emphasis" />
+          </marker>
+          <marker id="arrowhead-security" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-security" />
+          </marker>
+          <marker id="arrowhead-dashed" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-dashed" />
+          </marker>
+          <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+            <path d="M 40 0 L 0 0 0 40" class="c-grid" stroke-width="0.5"/>
+          </pattern>
+        </defs>
+
+        <!-- Background Grid -->
+        <rect width="100%" height="100%" fill="url(#grid)" />
+
+        <!-- Boundaries (behind everything) -->
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="0" x="20" y="60" width="912" height="270" rx="12" class="c-region" stroke-width="1"/>
+        <text x="28" y="78" class="t-cloud" font-size="9" font-weight="600">MySQL crm_dc —— Data Admin 写，后端读</text>
+
+        <!-- Connection paths (before components for correct z-order) -->
+        <path data-edge-from="df" data-edge-to="ds" data-edge-label="data_source_id" data-edge-key="0" data-edge-id="e1" data-composition-points="294,120;232,120;232,280;170,280" d="M 294 120 L 240 120 Q 232 120 232 128 L 232 272 Q 232 280 224 280 L 170 280" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="df" data-edge-to="bd" data-edge-label="business_domain_id" data-edge-key="1" data-edge-id="e2" data-composition-points="354,150;354,250" d="M 354 150 L 354 250" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="df" data-edge-to="vs" data-edge-label="value_set_id" data-edge-key="2" data-edge-id="e3" data-composition-points="414,113;476,113;476,280;538,280" d="M 414 113 L 468 113 Q 476 113 476 121 L 476 272 Q 476 280 484 280 L 538 280" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="df" data-edge-to="op" data-edge-label="semantic_type" data-edge-key="3" data-edge-id="e4" data-composition-points="414,127;758,127;758,280;782,280" d="M 414 127 L 750 127 Q 758 127 758 135 L 758 272 Q 758 280 766 280 L 782 280" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+
+        <!-- Components -->
+        <g id="node-df" data-node-id="df" data-node-label="crm_dc_data_field" tabindex="0" role="button" aria-label="Focus crm_dc_data_field, 字段字典 · 47 行 / 37 列, MySQL crm_dc —— Data Admin 写，后端读" aria-pressed="false" data-node-kind="database" data-node-sublabel="字段字典 · 47 行 / 37 列" data-node-tag="整张地图的中心" data-node-context="MySQL crm_dc —— Data Admin 写，后端读">
+          <title>crm_dc_data_field · 字段字典 · 47 行 / 37 列 · MySQL crm_dc —— Data Admin 写，后端读 · 整张地图的中心</title>
+          <rect x="294" y="90" width="120" height="60" rx="6" class="c-mask"/>
+          <rect x="294" y="90" width="120" height="60" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(300 96) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <text data-detail-anchor x="354" y="118" class="t-primary" font-size="10.9" font-weight="600" text-anchor="middle">crm_dc_data_field</text>
+        <text data-detail="context" x="354" y="134" class="t-muted" font-size="7.7" text-anchor="middle">字段字典 · 47 行 / 37 列</text>
+        <text data-detail="fine" x="354" y="142" class="t-database" font-size="7" text-anchor="middle">整张地图的中心</text>
+        </g>
+
+        <g id="node-ds" data-node-id="ds" data-node-label="crm_dc_data_source" tabindex="0" role="button" aria-label="Focus crm_dc_data_source, 逻辑源 → 物理表 · 3 行, MySQL crm_dc —— Data Admin 写，后端读" aria-pressed="false" data-node-kind="database" data-node-sublabel="逻辑源 → 物理表 · 3 行" data-node-context="MySQL crm_dc —— Data Admin 写，后端读">
+          <title>crm_dc_data_source · 逻辑源 → 物理表 · 3 行 · MySQL crm_dc —— Data Admin 写，后端读</title>
+          <rect x="50" y="250" width="120" height="60" rx="6" class="c-mask"/>
+          <rect x="50" y="250" width="120" height="60" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(56 256) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <text data-detail-anchor x="110" y="278" class="t-primary" font-size="10.3" font-weight="600" text-anchor="middle">crm_dc_data_source</text>
+        <text data-detail="context" x="110" y="294" class="t-muted" font-size="8.4" text-anchor="middle">逻辑源 → 物理表 · 3 行</text>
+        </g>
+
+        <g id="node-bd" data-node-id="bd" data-node-label="business_domain" tabindex="0" role="button" aria-label="Focus business_domain, 业务域层级 · 7 行, MySQL crm_dc —— Data Admin 写，后端读" aria-pressed="false" data-node-kind="database" data-node-sublabel="业务域层级 · 7 行" data-node-context="MySQL crm_dc —— Data Admin 写，后端读">
+          <title>business_domain · 业务域层级 · 7 行 · MySQL crm_dc —— Data Admin 写，后端读</title>
+          <rect x="294" y="250" width="120" height="60" rx="6" class="c-mask"/>
+          <rect x="294" y="250" width="120" height="60" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(300 256) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <text data-detail-anchor x="354" y="278" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">business_domain</text>
+        <text data-detail="context" x="354" y="294" class="t-muted" font-size="9" text-anchor="middle">业务域层级 · 7 行</text>
+        </g>
+
+        <g id="node-vs" data-node-id="vs" data-node-label="crm_dc_value_set" tabindex="0" role="button" aria-label="Focus crm_dc_value_set, 共享值集 · 2 行, MySQL crm_dc —— Data Admin 写，后端读" aria-pressed="false" data-node-kind="database" data-node-sublabel="共享值集 · 2 行" data-node-context="MySQL crm_dc —— Data Admin 写，后端读">
+          <title>crm_dc_value_set · 共享值集 · 2 行 · MySQL crm_dc —— Data Admin 写，后端读</title>
+          <rect x="538" y="250" width="120" height="60" rx="6" class="c-mask"/>
+          <rect x="538" y="250" width="120" height="60" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(544 256) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <text data-detail-anchor x="598" y="278" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">crm_dc_value_set</text>
+        <text data-detail="context" x="598" y="294" class="t-muted" font-size="9" text-anchor="middle">共享值集 · 2 行</text>
+        </g>
+
+        <g id="node-op" data-node-id="op" data-node-label="crm_dc_operator" tabindex="0" role="button" aria-label="Focus crm_dc_operator, 类型 → 操作符 · 30 行, MySQL crm_dc —— Data Admin 写，后端读" aria-pressed="false" data-node-kind="database" data-node-sublabel="类型 → 操作符 · 30 行" data-node-context="MySQL crm_dc —— Data Admin 写，后端读">
+          <title>crm_dc_operator · 类型 → 操作符 · 30 行 · MySQL crm_dc —— Data Admin 写，后端读</title>
+          <rect x="782" y="250" width="120" height="60" rx="6" class="c-mask"/>
+          <rect x="782" y="250" width="120" height="60" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(788 256) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <text data-detail-anchor x="842" y="278" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">crm_dc_operator</text>
+        <text data-detail="context" x="842" y="294" class="t-muted" font-size="8.8" text-anchor="middle">类型 → 操作符 · 30 行</text>
+        </g>
+
+        <!-- Connection labels -->
+        <g data-detail="context" data-edge-from="df" data-edge-to="ds" data-edge-label="data_source_id" data-edge-key="0" data-edge-id="e1">
+          <rect x="193.4" y="206" width="77.2" height="14" rx="3" class="c-mask"/>
+          <text x="232" y="216" class="t-muted" font-size="8" text-anchor="middle">data_source_id</text>
+        </g>
+        <g data-detail="context" data-edge-from="df" data-edge-to="bd" data-edge-label="business_domain_id" data-edge-key="1" data-edge-id="e2">
+          <rect x="305.8" y="156" width="96.39999999999999" height="14" rx="3" class="c-mask"/>
+          <text x="354" y="166" class="t-muted" font-size="8" text-anchor="middle">business_domain_id</text>
+        </g>
+        <g data-detail="context" data-edge-from="df" data-edge-to="vs" data-edge-label="value_set_id" data-edge-key="2" data-edge-id="e3">
+          <rect x="442.2" y="202.5" width="67.6" height="14" rx="3" class="c-mask"/>
+          <text x="476" y="212.5" class="t-muted" font-size="8" text-anchor="middle">value_set_id</text>
+        </g>
+        <g data-detail="context" data-edge-from="df" data-edge-to="op" data-edge-label="semantic_type" data-edge-key="3" data-edge-id="e4">
+          <rect x="721.8" y="209.5" width="72.4" height="14" rx="3" class="c-mask"/>
+          <text x="758" y="219.5" class="t-muted" font-size="8" text-anchor="middle">semantic_type</text>
+        </g>
+
+        <!-- Legend -->
+        <g data-legend data-legend-bridge>
+          <text x="40" y="362" class="t-primary" font-size="12" font-weight="650">Legend</text>
+          <g data-legend-semantic-kind="database" data-legend-kind="database" data-legend-label="Database" data-legend-x="40" data-legend-baseline="382" data-legend-width="83">
+            <rect x="40" y="373" width="16" height="10" rx="2.5" class="c-database" stroke-width="1"/>
+            <text x="62" y="382" class="t-muted" font-size="10" font-weight="500">Database</text>
+          </g>
+        </g>
+      </svg>
+      <figcaption>中心是 crm_dc_data_field —— 其他四张都是给它「查字典」用的。</figcaption>
+      <p class="arch-hint">
+        <span class="idle">点头上的任意一个框，只看它和它连出去的关系</span>
+        <span class="focused">再点一次空白处取消</span>
+      </p>
+    </figure><p><strong>逐张看：</strong></p>
+<div class="cards" data-cols="1"><div class="ccard tone-violet">
+          <span class="tag tone-violet">中心</span>
+          <h4>crm_dc_data_field —— 字段字典（47 行 × 37 列）</h4>
+          
+          <div class="cbody"><p><mark class="mk-blue">界面上能选到的每一个字段，这里都有一行。</mark></p>
+<p>37 列里，<strong>只有 7 列参与映射</strong>，其余是运维信息（谁改的、什么时候改的、口径说明、负责人）：</p>
+<table>
+<thead>
+<tr>
+<th>列</th>
+<th>连到哪 / 干什么</th>
+<th>例子</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>field_key</code></td>
+<td><strong>DSL 里的字段名</strong>，代码引用它</td>
+<td><code>age</code></td>
+</tr>
+<tr>
+<td><code>column_name</code></td>
+<td><strong>物理表的列名</strong></td>
+<td><code>birthday</code></td>
+</tr>
+<tr>
+<td><code>field_type</code></td>
+<td><code>1</code>=画像特征 <code>2</code>=关系 <code>3</code>=关系子项</td>
+<td><code>1</code></td>
+</tr>
+<tr>
+<td><code>data_source_id</code></td>
+<td>→ <code>crm_dc_data_source.id</code></td>
+<td><code>1</code></td>
+</tr>
+<tr>
+<td><code>parent_id</code></td>
+<td>→ <strong>本表</strong> id（关系子项挂在哪个关系下）</td>
+<td><code>62</code></td>
+</tr>
+<tr>
+<td><code>business_domain_id</code></td>
+<td>→ <code>business_domain.id</code></td>
+<td><code>70</code></td>
+</tr>
+<tr>
+<td><code>semantic_type</code></td>
+<td>→ <code>crm_dc_operator.semantic_type</code></td>
+<td><code>4</code>（NUMBER）</td>
+</tr>
+<tr>
+<td><code>value_source_type</code></td>
+<td>下拉选项哪来的：<code>0</code>不用 <code>1</code>内嵌 <code>2</code>值集 <code>3</code>动态</td>
+<td><code>0</code></td>
+</tr>
+<tr>
+<td><code>value_set_id</code></td>
+<td>→ <code>crm_dc_value_set.id</code>（仅 <code>=2</code> 时用）</td>
+<td><code>NULL</code></td>
+</tr>
+<tr>
+<td><code>value_mapping</code></td>
+<td>内嵌选项（仅 <code>=1</code> 时用）</td>
+<td><code>{&quot;US&quot;:{&quot;label&quot;:…}}</code></td>
+</tr>
+<tr>
+<td><code>physical_type</code></td>
+<td>物理类型，<code>derive</code> 靠它判断</td>
+<td><code>DATE</code></td>
+</tr>
+</tbody>
+</table>
+<p>真实的 <code>age</code> 那一行：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-json">{ &quot;id&quot;: 22, &quot;field_key&quot;: &quot;age&quot;, &quot;column_name&quot;: &quot;birthday&quot;,
+  &quot;field_type&quot;: 1, &quot;data_source_id&quot;: 1,
+  &quot;display_name_i18n&quot;: {&quot;zh-CN&quot;:&quot;年龄&quot;,&quot;en&quot;:&quot;Age&quot;,&quot;zh-HK&quot;:&quot;年齡&quot;},
+  &quot;semantic_type&quot;: 4, &quot;physical_type&quot;: &quot;DATE&quot;,
+  &quot;business_domain_id&quot;: 70, &quot;status&quot;: 1 }
+</code></pre></div>
+</div>
+          
+        </div><div class="ccard tone-blue">
+          <span class="tag tone-blue">7 列</span>
+          <h4>crm_dc_data_source —— 逻辑名 → 物理表（3 行）</h4>
+          
+          <div class="cbody"><table>
+<thead>
+<tr>
+<th>id</th>
+<th>source_key</th>
+<th>source_type</th>
+<th>table_name</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>1</code></td>
+<td><code>user_portrait</code></td>
+<td><code>1</code> 画像</td>
+<td><code>user_portraits_wide</code></td>
+</tr>
+<tr>
+<td><code>2</code></td>
+<td><code>holding</code></td>
+<td><code>2</code> 关系</td>
+<td><code>rel_holding</code></td>
+</tr>
+<tr>
+<td><code>3</code></td>
+<td><code>product</code></td>
+<td><code>2</code> 关系</td>
+<td><code>rel_product</code></td>
+</tr>
+</tbody>
+</table>
+<p><mark class="mk-blue">这张表存在的意义：<strong>代码永远不写物理表名</strong>。</mark>
+表改名 / 迁库 / 拆表，改这一行就够。</p>
+<p>代码里引用的是 <code>source_key</code>（<code>user_portrait</code>），物理表名只有到这里才知道。</p>
+</div>
+          
+        </div><div class="ccard tone-green">
+          <span class="tag tone-green">自关联</span>
+          <h4>crm_dc_business_domain —— 业务域层级（7 行）</h4>
+          
+          <div class="cbody"><p>一棵树，<code>parent_id</code> 指回本表：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">futu         (level 1)
+├── identity    身份      7 个字段
+├── account     账户      8 个
+├── asset       资产     12 个
+├── trade       交易      7 个
+└── service     服务      6 个
+legacy       (level 1)
+</code></pre></div>
+<p><mark class="mk-blue">它和宽表的列分组<strong>一一对应</strong></mark> —— 见 1.2。</p>
+</div>
+          
+        </div><div class="ccard tone-amber">
+          <span class="tag tone-amber">决定下拉</span>
+          <h4>crm_dc_operator —— 类型 → 操作符（30 行）</h4>
+          
+          <div class="cbody"><p>界面上「大于等于」那个下拉框，选项是从这里查的：</p>
+<table>
+<thead>
+<tr>
+<th><code>semantic_type</code></th>
+<th>可用操作符</th>
+<th>个数</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>1</code> ENUM</td>
+<td><code>eq neq in not_in is_null is_not_null</code></td>
+<td>6</td>
+</tr>
+<tr>
+<td><code>2</code> DATE</td>
+<td><code>eq between last_n_days before_n_days last_n_hours before_n_hours is_null is_not_null</code></td>
+<td>8</td>
+</tr>
+<tr>
+<td><code>3</code> BOOLEAN</td>
+<td><code>eq is_null is_not_null</code></td>
+<td>3</td>
+</tr>
+<tr>
+<td><code>4</code> NUMBER</td>
+<td><code>eq neq lt lte gt gte between is_null is_not_null</code></td>
+<td>9</td>
+</tr>
+<tr>
+<td><code>5</code> STRING</td>
+<td><code>eq neq is_null is_not_null</code></td>
+<td>4</td>
+</tr>
+<tr>
+<td></td>
+<td></td>
+<td><strong>30</strong></td>
+</tr>
+</tbody>
+</table>
+<p>字段的 <code>semantic_type</code> 决定它拿到哪一套。
+所以把 <code>age</code> 从 <code>NUMBER</code> 改成 <code>STRING</code>，操作符下拉<strong>自动换一套</strong>。</p>
+</div>
+          
+        </div><div class="ccard tone-muted">
+          <span class="tag tone-muted">复用</span>
+          <h4>crm_dc_value_set —— 共享值集（2 行）</h4>
+          
+          <div class="cbody"><table>
+<thead>
+<tr>
+<th>id</th>
+<th>set_key</th>
+<th>值</th>
+<th>谁在用</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>32</code></td>
+<td><code>city</code></td>
+<td>10 个城市</td>
+<td><code>city</code> 字段</td>
+</tr>
+<tr>
+<td><code>77</code></td>
+<td><code>market</code></td>
+<td><code>US</code> <code>HK</code></td>
+<td>关系里的 <code>market</code></td>
+</tr>
+</tbody>
+</table>
+<p>和 <code>value_mapping</code>（字段自己内嵌）的区别：
+<mark class="mk-blue">值集是<strong>多个字段共用</strong>的，改一处全都变。</mark></p>
+<p>形状是一样的：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-json">{ &quot;US&quot;: {&quot;label&quot;:{&quot;zh-CN&quot;:&quot;美国&quot;}, &quot;sortOrder&quot;:10, &quot;status&quot;:1} }
+</code></pre></div>
+</div>
+          
+        </div></div><h3 id="12-再看两张任务表">1.2 再看两张「任务表」</h3>
+<div class="callout tone-muted">
+      <span class="ic">📋</span>
+      <div><p><code>snapshot_job</code>（18 列）和 <code>snapshot_log</code>（6 列）<strong>不参与配置映射</strong> ——
+它们是「建快照」这条<strong>另一条路</strong>用的。</p>
+<table>
+<thead>
+<tr>
+<th>表</th>
+<th>干什么</th>
+<th>关键列</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>snapshot_job</code></td>
+<td>一次快照任务</td>
+<td><code>sql_text</code>（当时编出来的 SQL）、<code>query_json</code>（当时的 DSL）、<code>status</code>、<code>doris_job_id</code></td>
+</tr>
+<tr>
+<td><code>snapshot_log</code></td>
+<td>任务的逐条事件</td>
+<td><code>snapshot_id</code> → <code>snapshot_job.id</code>、<code>event</code>、<code>message</code></td>
+</tr>
+</tbody>
+</table>
+<p><code>snapshot_log.snapshot_id</code> 指向 <code>snapshot_job.id</code> —— 这是 MySQL 里唯一的<strong>跨表外键</strong>。</p>
+<p><mark class="mk-blue">注意它记了 <code>sql_text</code> 和 <code>query_json</code>。</mark> 意思是：快照跑完之后，
+即使元数据改了，你也能回头看出「当时是用什么条件、什么 SQL 建的名单」。</p>
+</div>
+    </div><h3 id="13-doris-那-4-张">1.3 Doris 那 4 张</h3>
+<figure class="archfig" data-arch>
+      <svg viewBox="0 0 978 524" role="img" aria-labelledby="archify-diagram-title archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
+        <title id="archify-diagram-title">配置怎么落到 Doris：一个拿表名，一个拿列名</title>
+        <desc id="archify-diagram-description">A architecture diagram generated by Archify.</desc>
+        <!-- Definitions -->
+        <defs>
+          <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-default" />
+          </marker>
+          <marker id="arrowhead-emphasis" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-emphasis" />
+          </marker>
+          <marker id="arrowhead-security" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-security" />
+          </marker>
+          <marker id="arrowhead-dashed" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-dashed" />
+          </marker>
+          <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+            <path d="M 40 0 L 0 0 0 40" class="c-grid" stroke-width="0.5"/>
+          </pattern>
+        </defs>
+
+        <!-- Background Grid -->
+        <rect width="100%" height="100%" fill="url(#grid)" />
+
+        <!-- Boundaries (behind everything) -->
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="0" x="20" y="70" width="918" height="110" rx="12" class="c-region" stroke-width="1"/>
+        <text x="28" y="88" class="t-cloud" font-size="9" font-weight="600">MySQL · 配置</text>
+
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="security-group" data-composition-frame-id="1" x="20" y="346" width="918" height="110" rx="8" class="c-security-group" stroke-width="1"/>
+        <text x="28" y="364" class="t-security" font-size="9" font-weight="600">Doris · 数据</text>
+
+        <!-- Connection paths (before components for correct z-order) -->
+        <path data-edge-from="ds" data-edge-to="holding" data-edge-label="table_name = rel_holding" data-edge-key="0" data-edge-id="e1" data-composition-points="110,160;110,376" d="M 110 160 L 110 376" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="ds" data-edge-to="product" data-edge-label="table_name = rel_product" data-edge-key="1" data-edge-id="e2" data-composition-points="170,130;233,130;233,406;296,406" d="M 170 130 L 225 130 Q 233 130 233 138 L 233 398 Q 233 406 241 406 L 296 406" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="df" data-edge-to="wide" data-edge-label="column_name → 具体列" data-edge-key="2" data-edge-id="e3" data-composition-points="848,160;848,376" d="M 848 160 L 848 376" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
+
+        <!-- Components -->
+        <g id="node-ds" data-node-id="ds" data-node-label="crm_dc_data_source" tabindex="0" role="button" aria-label="Focus crm_dc_data_source, source_key + table_name, MySQL · 配置" aria-pressed="false" data-node-kind="database" data-node-sublabel="source_key + table_name" data-node-tag="决定「哪张表」" data-node-context="MySQL · 配置">
+          <title>crm_dc_data_source · source_key + table_name · MySQL · 配置 · 决定「哪张表」</title>
+          <rect x="50" y="100" width="120" height="60" rx="6" class="c-mask"/>
+          <rect x="50" y="100" width="120" height="60" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(56 106) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <text data-detail-anchor x="110" y="128" class="t-primary" font-size="10.3" font-weight="600" text-anchor="middle">crm_dc_data_source</text>
+        <text data-detail="context" x="110" y="144" class="t-muted" font-size="8.1" text-anchor="middle">source_key + table_name</text>
+        <text data-detail="fine" x="110" y="152" class="t-database" font-size="7" text-anchor="middle">决定「哪张表」</text>
+        </g>
+
+        <g id="node-df" data-node-id="df" data-node-label="crm_dc_data_field" tabindex="0" role="button" aria-label="Focus crm_dc_data_field, field_key + column_name, MySQL · 配置" aria-pressed="false" data-node-kind="database" data-node-sublabel="field_key + column_name" data-node-tag="决定「哪一列」" data-node-context="MySQL · 配置">
+          <title>crm_dc_data_field · field_key + column_name · MySQL · 配置 · 决定「哪一列」</title>
+          <rect x="788" y="100" width="120" height="60" rx="6" class="c-mask"/>
+          <rect x="788" y="100" width="120" height="60" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(794 106) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <text data-detail-anchor x="848" y="128" class="t-primary" font-size="10.9" font-weight="600" text-anchor="middle">crm_dc_data_field</text>
+        <text data-detail="context" x="848" y="144" class="t-muted" font-size="8.1" text-anchor="middle">field_key + column_name</text>
+        <text data-detail="fine" x="848" y="152" class="t-database" font-size="7" text-anchor="middle">决定「哪一列」</text>
+        </g>
+
+        <g id="node-wide" data-node-id="wide" data-node-label="user_portraits_wide" tabindex="0" role="button" aria-label="Focus user_portraits_wide, 宽表 · 100 万行, Doris · 数据" aria-pressed="false" data-node-kind="cloud" data-node-sublabel="宽表 · 100 万行" data-node-context="Doris · 数据">
+          <title>user_portraits_wide · 宽表 · 100 万行 · Doris · 数据</title>
+          <rect x="788" y="376" width="120" height="60" rx="6" class="c-mask"/>
+          <rect x="788" y="376" width="120" height="60" rx="6" class="c-cloud" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="cloud" class="semantic-sigil s-cloud" transform="translate(794 382) scale(0.6875)">
+            <path d="M4.3 12.5h7.3a2.4 2.4 0 0 0 .2-4.8 4 4 0 0 0-7.5-1.3A3.1 3.1 0 0 0 4.3 12.5Z"/>
+          </g>
+          <text data-detail-anchor x="848" y="404" class="t-primary" font-size="9.8" font-weight="600" text-anchor="middle">user_portraits_wide</text>
+        <text data-detail="context" x="848" y="420" class="t-muted" font-size="9" text-anchor="middle">宽表 · 100 万行</text>
+        </g>
+
+        <g id="node-holding" data-node-id="holding" data-node-label="rel_holding" tabindex="0" role="button" aria-label="Focus rel_holding, 持仓 · 132 万行, Doris · 数据" aria-pressed="false" data-node-kind="cloud" data-node-sublabel="持仓 · 132 万行" data-node-context="Doris · 数据">
+          <title>rel_holding · 持仓 · 132 万行 · Doris · 数据</title>
+          <rect x="50" y="376" width="120" height="60" rx="6" class="c-mask"/>
+          <rect x="50" y="376" width="120" height="60" rx="6" class="c-cloud" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="cloud" class="semantic-sigil s-cloud" transform="translate(56 382) scale(0.6875)">
+            <path d="M4.3 12.5h7.3a2.4 2.4 0 0 0 .2-4.8 4 4 0 0 0-7.5-1.3A3.1 3.1 0 0 0 4.3 12.5Z"/>
+          </g>
+          <text data-detail-anchor x="110" y="404" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">rel_holding</text>
+        <text data-detail="context" x="110" y="420" class="t-muted" font-size="9" text-anchor="middle">持仓 · 132 万行</text>
+        </g>
+
+        <g id="node-product" data-node-id="product" data-node-label="rel_product" tabindex="0" role="button" aria-label="Focus rel_product, 开通产品 · 113 万行, Doris · 数据" aria-pressed="false" data-node-kind="cloud" data-node-sublabel="开通产品 · 113 万行" data-node-context="Doris · 数据">
+          <title>rel_product · 开通产品 · 113 万行 · Doris · 数据</title>
+          <rect x="296" y="376" width="120" height="60" rx="6" class="c-mask"/>
+          <rect x="296" y="376" width="120" height="60" rx="6" class="c-cloud" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="cloud" class="semantic-sigil s-cloud" transform="translate(302 382) scale(0.6875)">
+            <path d="M4.3 12.5h7.3a2.4 2.4 0 0 0 .2-4.8 4 4 0 0 0-7.5-1.3A3.1 3.1 0 0 0 4.3 12.5Z"/>
+          </g>
+          <text data-detail-anchor x="356" y="404" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">rel_product</text>
+        <text data-detail="context" x="356" y="420" class="t-muted" font-size="9" text-anchor="middle">开通产品 · 113 万行</text>
+        </g>
+
+        <!-- Connection labels -->
+        <g data-detail="context" data-edge-from="ds" data-edge-to="holding" data-edge-label="table_name = rel_holding" data-edge-key="0" data-edge-id="e1">
+          <rect x="47.400000000000006" y="174" width="125.19999999999999" height="14" rx="3" class="c-mask"/>
+          <text x="110" y="184" class="t-muted" font-size="8" text-anchor="middle">table_name = rel_holding</text>
+        </g>
+        <g data-detail="context" data-edge-from="ds" data-edge-to="product" data-edge-label="table_name = rel_product" data-edge-key="1" data-edge-id="e2">
+          <rect x="170.4" y="270" width="125.19999999999999" height="14" rx="3" class="c-mask"/>
+          <text x="233" y="280" class="t-muted" font-size="8" text-anchor="middle">table_name = rel_product</text>
+        </g>
+        <g data-detail="context" data-edge-from="df" data-edge-to="wide" data-edge-label="column_name → 具体列" data-edge-key="2" data-edge-id="e3">
+          <rect x="795" y="170" width="106" height="14" rx="3" class="c-mask"/>
+          <text x="848" y="180" class="t-backend" font-size="8" text-anchor="middle">column_name → 具体列</text>
+        </g>
+
+        <!-- Legend -->
+        <g data-legend data-legend-bridge>
+          <text x="40" y="488" class="t-primary" font-size="12" font-weight="650">Legend</text>
+          <g data-legend-semantic-kind="database" data-legend-kind="database" data-legend-label="Database" data-legend-x="40" data-legend-baseline="508" data-legend-width="83">
+            <rect x="40" y="499" width="16" height="10" rx="2.5" class="c-database" stroke-width="1"/>
+            <text x="62" y="508" class="t-muted" font-size="10" font-weight="500">Database</text>
+          </g>
+          <g data-legend-semantic-kind="cloud" data-legend-kind="cloud" data-legend-label="Cloud" data-legend-x="145" data-legend-baseline="508" data-legend-width="68">
+            <rect x="145" y="499" width="16" height="10" rx="2.5" class="c-cloud" stroke-width="1"/>
+            <text x="167" y="508" class="t-muted" font-size="10" font-weight="500">Cloud</text>
+          </g>
+        </g>
+      </svg>
+      <figcaption>配置里的两样东西分别落到 Doris —— data_source 给表名，data_field 给列名。</figcaption>
+      <p class="arch-hint">
+        <span class="idle">点头上的任意一个框，只看它和它连出去的关系</span>
+        <span class="focused">再点一次空白处取消</span>
+      </p>
+    </figure><p><strong><code>user_portraits_wide</code> —— 宽表，45 列，100 万行</strong></p>
+<p>「宽」的意思是：<strong>一个人的所有信息都在同一行里</strong>。</p>
+<div class="callout tone-green">
+      <span class="ic">✅</span>
+      <div><p><strong>45 列按业务域分成 5 组，分组定义就在 <code>crm_dc_business_domain</code> 里：</strong></p>
+<table>
+<thead>
+<tr>
+<th>业务域</th>
+<th>列数</th>
+<th>都有什么</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>identity</code> 身份</td>
+<td>7</td>
+<td><code>birthday</code> <code>gender</code> <code>region</code> <code>nationality</code> <code>language</code> <code>occupation</code> <code>city</code></td>
+</tr>
+<tr>
+<td><code>account</code> 账户</td>
+<td>8</td>
+<td><code>register_time</code> <code>kyc_level</code> <code>risk_level</code> <code>account_status</code> <code>has_hk_account</code> <code>has_us_account</code> <code>vip_level</code></td>
+</tr>
+<tr>
+<td><code>asset</code> 资产</td>
+<td>12</td>
+<td><code>aum_hkd</code> <code>aum_usd</code> <code>cash_hkd</code> <code>securities_hkd</code> <code>fund_nav_hkd</code> <code>margin_debt_hkd</code> <code>net_transfer_30d/90d</code> <code>peak_aum_1y</code> <code>last_deposit_time</code> <code>hold_semiconductor</code> <code>hold_count</code></td>
+</tr>
+<tr>
+<td><code>trade</code> 交易</td>
+<td>7</td>
+<td><code>trade_count_30d/90d</code> <code>trade_amount_30d</code> <code>last_trade_time</code> <code>hk/us/options_trade_count_30d</code></td>
+</tr>
+<tr>
+<td><code>service</code> 服务</td>
+<td>6</td>
+<td><code>last_touch_time</code> <code>last_call_time</code> <code>last_meet_time</code> <code>follow_count_30d</code> <code>nps_score</code> <code>complaint_count_1y</code></td>
+</tr>
+<tr>
+<td></td>
+<td><strong>40</strong></td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<p><strong>另外 5 列是身份/归属</strong>，故意不暴露成筛选项：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code>uid · customer_name · staff_id · staff_name · group_id · group_name
+</code></pre></div>
+<p><mark class="mk-blue"><code>uid</code> 是整张大宽表的主键，也是所有关系表对上的钥匙。</mark></p>
+</div>
+    </div><div class="compare-wrap"><table class="compare"><thead><tr><th>数</th><th>多少</th><th>说明</th></tr></thead><tbody><tr><th>宽表实际列</th><td data-label="多少">45</td><td data-label="说明">含 6 个身份/归属列</td></tr><tr><th>可筛的列</th><td data-label="多少">39</td><td data-label="说明">45 − 6 —— 这才是界面下拉框里的项数</td></tr><tr><th>元数据 FEATURE 行</th><td data-label="多少">40</td><td data-label="说明">40 条里有一条是停用的</td></tr><tr><th>停用的那条</th><td data-label="多少">1</td><td data-label="说明"><code>open_city</code>（<code>status=0</code>）—— 而且<strong>宽表里根本没有这一列</strong></td></tr><tr><th>两侧对账</th><td data-label="多少"><span class="tag tone-green">✅ 40 − 1 = 39</span></td><td data-label="说明">元数据启用的 = 宽表可筛的</td></tr></tbody></table></div><div class="callout tone-amber">
+      <span class="ic">⚠</span>
+      <div><p><strong><code>open_city</code> 值得看一眼。</strong></p>
+<p>它在元数据里挂着一个 <code>column_name = 'open_city'</code>，
+但<mark class="mk-blue"><code>user_portraits_wide</code> 里根本没有这一列</mark>。</p>
+<p>之所以没炸，是因为它 <code>status = 0</code>（停用）—— 没人会去查它。</p>
+<p><mark class="mk-blue">也就是说：元数据<strong>可以</strong>指向一个不存在的列，只要它是停用的。</mark>
+如果哪天有人在 Data Admin 里把它启用，查询会当场报「列不存在」。</p>
+</div>
+    </div><p><strong><code>rel_holding</code> / <code>rel_product</code> —— 两张关系表</strong></p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>表</th><th>列</th><th>行数</th><th>一行代表什么</th></tr></thead><tbody><tr><th><code>rel_holding</code> 持仓</th><td data-label="列"><code>uid</code> <code>object_id</code> <code>market</code> <code>qty</code> <code>last_trade_date</code></td><td data-label="行数">1,328,471</td><td data-label="一行代表什么"><strong>某个人持有某个标的</strong></td></tr><tr><th><code>rel_product</code> 开通产品</th><td data-label="列"><code>uid</code> <code>object_id</code> <code>status</code> <code>opened_at</code></td><td data-label="行数">1,138,855</td><td data-label="一行代表什么"><strong>某个人开通了某个产品</strong></td></tr></tbody></table></div><p>真实数据（抽几行）：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">rel_holding                             rel_product
+uid      object_id   market  qty        uid      object_id     status
+10001    09618.HK    HK      500        10001    US_ACCOUNT    ACTIVE
+10001    AMD.US      US      120        10029    OPTION        ACTIVE
+10029    SEMI        US      80         10049    MARGIN        ACTIVE
+</code></pre></div>
+<div class="callout tone-blue">
+      <span class="ic">🔑</span>
+      <div><p><strong>关系表和宽表靠什么对上？<code>uid</code>。</strong></p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code>user_portraits_wide.uid  ←──→  rel_holding.uid
+                         ←──→  rel_product.uid
+</code></pre></div>
+<p>一个人 → 宽表 1 行，关系表 <strong>N 行</strong>（持有几个标的就有几行）。</p>
+<p><mark class="mk-blue">这就是为什么「查持有 AMD 的人」不能用 JOIN —— 会把人变成 N 行。</mark>
+见第 2 节。</p>
+</div>
+    </div><p><strong><code>audience_snapshot</code> —— 快照落表（0 行）</strong></p>
+<div class="spec tone-muted">
+      <div class="spec-head"><b>audience_snapshot</b></div>
+      <div class="spec-body"><div class="srow">
+          <div class="sk"></div>
+          <div class="sv"></div>
+        </div><div class="srow">
+          <div class="sk"></div>
+          <div class="sv"></div>
+        </div><div class="srow">
+          <div class="sk"></div>
+          <div class="sv"></div>
+        </div><div class="srow">
+          <div class="sk"></div>
+          <div class="sv"></div>
+        </div><div class="srow">
+          <div class="sk"></div>
+          <div class="sv"></div>
+        </div></div>
+    </div><hr>
+<h2 id="一次查询数据是怎么走完的"><span class="num">02</span>一次查询，数据是怎么走完的</h2>
+<div class="seqd" data-seq data-n="4" data-segs="[{&quot;from&quot;:1,&quot;to&quot;:3,&quot;label&quot;:&quot;每次查询都重读&quot;},{&quot;from&quot;:4,&quot;to&quot;:5,&quot;label&quot;:&quot;真去扫 Doris&quot;}]">
+      <svg class="seqd-svg" aria-hidden="true">
+        <defs>
+          <marker id="s-fill" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+          <marker id="s-open" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10" fill="none" stroke="currentColor" stroke-width="1.4"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="seqd-head"><div class="scell"><div class="spart tone-muted" data-id="fe">
+          <b>圈选界面</b><small>browser</small>
+        </div></div><div class="scell"><div class="spart tone-muted" data-id="be">
+          <b>后端</b><small>127.0.0.1:8787</small>
+        </div></div><div class="scell"><div class="spart tone-muted" data-id="my">
+          <b>MySQL crm_dc</b><small>配置</small>
+        </div></div><div class="scell"><div class="spart tone-muted" data-id="do">
+          <b>Doris</b><small>crm_insight</small>
+        </div></div></div>
+      <div class="seqd-body"><div class="smsg" data-from="fe" data-to="be" data-kind="sync" data-i="1" data-note="① 条件树"><span class="snote">① 条件树</span><span class="slabel">POST /api/preview　条件树 JSON</span></div><div class="smsg" data-from="be" data-to="my" data-kind="sync" data-i="2" data-note="② 拿字典"><span class="snote">② 拿字典</span><span class="slabel">读 5 张配置表</span></div><div class="smsg" data-from="my" data-to="be" data-kind="reply" data-i="3"><span class="slabel">Catalog（39 字段 + 操作符 + 值集）</span></div><div class="smsg is-self" data-from="be" data-to="be" data-kind="self" data-i="4" data-note="③ 编译"><span class="snote">③ 编译</span><span class="slabel">编译：条件树 → SQL</span></div><div class="smsg" data-from="be" data-to="do" data-kind="sync" data-i="5" data-note="④ SQL"><span class="snote">④ SQL</span><span class="slabel">countSql / listSql / uidsSql</span></div><div class="smsg" data-from="do" data-to="be" data-kind="reply" data-i="6" data-note="⑤ 结果"><span class="snote">⑤ 结果</span><span class="slabel">人数 + 一页名单</span></div><div class="smsg" data-from="be" data-to="fe" data-kind="reply" data-i="7"><span class="slabel">count / rows / SQL 原文</span></div></div>
+    </div><h3 id="21-编译这一步三种条件三种写法">2.1 编译这一步：三种条件，三种写法</h3>
+<p>界面上的每个条件，编译出来的 SQL <strong>形状完全不同</strong>：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>条件类型</th><th>界面长什么样</th><th>编译成什么</th><th>打在哪个表</th></tr></thead><tbody><tr><th>普通列</th><td data-label="界面长什么样">地区 = 美国</td><td data-label="编译成什么"><code>u.region = 'US'</code></td><td data-label="打在哪个表"><code>user_portraits_wide</code></td></tr><tr><th>派生字段</th><td data-label="界面长什么样">年龄 ≥ 18</td><td data-label="编译成什么"><code>TIMESTAMPDIFF(YEAR, u.birthday, CURRENT_DATE()) &gt;= 18</code></td><td data-label="打在哪个表"><code>user_portraits_wide</code></td></tr><tr><th>关系·明细</th><td data-label="界面长什么样">持有 AMD 且市场=美国</td><td data-label="编译成什么"><code>u.uid IN (SELECT uid FROM rel_holding WHERE …)</code></td><td data-label="打在哪个表"><strong><code>rel_holding</code></strong></td></tr><tr><th>关系·次数</th><td data-label="界面长什么样">持仓 ≥ 5 笔</td><td data-label="编译成什么"><code>u.uid IN (SELECT uid FROM rel_holding WHERE … GROUP BY uid HAVING COUNT(*) &gt;= 5)</code></td><td data-label="打在哪个表"><strong><code>rel_holding</code></strong></td></tr><tr><th>关系·反向</th><td data-label="界面长什么样">不持有 AMD</td><td data-label="编译成什么"><code>NOT EXISTS (SELECT 1 FROM rel_holding WHERE rel.uid = u.uid AND …)</code></td><td data-label="打在哪个表"><strong><code>rel_holding</code></strong></td></tr></tbody></table></div><div class="callout tone-violet">
+      <span class="ic">💡</span>
+      <div><p><strong>注意「关系」那三行用的不是 JOIN，是子查询。</strong></p>
+<p>为什么？因为 <code>rel_holding</code> 里一个人有 N 行。用 JOIN 的话：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-sql">SELECT u.uid FROM user_portraits_wide u JOIN rel_holding r ON r.uid = u.uid
+WHERE r.object_id = 'AMD.US'
+</code></pre></div>
+<p>持有 3 个标的人会<strong>出现 3 次</strong>，<code>COUNT(*)</code> 数的是行不是人。</p>
+<p><mark class="mk-blue">所以编译器一律写成 <code>uid IN (子查询)</code> 或 <code>NOT EXISTS</code> —— 从根上不会重复。</mark></p>
+<p>这和你平时手写 SQL 的直觉不一样，但在这里是对的。</p>
+</div>
+    </div><p><strong>一步步看 SQL 怎么长出来</strong>（点「下一步」）：</p>
+<div class="demo" data-widget="stepper" data-config="{&quot;steps&quot;:[{&quot;label&quot;:&quot;起点&quot;,&quot;code&quot;:&quot;SELECT u.uid FROM user_portraits_wide AS u&quot;,&quot;note&quot;:&quot;只有一张宽表。还没有任何条件。&quot;},{&quot;label&quot;:&quot;① 普通列&quot;,&quot;code&quot;:&quot;WHERE u.region = 'US'&quot;,&quot;note&quot;:&quot;直接读列名。元数据说 region 的 column_name 就是 region。&quot;},{&quot;label&quot;:&quot;② 派生字段&quot;,&quot;code&quot;:&quot;AND TIMESTAMPDIFF(YEAR, u.birthday, CURRENT_DATE()) &gt;= 18&quot;,&quot;note&quot;:&quot;年龄在表里不存在。元数据说 column_name=birthday，代码按 field_key='age' 决定按年算。&quot;},{&quot;label&quot;:&quot;③ 关系条件&quot;,&quot;code&quot;:&quot;AND u.uid IN (\n  SELECT rel_holding.uid FROM rel_holding\n  WHERE rel_holding.object_id IN ('AMD.US')\n    AND (rel_holding.market = 'US')\n)&quot;,&quot;note&quot;:&quot;换成子查询。表名 rel_holding 来自 crm_dc_data_source，列名来自关系子项那几行。&quot;},{&quot;label&quot;:&quot;包一层&quot;,&quot;code&quot;:&quot;SELECT COUNT(*) FROM (\n  &lt;上面那一段&gt;\n) AS t&quot;,&quot;note&quot;:&quot;countSql 外面套一层，因为里面可能有 DISTINCT 之类的东西。&quot;},{&quot;label&quot;:&quot;发出去&quot;,&quot;code&quot;:&quot;-- 真实结果\ncount = 53,208\nusedTables = ['rel_holding', 'user_portraits_wide']&quot;,&quot;note&quot;:&quot;两张表都被用到了 —— 后端记录了它碰过哪些表。&quot;}]}">
+      <div class="demo-head">
+        <span class="title">条件树 → SQL</span>
+        <span class="status" data-status>点步骤看 SQL 怎么长</span>
+        <span class="spacer"></span>
+        
+      </div>
+      <div class="demo-body custom" data-mount></div>
+    </div><h3 id="22-数据怎么被找到">2.2 数据怎么被「找」到</h3>
+<div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;start&quot;,&quot;to&quot;:&quot;f1&quot;},{&quot;from&quot;:&quot;f1&quot;,&quot;to&quot;:&quot;f2&quot;},{&quot;from&quot;:&quot;f2&quot;,&quot;to&quot;:&quot;f3&quot;},{&quot;from&quot;:&quot;f3&quot;,&quot;to&quot;:&quot;out&quot;,&quot;anim&quot;:true},{&quot;from&quot;:&quot;rel&quot;,&quot;to&quot;:&quot;sub&quot;,&quot;label&quot;:&quot;读这张表&quot;},{&quot;from&quot;:&quot;sub&quot;,&quot;to&quot;:&quot;f2&quot;}]">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-blue" data-id="start">
+              
+              
+              <b>① 拿宽表当全集</b>
+              <small>100 万行</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="f1">
+              
+              
+              <b>② 画像条件先筛</b>
+              <small>region = US</small>
+            </div><div class="fnode tone-violet" data-id="rel">
+              
+              
+              <b>rel_holding</b>
+              <small>132 万行</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="f2">
+              
+              
+              <b>③ 关系条件再筛</b>
+              <small>uid IN (子查询)</small>
+            </div><div class="fnode tone-violet" data-id="sub">
+              
+              
+              <b>子查询：筛出符合条件的人</b>
+              <small>SELECT uid WHERE object_id='<a href="http://AMD.US">AMD.US</a>'</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-amber" data-id="f3">
+              
+              
+              <b>④ 权限范围</b>
+              <small>staff_id / group_id</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="out">
+              
+              
+              <b>最终名单</b>
+              <small>53,208 个 uid</small>
+            </div></div></div>
+      
+    </div><div class="callout tone-amber">
+      <span class="ic">⚠</span>
+      <div><p><strong>注意「权限范围」那一步 —— 它不在界面上，是后端偷偷加的。</strong></p>
+<p>界面上你只看到「客户范围：本人 / 指定团队 / 全部」。
+编译时它会变成 <code>WHERE staff_id = 301</code> 之类的谓词，<strong>直接写进 SQL</strong>。</p>
+<p><mark class="mk-blue">所以圈选页永远查不出不属于你的人的名单 —— 不是前端拦的，是 SQL 里就没有。</mark></p>
+</div>
+    </div><h3 id="23-uid唯一的钥匙">2.3 <code>uid</code>：唯一的钥匙</h3>
+<div class="cards" data-cols="3"><div class="ccard tone-blue">
+          <span class="tag tone-blue">主键</span>
+          <h4>宽表里</h4>
+          
+          <div class="cbody"><div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code>uid = 10001
+</code></pre></div>
+<p><strong>1 行</strong> —— 这个人的全部信息。</p>
+</div>
+          
+        </div><div class="ccard tone-violet">
+          <span class="tag tone-violet">一对多</span>
+          <h4>关系表里</h4>
+          
+          <div class="cbody"><div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code>uid = 10001  object_id = 09618.HK
+uid = 10001  object_id = AMD.US
+uid = 10001  object_id = SEMI
+</code></pre></div>
+<p><strong>N 行</strong> —— 持有几个就有几行。</p>
+</div>
+          
+        </div><div class="ccard tone-green">
+          <span class="tag tone-green">冻结</span>
+          <h4>快照表里</h4>
+          
+          <div class="cbody"><div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code>snapshot_id = 7  user_id = 10001
+snapshot_id = 7  user_id = 10002
+</code></pre></div>
+<p><strong>每个快照里各一份</strong> —— 同一个 uid 可以有多个快照。</p>
+</div>
+          
+        </div></div><hr>
+<h2 id="同一件事两种存法-而且答案不一样"><span class="num">03</span>同一件事，两种存法 —— 而且答案不一样</h2>
+<div class="callout tone-red quote">
+      <span class="ic">⚠</span>
+      <div><p><mark class="mk-blue"><strong>「这个人持不持有半导体？」这个问题，系统里有两种存法，而且答案对不上。</strong></mark></p>
+</div>
+    </div><p><strong>存法 A：宽表里的一列</strong></p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-sql">SELECT COUNT(*) FROM user_portraits_wide WHERE hold_semiconductor = 1;
+-- 229,424
+</code></pre></div>
+<p><strong>存法 B：关系表里的一行</strong></p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-sql">SELECT COUNT(DISTINCT uid) FROM rel_holding WHERE object_id = 'SEMI';
+-- 63,458
+</code></pre></div>
+<p><strong>两边都有</strong></p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-sql">SELECT COUNT(*) FROM user_portraits_wide w
+WHERE w.hold_semiconductor = 1
+  AND w.uid IN (SELECT uid FROM rel_holding WHERE object_id = 'SEMI');
+-- 44,465
+</code></pre></div>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>口径</th><th>人数</th><th>从哪来的</th></tr></thead><tbody><tr><th>宽表布尔列</th><td data-label="人数"><strong>229,424</strong></td><td data-label="从哪来的"><code>user_portraits_wide.hold_semiconductor</code></td></tr><tr><th>关系表某一行</th><td data-label="人数"><strong>63,458</strong></td><td data-label="从哪来的"><code>rel_holding</code> 里 <code>object_id='SEMI'</code> 的那些行</td></tr><tr><th>两边都满足</th><td data-label="人数"><strong>44,465</strong></td><td data-label="从哪来的">两个口径的交集</td></tr></tbody></table></div><div class="callout tone-violet">
+      <span class="ic">💡</span>
+      <div><p><strong>三个数字都「对」，但它们回答的不是同一个问题。</strong></p>
+<table>
+<thead>
+<tr>
+<th>问法</th>
+<th>答案</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>「画像上标了持半导体的人」</td>
+<td>229,424</td>
+</tr>
+<tr>
+<td>「持仓表里有 SEMI 这条记录的人」</td>
+<td>63,458</td>
+</tr>
+<tr>
+<td>「两个都算的人」</td>
+<td>44,465</td>
+</tr>
+</tbody>
+</table>
+<p><mark class="mk-blue">差在哪？</mark> 宽表那列是<strong>离线任务算出来的标记</strong>，
+关系表那些行是<strong>交易系统里真实的持仓记录</strong>。</p>
+<p>两边的更新时间不同、口径不同、覆盖范围也不同。</p>
+</div>
+    </div><div class="callout tone-amber">
+      <span class="ic">⚠</span>
+      <div><p><strong>这不是 bug，是 <code>seed.mjs</code> 故意造的。</strong></p>
+<p>它的注释写着：</p>
+<blockquote>
+<p>portraits/relations are sparse and <strong>sometimes disagree</strong>
+（画像标记 ≠ 关系表，账户开通 ≠ 画像布尔）</p>
+</blockquote>
+<p><mark class="mk-blue">真实系统里也这样。</mark> 只要同一件事有两条数据链路，
+迟早会出现两个口径。这个 demo 把它提前摆到你面前。</p>
+</div>
+    </div><p><strong>所以选哪个？</strong></p>
+<p><strong>该这么问：</strong></p>
+<ul class="check"><li>要「按业务事实筛」（真的持有了）→ 用关系表</li><li>要「按画像标记筛」（系统给他打的标）→ 用宽表列</li><li>要「两个都成立」→ 两种条件同时加</li></ul><p><strong>别这么想：</strong></p>
+<ul class="check cross"><li>以为两个数字应该一样</li><li>在两个页面各用一种口径，然后对不上账</li><li>把其中一个当成「另一个的加速版」</li></ul><hr>
+<div class="summary">
+      <h3 id="三句话">三句话</h3>
+      <p><strong>11 张表分两半。</strong> MySQL 那 7 张是定义，改完界面就变；
+Doris 那 4 张是事实，就是数据本身。中心的 <code>crm_dc_data_field</code> 用 7 个外键把两边接起来。</p>
+<p><strong>一次查询 = 拿定义去筛事实</strong> —— 画像条件变成 <code>WHERE 列</code>，关系条件变成 <code>uid IN (子查询)</code>，
+<mark class="mk-blue">一律不用 JOIN，因为关系表里一个人有 N 行。</mark></p>
+<p><strong>同一件事可以有两种存法。</strong> 持半导体的人数，宽表说 229,424、关系表说 63,458。
+<mark class="mk-blue">这不是错，是两个口径 —— 用之前先想清楚你要问的是哪个。</mark></p>
+
+    </div><div class="quiz"><details>
+        <summary>「年龄 ≥ 18」这个条件，最终打在 Doris 的哪张表、哪一列？</summary>
+        <div class="a"><p><code>user_portraits_wide</code> 表的 <code>birthday</code> 列。</p>
+<p>元数据里 <code>field_key='age'</code> 那行的 <code>column_name</code> 是 <strong><code>birthday</code></strong> ——
+<mark class="mk-blue">表里根本没有 age 这一列</mark>，它是 <code>TIMESTAMPDIFF(YEAR, birthday, CURRENT_DATE())</code> 现算的。</p>
+<p>表名来自 <code>crm_dc_data_source.table_name</code>（<code>data_source_id=1</code> → <code>user_portrait</code> → <code>user_portraits_wide</code>）。</p>
+</div>
+      </details><details>
+        <summary>「持有 AMD 的人」为什么不用 JOIN 写？</summary>
+        <div class="a"><p>因为 <code>rel_holding</code> 里一个人有 N 行。JOIN 之后持有 3 个标的的人会出现 3 次，
+<code>COUNT(*)</code> 数的是<strong>行</strong>不是<strong>人</strong> —— 人数会偏大。</p>
+<p><mark class="mk-blue">编译器一律写成 <code>u.uid IN (SELECT uid FROM rel_holding WHERE …)</code>。</mark></p>
+<p>副作用：<code>IN</code> 子查询里有 N 行也不会让外层重复。</p>
+</div>
+      </details><details>
+        <summary>元数据里有一条 <code>open_city</code>，为什么查它不报错？</summary>
+        <div class="a"><p>因为它 <code>status = 0</code>（停用），没人会去查它。</p>
+<p><mark class="mk-blue">但 <code>user_portraits_wide</code> 里根本没有 <code>open_city</code> 这一列</mark> ——
+元数据挂了一个不存在的列。谁在 Data Admin 里把它启用，查询就会当场报「列不存在」。</p>
+<p>这说明元数据的写入方<strong>没有校验列是否真的存在</strong>，只在查询时才暴露。</p>
+</div>
+      </details></div>
+
+    <footer>
+      <span>数据地图：11 张表，和一次圈选查询的完整旅程</span>
+      <span>最后更新 2026-09-30 · 单文件可离线打开</span>
+    </footer>
+  </main>
+</div>
+
+<script src="../../assets/app.js"></script>
+</body>
+</html>
