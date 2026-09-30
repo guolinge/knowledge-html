@@ -43,7 +43,7 @@ text: |
   nodes:
     - { title: 语法检查, sub: "形状对不对", tag: 不需要数据库 }
     - { title: 语义检查, sub: "字段存在吗、值类型对吗", tag: 要字段字典 }
-    - { title: 生成 SQL, sub: "4 段字符串", tag: 纯字符串拼接 }
+    - { title: 生成 SQL, sub: "用 Knex 构造", tag: 不自己拼字符串 }
   next: "SQL :: :: 到这里为止，一行数据都没查"
 
 - badge: 数据库那侧
@@ -136,7 +136,7 @@ items:
         "derive": { "kind": "age_years" } }
       ```
 
-      !!注意 `name` 是 `age`，而 `column` 是 `birthday`。!! 这两者不一样 —— 第 05 节会讲为什么。
+      !!注意 `name` 是 `age`，而 `column` 是 `birthday`。!! 这两者不一样 —— 第 04 节会讲为什么。
   - title: 身份（Actor）
     desc: "回答「谁在圈、他能看多少人」。它不参与「圈什么」，只决定**你能碰到的边界**。"
     tag: 输入
@@ -353,7 +353,7 @@ items:
 
       ==两个方向不对称 —— 一个裸着，一个包了 `NOT COALESCE`。==
 
-      为什么必须这样，是第 05 节的主题。
+      为什么必须这样，见第 04 节的「第三段 · 拼 SQL」。
   - title: 取消所有条件
     desc: "把②里的勾全去掉，看 SQL 还剩什么。"
     tone: muted
@@ -397,450 +397,500 @@ text: |
 
 ## 04 · 三段管道
 
-`compile()` 这个函数开头只有两行，但它们是整个包最重要的设计：
+`compile()` 开头这几行，是整个包的结构：
 
-```text
-validateStructure(query)              ← ① 只看形状
-validateSemantics(query, catalog)     ← ② 只看字段字典
+```ts
+validateStructure(query);                  // ① 只看形状
+validateSemantics(query, catalog);         // ② 只看字段字典
 // 两步都过了。后面不再重新判断形状或字段规则。
-...拼 SQL
+
+const includeApply = compileTree(query.include, ctx);
+const excludeApply = compileTree(query.exclude, ctx);
 ```
+
+`compileTree` 返回的不是 SQL 字符串，是一个 `Apply` —— 一个「怎么把这段条件加到某个查询上」的函数。调用方拿到它之后，把它挂到 Knex 的查询对象上，最后 `renderSql()` 把整个查询转成字符串。
+
+三段的边界很硬：**第一段不知道字段字典存在，第二段不知道 SQL 存在，第三段不做任何判断。**
+
+第二步要拿字段字典对一遍 —— 字典由 Data Admin 维护，通过 `Catalog` 对象传进来。
 
 ```flow
 grid: true
 nodes:
-  - { id: ast,  label: 条件树, sub: "用户圈了什么", row: 0, kind: external }
-  - { id: v1,   label: ① 形状校验, sub: "不需要字段字典", row: 1, tone: amber }
-  - { id: v2,   label: ② 语义校验, sub: "要字段字典", row: 2, tone: violet }
-  - { id: gen,  label: ③ 拼 SQL, sub: "不再判断任何规则", row: 3, kind: backend }
-  - { id: out,  label: 四条 SQL, sub: "纯字符串", row: 4, tone: green }
-  - { id: err1, label: "① EMPTY_GROUP", sub: "组是空的", row: 1, shape: note, tone: red }
-  - { id: err2, label: "② UNKNOWN_FIELD", sub: "没有这个字段", row: 2, shape: note, tone: red }
+  - { id: ast, label: 条件树, sub: "界面传过来的 JSON", row: 0, kind: external }
+  - { id: v1, label: "① 形状校验", sub: "不需要字典（也会查值的形状）", row: 1, tone: amber }
+  - { id: e1, label: EMPTY_GROUP, sub: "组里一个孩子都没有", row: 1, shape: note, tone: red }
+  - { id: e1b, label: INCOMPLETE_LEAF, sub: "少了 field 或 op", row: 1, shape: note, tone: red }
+  - { id: v2, label: "② 语义校验", sub: "要字段字典", row: 2, tone: violet }
+  - { id: e2, label: UNKNOWN_FIELD, sub: "字典里没这个字段", row: 2, shape: note, tone: red }
+  - { id: e2b, label: VALUE_TYPE, sub: "值跟字段类型对不上", row: 2, shape: note, tone: red }
+  - { id: gen, label: "③ compileTree", sub: "返回 Apply，不再判断规则", row: 3, kind: backend }
+  - { id: out, label: 四条 SQL, sub: "renderSql() 转成字符串", row: 4, tone: green }
 edges:
   - { from: ast, to: v1 }
+  - { from: v1, to: e1, dashed: true }
   - { from: v1, to: v2, label: 过了 }
+  - { from: v2, to: e2, dashed: true }
   - { from: v2, to: gen, label: 过了 }
   - { from: gen, to: out }
-  - { from: v1, to: err1, dashed: true }
-  - { from: v2, to: err2, dashed: true }
 ```
 
-### 一个条件走完三段
+### 第一段 · 形状校验
+
+入口是 `validateStructure(query)`。它递归走完整棵树，只回答一个问题：**这棵树的形状合法吗。**
+
+它不看字段字典。所以 `{ "type": "portrait", "field": "根本不存在的字段", "op": "gte", "value": 1 }` 在这一段是**合法**的 —— 名字对不对是第二段的事。
+
+它查的东西分四组：
+
+| 组 | 查什么 | 什么情况报错 | 错误码 |
+|---|---|---|---|
+| **scope** | `version` | 不是 `1` | `UNSUPPORTED_VERSION` |
+| | `scope` 存在且 kind 认识 | 缺失或 kind 不认识 | `MISSING_SCOPE` |
+| | `kind: 'team'` 要有 `groupIds` | 空数组 | `EMPTY_TEAM` |
+| | `groupIds` 元素类型 | 有非整数 | `VALUE_TYPE` |
+| | `kind: 'self'` / `'all'` | 却带了 `groupIds` | `INVALID_SCOPE` |
+| **树结构** | `include` / `exclude` 的根 | 不是 group | `UNKNOWN_NODE` |
+| | 每个 group 的 `children` | 空数组 | `EMPTY_GROUP` |
+| | 节点 `type` | 不认识 | `UNKNOWN_NODE` |
+| **各叶子的字段** | `portrait` 的 `field` 和 `op` | 少任何一个 | `INCOMPLETE_LEAF` |
+| | `relation` 的 `relation` / `formula` / `op` | 少任何一个 | `INCOMPLETE_LEAF` |
+| | `uid` 的 `uids` | 不是数组 / 空数组 | `INCOMPLETE_LEAF` |
+| | `uid` 的每个元素 | 不是十进制整数字符串 | `VALUE_TYPE` |
+| **关系专属** | `formula: 'detail'` 的 `op` | 不是 `in` / `not_in` | `OP_NOT_ALLOWED` |
+| | `formula: 'detail'` 的 `value` | 带了 value（detail 不看值） | `INCOMPLETE_LEAF` |
+| | `formula: 'detail'` 的 `objects` | 空数组 | `INCOMPLETE_LEAF` |
+| | `formula: 'times'` 的 `op` | 不是六个比较符或 `between` | `OP_NOT_ALLOWED` |
+| | `formula: 'times'` 的 `value` | 不是非负整数 | `INCOMPLETE_LEAF` |
+| | `between` 的区间 | `min > max` | `VALUE_TYPE` |
+| | `props.logic` / `props.items` | 不是 AND/OR、空数组 | `INCOMPLETE_LEAF` |
+| **谓词的值** | `isNull` / `isNotNull` | 却带了 value | `VALUE_TYPE` |
+| | `in` / `not_in` | 不是数组、空数组、元素不是标量 | `VALUE_TYPE` / `INCOMPLETE_LEAF` |
+| | `between` | 不是两元、端点不是标量 | `VALUE_TYPE` |
+| | 相对时间操作符 | 不是正整数 | `VALUE_TYPE` |
+
+> 这些检查分散在 6 个函数里：`validateScope`、`validateNodeStructure`、`validatePortraitStructure`、`validateRelationStructure`、`validatePropsStructure`、`validateUid`、`validatePredicateShape`。前两个管 scope 和树，后五个各管一种叶子。
+
+**一个细节**：`INCOMPLETE_LEAF` 和 `VALUE_TYPE` 在这一段都会出现 —— 前者是「少了东西」，后者是「东西在但不对」（比如 `uids` 里有个 `"abc"`）。
+
+下面可以点。八种坏输入，看它在哪一段停下来：
 
 ```demo
-widget: stepper
-title: 「年龄 ≥ 18」走完三段管道
+widget: validate-lab
+title: 喂几个坏输入，看它在哪一段被拦
 actions: false
 config:
-  steps:
-    - label: 拿到条件树
-      code: |
-        { "type": "portrait",
-          "field": "age", "op": "gte", "value": 18 }
-      note: 界面传过来的就是这段 JSON。此刻它没有任何含义。
-    - label: ① 形状校验
-      code: |
-        version === 1            ✓
-        field 和 op 都在         ✓
-        op=gte 要一个值，有       ✓
-        value 是数字，不是数组    ✓
-      note: 这一步完全不知道「age」是什么。它只回答「这棵树的形状合法吗」。
-    - label: ② 语义校验
-      code: |
-        字段字典里找 "age"        ✓ 找到了
-        gte 在 age 的 ops 里      ✓ 允许
-        value 类型匹配 int        ✓ 18 是整数
-      note: 这一步需要字段字典，但不重新检查形状。
-    - label: ③ 拼 SQL
-      code: |
-        age 的 column 是 birthday
-        derive 是 age_years
-          ↓
-        TIMESTAMPDIFF(YEAR, `u`.`birthday`, CURRENT_DATE()) >= 18
-      note: 到这里才开始生成字符串。前面两步已经把「不合法的输入」全都挡掉了。
+  cases:
+    - label: 空组
+      stage: shape
+      code: |-
+        { "type": "group", "logic": "AND", "children": [] }
+      mark: '"children": []'
+      err: EMPTY_GROUP
+      why: 一个组里一个孩子都没有，界面上不该产生这种输入，所以当成 bug 拦掉，而不是当成「空条件」放过。
+    - label: 缺 op
+      stage: shape
+      code: |-
+        { "type": "portrait", "field": "age", "value": 18 }
+      mark: '"value": 18 }'
+      err: INCOMPLETE_LEAF
+      why: field 有、value 有，但 op 没给。这一段只看到「少了一个必填项」，不知道 age 是什么。
+    - label: between 给一个值
+      stage: shape
+      code: |-
+        { "type": "portrait", "field": "age", "op": "between", "value": [18] }
+      mark: '[18]'
+      err: VALUE_TYPE
+      why: between 要两个端点。注意这里是 VALUE_TYPE 不是 INCOMPLETE_LEAF —— value 在，只是形状不对。
+    - label: uids 不是数字
+      stage: shape
+      code: |-
+        { "type": "uid", "op": "in", "uids": ["1001", "abc"] }
+      mark: '"abc"'
+      err: VALUE_TYPE
+      why: uids 必须是十进制整数字符串。原因是这些值会被直接拼进 SQL 的 IN 列表，不能带引号和反斜杠。
+    - label: 字段不存在
+      stage: semantic
+      code: |-
+        { "type": "portrait", "field": "user_age", "op": "gte", "value": 18 }
+      mark: '"user_age"'
+      err: UNKNOWN_FIELD
+      why: 形状没问题，是拿字段字典查不到这个 field_key。
+    - label: 操作符不允许
+      stage: semantic
+      code: |-
+        { "type": "portrait", "field": "region", "op": "gte", "value": "US" }
+      mark: '"gte"'
+      err: OP_NOT_ALLOWED
+      why: region 是枚举类型，允许的操作符里没有 gte。允许哪些是字段定义里带的 ops 数组。
+    - label: 枚举值不在候选里
+      stage: semantic
+      code: |-
+        { "type": "portrait", "field": "region", "op": "eq", "value": "XX" }
+      mark: '"XX"'
+      err: VALUE_TYPE
+      why: region 的 options 里没有 XX。枚举字段会逐个比对候选值，所以拼不出意料之外的字符串。
+    - label: 年龄给了字符串
+      stage: semantic
+      code: |-
+        { "type": "portrait", "field": "age", "op": "gte", "value": "18" }
+      mark: '"18"'
+      err: VALUE_TYPE
+      why: age 的 valueType 是 int，字符串 18 不匹配。
 ```
 
-### 为什么要分两段
+### 第二段 · 语义校验
 
-这是这个包**最容易被误解**的设计。看起来「两次校验」是重复劳动 —— 一次遍历就能全查完。
+入口是 `validateSemantics(query, catalog)`。它按同样的方式再走一遍树，但这次每片叶子都要跟字段字典对。
 
-```compare
-first: 好处
-head: [说明, 谁受益]
-rows:
-  - 不需要字段字典: ["① 只看形状，所以**前端能在本地跑**", "前端：输入框失焦就能报错，不用往返后端"]
-  - 错误码不串味: ["`EMPTY_GROUP` 一定来自 ①，`UNKNOWN_FIELD` 一定来自 ②", "排障：看到错误码就知道是哪一段"]
-  - 职责不重叠: ["② 假定形状已合法，**不重复检查空的 children / uids**", "维护：改一段不会误伤另一段"]
-  - 测试能分开写: ["44 个用例专测校验器，不掺 SQL", "测试：`validate.spec.ts` 一个文件搞定"]
-```
+三类检查，顺序固定：
 
-````callout
-tone: amber
-icon: ⚠
-text: |
-  ==边界的写法是硬性的，不是「尽量」。==
+**① 名字存在吗** —— `fieldByName(catalog, leaf.field)` / `relationByName(...)` / `rel.props.find(...)`。找不到就报 `UNKNOWN_FIELD` / `UNKNOWN_RELATION` / `UNKNOWN_RELATION_PROP`。
 
-  `validate.ts` 里两个函数的注释就在划这条线：
+**② 操作符允许吗** —— 看字段定义里的 `ops` 数组。
 
-  ```ts
-  // 不需要 catalog。检查非空 children / uids / groupIds / detail.objects / in 值。
-  export function validateStructure(query: InsightQuery): void
+| 字段类型 | `ops` 是怎么来的 |
+|---|---|
+| 数值 / 日期 | `eq` `neq` `lt` `lte` `gt` `gte` `between` `isNull` `isNotNull` |
+| 枚举 | `eq` `neq` `in` `notIn` `isNull` `isNotNull` |
+| 布尔 | `eq` `isNull` `isNotNull` |
 
-  // 只看 catalog：字段、关系、属性、允许的操作符、值类型、枚举。
-  // 必须先调 validateStructure。这一步不重新检查空列表。
-  export function validateSemantics(query: InsightQuery, catalog: Catalog): void
-  ```
+这三个数组在 `catalog.ts` 里叫 `RANGE` / `SET` / `BOOL`。元数据从 MySQL 读的时候，是按 `semantic_type` 从 `crm_dc_operator` 查出来的。
 
-  ++「不重新检查」是写进注释的承诺。++ 谁违反了，测试会红。
-````
+**③ 值类型对吗** —— `isValidValue(value, valueType, options)` 的五个分支：
 
-### 那错误码长什么样
-
-12 个错误码，按来源分成两组：
-
-```cards
-cols: 2
-items:
-  - title: 形状类（来自 ①）
-    tag: 不需要字段字典
-    tone: amber
-    body: |
-      | 码 | 什么时候 |
-      |---|---|
-      | `UNSUPPORTED_VERSION` | `version` 不是 1 |
-      | `MISSING_SCOPE` | 没给 `scope` |
-      | `EMPTY_TEAM` | `kind: team` 但 `groupIds` 是空的 |
-      | `EMPTY_GROUP` | 一个 `AND` 组里一个孩子都没有 |
-      | `INCOMPLETE_LEAF` | `field` 或 `op` 少了一个 |
-      | `UNKNOWN_NODE` | `include` 不是组 |
-  - title: 语义类（来自 ②）
-    tag: 要字段字典
-    tone: violet
-    body: |
-      | 码 | 什么时候 |
-      |---|---|
-      | `UNKNOWN_FIELD` | 字段字典里没这个字段 |
-      | `UNKNOWN_RELATION` | 没有这个关系 |
-      | `UNKNOWN_RELATION_PROP` | 关系里没这个属性 |
-      | `OP_NOT_ALLOWED` | 这个字段不允许这个操作符 |
-      | `VALUE_TYPE` | 值类型不对（枚举值不在选项里、整数给成了字符串） |
-      | `INVALID_SCOPE` | `kind: self` 却带了 `groupIds` |
-```
-
-**两组各自负责的事情，从错误码上就能看出来。** 这就是「分两段」最实际的好处。
-
----
-
-## 05 · 三处反直觉的设计
-
-前面都是「它是什么」。这一节讲**它为什么这么做** —— 三处不看源码就想不到的地方。
-
-### 5.1 为什么 include 和 exclude 写法不一样
-
-先看真代码里那个函数，一共四行：
-
-```text
-function whereSql(universe, includeExpr, excludeExpr) {
-  const parts = [...universe];
-  if (includeExpr) parts.push(includeExpr);                              // ← 裸的
-  if (excludeExpr) parts.push(`NOT COALESCE((${excludeExpr}), FALSE)`);  // ← 包了两层
-  ...
-}
-```
-
-```callout
-tone: red
-icon: ⚠
-text: |
-  ==一个裸着，一个包了 `NOT COALESCE`。这不是笔误。==
-
-  正常人第一次看到都会觉得「应该统一一下」。
-  ==但统一会引入一个只在 NULL 上暴露的 bug。==
-```
-
-#### 亲手试一遍
-
-下面 6 行数据，其中两行「性别」是**未知（NULL）**。
-
-条件固定是 `gender = 'M'`。**换「放进哪边」和「包不包 COALESCE」，看哪几行留下来。**
-
-```demo
-widget: null-lab
-title: 6 行数据 · 一个条件 · 四种写法
-actions: false
-config:
-  col: gender
-  label: 性别
-  matchVal: M
-  rows:
-    - { id: 1, name: 张三, v: M }
-    - { id: 2, name: 李四, v: F }
-    - { id: 3, name: 王五, v: null }
-    - { id: 4, name: 赵六, v: M }
-    - { id: 5, name: 孙七, v: F }
-    - { id: 6, name: 周八, v: null }
-```
-
-#### 试出来的是什么
-
-**把 `gender = 'M'` 放进 exclude，期望是「排除掉男性，留下其余 4 人」。**
-
-| 写法 | NULL 那两行 | 为什么 |
+| `valueType` | 怎么判 | 例子 |
 |---|---|---|
-| `NOT COALESCE((gender = 'M'), FALSE)` | **留下** ✓ | `COALESCE` 把 UNKNOWN 压成 FALSE，`NOT FALSE` = TRUE |
-| `NOT (gender = 'M')` | **丢掉** ✗ | `NOT UNKNOWN` 还是 UNKNOWN，而 WHERE 把 UNKNOWN 当 false |
+| `int` | `typeof === 'number'` 且是整数 | `18` ✓，`"18"` ✗ |
+| `decimal` | `typeof === 'number'` 且有限 | `1000.5` ✓ |
+| `string` | `typeof === 'string'` | 任何字符串都过 |
+| `bool` | `typeof === 'boolean'` | `true` ✓，`1` ✗ |
+| `enum` | **有 `options` 就逐个比对**；没有就只查类型 | `"US"` 在候选里 ✓，`"XX"` ✗ |
 
-```compare
-first: 值
-head: [为什么 include 不用包, 为什么 exclude 必须包]
-rows:
-  - 想要的语义:
-      - "「满足条件的才进来」→ 不满足就该被挡在外面"
-      - "「满足条件的出去」→ ==不满足的（包括不知道的）应该留下=="
-  - UNKNOWN 该怎么办:
-      - "当成「不满足」→ 不进来"
-      - "当成「不在 E 里」→ 留下"
-  - SQL 默认行为:
-      - { text: "WHERE 天然把 UNKNOWN 当 false ✓", tone: green }
-      - { text: "NOT UNKNOWN 还是 UNKNOWN → 被当成 false ✗", tone: red }
-  - 结论:
-      - { text: "不用包，语义已经对了", tone: green }
-      - { text: "必须包，否则误伤", tone: amber }
-```
+注意 `enum` 那一行：**有候选值列表时，校验会收紧**。这是枚举字段拼不出任意字符串的原因。
 
-```callout
-tone: violet
-icon: 💡
-text: |
-  **用集合的说法**：`include` 要的是 `U ∩ I`，`exclude` 要的是 `U − E`。
-
-  ==减法必须二值 —— 一个人要么在 E 里，要么不在，不能「不知道」。==
-  而 `gender = 'M'` 对 NULL 行给的是「不知道」，不是「不在」。
-  `COALESCE` 的作用就是把这个「不知道」强行归到「不在」那一侧。
-```
-
-#### 这个约定被测试钉死了
-
-包里有一个专门的文件看着它：`test/includeCoalesce.spec.ts`。
-
-它甚至带了一对**构造反例**的工具（`wrapIncludeCoalesce` / `unwrapIncludeCoalesce`），
-专门用来验证两件事：
+**关系对象走的是另一条路。** `relations[].objectType` 决定值类型，候选值来自 `objectSource`：
 
 ```text
-it('does not wrap include-only trees')                              // include 不该包
-it('still wraps exclude with NOT COALESCE so missing rows stay')    // exclude 必须包
+holding 的 objectSource 是 { kind: 'provider', key: 'stock_search' }
+  → 没有本地候选值，只查是不是字符串
+
+product 的 objectSource 是 { kind: 'inline', options: [...] }
+  → 有候选值，逐个比对
 ```
 
-==将来谁「顺手统一一下」，测试立刻红。== 这就是把设计意图写进测试的样子。
+`times` 分支的值不走 `isValidValue` —— 它是计数，另外判「非负整数」和「`between` 时 min ≤ max」。
 
-### 5.2 为什么「年龄」在数据库里不存在
+### 第三段 · 拼 SQL
 
-字段字典里 `age` 这一行长这样：
+#### 挂载点：返回一个函数，而不是字符串
 
-```json
-{ "name": "age", "label": "年龄",
-  "column": "birthday",
-  "valueType": "int",
-  "derive": { "kind": "age_years" } }
+`compileTree` 的返回类型是：
+
+```ts
+type Gate = 'and' | 'or';
+type Apply = (query: Knex.QueryBuilder, gate: Gate) => void;
 ```
 
-**`name` 和 `column` 不是一回事。**
+**它不返回 SQL 文本，返回一个「怎么加条件」的函数。** 调用方决定什么时候、以什么方式调用它。
 
-```journey
-- tag: ① 界面说
-  tone: muted
-  name: 逻辑字段
-  badge: 用户看到的
-  fields:
-    - { k: name, v: age }
-    - { k: label, v: 年龄 }
-  note: 界面上的下拉框写的是「年龄」。**用户不知道 birthday 是什么。**
-  next: "查字段字典 :: :: 这一步发生在服务端"
-
-- tag: ② 字典说
-  tone: violet
-  name: 物理列 + 变换
-  badge: 推导规则
-  fields:
-    - { k: column, v: birthday, note: 真实存在的列, tone: ok }
-    - { k: derive, v: "age_years", note: 不是直接读，要算 }
-  note: 字典把「逻辑字段」翻译成「物理列 + 一个变换」。
-  next: "编译 :: :: 变换决定 SQL 长什么样"
-
-- tag: ③ SQL 里
-  tone: green
-  name: 表达式
-  code: |
-    TIMESTAMPDIFF(YEAR, `u`.`birthday`, CURRENT_DATE())
-  note: ==数据库里没有「年龄」这一列，它是每次查询现算的。==
-```
-
-**为什么绕这一圈？** 因为「年龄」有两个麻烦：
-
-```cards
-cols: 2
-items:
-  - title: 它会变
-    desc: "生日是不变的，年龄每年涨一岁。存年龄就要每天刷一遍全表。"
-    tone: amber
-    body: |
-      如果真存一列 `age`：
-
-      - 每个人生日那天要 UPDATE
-      - 忘了刷就会推出「这个人 30 岁」而实际 31
-      - 跨时区还要考虑「算哪一天」
-
-      ==存生日，年龄每次算 —— 只有一处逻辑，永远不会过期。==
-  - title: 口径必须唯一
-    desc: "「年龄」可能是周岁、可能是虚岁、可能按自然年算。三处各写一遍就会不一致。"
-    tone: violet
-    body: |
-      `derive` 只有两个取值，**整个系统里「年龄怎么算」只有一处定义**：
-
-      | kind | 生成什么 |
-      |---|---|
-      | `age_years` | `TIMESTAMPDIFF(YEAR, col, CURRENT_DATE())` |
-      | `days_since` | `DATEDIFF(CURRENT_DATE(), col)` |
-
-      ==所以「距上次成交天数」和「年龄」用的是同一套机制。==
-```
-
-**同一个 `days_since` 用在四个字段上**，它们各自映射到不同的物理列：
-
-```tree
-- label: "derive: days_since"
-  sub: "DATEDIFF(CURRENT_DATE(), col)"
-  tone: green
-  note: 一个变换，四个字段在用
-  children:
-    - { label: register_days,      sub: "→ register_time",     note: 开户天数 }
-    - { label: last_deposit_days,  sub: "→ last_deposit_time", note: 距上次入金天数 }
-    - { label: last_trade_days,    sub: "→ last_trade_time",   note: 距上次成交天数 }
-    - { label: last_touch_days,    sub: "→ last_touch_time",   note: 距上次触达天数 }
-```
-
-### 5.3 权限不是「过滤」，是「编进 WHERE」
-
-直觉上，权限应该是「查完再筛掉不该看的」。真代码不是这样：
-
-```text
-function universePreds(actor, scope) {
-  const preds = [];
-  if (scope.kind === 'team' && actor.dataLevel === 'team') {
-    pushGroups(preds, scope.groupIds.filter(id => actor.groupIds.includes(id)));  // 取交集
-  } else if (scope.kind === 'team') {
-    pushGroups(preds, scope.groupIds);
-  } else if (actor.dataLevel === 'team') {
-    pushGroups(preds, actor.groupIds);
-  }
-  if (actor.dataLevel === 'self' || scope.kind === 'self') {
-    preds.push(`\`u\`.\`staff_id\` = ${actor.staffId}`);
-  }
-  return preds;
-}
-```
-
-**它产出的是一段 WHERE 谓词，和用户圈的条件拼在一起。**
-
-```compare
-first: 做法
-head: [查完再过滤, 编进 WHERE]
-rows:
-  - SQL 长什么样:
-      - "两段：先查全量，再筛"
-      - "一段：`WHERE u.staff_id = 101 AND (用户条件)`"
-  - 扫描的数据量:
-      - { text: "全表 100 万行", tone: red }
-      - { text: "只有自己名下那部分", tone: green }
-  - 「忘了过滤」的后果:
-      - { text: "越权数据已经查出来了，只是没显示", tone: red }
-      - { text: "==数据库层面就不可能返回==，没有这个 bug 类型", tone: green }
-  - 谁能绕过:
-      - "任何一个走捷径的新接口"
-      - "绕过不了 —— 谓词是 `compile()` 的必经步骤"
-```
-
-````callout
-tone: green
-icon: ✅
-text: |
-  ==这是「让错误的做法写不出来」，不是「提醒大家别写错」。==
-
-  `compile()` 的签名就决定了：**你不给它 actor，它就没法工作。**
-
-  ```ts
-  export function compile(query: InsightQuery, options: CompileOptions): CompileResult
-  //                                    options 里 actor 是必填的
-  ```
-
-  不存在「这个接口先不接权限，以后再补」的路径。
-````
-
-**还有一个细节**：`team` 身份只能圈自己的组。看第一段那个 `filter`：
+原因是 Knex 拼嵌套条件时的形状：
 
 ```js
-scope.groupIds.filter(id => actor.groupIds.includes(id))
+// AND 组：第一个用 where，后面的也用 where（Knex 默认就是 AND）
+qb.where(a).where(b)
+
+// OR 组：第一个用 where，后面的用 orWhere
+qb.where(a).orWhere(b)
+
+// 嵌套：每一层要开一个括号，括号里重新数第一个
+qb.where(function () {
+  this.where(a).orWhere(b)
+})
 ```
 
-组长传 `{ kind: 'team', groupIds: [1, 2, 3] }`，但他只有组 1 —— **交集之后只剩 [1]**。
-越权的那部分不是被拒绝，是**悄悄消失了**。
+**递归函数不知道自己是第几个。** 这个信息只有父层有。所以父层在循环里决定，通过 `gate` 传下去：
 
----
+```ts
+const grouped = function (this: Knex.QueryBuilder) {
+  children.forEach((child, index) => {
+    child(this, index === 0 ? 'and' : logic === 'OR' ? 'or' : 'and');
+  });
+};
+if (gate === 'or') query.orWhere(grouped);
+else query.where(grouped);
+```
 
-## 06 · 它由什么组成
+第一个孩子永远拿到 `'and'` —— 因为在它前面没有东西可以 `or`。
 
-`src/` 下 **10 个文件、1717 行**。按行数排：
+这样安排之后，叶子那一层完全不知道 `where` / `andWhere` / `orWhere` 的存在，它只管「我加什么条件」。好处是叶子能单独测，新增节点类型时不用碰挂载逻辑。
+
+#### 四种叶子各自的形状
+
+| 叶子 | 生成的 SQL |
+|---|---|
+| `portrait` | `` `u`.`region` = ? `` |
+| `portrait` + `derive` | `` TIMESTAMPDIFF(YEAR, `u`.`birthday`, CURRENT_DATE()) >= ? `` |
+| `relation` + `detail` | `` `u`.`uid` IN (SELECT `rel_holding`.`uid` FROM `rel_holding` AS `rel_holding` WHERE ...) `` |
+| `relation` + `detail` + `not_in` | `` NOT EXISTS (SELECT 1 FROM `rel_holding` AS `rel_holding` WHERE `rel_holding`.`uid` = `u`.`uid` AND ...) `` |
+| `relation` + `times` | `` `u`.`uid` IN (SELECT uid FROM ... GROUP BY uid HAVING COUNT(*) >= ?) `` |
+| `uid` | `` `u`.`uid` IN (?, ?, ...) `` |
+
+`detail` 的 `objects` 和 `props` 都进子查询的 WHERE：
+
+```sql
+-- objects：落在 object_id 列
+WHERE `rel_holding`.`object_id` IN ('00700.HK')
+
+-- props：落在各自的物理列，按 logic 组合
+WHERE (`rel_holding`.`qty` >= ? AND `rel_holding`.`market` = ?)
+```
+
+#### 派生字段走的不是普通比较
+
+`portraitExpr(field)` 决定这个字段的「表达式」是什么：
+
+```ts
+if (field.derive?.kind === 'days_since')
+  return db.raw('DATEDIFF(CURRENT_DATE(), ??)', [ref])          // 距上次 X 天数
+if (field.derive?.kind === 'age_years')
+  return db.raw('TIMESTAMPDIFF(YEAR, ??, CURRENT_DATE())', [ref]) // 年龄
+return { kind: 'column', ref }                                   // 普通列
+```
+
+返回值有两种形态：`{ kind: 'column' }` 和 `{ kind: 'sql' }`。后面 `applyIn` / `applyBetween` / `applyScalar` 都要按这两种形态分叉：
+
+| 形态 | 怎么加条件 |
+|---|---|
+| `column` | 用 Knex 的 `where(ref, op, value)` / `whereIn` / `whereBetween` |
+| `sql` | 用 `whereRaw(sql, values)`，表达式里用 `??` 占位列、`?` 占位值 |
+
+**这就是「年龄」在数据库里不存在的原因。** 字段字典里 `age` 的 `column_name` 是 `birthday`、`derive_kind` 是 `age_years`，编译时现算。
+
+好处是它不会过期（存年龄要每天刷全表），口径也只有一处（周岁还是虚岁、按哪天算，只有一个答案）。
+
+同一个机制还用在四个「距上次 X 天数」的字段上，它们都是 `days_since`：
+
+```tree
+- label: "derive_kind: days_since"
+  sub: "DATEDIFF(CURRENT_DATE(), col)"
+  tone: green
+  note: 一个模板，四个字段在用
+  children:
+    - { label: register_days, sub: "→ register_time", note: 开户天数 }
+    - { label: last_deposit_days, sub: "→ last_deposit_time", note: 距上次入金天数 }
+    - { label: last_trade_days, sub: "→ last_trade_time", note: 距上次成交天数 }
+    - { label: last_touch_days, sub: "→ last_touch_time", note: 距上次触达天数 }
+```
+
+#### 权限谓词插在最前面
+
+`applyUniverse(query, actor, scope)` 在拼条件之前先跑一遍。它的输入 `actor` 不是 DSL 里的东西，是调用方传进来的：
+
+```ts
+actor = { staffId: number; dataLevel: 'self' | 'team' | 'all'; groupIds: number[] }
+```
+
+| `scope.kind` | `actor.dataLevel` | 加什么谓词 |
+|---|---|---|
+| `team` | `team` | `group_id IN (scope 和 actor 的交集)` |
+| `team` | 其它 | `group_id IN (scope.groupIds)` |
+| 其它 | `team` | `group_id IN (actor.groupIds)` |
+| `self` 或 `actor` 是 `self` | | `staff_id = ?` |
+
+**它是编进 WHERE 的，不是查完再筛。** 所以不存在「某个接口忘了过滤」这种漏洞 —— 想绕过就得改 `compile()` 本身。
+
+两个细节：
+
+- **交集那个分支**：组长传 `groupIds: [1, 2, 3]` 但他只有组 1，交集之后只剩 `[1]`。越权的组不是被拒绝，是从谓词里消失了。
+- **空交集**：`applyGroups` 拿到空数组时生成 `FALSE`。一个恒假条件，等于查不到任何人 —— 这比生成一个空 `IN ()`（语法错误）安全。
+
+#### include 和 exclude 的写法不一样
+
+```
+include  →  谓词本身                          (cond1 AND cond2)
+exclude  →  NOT COALESCE((谓词), FALSE)
+```
+
+exclude 外面套了一层 `COALESCE`。原因是 SQL 的三值逻辑：
+
+```
+gender = 'M' 对 NULL 行求值 → UNKNOWN（不是 TRUE 也不是 FALSE）
+NOT UNKNOWN                 → 还是 UNKNOWN
+WHERE 里的 UNKNOWN          → 按 false 处理 → 这行被丢掉
+```
+
+所以「排除男性」写成 `NOT (gender = 'M')` 时，**性别为 NULL 的人会被一并排除** —— 他们既不满足「是男性」，也不满足「不是男性」。
+
+`COALESCE` 把 UNKNOWN 归到 FALSE 一侧，排除集恢复成二值判断：要么在里面，要么不在。
+
+include 不需要这一层。「满足条件的进来」和 WHERE 的默认行为一致。
+
+这个约定有个测试文件专门看着它（`includeCoalesce.spec.ts`），里面带了一对构造反例的工具 —— 将来谁想把两边写法统一，测试会红。
+
+#### 关系为什么用 `IN` 子查询，不用 `LEFT JOIN`
+
+三个分支（`detail` / `detail + not_in` / `times`）全走子查询，没有一个是 JOIN。
+
+```sql
+-- 一个人持 5 个标的
+LEFT JOIN rel_holding 之后  →  出 5 行
+COUNT(*)                   →  把「1 个人」数成「5」
+```
+
+`IN` 子查询只回答「这个 uid 在不在结果集里」，一行对应一个人。
+
+**有一件事容易搞错**：包一层 COUNT 解决不了这个问题。
+
+```sql
+-- 结果还是 5，不是 1
+SELECT COUNT(*) FROM (
+  SELECT u.uid FROM users u LEFT JOIN rel_holding h ON h.uid = u.uid
+) t
+```
+
+子查询里只写 `SELECT u.uid` **不会自动去重**，要去重得写 `DISTINCT` 或 `GROUP BY`。
+
+本设计从语句形状上避免重复行产生，而不是在统计时去重。
+
+#### `not_in` 为什么是 `NOT EXISTS`
+
+`not_in` 是**关系集合级**的否定，不是对象列上的否定。
+
+```
+需求：「不持有腾讯」
+
+✅ NOT EXISTS (SELECT 1 FROM rel_holding
+               WHERE rel_holding.uid = u.uid AND object_id IN ('00700.HK'))
+   → 不存在「这个人与腾讯的关系记录」
+
+❌ WHERE object_id NOT IN ('00700.HK')
+   → 变成「这条关系记录不是腾讯」——行级否定，语义完全不同
+```
+
+用一句话验：**同时持有腾讯和阿里的人，不满足「不持有腾讯」。**
+
+写成 `NOT EXISTS` 时结论正确。写成对象列上的 `NOT IN` 时，那个人会因为有阿里这条记录而被留下 —— 错的。
+
+代码里那句注释就是记这个：
+
+```ts
+// Set negation. filters stay a positive match; object_id is never NOT IN.
+```
+
+### 组装：从一段 WHERE 到四条 SQL
+
+四段条件都准备好之后，`compile()` 用一个内部函数 `filtered()` 把它们拼到一个 Knex 查询上：
+
+```ts
+const filtered = (joins, seek) => {
+  const builder = db(`${universeTable} as u`);
+  if (seek) crossJoin(builder, seek);
+  for (const table of joins) builder.leftJoin(...);
+  applyUniverse(builder, actor, scope);       // 权限
+  if (includeApply) includeApply(builder, 'and');
+  if (exclude) builder.whereRaw(`NOT COALESCE((${exclude.sql}), FALSE)`, [...exclude.bindings]);
+  return builder;
+};
+```
+
+四条 SQL 都是从这个函数长出来的：
+
+| 输出 | 怎么来 |
+|---|---|
+| `uidsSql` | `filtered(filterJoins).select('u.uid')` |
+| `countSql` | `count(*) from (uidsSql) as t` |
+| `listSql` | `filtered(listJoins)` + 展示列 + 排序 + 分页 |
+| `droppedUidsSql` | 把点名的 uid 拼成派生表，再 `NOT EXISTS` 反查 |
+
+**`countSql` 外面包一层子查询**，统计的是 `uidsSql` 返回的行数。本期 `uidsSql` 不产生重复行（关系条件用子查询而非 JOIN，宽表的 `uid` 是唯一键），所以包一层不改变结果。它的作用是把「人数」定义成「`uidsSql` 这个集合的大小」，后续 `uidsSql` 里加入会改变行数的逻辑时，外层不用动。
+
+两个构造细节：
+
+- **`filterJoins` 和 `listJoins` 是两个不同的集合。** 前者是条件里用到的表，后者是展示列用到的表。`uidsSql` 和 `countSql` 只需要前者，`listSql` 两个都要。
+- **`droppedUidsSql` 只在用过 `uid` 叶子时才有值**，否则返回 `null`。它是给界面回话用的：「你点名的 100 个人里，有 20 个不在你的数据范围内」。代码里那句注释说明了它只核对 `in`：
+
+```ts
+// droppedUidsSql 只核对 in 点名要纳入的人。not_in 的 id 不是纳入请求。
+```
+
+**分页走 uid 游标。** `listSql` 有三种分页形态：
+
+| 情况 | 生成的 SQL |
+|---|---|
+| 第一页 | `ORDER BY u.uid LIMIT ?` |
+| 带 `afterUid` | `WHERE u.uid > ? ORDER BY u.uid LIMIT ?` |
+| 只有页码、没有游标 | `CROSS JOIN (SELECT u.uid ... LIMIT 1 OFFSET ?) AS prev` 再 `WHERE u.uid > prev.after_uid` |
+
+第三种是为了兼容「跳页」：先查目标页前一行的 uid，再按游标取。**深分页时 `OFFSET` 会越翻越慢，所以正常翻页走游标。**
+
+还有两处 Knex 的补偿（都在 `knex.ts` 里）：
+
+- **`applyOffset`** —— Knex 在 offset 为 0 时会省略 `OFFSET`，而夹具要求它显式出现。
+- **`crossJoin`** —— Knex 没有 cross join 的一等 API，用 `joinRaw` 补。
+
+## 05 · 它由什么组成
+
+`src/` 下 **11 个文件、1507 行**。按行数排：
 
 ```tree
 - label: packages/dsl/src
   tone: violet
-  note: 10 个文件 · 1717 行（wc -l 实测）
+  note: 11 个文件 · 1507 行（wc -l 实测）
   children:
-    - label: catalog.ts
-      sub: 474 行
-      tone: amber
-      note: 最大。字段字典的**默认值**（测试夹具），外加两个查名字的小函数
-      children:
-        - { label: defaultCatalog, note: "46 个字段 + 2 个关系的硬编码副本" }
-        - { label: fieldByName, note: 找不到就返回 undefined —— 由调用方决定怎么办 }
-        - { label: relationByName, note: 同上 }
     - label: compile.ts
-      sub: 424 行
+      sub: 533 行
       note: 编排者。三段管道都在这里串起来
       children:
         - { label: compile, sub: "(query, options)", note: "对外唯一入口" }
-        - { label: compileNode, note: "递归展开条件树 —— 一个 switch 分派四种节点" }
-        - { label: whereSql, note: "拼 WHERE。include/exclude 的不对称就写在这里" }
-        - { label: universePreds, note: "权限下推" }
-        - { label: compileListSql, note: "分页 —— 走 uid 游标，不走 OFFSET" }
+        - { label: compileNode, note: "递归展开条件树，返回 Apply" }
+        - { label: compileRelation, note: "关系条件的三个分支" }
+        - { label: applyUniverse, note: "权限谓词" }
+        - { label: filtered, note: "内部函数 —— 四条 SQL 都从它长出来" }
     - label: validate.ts
-      sub: 356 行
+      sub: 357 行
       tone: blue
       note: 两段校验器。**不含任何 SQL**
       children:
         - { label: validateStructure, note: "只查形状，不需要字典" }
         - { label: validateSemantics, note: "只查字典，假定形状已合法" }
     - label: schema.ts
-      sub: 319 行
+      sub: 320 行
       tone: green
       note: 类型定义 + 类型守卫 + 几个构造器
       children:
-        - { label: "Ops", note: "14 个操作符常量" }
+        - { label: Ops, note: "15 个操作符常量" }
         - { label: "BoolNode / PortraitLeaf / RelationLeaf / UidLeaf", note: "四种节点" }
         - { label: "isGroup / isPortrait / isRelation / isUid", note: "类型守卫，编译器和校验器都用" }
-    - label: sql.ts
-      sub: 53 行
-      note: 只干一件事：**安全地拼字符串**。不做任何规则判断
+    - label: knex.ts
+      sub: 129 行
+      note: Knex 的包装层。四处补偿
       children:
-        - { label: ident, note: "加反引号，内部反引号翻倍" }
-        - { label: sqlString, note: "单引号翻倍 —— 转义" }
-        - { label: sqlLiteral, note: "按值类型给字面量：数字不加引号、布尔给 TRUE/FALSE" }
+        - { label: db, note: "client 是 mysql，**不连库**，只用来拼 SQL" }
+        - { label: "_escapeBinding（覆盖）", note: "布尔输出大写 TRUE/FALSE，字符串用 ANSI 的 ''" }
+        - { label: whereFragment, note: "把一段条件单独编译成 { sql, bindings } —— exclude 要套 NOT COALESCE" }
+        - { label: renderSql, note: "toString() 之后把关键字转大写（Knex 输出小写）" }
+        - { label: crossJoin, note: "Knex 没有 cross join 的一等 API" }
     - label: metadata.ts
-      sub: 53 行
-      note: 字段字典、关系、Catalog 的**类型定义**。纯类型，运行时是空的
+      sub: 61 行
+      note: Catalog 的类型定义 + 两个查名字的函数
+      children:
+        - { label: "FieldDef / RelationDef / Catalog", note: 纯类型 }
+        - { label: "fieldByName / relationByName", note: "找不到返回 undefined，由调用方决定怎么报错" }
+    - label: sql.ts
+      sub: 52 行
+      note: 重构前是唯一的拼 SQL 入口，**现在不在生成路径上**
+      children:
+        - { label: compileScalarOp, note: "把 op 映射成 = / != / < / <= / > / >=" }
+        - { label: "ident / qualify / sqlString / sqlLiteral / joinSql / inList", note: "旧的手拼辅助函数，测试还在跑，生产不再调用" }
     - label: errors.ts
       sub: 23 行
       note: 12 个错误码 + 一个 CompileError 类
+    - label: page.ts
+      sub: 17 行
+      note: 只有一个函数，处理分页游标的入参
+      children:
+        - { label: parseAfterUid, note: "把 bigint / number / string 统一成十进制整数字符串，不合法返回 undefined" }
     - label: index.ts
       sub: 7 行
       note: 包的出口。决定哪些是公开契约
@@ -857,22 +907,23 @@ scope.groupIds.filter(id => actor.groupIds.includes(id))
 ```lane-stack
 - badge: LAYER 01
   title: 底层
-  desc: 一个依赖都没有 —— 所以任何一层都能引用它们
+  desc: 一个依赖都没有，任何一层都能引用
   tone: muted
   nodes:
     - { title: context.ts, sub: 7 行, tag: Actor 类型 }
     - { title: errors.ts, sub: 23 行, tag: 错误码 }
-    - { title: schema.ts, sub: 319 行, tag: 四种节点 + 类型守卫 }
+    - { title: schema.ts, sub: 320 行, tag: 四种节点 + 类型守卫 }
   next: "被引用 :: :: 单向，不回头"
 
 - badge: LAYER 02
   title: 类型与工具
-  desc: 只依赖 LAYER 01。三个文件彼此不引用
+  desc: 只依赖 LAYER 01
   tone: green
   nodes:
-    - { title: metadata.ts, sub: 53 行, tag: 纯类型定义 }
-    - { title: sql.ts, sub: 53 行, tag: 转义与字面量 }
-    - { title: catalog.ts, sub: 474 行, tag: 查名字 }
+    - { title: metadata.ts, sub: 61 行, tag: 类型 + 查名字 }
+    - { title: page.ts, sub: 17 行, tag: 分页入参 }
+    - { title: sql.ts, sub: 52 行, tag: 比较符映射 }
+    - { title: knex.ts, sub: 129 行, tag: 外部库的包装 }
   next: "校验器要用字典 :: :: 而字典要用类型"
 
 - badge: LAYER 03
@@ -880,7 +931,7 @@ scope.groupIds.filter(id => actor.groupIds.includes(id))
   desc: 两道门。不含任何 SQL
   tone: blue
   nodes:
-    - { title: validate.ts, sub: 356 行, tag: 形状 + 语义 }
+    - { title: validate.ts, sub: 357 行, tag: 形状 + 语义 }
   next: "两道都过了才轮到 :: :: 这样拼 SQL 时不用再判断规则"
 
 - badge: LAYER 04
@@ -888,7 +939,7 @@ scope.groupIds.filter(id => actor.groupIds.includes(id))
   desc: 在顶端，依赖下面所有层
   tone: violet
   nodes:
-    - { title: compile.ts, sub: 424 行, tag: 对外唯一入口 }
+    - { title: compile.ts, sub: 533 行, tag: 对外唯一入口 }
 ```
 
 ```callout
@@ -897,113 +948,37 @@ icon: ✅
 text: |
   ==**每一层只依赖它下面那层，没有回环。**==
 
-  这个形状换来一个很实际的好处：
+  三个底层文件（`context` / `errors` / `schema`）一个依赖都没有，所以能被任何一层引用，包括测试。
 
-  **`sql.ts` 只负责「怎么安全地拼一个字符串」，它不判断任何规则。**
-  所以 `compile.ts` 可以随便复用它，而不会产生「编译器 ↔ 校验器互相依赖」。
-
-  **三个底层文件（`context` / `errors` / `schema`）一个依赖都没有** ——
-  所以它们能被任何一层引用，包括测试。
+  `knex.ts` 的位置也在这里 —— 它包着外部库，被 `compile.ts` 用，**校验器完全不碰它**。
+  所以校验逻辑可以脱离 Knex 单独测。
 ```
 
-### 一个诚实的问题
+## 06 · 怎么保证它是对的
 
-`catalog.ts` 是最大的文件（474 行），但它的注释写着：
+334 个测试，878ms 跑完。分三层，每层管的事不一样。
 
-```ts
-// Seed and compiler-test fixture. The server loads the live catalog from MySQL.
+| 层 | 规模 | 管什么 |
+|---|---|---|
+| 单元测试 | 11 个文件 166 个用例 | 一个特性一个文件，断言「抛的是哪个错误码」而不是「抛没抛」 |
+| 夹具 | 168 条 | 锁住输出 —— 每条夹具是一份 `{ query, expected }`，`expected` 里是**逐字符**的 SQL 快照 |
+| 真库验证 | 单独一套配置 | 同一批夹具喂给真 Doris 跑，跟快照对账 |
+
+### 夹具为什么值得单独说
+
+一份用例，两处验证：
+
+```
+test/fixtures/cases.ts          ← 用例的唯一真相源（TS，能调构造器，写起来短）
+        │  npx tsx scripts/update-fixtures.ts
+        ▼
+test/fixtures/*.json            ← 10 个文件，6100 行 SQL 快照
+        │
+        ├── fixtures.spec.ts    → 断言「现在的编译器输出 === 快照」
+        └── test/doris/*.spec.ts → 真的连 Doris 执行，跟快照对账
 ```
 
-**它是测试夹具，不是运行时真相。** 但同一个文件里也导出了 `fieldByName` / `relationByName` ——
-而这两个函数**生产代码在用**（`compile.ts` 和 `validate.ts` 都 import）。
-
-```compare
-first: 混在一起的问题
-head: [实际情况, 更好的做法]
-rows:
-  - 474 行里是什么: ["约 460 行是硬编码的 46 个字段 + 2 个关系", "那些应该搬去 test/fixtures/"]
-  - 谁在用这个文件: ["生产代码用两个查找函数；测试用整个 defaultCatalog", "两个查找函数留在 src/，夹具搬走"]
-  - 后果: ["读源码的人会以为字段字典是写死的", "一眼能看出「字典是运行时的，这只是测试数据」"]
-```
-
-**这不是 bug，是组织问题。** 但它会让第一次读代码的人多花几分钟 —— 所以值得指出。
-
----
-
-## 07 · 怎么保证它是对的
-
-332 个测试，553ms 跑完。分三层，每层管不同的事。
-
-### 第一层：单元测试
-
-```cards
-cols: 3
-items:
-  - title: 按特性分文件
-    desc: "一个特性一个 spec，共 11 个文件 163 个用例。"
-    tone: blue
-    body: |
-      | 文件 | 测什么 | 用例 |
-      |---|---|---|
-      | `validate.spec.ts` | 两段校验器 | 44 |
-      | `compile.relation.spec.ts` | 关系节点 | 24 |
-      | `compile.operators.spec.ts` | 14 个操作符 | 16 |
-      | `compile.sql.spec.ts` | 生成的 SQL 形状 | 16 |
-      | `compile.scope.spec.ts` | 权限口径 | 13 |
-      | `compile.formula.spec.ts` | detail vs times | 11 |
-      | `compile.uid.spec.ts` | 指定 UID | 11 |
-      | `compile.null.spec.ts` | NULL 语义 | 8 |
-      | `includeCoalesce.spec.ts` | 那个不对称 | 9 |
-      | `schema.spec.ts` | 类型守卫与构造器 | 9 |
-      | `sql.spec.ts` | 转义 | 2 |
-  - title: 断言的是错误码
-    desc: "不是「抛了异常」，而是「抛了带这个码的异常」。"
-    tone: violet
-    body: |
-      ```ts
-      export function expectCode(fn, code) {
-        try { fn(); expect.fail(`expected ${code}`) }
-        catch (e) {
-          expect(e).toBeInstanceOf(CompileError)
-          expect((e as CompileError).code).toBe(code)
-        }
-      }
-      ```
-
-      ==这让「校验器有没有换过分类」变得可测。==
-      如果哪天 `EMPTY_GROUP` 被改成了 `INCOMPLETE_LEAF`，测试会红。
-  - title: 三个现成的身份
-    desc: "每个测试用例都从三个演员里挑一个，不用自己构造。"
-    tone: amber
-    body: |
-      ```ts
-      export const selfRm  = { staffId: 101, dataLevel: 'self', groupIds: [1] }
-      export const leader  = { staffId: 201, dataLevel: 'team', groupIds: [1] }
-      export const ops     = { staffId: 301, dataLevel: 'all',  groupIds: [1,2,3] }
-      ```
-
-      跟 `doris/seed.mjs` 里灌的那 10 个员工是同一批人。
-```
-
-### 第二层：夹具 —— 这是最有意思的一层
-
-**一份用例，两处验证。**
-
-```flow
-grid: true
-nodes:
-  - { id: cases, label: "test/fixtures/cases.ts", sub: "用例的唯一真相源", row: 0, tone: violet }
-  - { id: json,  label: "test/fixtures/*.json",  sub: "10 个文件 · 6100 行 SQL 快照", row: 1, tone: amber }
-  - { id: unit,  label: "fixtures.spec.ts",      sub: "169 个断言：输出 === 快照吗", row: 2, kind: backend }
-  - { id: doris, label: "test/doris/*.spec.ts",  sub: "真连 Doris 跑，跟快照对账", row: 2, kind: database }
-edges:
-  - { from: cases, to: json, label: "update-fixtures 生成" }
-  - { from: json, to: unit, label: 读 }
-  - { from: json, to: doris, label: 读 }
-  - { from: unit, to: doris, dashed: true }
-```
-
-**一条夹具长这样：**
+一条夹具长这样：
 
 ```json
 { "id": "count-joins-used-tables",
@@ -1011,103 +986,53 @@ edges:
   "actorStaffId": 101,
   "query": { "version": 1, "scope": {...}, "include": {...}, "exclude": null },
   "expected": {
-    "countSql": "SELECT COUNT(*) AS `count` FROM (SELECT `u`.`uid` AS `uid` FROM `user_portraits_wide` AS `u` WHERE `u`.`staff_id` = 101 AND (TIMESTAMPDIFF(YEAR, `u`.`birthday`, CURRENT_DATE()) > 18)) AS `t`",
-    "listSql": "SELECT `u`.`uid` AS `uid`, ... ORDER BY `u`.`uid` LIMIT 10 OFFSET 0",
+    "countSql": "SELECT COUNT(*) AS `count` FROM (SELECT `u`.`uid` AS `uid` FROM `user_portraits_wide` AS `u` WHERE ...) AS `t`",
+    "listSql": "...",
     "uidsSql": "...",
     "usedTables": ["user_portraits_wide"],
     "listColumns": [{ "key": "age", "label": "年龄", ... }]
   }}
 ```
 
-```compare
-first: 设计
-head: [为什么这样, 换来什么]
-rows:
-  - "`from` 字段回指源头":
-      - "夹具不是凭空长出来的，每个都能追溯到一条真实断言"
-      - "排查时知道该去看哪个 spec"
-  - SQL 是逐字符快照:
-      - "精确到括号和空格"
-      - "==改一行编译器，169 个夹具立刻告诉你「哪些 SQL 变了」=="
-  - 同一批夹具喂给真 Doris:
-      - "编译器输出 → 直接执行"
-      - "验证的不只是「SQL 长得对」，还有「SQL 跑得对」"
-  - 用例写在 TS 里而不是 JSON 里:
-      - "TS 能调 `and()` / `portrait()` 这些构造器，写起来短"
-      - "JSON 只是**产物**，可以随时重新生成"
+两点设计：
+
+- **`from` 字段回指源头测试**。夹具不是凭空长出来的，每个都能追溯到一条真实断言，排查时知道该去看哪个 spec。
+- **SQL 是逐字符快照**。改一行编译器，168 条夹具立刻告诉你哪些 SQL 变了。
+
+用 Knex 之后这层更值钱 —— 链式 API 调用的顺序会影响生成的 SQL，光看代码不容易发现。
+
+### 真库验证之前有一道闸门
+
+`test/doris/gate.ts` 在跑任何测试之前，先核对数据是不是那一份：
+
 ```
-
-### 第三层：真库验证 + 一个「数据体检」闸门
-
-`test/doris/` 是单独一套配置（跑得慢，120 秒超时，文件串行）。
-
-**但在跑任何测试之前，先过一道闸门** —— `assertSeed()`：
-
-```text
-✓ 三张该有的表都在（user_portraits_wide / rel_holding / rel_product）
-✓ 五张早该删掉的表确实没有了
 ✓ user_portraits_wide 一共 1000000 行
 ✓ uid 范围是 10001 ~ 1010000
 ✓ 去重后有 10 个 staff_id
 ✓ 101 / 201 / 301 三个人的客户数分别对得上
 ✓ 年龄 ≥ 18 的人数是 136655
-✗ 持有 SEMI 的人数是 10256
 ```
 
-````callout
-tone: violet
-icon: 💡
-text: |
-  ==**它不只检查「数据对不对」，还检查「数据是不是够脏」。**==
+它还检查数据**够不够脏**：
 
-  这一段是我见过最反直觉、也最有道理的测试设计：
-
-  ```ts
-  const missingGender = ... WHERE gender IS NULL
-  if (missingGender <= 0 || missingGender >= expected.universe_total)
-    throw new Error('messy seed must leave some portrait columns empty')
-  ```
-````
-
-**为什么故意要脏数据？** 因为第 5.1 节那个 `COALESCE` 的不对称，**只有在「有些行画像列是 NULL」时才会暴露**。
-
-干净数据会让所有边界测试**假绿**。
-
-同样套路的还有三条：
-
-```compare
-first: 断言
-head: [要求什么, 为什么必须有]
-rows:
-  - 有些行 `gender IS NULL`:
-      - "NULL 不能是 0 行，也不能是全部"
-      - "否则测不出 NULL 三值逻辑"
-  - 画像标记 ≠ 关系表:
-      - "`hold_semiconductor = 1` 但关系表里没有 SEMI 的人必须 > 0"
-      - "否则测不出「两处数据不一致时以谁为准」"
-  - 组长名下有跨组脏数据:
-      - "staff 101 名下有 `group_id <> 1` 的客户"
-      - "否则测不出权限交集那个 `filter`"
-  - 标的代码和市场要对得上:
-      - "`.HK` 结尾的必须是港股，`.US` 的必须是美股"
-      - "==前三条要脏，这一条要干净 —— 数据得脏得讲道理=="
+```ts
+const missingGender = ... WHERE gender IS NULL
+if (missingGender <= 0 || missingGender >= expected.universe_total)
+  throw new Error('messy seed must leave some portrait columns empty')
 ```
 
-```callout
-tone: green
-icon: ✅
-text: |
-  ==这四条断言锁住的是「测试数据的病态程度」。==
+「性别」全空或全不空，测试数据都测不出 NULL 三值逻辑那类问题（见第 04 节 include / exclude 那一段）。同一套思路还有三条：
 
-  如果谁重灌了一批太干净的数据，所有边界测试都会通过 ——
-  但那是**因为边界不存在了**，不是因为代码没问题。
+| 断言 | 要求 |
+|---|---|
+| 有些行 `gender IS NULL` | 不能是 0 行，也不能是全部 |
+| 画像标记 ≠ 关系表 | `hold_semiconductor = 1` 但关系表里没有 SEMI 的人必须 > 0 |
+| 组长名下有跨组脏数据 | staff 101 名下有 `group_id <> 1` 的客户 |
+| 标的代码和市场要对得上 | `.HK` 结尾的必须是港股 —— **这条要干净，前三条要脏** |
 
-  这些断言会拦住他。
-```
+这四条锁住的是「测试数据的病态程度」。谁重灌一批太干净的数据，边界测试会通过 —— 但那是**因为边界不存在了**，不是因为代码没问题。
 
----
-
-## 08 · 它现在缺什么
+## 07 · 它现在缺什么
 
 诚实说几处。不是 bug，是「现在这样也能跑，但迟早要处理」。
 
@@ -1197,7 +1122,7 @@ text: |
 
 ---
 
-## 09 · 自测
+## 08 · 自测
 
 ```quiz
 - q: 为什么校验要分两段，一段遍历不是更快吗？
