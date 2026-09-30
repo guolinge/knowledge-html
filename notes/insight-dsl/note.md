@@ -13,7 +13,7 @@ text: |
   **这篇回答三个问题**：
 
   - 这个包由什么组成、怎么工作？
-  - 它为什么这么设计（三处反直觉的地方）？
+  - 三段管道各自在检查什么？
   - 它现在缺什么？
 
   ==读完你应该能自己说出「用户勾的条件是怎么变成 SQL 的」，而不是记住一张架构图。==
@@ -555,7 +555,7 @@ config:
 | 枚举 | `eq` `neq` `in` `notIn` `isNull` `isNotNull` |
 | 布尔 | `eq` `isNull` `isNotNull` |
 
-这三个数组在 `catalog.ts` 里叫 `RANGE` / `SET` / `BOOL`。元数据从 MySQL 读的时候，是按 `semantic_type` 从 `crm_dc_operator` 查出来的。
+这三个数组在测试夹具（`test/catalog.ts`）里叫 `RANGE` / `SET` / `BOOL`。生产路径上，它是服务端按 `semantic_type` 从 `crm_dc_operator` 查出来、组装进 `Catalog` 的。
 
 **③ 值类型对吗** —— `isValidValue(value, valueType, options)` 的五个分支：
 
@@ -645,6 +645,16 @@ WHERE `rel_holding`.`object_id` IN ('00700.HK')
 -- props：落在各自的物理列，按 logic 组合
 WHERE (`rel_holding`.`qty` >= ? AND `rel_holding`.`market` = ?)
 ```
+
+**相对时间操作符有自己的编译器。** `last_n_days` / `before_n_days` / `last_n_hours` /
+`before_n_hours` 四个不走进普通比较，而是把「数字 + 单位 + 方向」算成一个时间窗：
+
+```ts
+case Ops.lastNDays:    applyTimeWindow(query, gate, physical, 'DAY',  'last',   value); return;
+case Ops.beforeNHours: applyTimeWindow(query, gate, physical, 'HOUR', 'before', value); return;
+```
+
+它和「派生字段 + `lte`」能表达同一件事（见第 07 节）。
 
 #### 派生字段走的不是普通比较
 
@@ -1059,41 +1069,35 @@ items:
 
       这在目标架构里是个真缺口：等 Data Admin 上线，
       运营在配置台改完，用户看到的还是旧的。
-  - title: 字段字典在代码里有一份副本
+  - title: 物理列类型在代码里有另一份
     tone: amber
     body: |
-      `catalog.ts` 474 行，是 46 个字段 + 2 个关系的硬编码版本。
+      `crm_dc_data_field` 里没存列的物理类型，所以服务端要维护一份映射兜底：
 
-      注释说它是「seed and compiler-test fixture」，
-      但它和 `fieldByName` / `relationByName` 混在同一个文件里。
+      - 目录：`apps/server/src/metadata/project.ts`
+      - 长什么样：`'user_portraits_wide.birthday': 'DATE'`
 
-      ==读源码的人容易误以为字典是写死的。==
+      ==文件的注释写的是「只用于字面量和参数转换」== —— 它不影响编译出的 SQL 结构，
+      只影响值怎么写成字面量。所以风险不算高。
 
-      物理列类型也一样：元数据结构里没存，所以要在
-      `metadata/project.ts` 里再维护一份 `PHYSICAL_TYPES` 兜底。
-
-      !!两个真源 —— 迟早会不一致。!!
-  - title: 时间类操作符没有 SQL 实现
+      !!但仍然是两个地方记着同一件事，表结构改了要记得同步。!!
+  - title: 相对时间和派生字段重叠
     tone: amber
     body: |
-      `schema.ts` 里定义了四个相对时间操作符：
+      表达「最近 30 天成交过」，两条路都能走：
 
       ```
-      last_n_days / before_n_days / last_n_hours / before_n_hours
+      A: { field: 'last_trade_time', op: 'last_n_days', value: 30 }
+      B: { field: 'last_trade_days',  op: 'lte',         value: 30 }
       ```
 
-      校验器**放行**它们，但编译器里写着：
+      两条路在编译器里都实现了（`A` 走 `applyTimeWindow`，`B` 走派生字段 + 普通比较），
+      结果一样。
 
-      ```ts
-      if (isRelativeTimeOp(op)) {
-        throw new Error(`no SQL compiler for op ${op}`)
-      }
-      ```
+      ==但没有哪里说明什么时候用哪个。==
 
-      ==类型系统允许、校验通过、编译时才炸。==
-
-      现在没炸是因为字典里没有字段声明这几个操作符 ——
-      靠的不是设计，是没人用。
+      圈选组件要为两种写法做两种 UI，测试要覆盖两条路径，改口径要改两处。
+      这一条需要在 Metadata 或 DSL 层面定个默认。
   - title: "`ast.ts` 只有一行"
     tone: muted
     body: |

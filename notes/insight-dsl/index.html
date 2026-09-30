@@ -75,7 +75,7 @@
       <div><p><strong>这篇回答三个问题</strong>：</p>
 <ul>
 <li>这个包由什么组成、怎么工作？</li>
-<li>它为什么这么设计（三处反直觉的地方）？</li>
+<li>三段管道各自在检查什么？</li>
 <li>它现在缺什么？</li>
 </ul>
 <p><mark class="mk-blue">读完你应该能自己说出「用户勾的条件是怎么变成 SQL 的」，而不是记住一张架构图。</mark></p>
@@ -752,7 +752,7 @@ const excludeApply = compileTree(query.exclude, ctx);
 </tr>
 </tbody>
 </table>
-<p>这三个数组在 <code>catalog.ts</code> 里叫 <code>RANGE</code> / <code>SET</code> / <code>BOOL</code>。元数据从 MySQL 读的时候，是按 <code>semantic_type</code> 从 <code>crm_dc_operator</code> 查出来的。</p>
+<p>这三个数组在测试夹具（<code>test/catalog.ts</code>）里叫 <code>RANGE</code> / <code>SET</code> / <code>BOOL</code>。生产路径上，它是服务端按 <code>semantic_type</code> 从 <code>crm_dc_operator</code> 查出来、组装进 <code>Catalog</code> 的。</p>
 <p><strong>③ 值类型对吗</strong> —— <code>isValidValue(value, valueType, options)</code> 的五个分支：</p>
 <table>
 <thead>
@@ -871,6 +871,12 @@ WHERE `rel_holding`.`object_id` IN ('00700.HK')
 -- props：落在各自的物理列，按 logic 组合
 WHERE (`rel_holding`.`qty` &gt;= ? AND `rel_holding`.`market` = ?)
 </code></pre></div>
+<p><strong>相对时间操作符有自己的编译器。</strong> <code>last_n_days</code> / <code>before_n_days</code> / <code>last_n_hours</code> /
+<code>before_n_hours</code> 四个不走进普通比较，而是把「数字 + 单位 + 方向」算成一个时间窗：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-ts">case Ops.lastNDays:    applyTimeWindow(query, gate, physical, 'DAY',  'last',   value); return;
+case Ops.beforeNHours: applyTimeWindow(query, gate, physical, 'HOUR', 'before', value); return;
+</code></pre></div>
+<p>它和「派生字段 + <code>lte</code>」能表达同一件事（见第 07 节）。</p>
 <h4>派生字段走的不是普通比较</h4>
 <p><code>portraitExpr(field)</code> 决定这个字段的「表达式」是什么：</p>
 <div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-ts">if (field.derive?.kind === 'days_since')
@@ -1563,32 +1569,31 @@ export function getMetadataRows() {
           
         </div><div class="ccard tone-amber">
           
-          <h4>字段字典在代码里有一份副本</h4>
+          <h4>物理列类型在代码里有另一份</h4>
           
-          <div class="cbody"><p><code>catalog.ts</code> 474 行，是 46 个字段 + 2 个关系的硬编码版本。</p>
-<p>注释说它是「seed and compiler-test fixture」，
-但它和 <code>fieldByName</code> / <code>relationByName</code> 混在同一个文件里。</p>
-<p><mark class="mk-blue">读源码的人容易误以为字典是写死的。</mark></p>
-<p>物理列类型也一样：元数据结构里没存，所以要在
-<code>metadata/project.ts</code> 里再维护一份 <code>PHYSICAL_TYPES</code> 兜底。</p>
-<p><mark class="mk-amber">两个真源 —— 迟早会不一致。</mark></p>
+          <div class="cbody"><p><code>crm_dc_data_field</code> 里没存列的物理类型，所以服务端要维护一份映射兜底：</p>
+<ul>
+<li>目录：<code>apps/server/src/metadata/project.ts</code></li>
+<li>长什么样：<code>'user_portraits_wide.birthday': 'DATE'</code></li>
+</ul>
+<p><mark class="mk-blue">文件的注释写的是「只用于字面量和参数转换」</mark> —— 它不影响编译出的 SQL 结构，
+只影响值怎么写成字面量。所以风险不算高。</p>
+<p><mark class="mk-amber">但仍然是两个地方记着同一件事，表结构改了要记得同步。</mark></p>
 </div>
           
         </div><div class="ccard tone-amber">
           
-          <h4>时间类操作符没有 SQL 实现</h4>
+          <h4>相对时间和派生字段重叠</h4>
           
-          <div class="cbody"><p><code>schema.ts</code> 里定义了四个相对时间操作符：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code>last_n_days / before_n_days / last_n_hours / before_n_hours
+          <div class="cbody"><p>表达「最近 30 天成交过」，两条路都能走：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code>A: { field: 'last_trade_time', op: 'last_n_days', value: 30 }
+B: { field: 'last_trade_days',  op: 'lte',         value: 30 }
 </code></pre></div>
-<p>校验器<strong>放行</strong>它们，但编译器里写着：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-ts">if (isRelativeTimeOp(op)) {
-  throw new Error(`no SQL compiler for op ${op}`)
-}
-</code></pre></div>
-<p><mark class="mk-blue">类型系统允许、校验通过、编译时才炸。</mark></p>
-<p>现在没炸是因为字典里没有字段声明这几个操作符 ——
-靠的不是设计，是没人用。</p>
+<p>两条路在编译器里都实现了（<code>A</code> 走 <code>applyTimeWindow</code>，<code>B</code> 走派生字段 + 普通比较），
+结果一样。</p>
+<p><mark class="mk-blue">但没有哪里说明什么时候用哪个。</mark></p>
+<p>圈选组件要为两种写法做两种 UI，测试要覆盖两条路径，改口径要改两处。
+这一条需要在 Metadata 或 DSL 层面定个默认。</p>
 </div>
           
         </div><div class="ccard tone-muted">
