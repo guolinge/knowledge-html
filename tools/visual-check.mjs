@@ -123,6 +123,51 @@ function isKnown(slug, text) {
   return !!hit;
 }
 
+/* 跑一次浏览器，拿回诊断。
+   返回 { ok:true, problems } 或 { ok:false, why }。
+
+   为什么单独抽出来：**这台机器上它会假阳性。**
+   并行会话也在跑无头浏览器时，load average 会到 20~47 —— 那时布局
+   还没稳定，量出来的矩形和上一次不一样，同一份代码会给出不同的
+   失败集合。实测：同一篇笔记连跑三次，分别挂 2 处 / 1 处 / 0 处。
+
+   所以下面按「重试 + 比对」判定，不拿单次结果当结论。 */
+function probeOnce(html) {
+  fs.writeFileSync(tmp, html);
+  let dom = '';
+  try {
+    dom = execFileSync(
+      CHROME,
+      ['--headless', '--disable-gpu', '--dump-dom', '--virtual-time-budget=6000',
+       '--window-size=1280,900', `file://${tmp}`],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 60000 },
+    );
+  } catch {
+    return { ok: false, why: '浏览器没跑起来' };
+  }
+  const m = dom.match(/<pre id="vc-result">([\s\S]*?)<\/pre>/);
+  /* 探针没回数据 = 它自己抛了异常。**不能算通过** ——
+     踩过：探针里引用了一个已删除的变量，抛 ReferenceError，
+     结果所有图都「检查通过」，而实际上一个都没检查。 */
+  if (!m) return { ok: false, why: '探针没回数据（多半是探针自己抛了异常，或没跑完）' };
+  try {
+    return {
+      ok: true,
+      problems: JSON.parse(
+        m[1]
+          .replace(/&quot;/g, '"')
+          .replace(/&amp;/g, '&')
+          .replace(/&lt;/g, '<')
+          .replace(/&gt;/g, '>'),
+      ),
+    };
+  } catch {
+    return { ok: false, why: `探针返回的不是合法 JSON：${m[1].slice(0, 100)}` };
+  }
+}
+
+const ATTEMPTS = 3;
+
 for (const file of files) {
   const slug = path.basename(file, '.html');
   const html = fs
@@ -132,66 +177,61 @@ for (const file of files) {
       `<script>window.__VC_CONTAINERS = ${JSON.stringify(CONTAINERS)};</script>\n` +
         `<script>${PROBE}</script></body>`,
     );
-  fs.writeFileSync(tmp, html);
 
-  let dom = '';
-  try {
-    dom = execFileSync(
-      CHROME,
-      ['--headless', '--disable-gpu', '--dump-dom', '--virtual-time-budget=2500',
-       '--window-size=1280,900', `file://${tmp}`],
-      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 30000 },
-    );
-  } catch {
-    console.error(`  ? ${slug}  浏览器没跑起来`);
+  /* 重试到「干净」为止。三次都没干净就比对：
+       · 诊断完全一样 → 是真的，阻塞
+       · 诊断不一样   → 是环境不稳（探测量到的是不同状态），不阻塞但报出来
+     不能只看一次 —— 单次结果在这台机器上没有判别力。 */
+  const runs = [];
+  let clean = false;
+  for (let i = 0; i < ATTEMPTS; i++) {
+    const r = probeOnce(html);
+    runs.push(r);
+    /* 只有「真的干净」才提前收工。
+       ==写 `!r.ok || …` 会直接 break —— 那等于一次失败就不重试了。== */
+    if (r.ok && r.problems.length === 0) { clean = true; break; }
+  }
+
+  if (clean) {
+    /* 中途挂过 = 这篇笔记的检查不稳定。不阻塞，但要让人知道 ——
+       否则「某次跑过了」会掩盖一个真的偶发问题。 */
+    const flaky = runs.some((r) => !r.ok || r.problems.length);
+    if (flaky) console.error(`  ⚠ ${slug}  第 ${runs.length} 次才通过 —— 检查不稳定，见上（不阻塞）`);
+    else console.log(`  ✓ ${slug}`);
     continue;
   }
 
-  const m = dom.match(/<pre id="vc-result">([\s\S]*?)<\/pre>/);
-  /* 探针没回数据 = 它自己抛了异常。**不能算通过** ——
-     踩过：探针里引用了一个已删除的变量，抛 ReferenceError，
-     结果所有图都「检查通过」，而实际上一个都没检查。 */
-  if (!m) {
-    console.error(`  ✗ ${slug}  探针没回数据（多半是探针自己抛了异常）`);
+  const last = runs[runs.length - 1];
+  if (!last.ok) {
+    console.error(`  ✗ ${slug}  ${last.why}（连试 ${ATTEMPTS} 次）`);
     total++;
     continue;
   }
 
-  /* 探针把诊断塞在 <pre> 的 textContent 里，读回来得先反转义。
-     这一步必须包住：解析失败时要报出「哪一篇、内容长什么样」，
-     不能让 pre-push 钩子丢一个没有上下文的 SyntaxError 出来。 */
-  let problems;
-  try {
-    problems = JSON.parse(
-      m[1]
-        .replace(/&quot;/g, '"')
-        .replace(/&amp;/g, '&')
-        .replace(/&lt;/g, '<')
-        .replace(/&gt;/g, '>'),
+  const same = runs.every((r) => r.ok && JSON.stringify(r.problems) === JSON.stringify(last.problems));
+  if (!same) {
+    console.error(
+      `  ⚠ ${slug}  ${ATTEMPTS} 次的诊断不一致（${runs.map((r) => (r.ok ? r.problems.length : '?')).join('/')} 处）` +
+        `\n      → 多半是机器负载高、探针量到的是不同时刻的布局。**不阻塞**。` +
+        `\n      → 负载降下来重跑；还挂同样的位置才是真问题。`,
     );
-  } catch {
-    console.error(`  ✗ ${slug}  探针返回的内容不是合法 JSON：${m[1].slice(0, 120)}`);
-    total++;
     continue;
   }
 
-  if (problems.length) {
-    const fresh = problems.filter((p) => !isKnown(slug, p));
-    const old = problems.length - fresh.length;
-    known += old;
+  const problems = last.problems;
+  const fresh = problems.filter((p) => !isKnown(slug, p));
+  const old = problems.length - fresh.length;
+  known += old;
 
-    if (fresh.length) {
-      console.error(`  ✗ ${slug}  ${fresh.length} 处`);
-      fresh.slice(0, 12).forEach((p) => console.error(`      ${p}`));
-      if (fresh.length > 12) console.error(`      …还有 ${fresh.length - 12} 处`);
-      total += fresh.length;
-    }
-    if (old) {
-      // 已知问题照旧写出来 —— 只是不阻塞。看不到就等于没有。
-      console.error(`  ⚠ ${slug}  ${old} 处已知问题（在 tools/visual-baseline.json 里）`);
-    }
-  } else {
-    console.log(`  ✓ ${slug}`);
+  if (fresh.length) {
+    console.error(`  ✗ ${slug}  ${fresh.length} 处`);
+    fresh.slice(0, 12).forEach((p) => console.error(`      ${p}`));
+    if (fresh.length > 12) console.error(`      …还有 ${fresh.length - 12} 处`);
+    total += fresh.length;
+  }
+  if (old) {
+    // 已知问题照旧写出来 —— 只是不阻塞。看不到就等于没有。
+    console.error(`  ⚠ ${slug}  ${old} 处已知问题（在 tools/visual-baseline.json 里）`);
   }
 }
 
