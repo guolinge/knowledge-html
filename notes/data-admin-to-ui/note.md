@@ -429,6 +429,60 @@ text: |
 
 这一节就把中间那段接上 —— ==**拉取 → 转换 → 一份前端直接能用的 JSON**==。
 
+```seq
+title: catalog 的一生 —— 什么时候拉的、谁在消费
+participants:
+  - { id: be, label: 后端进程, sub: "8787" }
+  - { id: my, label: "MySQL crm_dc", sub: "配置 · 89 行" }
+  - { id: fe, label: 浏览器, sub: 圈选页 }
+messages:
+  - { from: be, to: be, label: "createApp() 先 getCatalog() 验证一遍", kind: self, note: ① 随进程启动 }
+  - { from: be, to: my, label: "5 条 SELECT（唯一的读库）", kind: sync, note: ② 只读这一次 }
+  - { from: my, to: be, label: "89 行（3+30+47+2+7）", kind: reply }
+  - { from: be, to: be, label: "存进 cached 变量", kind: self, note: ③ 之后不再碰 MySQL }
+  - { from: fe, to: be, label: "GET /api/meta/catalog", kind: sync, note: ④ 页面加载时拉一次 }
+  - { from: be, to: be, label: "rowsToCatalog(缓存的行)", kind: self, note: ⑤ 每次都重跑 }
+  - { from: be, to: fe, label: "Catalog JSON", kind: reply }
+  - { from: fe, to: fe, label: "v-for 渲染下拉", kind: self, note: ⑥ 之后不再拉 }
+gap: 0
+segments:
+  - { from: 1, to: 4, label: 进程启动时 · 一生只有一次 }
+  - { from: 5, to: 8, label: 之后每次打开页面 }
+```
+
+````callout
+tone: red
+icon: ⚠
+text: |
+  ==**看图上有两处反直觉，都是我从源码里读出来的：**==
+
+  **① MySQL 只读一次。** `getMetadataRows()` 缓存了行：
+
+  ```ts
+  let cached: MetadataRows | null = null;
+  export async function getMetadataRows() {
+    if (!cached) cached = await loadMetadataRows();   // ← 只有第一次真读库
+    return cached;
+  }
+  ```
+
+  **② 但 `rowsToCatalog()` 每次都跑。** `getCatalog()` 每次调用都重新拼一遍：
+
+  ```ts
+  export async function getCatalog() {
+    return rowsToCatalog(await getMetadataRows(), UNIVERSE_TABLE);   // ← 每次都拼
+  }
+  ```
+
+  ==**895 行的转换，每个 `/api/meta/catalog` 请求都重跑一次**== —— 缓存的是
+  「读出来的行」，不是「拼好的 catalog」。
+
+  之所以这么写，大概率是因为 `rowsToCatalog` 是**纯函数**、而且快（几十毫秒），
+  而 `locale` 是每次请求都可能不同的参数 —— 缓存拼好的结果反而要按 locale 分桶。
+
+  代价是：**它每次都在跑那 8 处 `throw`**。改坏了元数据，下一个请求就会炸。
+````
+
 ```lane-stack
 - badge: "01 · MySQL"
   title: 5 张表
@@ -503,32 +557,17 @@ text: |
 
 `rowsToCatalog()` 的核心就是一个 `.map()`。**点下面任一条规则**，看它读了哪些列、写出了哪些字段：
 
+```arch
+svg: rows-to-catalog
+caption: 6 条规则各读各的列、各写各的字段。注意它们是**并列的**，不是接力 —— 每条只碰自己那一列。
+```
+
 ```demo
 widget: row-to-catalog
 title: 数据库的一行 → 一个下拉项
-hint: 点中间任一条规则
+hint: 点上面换字段，点中间任一条规则看它读了什么
 actions: false
 config:
-  srcLabel: MySQL · crm_dc_data_field 的 age 那一行
-  outLabel: Catalog · fields[0]
-  src:
-    - [field_key, age]
-    - [column_name, birthday]
-    - [display_name_i18n, '{"zh-CN":"年龄", "en":"Age"}']
-    - [data_source_id, '1']
-    - [semantic_type, '4  (NUMBER)']
-    - [physical_type, DATE]
-    - [value_source_type, '0  (NONE)']
-    - [value_mapping, 'NULL']
-  out:
-    - [name, '"age"']
-    - [label, '"年龄"']
-    - [table, '"user_portraits_wide"']
-    - [column, '"birthday"']
-    - [valueType, '"int"']
-    - [derive, '{ kind: "age_years" }']
-    - [ops, '[eq, neq, lt, lte, gt, gte, between, …]']
-    - [options, '(没有 — value_source_type = 0)']
   rules:
     - title: ① 直接搬
       from: [field_key, column_name]
@@ -548,19 +587,137 @@ config:
     - title: ④ 类型推导
       from: [semantic_type, physical_type, field_key]
       out: [valueType, derive]
-      note: "**这条最绕**：`semantic_type=4(NUMBER)` + `physical_type=DATE` → 「这是个从日期算出来的数」。再按字段名猜单位（`age` → 年，其余 → 天）。"
+      note: "**这条最绕**：`semantic_type` 决定大类（枚举 / 布尔 / 数字 / 字符串），数字再看 `physical_type` 是不是日期、是不是小数。是日期的话还要按字段名猜单位。"
       code: "if (semanticType === NUMBER) {\n  if (physical === 'DATE' || physical.startsWith('DATETIME'))\n    return { valueType: 'int',\n             derive: { kind: fieldKey === 'age' ? 'age_years' : 'days_since' } };\n  if (physical.startsWith('DECIMAL')) return { valueType: 'decimal' };\n}"
     - title: ⑤ 挑操作符
       from: [semantic_type]
       out: [ops]
-      note: "拿 `semantic_type` 去 `crm_dc_operator` 里筛，再按 `sort_order` 排。**界面上那个操作符下拉的选项就是它。**"
+      note: "拿 `semantic_type` 去 `crm_dc_operator` 里筛，再按 `sort_order` 排。**界面上那个操作符下拉的选项就是它。** 数字字段 9 个，布尔字段只有 3 个 —— 差别就在这一行。"
       code: "operators.filter((op) => op.semanticType === field.semanticType)\n  .sort((a, b) => a.sortOrder - b.sortOrder || a.id - b.id)\n  .map((op) => asOp(op.operatorKey))"
     - title: ⑥ 解析值集
-      from: [value_source_type, value_mapping]
+      from: [value_source_type, value_mapping, value_set_id]
       out: [options]
-      note: "`0` 不用值 → 没有选项；`1` 用字段自己内嵌的；`2` 去 `crm_dc_value_set` 里按 `value_set_id` 取。取到的还要按 locale 翻译、按 `sortOrder` 排、过滤掉停用的。"
+      note: "三种来源：`0` 不用值 → 没有选项；`1` 用字段自己内嵌的；`2` **去 `crm_dc_value_set` 里按 `value_set_id` 取**。取到的还要按 locale 翻译、按 `sortOrder` 排、过滤掉停用的。"
       code: "mappingOf(field)\n// value_source_type === 2 时去 valueSets.get(field.valueSetId)\noptionsOf(mapping, locale)\n// 过滤 status / 排序 / 翻译 label"
+  tabs:
+    - key: age
+      srcLabel: MySQL · crm_dc_data_field 的 age 那一行
+      outLabel: Catalog · fields[0]
+      src:
+        - [field_key, age]
+        - [column_name, birthday]
+        - [display_name_i18n, '{"zh-CN":"年龄", "en":"Age"}']
+        - [data_source_id, '1']
+        - [semantic_type, '4  (NUMBER)']
+        - [physical_type, DATE]
+        - [value_source_type, '0  (NONE)']
+        - [value_mapping, 'NULL']
+      out:
+        - [name, '"age"']
+        - [label, '"年龄"']
+        - [table, '"user_portraits_wide"']
+        - [column, '"birthday"']
+        - [valueType, '"int"']
+        - [derive, '{ kind: "age_years" }']
+        - [ops, '[eq, neq, lt, lte, gt, gte, between, …]']
+    - key: region
+      srcLabel: MySQL · region 那一行 —— 值集内嵌在自己身上
+      outLabel: Catalog · fields[region]
+      src:
+        - [field_key, region]
+        - [column_name, region]
+        - [display_name_i18n, '{"zh-CN":"地区", "en":"Region"}']
+        - [data_source_id, '1']
+        - [semantic_type, '1  (ENUM)']
+        - [physical_type, VARCHAR(8)]
+        - [value_source_type, '1  (INLINE)']
+        - [value_mapping, '{"US": {…}, "HK": {…}, …}']
+      out:
+        - [name, '"region"']
+        - [label, '"地区"']
+        - [table, '"user_portraits_wide"']
+        - [column, '"region"']
+        - [valueType, '"enum"']
+        - [ops, '[eq, neq, in, not_in, is_null, is_not_null]']
+        - [options, '[{value:"US",label:"美国"}, …]']
+    - key: city
+      srcLabel: MySQL · city 那一行 —— 值集在另一张表里
+      outLabel: Catalog · fields[city]
+      src:
+        - [field_key, city]
+        - [column_name, city]
+        - [display_name_i18n, '{"zh-CN":"常驻城市", "en":"City"}']
+        - [data_source_id, '1']
+        - [semantic_type, '1  (ENUM)']
+        - [physical_type, VARCHAR(32)]
+        - [value_source_type, '2  (VALUE_SET)']
+        - [value_set_id, '32  →  crm_dc_value_set']
+      out:
+        - [name, '"city"']
+        - [label, '"常驻城市"']
+        - [table, '"user_portraits_wide"']
+        - [column, '"city"']
+        - [valueType, '"enum"']
+        - [ops, '[eq, neq, in, not_in, is_null, is_not_null]']
+        - [options, '10 个城市 · 从值集 #32 取的']
+    - key: hold_semiconductor
+      srcLabel: MySQL · hold_semiconductor 那一行 —— 布尔
+      outLabel: Catalog · fields[hold_semiconductor]
+      src:
+        - [field_key, hold_semiconductor]
+        - [column_name, hold_semiconductor]
+        - [display_name_i18n, '{"zh-CN":"持仓半导体(画像标记)"}']
+        - [data_source_id, '1']
+        - [semantic_type, '3  (BOOLEAN)']
+        - [physical_type, TINYINT]
+        - [value_source_type, '0  (NONE)']
+        - [value_mapping, 'NULL']
+      out:
+        - [name, '"hold_semiconductor"']
+        - [label, '"持仓半导体(画像标记)"']
+        - [table, '"user_portraits_wide"']
+        - [column, '"hold_semiconductor"']
+        - [valueType, '"bool"']
+        - [ops, '[eq, is_null, is_not_null]  ← 只有 3 个']
+    - key: last_trade_days
+      srcLabel: MySQL · last_trade_days 那一行 —— 和 age 同一条代码分支
+      outLabel: Catalog · fields[last_trade_days]
+      src:
+        - [field_key, last_trade_days]
+        - [column_name, last_trade_time]
+        - [display_name_i18n, '{"zh-CN":"距上次成交天数"}']
+        - [data_source_id, '1']
+        - [semantic_type, '4  (NUMBER)']
+        - [physical_type, DATE]
+        - [value_source_type, '0  (NONE)']
+        - [value_mapping, 'NULL']
+      out:
+        - [name, '"last_trade_days"']
+        - [label, '"距上次成交天数"']
+        - [table, '"user_portraits_wide"']
+        - [column, '"last_trade_time"']
+        - [valueType, '"int"']
+        - [derive, '{ kind: "days_since" }  ← 不是 age_years']
+        - [ops, '[eq, neq, lt, lte, gt, gte, between, …]']
 ```
+
+```callout
+tone: green
+icon: ✅
+text: |
+  **上面那 5 个标签，每一个都在演示 6 条规则里的一条。**
+
+  | 标签 | 它特别在哪 |
+  |---|---|
+  | `age` | ④ 最绕的一支：NUMBER + DATE → 现算，且**按年** |
+  | `region` | ⑥ 的第一种来源：值集**内嵌在自己身上**（`=1 INLINE`） |
+  | `city` | ⑥ 的第二种来源：值集**在 `crm_dc_value_set` 里**（`=2`），要跨表取 |
+  | `hold_semiconductor` | ⑤ 最明显的反差：布尔字段只有 **3 个**操作符，数字有 9 个 |
+  | `last_trade_days` | ④ 的另一支：**和 `age` 走同一段代码**，只因为字段名不叫 `age`，就变成按天算 |
+
+  ==**5 个标签看完，`rowsToCatalog()` 的每一行代码都被走过一遍了。**==
+```
+
 
 ````callout
 tone: violet

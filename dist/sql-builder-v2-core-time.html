@@ -3031,6 +3031,27 @@ a.need:hover { color: var(--blue); }
   .r2c-mid { padding: 0; }
 }
 
+/* row-to-catalog：字段切换标签 */
+.r2c-tabs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; }
+.r2c-tab {
+  font: 600 11px var(--mono);
+  padding: 4px 11px; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--surface); color: var(--text-2); cursor: pointer;
+  transition: border-color .15s, background .15s, color .15s;
+}
+.r2c-tab:hover { border-color: var(--border-strong); }
+.r2c-tab.on {
+  border-color: var(--blue);
+  background: color-mix(in srgb, var(--blue) 13%, transparent);
+  color: var(--blue);
+}
+.r2c-skip {
+  margin-left: 10px; padding: 1px 7px; border-radius: 5px;
+  font: 600 10.5px var(--sans);
+  background: color-mix(in srgb, var(--muted) 14%, transparent);
+  color: var(--muted);
+}
+
 </style>
   <style>
 /* ==========================================================
@@ -7110,20 +7131,21 @@ Doris 的 <code>event_time</code> 是 <code>DATETIME</code>，不能套这层包
 
   /* ============================================================
      控件：row-to-catalog —— 数据库的一行怎么变成一个下拉项
-     左：MySQL 里的原始行      中：5 条转换规则      右：Catalog 里的条目
-     点中间任一条规则 → 高亮它读了什么、写出了什么。
+     左：MySQL 里的原始行   中：转换规则（可点）   右：Catalog 里的条目
+     点中间任一条规则 → 高亮它读了哪些列、写出了哪些字段。
      config:
-       srcLabel, outLabel
-       src:  [[key, value]]
-       out:  [[key, value]]
-       rules: [{ id, title, to, from: [srcKey], out: [outKey], note, code }]
+       rules: [{ title, from:[srcKey], out:[outKey], note, code }]
+       tabs:  [{ key, srcLabel, outLabel, src:[[k,v]], out:[[k,v]] }]
+         —— 规则共享，标签只换「左边那一行」和「右边那个条目」
      ============================================================ */
   WIDGETS['row-to-catalog'] = (root) => {
     const cfg = cfgOf(root);
     const box = mountOf(root);
     const statusEl = root.querySelector('[data-status]');
     const rules = cfg.rules || [];
-    if (!rules.length) return;
+    const tabs = cfg.tabs || [];
+    if (!rules.length || !tabs.length) return;
+    let cur = 0;
 
     const el = (tag, cls, text) => {
       const n = document.createElement(tag);
@@ -7132,70 +7154,86 @@ Doris 的 <code>event_time</code> 是 <code>DATETIME</code>，不能套这层包
       return n;
     };
 
+    // 标签栏
+    const bar = el('div', 'r2c-tabs');
+    tabs.forEach((t, i) => {
+      const b = el('button', 'r2c-tab' + (i === 0 ? ' on' : ''), t.key);
+      b.addEventListener('click', () => { cur = i; bar.querySelectorAll('.r2c-tab').forEach((n, j) => n.classList.toggle('on', j === i)); draw(); });
+      bar.appendChild(b);
+    });
+    box.appendChild(bar);
+
+    // 三栏骨架
     const wrap = el('div', 'r2c');
-    // 左
-    const L = el('div', 'r2c-col');
-    L.appendChild(el('div', 'r2c-colhead', cfg.srcLabel || 'MySQL 原始行'));
-    const srcBox = el('div', 'r2c-box');
-    const srcRows = {};
-    (cfg.src || []).forEach(([k, v]) => {
-      const r = el('div', 'r2c-row');
-      r.appendChild(el('code', 'r2c-k', k));
-      r.appendChild(el('code', 'r2c-v', v));
-      srcBox.appendChild(r);
-      srcRows[k] = r;
-    });
-    L.appendChild(srcBox);
-    // 中
-    const M = el('div', 'r2c-mid');
-    M.appendChild(el('div', 'r2c-colhead', '转换'));
-    // 右
-    const R = el('div', 'r2c-col');
-    R.appendChild(el('div', 'r2c-colhead', cfg.outLabel || 'Catalog 条目'));
-    const outBox = el('div', 'r2c-box');
-    const outRows = {};
-    (cfg.out || []).forEach(([k, v]) => {
-      const r = el('div', 'r2c-row');
-      r.appendChild(el('code', 'r2c-k', k));
-      r.appendChild(el('code', 'r2c-v', v));
-      outBox.appendChild(r);
-      outRows[k] = r;
-    });
-    R.appendChild(outBox);
+    const L = el('div', 'r2c-col'); const Lhead = el('div', 'r2c-colhead'); L.appendChild(Lhead);
+    const srcBox = el('div', 'r2c-box'); L.appendChild(srcBox);
+    const M = el('div', 'r2c-mid'); M.appendChild(el('div', 'r2c-colhead', '转换'));
+    const R = el('div', 'r2c-col'); const Rhead = el('div', 'r2c-colhead'); R.appendChild(Rhead);
+    const outBox = el('div', 'r2c-box'); R.appendChild(outBox);
     wrap.appendChild(L); wrap.appendChild(M); wrap.appendChild(R);
     box.appendChild(wrap);
 
-    // 说明区
     const note = el('div', 'r2c-note');
-    note.innerHTML = '<span class="r2c-hint">点上面任一条规则，看它读了什么、写出了什么</span>';
     box.appendChild(note);
 
-    function clear() {
-      wrap.querySelectorAll('.is-hot, .is-warm').forEach((n) => n.classList.remove('is-hot', 'is-warm'));
+    let srcRows = {}, outRows = {};
+    let pickIdx = rules.length - 1;
+
+    function fillRows(boxEl, list, store) {
+      boxEl.textContent = '';
+      const m = {};
+      list.forEach(([k, v]) => {
+        const r = el('div', 'r2c-row');
+        r.appendChild(el('code', 'r2c-k', k));
+        r.appendChild(el('code', 'r2c-v', v));
+        boxEl.appendChild(r);
+        m[k] = r;
+      });
+      return m;
     }
-    function pick(i) {
-      clear();
+    function clearHot() {
+      wrap.querySelectorAll('.is-hot').forEach((n) => n.classList.remove('is-hot'));
+    }
+    function pick(i, scroll) {
+      pickIdx = i;
+      clearHot();
       const r = rules[i];
       (r.from || []).forEach((k) => srcRows[k] && srcRows[k].classList.add('is-hot'));
       (r.out || []).forEach((k) => outRows[k] && outRows[k].classList.add('is-hot'));
       M.querySelectorAll('.r2c-rule').forEach((n, j) => n.classList.toggle('is-hot', j === i));
+      const hitFrom = (r.from || []).filter((k) => srcRows[k]).length;
+      const hitOut = (r.out || []).filter((k) => outRows[k]).length;
       note.innerHTML =
         '<b class="r2c-rt">' + r.title + '</b> ' +
         '<span class="r2c-from">' + (r.from || []).join(' + ') + '</span>' +
         '<span class="r2c-arrow">→</span>' +
         '<span class="r2c-to">' + (r.out || []).join(' + ') + '</span>' +
+        (hitOut === 0
+          ? '<span class="r2c-skip">这条规则对这个字段不产出东西</span>'
+          : (hitFrom === 0 ? '<span class="r2c-skip">这个字段用不到它</span>' : '')) +
         '<div class="r2c-note1">' + (r.note || '') + '</div>' +
         (r.code ? '<pre class="r2c-code">' + r.code + '</pre>' : '');
-      if (statusEl) statusEl.textContent = r.title;
+      if (statusEl) statusEl.textContent = tabs[cur].key + ' · ' + r.title;
     }
-    rules.forEach((r, i) => {
-      const n = el('div', 'r2c-rule');
-      n.appendChild(el('span', 'r2c-n', String(i + 1)));
-      n.appendChild(el('span', 'r2c-t', r.title));
-      n.addEventListener('click', () => pick(i));
-      M.appendChild(n);
-    });
-    pick(rules.length - 1);
+    function draw() {
+      const t = tabs[cur];
+      Lhead.textContent = t.srcLabel || 'MySQL 原始行';
+      Rhead.textContent = t.outLabel || 'Catalog 条目';
+      srcRows = fillRows(srcBox, t.src || [], srcRows);
+      outRows = fillRows(outBox, t.out || [], outRows);
+      pick(pickIdx, false);
+    }
+
+    if (!M.querySelector('.r2c-rule')) {
+      rules.forEach((r, i) => {
+        const n = el('div', 'r2c-rule');
+        n.appendChild(el('span', 'r2c-n', String(i + 1)));
+        n.appendChild(el('span', 'r2c-t', r.title));
+        n.addEventListener('click', () => pick(i, true));
+        M.appendChild(n);
+      });
+    }
+    draw();
   };
 
   /* ---------- 挂载 ---------- */
