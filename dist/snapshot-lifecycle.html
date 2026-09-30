@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>sql_builder_v2 的条件树重写</title>
-<meta name="description" content="在翻译成 SQL 之前，条件树会先被重写一遍。它做两件相反的事——把同一张表上的条件合并、把人群包拆成组合结构，目标只有一个：减少没必要的 UNION ALL。" />
+<title>快照：一次「冻名单」的完整生命周期</title>
+<meta name="description" content="圈选页点一下「创建快照」，它 0.05 秒就回你一个 202，6 秒后变成「成功」。预览 0.2 秒就能出结果，为什么快照要绕这么大一圈 —— 七个状态、三个后台 worker、一段 CREATE JOB，还有一条把所有权重都压在它身上的约束：audience_snapshot 的分区只活 5 分钟。这篇用一次真实跑出来的快照，把这条链路从头走到尾。" />
 <style>
 /* ============================================================
    theme.css — 设计 token 与页面骨架
@@ -3300,89 +3300,452 @@ svg[data-preset="blueprint"] .c-security-group,
   <aside class="toc" id="toc">
       <p class="toc-title">目录</p>
       <a href="../../index.html" class="sub">← 全部笔记</a>
-      <a href="#概念在翻译之前还有一步">概念：在翻译之前，还有一步</a>
-      <a href="#架构它做七件事">架构：它做七件事</a>
-      <a href="#核心该合的合该拆的拆">核心：该合的合，该拆的拆</a>
-      <a href="#画像合并因为查的是同一张表" class="sub">画像：合并（因为查的是同一张表）</a>
-      <a href="#人群包拆开因为每个-item-是一次独立查询" class="sub">人群包：拆开（因为每个 item 是一次独立查询）</a>
-      <a href="#细节三种情况它不优化">细节：三种情况它不优化</a>
-      <a href="#①-有自定义计数就整个跳过" class="sub">① 有「自定义计数」就整个跳过</a>
-      <a href="#②-有些-uid-条件不能转成画像" class="sub">② 有些 uid 条件不能转成画像</a>
-      <a href="#③-空树有兜底" class="sub">③ 空树有兜底</a>
-      <a href="#细节压缩-消掉只有一个孩子的节点">细节：压缩 —— 消掉只有一个孩子的节点</a>
-      <a href="#自测">自测</a>
+      <a href="#预览是查一下快照是冻下来">预览是「查一下」，快照是「冻下来」</a>
+      <a href="#一次真实快照的全程">一次真实快照的全程</a>
+      <a href="#七个状态三个-worker">七个状态，三个 worker</a>
+      <a href="#5-分钟的分区决定了所有超时数字">★ 5 分钟的分区，决定了所有超时数字</a>
+      <a href="#于是所有超时数字都是从这里推出来的" class="sub">于是所有超时数字都是从这里推出来的</a>
+      <a href="#结果未知不猜去查事实">★「结果未知」不猜，去查事实</a>
+      <a href="#并发安全casjob-job-名字当幂等键">并发安全：casJob + job 名字当幂等键</a>
+      <a href="#三句话" class="sub">三句话</a>
   </aside>
 
   <main>
     <div class="hero">
-      <span class="eyebrow">● 从零理解 · 模块</span>
-      <h1>sql_builder_v2 的条件树重写</h1>
-      <p class="lede">在翻译成 SQL 之前，条件树会先被重写一遍。它做两件相反的事——把同一张表上的条件合并、把人群包拆成组合结构，目标只有一个：减少没必要的 UNION ALL。</p>
+      <span class="eyebrow">● 从零理解 · 异步任务</span>
+      <h1>快照：一次「冻名单」的完整生命周期</h1>
+      <p class="lede">圈选页点一下「创建快照」，它 0.05 秒就回你一个 202，6 秒后变成「成功」。预览 0.2 秒就能出结果，为什么快照要绕这么大一圈 —— 七个状态、三个后台 worker、一段 CREATE JOB，还有一条把所有权重都压在它身上的约束：audience_snapshot 的分区只活 5 分钟。这篇用一次真实跑出来的快照，把这条链路从头走到尾。</p>
     </div>
 
     <div class="draft-banner">
     <span>⚠</span>
     <span>本页状态为 <b>draft</b>：内容尚未人工核对，引用前请自行验证。</span>
   </div>
-<aside class="needs">
-      <p class="needs-title">读这篇之前，你需要先知道</p>
-      <a class="need" href="../sql-builder-v2-crowd/">← <b>9. crowd 篇</b><span>业务层：core 之上加了什么</span></a>
-    </aside>
-    <div class="provenance"><span><b>来源</b> sources/gitlab/sql_builder_v2 @ 2c500b2</span><span><b>生成</b> 2026-09-26</span><span><b>模型</b> deepseek-v4.1-flash</span></div>
-    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">架构</span> <span class="tag tone-muted">SQL</span> <span class="tag tone-muted">TypeScript</span> <span class="tag tone-muted">圈人</span></span></div>
 
+    <div class="provenance"><span><b>来源</b> crm-dsl-stru apps/server/src/snapshot/ 全部 9 个文件（1867 行） · crm-dsl-stru apps/client/src/JobsPage.vue —— 快照任务页 · 实测：POST /api/snapshots 建了一个真实快照，逐秒观察状态流转 · 实测：snapshot_job / snapshot_log 的真实行、audience_snapshot 的真实分区与行数</span><span><b>生成</b> 2026-09-30</span><span><b>模型</b> claude-opus-4-6</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">快照</span> <span class="tag tone-muted">异步</span> <span class="tag tone-muted">Doris</span> <span class="tag tone-muted">状态机</span> <span class="tag tone-muted">Doris JOB</span></span></div>
+
+<p>你在圈选页点一下「创建快照」——</p>
+<p><strong>0.05 秒</strong>后它回你一个 <code>202</code>，说「收到了，<code>snapshotId = 1</code>」。
+<strong>6 秒</strong>后，快照任务页上那一行变成了「成功，138,818 人」。</p>
+<p>但预览明明 <strong>0.2 秒</strong>就能出结果。为什么快照要绕这么大一圈 —— 建任务、后台 worker、七个状态、还往 Doris 里下一个 <code>CREATE JOB</code>？</p>
 <div class="callout tone-blue">
-      <span class="ic">🧭</span>
-      <div><p>前置是 <a href="../sql-builder-v2-crowd/">⑧ crowd 篇</a>。</p>
-<p>架构篇画的主干图是<strong>从 <code>Rule[]</code> 开始的</strong>。这篇讲它前面那一步 ——
-在翻译之前，条件树会先被<strong>重写</strong>一遍。</p>
-<p>读完你应该能说出：「<mark class="mk-blue">它同时做「合」和「拆」两件相反的事，目标只有一个：少一次 UNION ALL。</mark>」</p>
+      <span class="ic">🎯</span>
+      <div><p><strong>这篇讲三件事</strong>：</p>
+<ul>
+<li>预览和快照，为什么是两种完全不同的东西</li>
+<li>一次快照从 <code>INIT</code> 到 <code>SUCCESS</code>，中间到底经过了什么</li>
+<li><mark class="mk-blue">一条约束（分区只活 5 分钟）怎么决定了整个设计的每一个数字</mark></li>
+</ul>
+<p>全部结论都来自<strong>一次真跑出来的快照</strong>，不是读文档猜的。</p>
 </div>
-    </div><h2 id="概念在翻译之前还有一步"><span class="num">01</span>概念：在翻译之前，还有一步</h2>
-<div class="callout tone-red quote">
-      <span class="ic">⚠</span>
-      <div><p><mark class="mk-blue"><strong>完整的主干是三步，不是两步。</strong></mark></p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code>业务条件
-  ↓ ① treeSimplifier 重写      ← 这篇
-重写后的条件树
-  ↓ ② adapter 翻译
-Rule[]
-  ↓ ③ buildWhere 编译
-SQL
-</code></pre></div>
+    </div><hr>
+<h2 id="预览是查一下快照是冻下来"><span class="num">01</span>预览是「查一下」，快照是「冻下来」</h2>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>维度</th><th>预览（查询按钮）</th><th>快照（创建快照按钮）</th></tr></thead><tbody><tr><th>接口</th><td data-label="预览（查询按钮）"><code>POST /api/preview</code></td><td data-label="快照（创建快照按钮）"><code>POST /api/snapshots</code></td></tr><tr><th>返回时机</th><td data-label="预览（查询按钮）"><span class="tag tone-blue"><strong>同步</strong> —— 等 SQL 跑完才返回</span></td><td data-label="快照（创建快照按钮）"><span class="tag tone-amber"><strong>异步</strong> —— 立刻返回 202</span></td></tr><tr><th>返回什么</th><td data-label="预览（查询按钮）">人数 + 一页名单 + SQL 原文</td><td data-label="快照（创建快照按钮）">只有一个 <code>snapshotId</code></td></tr><tr><th>谁在执行</th><td data-label="预览（查询按钮）">后端进程直接连 Doris 查</td><td data-label="快照（创建快照按钮）"><strong>Doris 服务端</strong>跑一个 JOB</td></tr><tr><th>耗时</th><td data-label="预览（查询按钮）">0.2 秒</td><td data-label="快照（创建快照按钮）">几秒到几分钟</td></tr><tr><th>结果落在哪</th><td data-label="预览（查询按钮）">什么都没落，看完就没了</td><td data-label="快照（创建快照按钮）"><code>audience_snapshot</code> 表里，<strong>持久化</strong></td></tr><tr><th>失败了</th><td data-label="预览（查询按钮）">当场报错给你看</td><td data-label="快照（创建快照按钮）">记在状态里，后台重试</td></tr></tbody></table></div><div class="callout tone-violet">
+      <span class="ic">💡</span>
+      <div><p><mark class="mk-blue"><strong>根本区别不是「快慢」，是「要不要留下东西」。</strong></mark></p>
+<p>预览是<strong>读</strong>：跑一条 <code>SELECT COUNT(*)</code>，把数字给你，然后什么都不留。</p>
+<p>快照是<strong>写</strong>：要往 Doris 里 <code>INSERT</code> 几十万行，而且要保证
+「要么全写进去，要么一个也别写」—— 这才是它必须异步、必须有状态机的原因。</p>
+<p><strong>一次写几十万行，不能占着 HTTP 连接不放。</strong></p>
 </div>
-    </div><p><strong>它在代码里的位置</strong>：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">// crowd/src/combi/utils.ts · initMajorListSqlGen
-return (entrepot, decode = true) =&gt; {
-    const _entrepot = treeSimplifier(entrepot);        // ← 第一步就是它
-
-    if (isMultiEntrepot(_entrepot)) {
-        return decodeValue(_combinationInstance.list(_entrepot, decode));
-    }
-    if (isEntrepot(_entrepot)) {
-        return decodeValue(_entrepotListSqlGen(_entrepot, decode));
-    }
-    throw new Error('条件错误(判断单个模块 or 联合)');
-};
-</code></pre></div>
+    </div><p><strong>为什么非得「冻下来」？</strong></p>
 <div class="callout tone-amber">
       <span class="ic">⚠</span>
-      <div><p><strong>这意味着 <code>Rule[]</code> 和原始业务条件不是一一对应的。</strong></p>
-<p>原始条件有 3 个叶子，重写后可能变成 1 个（合并了），
-也可能变成 5 个（拆开了）。</p>
-<p><mark class="mk-blue">读代码时对不上号，往往就是漏了这一步。</mark></p>
+      <div><p>因为<strong>圈选条件是活的</strong>。</p>
+<p>今天「年龄 ≥ 18 且地区=美国」是 138,818 人；明天有人满 18 岁了，就是 138,819 人。</p>
+<p><mark class="mk-blue">「创建事项」需要的是<strong>当时那一刻</strong>的名单。</mark>
+所以点「创建快照」= 把这一刻的 UID 全量复制一份，冻起来。</p>
 </div>
-    </div><h2 id="架构它做七件事"><span class="num">02</span>架构：它做七件事</h2>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">// combi/utils.ts · treeSimplifier()
-① checkHasCustomCountCombination  → 有「自定义计数」就整个跳过，不优化
-② cloneDeep                       → 不改调用方传进来的对象
-③ _checkAndConvertTreeNodeToPortraitEntrepot  → 把能转的节点转成画像
-④ _mergePortraitEntrepot          → 合并同一层的画像节点
-⑤ _partitionSpecialCondition      → 拆开特殊条件（人群包 / rawSql / 关系）
-⑥ _mainTreeMinimizer              → 压缩：去掉空节点、消掉单子节点
-⑦ 空了就兜底 → select `uid` from user_portrait
+    </div><hr>
+<h2 id="一次真实快照的全程"><span class="num">02</span>一次真实快照的全程</h2>
+<p>下面是我实际跑的一次。第一个命令建快照，然后每 3 秒看一眼状态：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">POST /api/snapshots   →  202   {&quot;snapshotId&quot;: 1, &quot;status&quot;: &quot;INIT&quot;}
+
+  + 0s   INIT      尝试 0  行数 -       job -
+  + 3s   INIT      尝试 0  行数 -       job -          ← 还在排队
+  + 6s   SUCCESS   尝试 1  行数 138818  job snapshot_1_a1_20260930113858074
+  + 9s   SUCCESS   ...
 </code></pre></div>
-<div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;in&quot;,&quot;to&quot;:&quot;q&quot;},{&quot;from&quot;:&quot;q&quot;,&quot;to&quot;:&quot;skip&quot;,&quot;label&quot;:&quot;是&quot;,&quot;dashed&quot;:true},{&quot;from&quot;:&quot;q&quot;,&quot;to&quot;:&quot;conv&quot;,&quot;label&quot;:&quot;否&quot;},{&quot;from&quot;:&quot;conv&quot;,&quot;to&quot;:&quot;merge&quot;},{&quot;from&quot;:&quot;merge&quot;,&quot;to&quot;:&quot;part&quot;},{&quot;from&quot;:&quot;part&quot;,&quot;to&quot;:&quot;mini&quot;},{&quot;from&quot;:&quot;mini&quot;,&quot;to&quot;:&quot;out&quot;}]">
+<p><strong>中间那 6 秒发生了什么？</strong> <code>snapshot_log</code> 表把它一步一步记下来了：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-json">[
+  { &quot;id&quot;: 1, &quot;event&quot;: &quot;created&quot;,   &quot;message&quot;: &quot;已创建，等待执行&quot; },
+  { &quot;id&quot;: 2, &quot;event&quot;: &quot;claimed&quot;,   &quot;message&quot;: &quot;第 1 次执行，Job snapshot_1_a1_20260930113858074&quot; },
+  { &quot;id&quot;: 3, &quot;event&quot;: &quot;submitted&quot;, &quot;message&quot;: &quot;已提交 Doris，Job Id 41645728950576&quot; },
+  { &quot;id&quot;: 4, &quot;event&quot;: &quot;success&quot;,   &quot;message&quot;: &quot;写入 138818 人&quot; }
+]
+</code></pre></div>
+<div class="seqd" data-seq data-n="5" data-segs="[{&quot;from&quot;:1,&quot;to&quot;:4,&quot;label&quot;:&quot;同步段：毫秒级&quot;},{&quot;from&quot;:5,&quot;to&quot;:11,&quot;label&quot;:&quot;异步段：后台慢慢跑&quot;}]">
+      <svg class="seqd-svg" aria-hidden="true">
+        <defs>
+          <marker id="s-fill" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+          <marker id="s-open" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10" fill="none" stroke="currentColor" stroke-width="1.4"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="seqd-head"><div class="scell"><div class="spart tone-muted" data-id="fe">
+          <b>圈选页</b><small>browser</small>
+        </div></div><div class="scell"><div class="spart tone-muted" data-id="be">
+          <b>后端</b><small>8787</small>
+        </div></div><div class="scell"><div class="spart tone-muted" data-id="my">
+          <b>MySQL snapshot_job</b><small>状态机</small>
+        </div></div><div class="scell"><div class="spart tone-muted" data-id="wk">
+          <b>后台 worker</b><small>3 个循环</small>
+        </div></div><div class="scell"><div class="spart tone-muted" data-id="do">
+          <b>Doris</b><small>crm_insight</small>
+        </div></div></div>
+      <div class="seqd-body"><div class="smsg" data-from="fe" data-to="be" data-kind="sync" data-i="1" data-note="① 建快照"><span class="snote">① 建快照</span><span class="slabel">POST /api/snapshots</span></div><div class="smsg is-self" data-from="be" data-to="be" data-kind="self" data-i="2"><span class="slabel">编译出 uidsSql</span></div><div class="smsg" data-from="be" data-to="my" data-kind="sync" data-i="3"><span class="slabel">写一行 status = INIT</span></div><div class="smsg" data-from="be" data-to="fe" data-kind="reply" data-i="4" data-note="② 立刻返回"><span class="snote">② 立刻返回</span><span class="slabel">202 { snapshotId: 1 }</span></div><div class="smsg" data-from="wk" data-to="my" data-kind="sync" data-i="5" data-note="③ 1 秒扫一次"><span class="snote">③ 1 秒扫一次</span><span class="slabel">扫到 INIT → 抢占</span></div><div class="smsg" data-from="wk" data-to="do" data-kind="sync" data-i="6" data-note="④ 下 JOB，Doris 服务端自己跑 INSERT"><span class="snote">④ 下 JOB，Doris 服务端自己跑 INSERT</span><span class="slabel">CREATE JOB …</span></div><div class="smsg" data-from="do" data-to="wk" data-kind="reply" data-i="7"><span class="slabel">Job Id 41645728950576</span></div><div class="smsg" data-from="wk" data-to="my" data-kind="sync" data-i="8"><span class="slabel">status = SUBMITTED</span></div><div class="smsg" data-from="wk" data-to="do" data-kind="async" data-i="9" data-note="⑤ 2 秒扫一次"><span class="snote">⑤ 2 秒扫一次</span><span class="slabel">轮询任务状态</span></div><div class="smsg" data-from="do" data-to="wk" data-kind="reply" data-i="10"><span class="slabel">success</span></div><div class="smsg" data-from="wk" data-to="do" data-kind="sync" data-i="11"><span class="slabel">SELECT COUNT(*) 数行数</span></div><div class="smsg" data-from="wk" data-to="my" data-kind="sync" data-i="12" data-note="⑥ 收尾"><span class="snote">⑥ 收尾</span><span class="slabel">SUCCESS + 行数</span></div></div>
+    </div><p><strong>最终写在 <code>snapshot_job</code> 里的一行：</strong></p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-json">{
+  &quot;id&quot;: 1,
+  &quot;snapshot_date&quot;: &quot;2026-09-30&quot;,
+  &quot;snapshot_minute&quot;: &quot;2026-09-30 03:38:00&quot;,
+  &quot;status&quot;: &quot;SUCCESS&quot;,
+  &quot;attempt&quot;: 1,
+  &quot;doris_job_name&quot;: &quot;snapshot_1_a1_20260930113858074&quot;,
+  &quot;doris_job_id&quot;: 41645728950576,
+  &quot;doris_task_id&quot;: 41645931408192,
+  &quot;result_row_count&quot;: 138818,
+  &quot;staff_id&quot;: 301
+}
+</code></pre></div>
+<p>前端「快照任务」页显示的就是这一行：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">快照  状态  日期        人数     尝试  Doris Job                     Job Id           操作人  创建
+1     成功  2026-09-30  138818  1    snapshot_1_a1_202609301...   41645728950576   301     11:38:57
+</code></pre></div>
+<div class="callout tone-violet">
+      <span class="ic">💡</span>
+      <div><p><strong>注意 <code>doris_job_id</code> 和 <code>doris_task_id</code> 是两个不同的东西。</strong></p>
+<ul>
+<li><code>job_id</code> = Doris 那边的<strong>调度任务</strong>（<code>CREATE JOB</code> 建的那个）</li>
+<li><code>task_id</code> = 这次<strong>具体执行</strong>（Job 可能被调度多次，每次一个 task）</li>
+</ul>
+<p>它们都存下来了，排障时能直接去 Doris 里按 id 查。</p>
+</div>
+    </div><hr>
+<h2 id="七个状态三个-worker"><span class="num">03</span>七个状态，三个 worker</h2>
+<figure class="archfig" data-arch>
+      <svg viewBox="0 0 980 660" role="img" aria-labelledby="archify-diagram-title archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
+        <title id="archify-diagram-title">一次快照的七个状态</title>
+        <desc id="archify-diagram-description">A lifecycle diagram generated by Archify.</desc>
+        <!-- Definitions -->
+        <defs>
+          <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-default" />
+          </marker>
+          <marker id="arrowhead-emphasis" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-emphasis" />
+          </marker>
+          <marker id="arrowhead-security" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-security" />
+          </marker>
+          <marker id="arrowhead-dashed" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-dashed" />
+          </marker>
+          <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+            <path d="M 40 0 L 0 0 0 40" class="c-grid" stroke-width="0.5"/>
+          </pattern>
+        </defs>
+
+        <!-- Background Grid -->
+        <rect width="100%" height="100%" fill="url(#grid)" />
+
+        <!-- Lifecycle bands -->
+        <path d="M 72 112 L 908 112" class="a-default" stroke-width="0.8" stroke-dasharray="3,8"/>
+        <text x="72" y="100" class="t-dim" font-size="10" font-weight="600">01 / 正常路径</text>
+        <path d="M 72 264 L 908 264" class="a-default" stroke-width="0.8" stroke-dasharray="3,8"/>
+        <text x="72" y="252" class="t-dim" font-size="10" font-weight="600">02 / 等一会儿</text>
+        <path d="M 72 436 L 908 436" class="a-default" stroke-width="0.8" stroke-dasharray="3,8"/>
+        <text x="72" y="424" class="t-dim" font-size="10" font-weight="600">03 / 终止</text>
+
+        <!-- Primary lifecycle rail -->
+        <path d="M 154 157 L 748 157" class="a-emphasis" stroke-width="2.2" marker-end="url(#arrowhead-emphasis)"/>
+
+        <!-- Transition paths -->
+        <path data-edge-from="init" data-edge-to="creating" data-edge-key="0" data-edge-id="t1" data-composition-points="153,157;189,157" d="M 153 157 L 189 157" class="a-default" stroke-width="1.1" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="creating" data-edge-to="submitted" data-edge-key="1" data-edge-id="t2" data-composition-points="307,157;343,157" d="M 307 157 L 343 157" class="a-default" stroke-width="1.1" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="submitted" data-edge-to="running" data-edge-key="2" data-edge-id="t3" data-composition-points="461,157;497,157" d="M 461 157 L 497 157" class="a-default" stroke-width="1.1" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="running" data-edge-to="success" data-edge-key="3" data-edge-id="t4" data-composition-points="615,157;651,157" d="M 615 157 L 651 157" class="a-emphasis" stroke-width="2" marker-end="url(#arrowhead-emphasis)"/>
+        <path data-edge-from="creating" data-edge-to="retry" data-edge-key="4" data-edge-id="t5" data-composition-points="241,188;241,233;395,233;395,278" d="M 241 188 L 241 223 Q 241 233 251 233 L 385 233 Q 395 233 395 243 L 395 278" class="a-security" stroke-width="1.1" marker-end="url(#arrowhead-security)"/>
+        <path data-edge-from="retry" data-edge-to="creating" data-edge-key="5" data-edge-id="t7" data-composition-points="409,278;409,233;255,233;255,188" d="M 409 278 L 409 243 Q 409 233 399 233 L 265 233 Q 255 233 255 223 L 255 188" class="a-emphasis" stroke-width="2" marker-end="url(#arrowhead-emphasis)"/>
+        <path data-edge-from="running" data-edge-to="retry" data-edge-key="6" data-edge-id="t6" data-composition-points="556,188;556,247.5;465,247.5;465,307" d="M 556 188 L 556 237.5 Q 556 247.5 546 247.5 L 475 247.5 Q 465 247.5 465 257.5 L 465 307" class="a-security" stroke-width="1.1" marker-end="url(#arrowhead-security)"/>
+        <path data-edge-from="retry" data-edge-to="failed" data-edge-key="7" data-edge-id="t8" data-composition-points="402,336;402,393;710,393;710,450" d="M 402 336 L 402 383 Q 402 393 412 393 L 700 393 Q 710 393 710 403 L 710 450" class="a-security" stroke-width="1.1" marker-end="url(#arrowhead-security)"/>
+
+        <!-- States -->
+        <g id="node-init" data-node-id="init" data-node-label="INIT" tabindex="0" role="button" aria-label="Focus INIT, 已建任务，等人来抢, 正常路径" aria-pressed="false" data-node-kind="start" data-node-sublabel="已建任务，等人来抢" data-node-context="正常路径">
+          <title>INIT · 已建任务，等人来抢 · 正常路径</title>
+          <rect x="35" y="126" width="118" height="62" rx="7" class="c-mask"/>
+          <rect x="35" y="126" width="118" height="62" rx="7" class="c-frontend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="start" class="semantic-sigil s-frontend" transform="translate(136 132) scale(0.6875)">
+            <circle cx="8" cy="8" r="5"/>
+            <path d="m7 5.4 3.6 2.6L7 10.6Z" class="sigil-fill"/>
+          </g>
+        <text data-detail="fine" x="45" y="140" class="t-frontend" font-size="7" font-weight="700">01</text>
+          <text data-detail-anchor x="94" y="147" class="t-primary" font-size="10" font-weight="600" text-anchor="middle">INIT</text>
+          <text data-detail="context" x="94" y="163" class="t-muted" font-size="7" text-anchor="middle">已建任务，等人来抢</text>
+        </g>
+
+        <g id="node-creating" data-node-id="creating" data-node-label="CREATING" tabindex="0" role="button" aria-label="Focus CREATING, 已抢占，正在下 JOB, 正常路径" aria-pressed="false" data-node-kind="active" data-node-sublabel="已抢占，正在下 JOB" data-node-context="正常路径">
+          <title>CREATING · 已抢占，正在下 JOB · 正常路径</title>
+          <rect x="189" y="126" width="118" height="62" rx="7" class="c-mask"/>
+          <rect x="189" y="126" width="118" height="62" rx="7" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="active" class="semantic-sigil s-backend" transform="translate(290 132) scale(0.6875)">
+            <path d="M2 8h3l1.5-3.5L9 12l1.6-4H14"/>
+          </g>
+        <text data-detail="fine" x="199" y="140" class="t-backend" font-size="7" font-weight="700">02</text>
+          <text data-detail-anchor x="248" y="147" class="t-primary" font-size="10" font-weight="600" text-anchor="middle">CREATING</text>
+          <text data-detail="context" x="248" y="163" class="t-muted" font-size="7" text-anchor="middle">已抢占，正在下 JOB</text>
+        </g>
+
+        <g id="node-submitted" data-node-id="submitted" data-node-label="SUBMITTED" tabindex="0" role="button" aria-label="Focus SUBMITTED, JOB 已提交，等它跑, 正常路径" aria-pressed="false" data-node-kind="active" data-node-sublabel="JOB 已提交，等它跑" data-node-context="正常路径">
+          <title>SUBMITTED · JOB 已提交，等它跑 · 正常路径</title>
+          <rect x="343" y="126" width="118" height="62" rx="7" class="c-mask"/>
+          <rect x="343" y="126" width="118" height="62" rx="7" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="active" class="semantic-sigil s-backend" transform="translate(444 132) scale(0.6875)">
+            <path d="M2 8h3l1.5-3.5L9 12l1.6-4H14"/>
+          </g>
+        <text data-detail="fine" x="353" y="140" class="t-backend" font-size="7" font-weight="700">03</text>
+          <text data-detail-anchor x="402" y="147" class="t-primary" font-size="10" font-weight="600" text-anchor="middle">SUBMITTED</text>
+          <text data-detail="context" x="402" y="163" class="t-muted" font-size="7" text-anchor="middle">JOB 已提交，等它跑</text>
+        </g>
+
+        <g id="node-running" data-node-id="running" data-node-label="RUNNING" tabindex="0" role="button" aria-label="Focus RUNNING, Doris 正在写, 正常路径" aria-pressed="false" data-node-kind="active" data-node-sublabel="Doris 正在写" data-node-context="正常路径">
+          <title>RUNNING · Doris 正在写 · 正常路径</title>
+          <rect x="497" y="126" width="118" height="62" rx="7" class="c-mask"/>
+          <rect x="497" y="126" width="118" height="62" rx="7" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="active" class="semantic-sigil s-backend" transform="translate(598 132) scale(0.6875)">
+            <path d="M2 8h3l1.5-3.5L9 12l1.6-4H14"/>
+          </g>
+        <text data-detail="fine" x="507" y="140" class="t-backend" font-size="7" font-weight="700">04</text>
+          <text data-detail-anchor x="556" y="147" class="t-primary" font-size="10" font-weight="600" text-anchor="middle">RUNNING</text>
+          <text data-detail="context" x="556" y="163" class="t-muted" font-size="7" text-anchor="middle">Doris 正在写</text>
+        </g>
+
+        <g id="node-success" data-node-id="success" data-node-label="SUCCESS" tabindex="0" role="button" aria-label="Focus SUCCESS, 写完，行数已记, 正常路径" aria-pressed="false" data-node-kind="success" data-node-sublabel="写完，行数已记" data-node-context="正常路径">
+          <title>SUCCESS · 写完，行数已记 · 正常路径</title>
+          <rect x="651" y="126" width="118" height="62" rx="7" class="c-mask"/>
+          <rect x="651" y="126" width="118" height="62" rx="7" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="success" class="semantic-sigil s-database" transform="translate(752 132) scale(0.6875)">
+            <circle cx="8" cy="8" r="5.3"/>
+            <path d="m5.2 8 1.8 1.8 3.8-4"/>
+          </g>
+        <text data-detail="fine" x="661" y="140" class="t-database" font-size="7" font-weight="700">05</text>
+          <text data-detail-anchor x="710" y="147" class="t-primary" font-size="10" font-weight="600" text-anchor="middle">SUCCESS</text>
+          <text data-detail="context" x="710" y="163" class="t-muted" font-size="7" text-anchor="middle">写完，行数已记</text>
+        </g>
+
+        <g id="node-retry" data-node-id="retry" data-node-label="RETRY_WAIT" tabindex="0" role="button" aria-label="Focus RETRY_WAIT, 等 10/20/40 秒再试, 等一会儿" aria-pressed="false" data-node-kind="waiting" data-node-sublabel="等 10/20/40 秒再试" data-node-context="等一会儿">
+          <title>RETRY_WAIT · 等 10/20/40 秒再试 · 等一会儿</title>
+          <rect x="339" y="278" width="126" height="58" rx="7" class="c-mask"/>
+          <rect x="339" y="278" width="126" height="58" rx="7" class="c-cloud" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="waiting" class="semantic-sigil s-cloud" transform="translate(448 284) scale(0.6875)">
+            <path d="M4 2.5h8M4 13.5h8M5 3c0 2.8 2 3.2 3 5-1 1.8-3 2.2-3 5M11 3c0 2.8-2 3.2-3 5 1 1.8 3 2.2 3 5"/>
+          </g>
+          <text data-detail-anchor x="402" y="299" class="t-primary" font-size="10" font-weight="600" text-anchor="middle">RETRY_WAIT</text>
+          <text data-detail="context" x="402" y="315" class="t-muted" font-size="7" text-anchor="middle">等 10/20/40 秒再试</text>
+        </g>
+
+        <g id="node-failed" data-node-id="failed" data-node-label="FAILED" tabindex="0" role="button" aria-label="Focus FAILED, 不再重试，等人工, 终止" aria-pressed="false" data-node-kind="failure" data-node-sublabel="不再重试，等人工" data-node-context="终止">
+          <title>FAILED · 不再重试，等人工 · 终止</title>
+          <rect x="651" y="450" width="118" height="58" rx="7" class="c-mask"/>
+          <rect x="651" y="450" width="118" height="58" rx="7" class="c-security" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="failure" class="semantic-sigil s-security" transform="translate(752 456) scale(0.6875)">
+            <circle cx="8" cy="8" r="5.3"/>
+            <path d="m5.7 5.7 4.6 4.6m0-4.6-4.6 4.6"/>
+          </g>
+          <text data-detail-anchor x="710" y="471" class="t-primary" font-size="10" font-weight="600" text-anchor="middle">FAILED</text>
+          <text data-detail="context" x="710" y="487" class="t-muted" font-size="7" text-anchor="middle">不再重试，等人工</text>
+        </g>
+
+        <!-- Transition labels -->
+
+
+
+
+
+
+
+
+
+        <!-- Legend -->
+        <g data-legend data-legend-bridge>
+          <text x="40" y="604" class="t-primary" font-size="12" font-weight="650">Legend</text>
+          <g data-legend-semantic-kind="start" data-legend-kind="start" data-legend-label="start" data-legend-x="40" data-legend-baseline="624" data-legend-width="68">
+            <rect x="40" y="616" width="14" height="9" rx="2" class="c-frontend" stroke-width="1"/>
+            <text x="62" y="624" class="t-muted" font-size="10" font-weight="500">start</text>
+          </g>
+          <g data-legend-semantic-kind="active" data-legend-kind="active" data-legend-label="active state" data-legend-x="130" data-legend-baseline="624" data-legend-width="103">
+            <rect x="130" y="616" width="14" height="9" rx="2" class="c-backend" stroke-width="1"/>
+            <text x="152" y="624" class="t-muted" font-size="10" font-weight="500">active state</text>
+          </g>
+          <g data-legend-semantic-kind="waiting" data-legend-kind="waiting" data-legend-label="waiting" data-legend-x="255" data-legend-baseline="624" data-legend-width="78">
+            <rect x="255" y="616" width="14" height="9" rx="2" class="c-cloud" stroke-width="1"/>
+            <text x="277" y="624" class="t-muted" font-size="10" font-weight="500">waiting</text>
+          </g>
+          <g data-legend-semantic-kind="success" data-legend-kind="success" data-legend-label="terminal success" data-legend-x="355" data-legend-baseline="624" data-legend-width="123">
+            <rect x="355" y="616" width="14" height="9" rx="2" class="c-database" stroke-width="1"/>
+            <text x="377" y="624" class="t-muted" font-size="10" font-weight="500">terminal success</text>
+          </g>
+          <g data-legend-semantic-kind="failure" data-legend-kind="failure" data-legend-label="failure / exit" data-legend-x="500" data-legend-baseline="624" data-legend-width="113">
+            <rect x="500" y="616" width="14" height="9" rx="2" class="c-security" stroke-width="1"/>
+            <text x="522" y="624" class="t-muted" font-size="10" font-weight="500">failure / exit</text>
+          </g>
+        </g>
+      </svg>
+      <figcaption>正常路径一条直线；可重试的错落到 RETRY_WAIT 等一会儿再上来；不能重试的直接 FAILED。</figcaption>
+      <p class="arch-hint">
+        <span class="idle">点头上的任意一个框，只看它和它连出去的关系</span>
+        <span class="focused">再点一次空白处取消</span>
+      </p>
+    </figure><p><strong>三条路径，三句话：</strong></p>
+<div class="cards" data-cols="3"><div class="ccard tone-green">
+          <span class="tag tone-green">绿色</span>
+          <h4>正常路径</h4>
+          
+          <div class="cbody"><p><code>INIT → CREATING → SUBMITTED → RUNNING → SUCCESS</code></p>
+<p>五个状态一条直线，全程由后台 worker 推着走，
+<strong>没有人在等它</strong>。</p>
+<p><code>SUCCESS</code> 时才去数一次真实行数（<code>SELECT COUNT(*)</code>），
+写进 <code>result_row_count</code>。</p>
+</div>
+          
+        </div><div class="ccard tone-amber">
+          <span class="tag tone-amber">橙色</span>
+          <h4>可重试的错</h4>
+          
+          <div class="cbody"><p>落到 <code>RETRY_WAIT</code>，退避 <code>10 / 20 / 40</code> 秒后<strong>从 <code>CREATING</code> 重来</strong>。</p>
+<p><code>MAX_ATTEMPTS = 4</code> —— 试满 4 次就 <code>FAILED</code>。</p>
+<p><mark class="mk-blue">为什么这么急？因为分区只活 5 分钟。</mark> 见下一节。</p>
+</div>
+          
+        </div><div class="ccard tone-red">
+          <span class="tag tone-red">红色</span>
+          <h4>不能重试的错</h4>
+          
+          <div class="cbody"><p>直接 <code>FAILED</code>，不重试。</p>
+<p><strong>分界线是「我确定没写」还是「我不确定」</strong>：</p>
+<ul>
+<li>下 JOB 时就失败（确定没写）→ 能重试</li>
+<li>「结果未知」（可能写了）→ <strong>不能</strong>，宁可报失败</li>
+</ul>
+</div>
+          
+        </div></div><p><strong>三个 worker 在后台一直转：</strong></p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>worker</th><th>扫描间隔</th><th>干什么</th><th>对应哪些状态</th></tr></thead><tbody><tr><th><code>claimAndSubmit</code></th><td data-label="扫描间隔">1 秒</td><td data-label="干什么">抢一个任务，给它下 JOB</td><td data-label="对应哪些状态"><code>INIT</code> → <code>CREATING</code> → <code>SUBMITTED</code></td></tr><tr><th><code>monitorOne</code></th><td data-label="扫描间隔">2 秒</td><td data-label="干什么">问 Doris「跑完了吗」</td><td data-label="对应哪些状态"><code>SUBMITTED</code> / <code>RUNNING</code></td></tr><tr><th><code>recoverOne</code></th><td data-label="扫描间隔">5 秒</td><td data-label="干什么">捞那些卡住不动的</td><td data-label="对应哪些状态">所有未完成的</td></tr><tr><th>分区维护</th><td data-label="扫描间隔">15 秒</td><td data-label="干什么">建新分区、删老分区</td><td data-label="对应哪些状态">——</td></tr></tbody></table></div><div class="callout tone-green">
+      <span class="ic">✅</span>
+      <div><p><strong>为什么要三个，不能一个循环搞定？</strong></p>
+<p>因为它们的<strong>关注点不同</strong>：</p>
+<ul>
+<li><code>claimAndSubmit</code> 关心「有没有人干活」—— 慢了任务就排队</li>
+<li><code>monitorOne</code> 关心「干完没」—— 慢了用户就多等</li>
+<li><code>recoverOne</code> 关心「有没有卡死的」—— <mark class="mk-blue">比如进程重启后，任务停在 <code>CREATING</code> 没人管</mark></li>
+</ul>
+<p><code>recoverOne</code> 那一条最容易被忘掉：<strong>进程崩了，内存里的状态全没了，但数据库里那一行还在。</strong>
+它扫的就是这种「孤儿」。</p>
+</div>
+    </div><hr>
+<h2 id="5-分钟的分区决定了所有超时数字"><span class="num">04</span>★ 5 分钟的分区，决定了所有超时数字</h2>
+<div class="callout tone-red quote">
+      <span class="ic">⚠</span>
+      <div><p><mark class="mk-blue"><strong>整个设计里最要紧的一条约束：<code>audience_snapshot</code> 的分区，只活 5 分钟。</strong></mark></p>
+</div>
+    </div><p><strong>分区长什么样？</strong> 我实际查了一下：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">PartitionName      VisibleVersion
+pm202609300335     1
+pm202609300336     1
+pm202609300337     1
+pm202609300338     2        ← 我的快照写进了这一格
+pm202609300339     1
+pm202609300340     1
+pm202609300341     1
+pm202609300342     1
+</code></pre></div>
+<div class="cards" data-cols="3"><div class="ccard tone-blue">
+          <span class="tag tone-blue">粒度</span>
+          <h4>按分钟切</h4>
+          
+          <div class="cbody"><p>分区名 = <code>pm</code> + <code>YYYYMMDDHHMM</code>。</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code>pm202609300338
+  └ 2026-09-30 03:38（UTC）
+</code></pre></div>
+<p><strong>每分钟一个分区。</strong></p>
+</div>
+          
+        </div><div class="ccard tone-amber">
+          <span class="tag tone-amber">TTL</span>
+          <h4>只活 5 分钟</h4>
+          
+          <div class="cbody"><div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-ts">export const PARTITION_TTL_MS = 5 * 60 * 1000;
+export const PARTITION_WIDTH_MS = 60 * 1000;
+</code></pre></div>
+<p>后台每 15 秒维护一次：建未来 2 个、保留过去 6 个，
+<strong>超过 5 分钟的老分区直接 <code>DROP</code>。</strong></p>
+</div>
+          
+        </div><div class="ccard tone-muted">
+          <span class="tag tone-muted">本机 demo</span>
+          <h4>为什么这么短</h4>
+          
+          <div class="cbody"><p>真实系统里是 <strong>14 天</strong>。</p>
+<p>本机把它压成 5 分钟 —— 这样开发时不用等两周就能看到
+「分区过期 → 名单没了」这条路径。</p>
+<p><mark class="mk-blue">但也正因为压短了，才把超时约束逼到台面上。</mark></p>
+</div>
+          
+        </div></div><h3 id="于是所有超时数字都是从这里推出来的">于是所有超时数字都是从这里推出来的</h3>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>常量</th><th>值</th><th>为什么是这个值</th></tr></thead><tbody><tr><th><code>RETRY_BACKOFF_MS</code></th><td data-label="值"><code>[10s, 20s, 40s]</code></td><td data-label="为什么是这个值">三次重试一共 70 秒 —— <strong>必须在 5 分钟里跑完</strong></td></tr><tr><th><code>MAX_ATTEMPTS</code></th><td data-label="值"><code>4</code></td><td data-label="为什么是这个值">第 4 次失败就放弃，不再无限重试</td></tr><tr><th><code>UNKNOWN_WINDOW_MS</code></th><td data-label="值"><code>60s</code></td><td data-label="为什么是这个值">「结果未知」最多等 60 秒就要去查 —— <strong>再等分区就没了</strong></td></tr><tr><th><code>STALE_THRESHOLD_MS</code></th><td data-label="值"><code>15s</code></td><td data-label="为什么是这个值">超过 15 秒没更新就算卡住，<code>recoverOne</code> 来捞</td></tr><tr><th><code>EXECUTION_SCAN_MS</code></th><td data-label="值"><code>1s</code></td><td data-label="为什么是这个值">抢占要快 —— 慢了任务就排队</td></tr><tr><th><code>MONITOR_SCAN_MS</code></th><td data-label="值"><code>2s</code></td><td data-label="为什么是这个值">监控可以慢一点 —— 反正用户不看这一行</td></tr></tbody></table></div><div class="callout tone-violet">
+      <span class="ic">💡</span>
+      <div><p><mark class="mk-blue"><strong>这一条值得单独记下来：</strong></mark></p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code>分区只活 5 分钟
+      ↓
+重试必须快（10s / 20s / 40s，总共 70s）
+      ↓
+「结果未知」最多等 60 秒就要去查
+      ↓
+分区过期了连查都查不了 → 只能保持原状
+</code></pre></div>
+<p><strong>一行 <code>PARTITION_TTL_MS = 5 * 60 * 1000</code>，定住了上面所有数字的上限。</strong></p>
+<p>真实系统里 TTL 是 14 天，所以那边可以放宽得多 ——
+但<strong>约束的形状是一样的<strong>：</strong>重试窗口不能超过数据还在的时间。</strong></p>
+</div>
+    </div><hr>
+<h2 id="结果未知不猜去查事实"><span class="num">05</span>★「结果未知」不猜，去查事实</h2>
+<p>最难的一种情况：<strong>Doris 那边的任务记录查不到了。</strong></p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">我们的状态：SUBMITTED，attempt = 1
+Doris 那边：jobs() 查不到这个 JOB，tasks() 也查不到这个 task
+
+→ 它到底写进去了没有？
+</code></pre></div>
+<p><strong>猜是没用的。</strong> 代码的做法是 —— <strong>等一会儿，然后直接去表里数</strong>：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-ts">// workers.ts
+if (action.type === 'probe') {
+  // 去 audience_snapshot 里数：这个 snapshot_id 有没有落进去行
+  const hit = await audienceHasRow(row.snapshotDate, row.id);
+
+  if (hit == null) {
+    // 分区已经过期了，查不了 → 什么都不做，保持原状
+    await casJob(row.id, row.status, checked);
+    return;
+  }
+  if (hit) {
+    // 有行！其实成功了 → 按真实行数收尾
+    await finishFromCount(row, checked, now);
+    return;
+  }
+  // 确定没写进去 → FAILED，而且**禁止自动重试**
+  await casJob(row.id, row.status, {
+    status: 'FAILED',
+    error: 'Doris execution result is unknown; automatic retry is disabled.',
+    nextRetryAt: null,          // ← 关键：不重试
+  });
+}
+</code></pre></div>
+<div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;q&quot;,&quot;to&quot;:&quot;w&quot;},{&quot;from&quot;:&quot;w&quot;,&quot;to&quot;:&quot;p&quot;},{&quot;from&quot;:&quot;p&quot;,&quot;to&quot;:&quot;yes&quot;},{&quot;from&quot;:&quot;p&quot;,&quot;to&quot;:&quot;no&quot;},{&quot;from&quot;:&quot;p&quot;,&quot;to&quot;:&quot;gone&quot;},{&quot;from&quot;:&quot;yes&quot;,&quot;to&quot;:&quot;ok&quot;,&quot;anim&quot;:true},{&quot;from&quot;:&quot;no&quot;,&quot;to&quot;:&quot;bad&quot;},{&quot;from&quot;:&quot;gone&quot;,&quot;to&quot;:&quot;keep&quot;}]">
       <svg class="flowd-svg" aria-hidden="true">
         <defs>
           <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
@@ -3392,240 +3755,162 @@ return (entrepot, decode = true) =&gt; {
         </defs>
       </svg>
       <div class="flowd-groups"></div>
-      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-muted" data-id="in">
-              
-              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="3" width="11" height="8.5" rx="1.5"/><path d="M2.5 6h11"/></svg>
-              <b>业务条件树</b>
-              
-            </div></div><div class="flowd-row"><div class="fnode tone-amber shape-note" data-id="q">
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-amber" data-id="q">
               
               
-              <b>有自定义计数？</b>
-              
-            </div></div><div class="flowd-row"><div class="fnode tone-muted" data-id="skip">
-              
-              
-              <b>原样返回</b>
-              <small>不优化</small>
-            </div><div class="fnode tone-green" data-id="conv">
+              <b>Doris 状态查不到</b>
+              <small>SUBMITTED 但 jobs() 没有</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-muted" data-id="w">
               
               
-              <b>③ 转换</b>
-              <small>uid → 画像</small>
-            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="merge">
+              <b>等 60 秒</b>
+              <small>UNKNOWN_WINDOW_MS</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="p">
               
               
-              <b>④ 合并画像</b>
-              <small>同表的合成一个</small>
-            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="part">
+              <b>去数行 (probe)</b>
+              <small>audienceHasRow(snapshot_id)</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="yes">
               
               
-              <b>⑤ 拆开特殊条件</b>
-              <small>人群包 / rawSql / 关系</small>
-            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="mini">
+              <b>有行</b>
+              <small>其实成功了</small>
+            </div><div class="fnode tone-red" data-id="no">
               
               
-              <b>⑥ 压缩</b>
-              <small>去空节点、提单子节点</small>
-            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="out">
+              <b>没行</b>
+              <small>确定失败</small>
+            </div><div class="fnode tone-muted" data-id="gone">
               
-              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5L3 8l3 4.5M10 3.5L13 8l-3 4.5"/></svg>
-              <b>重写后的条件树</b>
               
+              <b>分区没了</b>
+              <small>查不了</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="ok">
+              
+              
+              <b>SUCCESS</b>
+              <small>按真实行数收尾</small>
+            </div><div class="fnode tone-red" data-id="bad">
+              
+              
+              <b>FAILED</b>
+              <small>不重试，等人工</small>
+            </div><div class="fnode tone-muted" data-id="keep">
+              
+              
+              <b>保持原状</b>
+              <small>什么都不做</small>
             </div></div></div>
       
+    </div><div class="callout tone-red">
+      <span class="ic">⚠</span>
+      <div><p><mark class="mk-blue"><strong>「结果未知」为什么不重试？</strong></mark></p>
+<p>因为「未知」意味着<strong>可能已经写进去了</strong>。</p>
+<p>这时候重试，会造成 <mark class="mk-blue"><strong>重复数据</strong></mark> —— 同一个 <code>snapshot_id</code> 下同一个人出现两次，
+下游拉名单的时候人数就对不上了。</p>
+<p><strong>宁可报失败让人来看，也不能悄悄写重。</strong></p>
+<table>
+<thead>
+<tr>
+<th>情况</th>
+<th>能不能重试</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>下 JOB 的时候就失败了（还没执行）</td>
+<td>✅ 能 —— 肯定没写</td>
+</tr>
+<tr>
+<td>Doris 明确说「跑失败了」</td>
+<td>✅ 能 —— 肯定没写成功</td>
+</tr>
+<tr>
+<td><strong>状态未知（可能写了）</strong></td>
+<td>❌ <strong>不能</strong> —— 去查，查不到就让人看</td>
+</tr>
+</tbody>
+</table>
+<p>这条分界线就是：<mark class="mk-blue"><strong>「我确定没写」可以重试，「我不确定」不行。</strong></mark></p>
+</div>
+    </div><hr>
+<h2 id="并发安全casjob-job-名字当幂等键"><span class="num">06</span>并发安全：casJob + job 名字当幂等键</h2>
+<p>三个 worker 同时在跑，<strong>同一行任务可能被两个 worker 同时处理</strong>。怎么防？</p>
+<div class="callout tone-blue">
+      <span class="ic">🔒</span>
+      <div><p><strong>两把锁：</strong></p>
+<p><strong>① 状态 CAS（Compare-And-Set）</strong></p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-ts">await casJob(row.id, row.status, { status: 'CREATING', ... })
+//         ↑ 期望它现在是这个状态
+//           变了就更新 0 行 → 说明别人抢走了 → 放弃
+</code></pre></div>
+<p><mark class="mk-blue">每次状态变更都带上「我以为它现在是什么」，变了就不改。</mark></p>
+<p><strong>② JOB 名字当幂等键</strong></p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-ts">const jobName = snapshotDorisJobName(row.id, attempt, timestamp);
+// → snapshot_1_a1_20260930113858074
+//     ↑快照id ↑第几次 ↑时间戳
+</code></pre></div>
+<p>下 JOB 之前先查 <code>jobs()</code> 里有没有这个名字：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-ts">const existing = await findDorisJob(row.dorisJobName);
+if (existing || isJobAlreadyExists(err)) {
+  // 上次其实提交成功了，只是没收到回包 → 当作已提交
+  await markSubmitted(row, existing?.jobId ?? null, new Date());
+  return;
+}
+</code></pre></div>
+</div>
     </div><div class="callout tone-violet">
       <span class="ic">💡</span>
-      <div><p><mark class="mk-blue"><strong>看第 ④ 和第 ⑤ 步：它们是相反的动作。</strong></mark></p>
-<ul>
-<li><strong>④ 合并</strong> —— 把多个画像条件合成一个</li>
-<li><strong>⑤ 拆开</strong> —— 把一个人群包条件拆成多个</li>
-</ul>
-<p>看起来矛盾，其实同一个判断标准：<strong>能不能少一次 <code>UNION ALL</code>。</strong></p>
+      <div><p><strong>注意 job 名字里带了 <code>attempt</code>：<code>a1</code>、<code>a2</code>……</strong></p>
+<p>这意味着<strong>每次重试都是一个新名字</strong> —— 不是同名重试。</p>
+<p>为什么？因为<strong>重试意味着「上一次确定没写成功」</strong>，
+那次建 JOB 的痕迹（如果还在）不该跟这次混在一起。
+<mark class="mk-blue">新名字 = 干净的一次。</mark></p>
+<p>而同一次 attempt 内如果崩了重启，名字是一样的 →
+<code>findDorisJob</code> 能查到 → <strong>不会重复下 JOB</strong>。</p>
 </div>
-    </div><h2 id="核心该合的合该拆的拆"><span class="num">03</span>核心：该合的合，该拆的拆</h2>
-<h3 id="画像合并因为查的是同一张表">画像：合并（因为查的是同一张表）</h3>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">「城市是杭州 AND 城市是深圳」
-</code></pre></div>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>阶段</th><th>SQL</th><th>代价</th></tr></thead><tbody><tr><th>不优化</th><td data-label="SQL">两个子查询 <code>UNION ALL</code> + <code>GROUP BY</code> + <code>HAVING count = 2</code></td><td data-label="代价"><span class="tag tone-red">两次扫表</span></td></tr><tr><th>优化后</th><td data-label="SQL"><code>where city = '杭州' and city = '深圳'</code></td><td data-label="代价"><span class="tag tone-green">一次扫表</span></td></tr></tbody></table></div><p><strong>实现</strong>：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">// _mergePortraitEntrepot
-if (isPortraitEntrepotOnly(tree)) {
-    return integratePortraitEntrepot(tree);      // 整棵树全是画像 → 合成一个
-}
-// 否则把同一层的画像挑出来合并成一个节点，非画像的保持原样
-return {
-    logic: tree.logic,
-    conditions: [
-        ..._others,
-        { type: Entrepots.Portrait,
-          condition: { items: _portraits.map(p =&gt; p.condition), logic: tree.logic } }
-    ]
-};
-</code></pre></div>
-<h3 id="人群包拆开因为每个-item-是一次独立查询">人群包：拆开（因为每个 item 是一次独立查询）</h3>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">// _partitionSpecialCondition
-if (tree.type === Entrepots.Crowd) {
-    return CrowdEntrepotClass.partition(tree);
-}
-</code></pre></div>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">// crowd.ts · partitionCrowdTree
-const partitionCrowdTree = (tree, options) =&gt; {
-    if (isConditionNode(tree)) {
-        return { logic: tree.logic,
-                 conditions: tree.items.map((item) =&gt; partitionCrowdTree(item, options)) };
-    } else {
-        return { type: Entrepots.Crowd, condition: tree, options };
-    }
-};
-</code></pre></div>
-<div class="callout tone-violet">
-      <span class="ic">💡</span>
-      <div><p><strong>人群包为什么不能像画像那样合并？</strong></p>
-<p>因为一个人群包条件<strong>本身就是一次独立查询</strong> ——
-<code>select uid from crowds where crowd_id = 'C_888'</code>。</p>
-<p>「C_888 <strong>或</strong> C_999」没法写成一个 <code>where</code> ——
-它们是两行数据，不是两个字段值。</p>
-<p><mark class="mk-blue">所以只能拆成组合结构，交给组合层用 <code>UNION ALL</code> 处理。</mark></p>
-</div>
-    </div><div class="compare-wrap"><table class="compare"><thead><tr><th>条件</th><th>底层是什么</th><th>优化动作</th><th>为什么</th></tr></thead><tbody><tr><th>画像</th><td data-label="底层是什么">同一张表上的<strong>字段值</strong></td><td data-label="优化动作"><span class="tag tone-green">合并</span></td><td data-label="为什么">一个 <code>where</code> 能表达所有组合</td></tr><tr><th>人群包</th><td data-label="底层是什么"><strong>每一行</strong>都是一次独立查询</td><td data-label="优化动作"><span class="tag tone-violet">拆开</span></td><td data-label="为什么"><code>where</code> 表达不了「或」</td></tr></tbody></table></div><div class="callout tone-green quote">
-      <span class="ic">✅</span>
-      <div><p><mark class="mk-blue"><strong>这就是「该合的合、该拆的拆」的判据：</strong></mark></p>
-<p>问一句：<strong>这些条件能不能写进同一个 <code>WHERE</code>？</strong></p>
-<ul>
-<li>能 → 合并（画像）</li>
-<li>不能 → 拆成组合结构（人群包 / rawSql / 关系）</li>
-</ul>
-</div>
-    </div><h2 id="细节三种情况它不优化"><span class="num">04</span>细节：三种情况它不优化</h2>
-<h3 id="①-有自定义计数就整个跳过">① 有「自定义计数」就整个跳过</h3>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">// checkHasCustomCountCombination
-/**
- * 判断是否有 &quot;自定义计数&quot; （unionCount） 的 combines
- * 对于 &quot;自定义计数&quot; 的结构，需要保留 combines 的结构，不进行合并
- * （比如，udp 有个场景：用一批 uid 去 union all 另外一批，
- *   然后找到计数为 1 的 uid，把这批 uid 标记为无效的）
- */
-</code></pre></div>
-<div class="callout tone-amber">
-      <span class="ic">⚠</span>
-      <div><p><strong>「自定义计数」是「至少命中 N 个条件」那种查询</strong> ——
-它<strong>依赖 UNION ALL 的结构</strong>（因为要数「命中了几次」）。</p>
-<p>一旦合并，计数就变了。所以这种情况<strong>整个优化跳过</strong>。</p>
-<p><mark class="mk-blue">宁可慢，不能错。</mark></p>
-</div>
-    </div><h3 id="②-有些-uid-条件不能转成画像">② 有些 uid 条件不能转成画像</h3>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">// uid.ts
-static checkCanBeConvertToPortraitEntrepot(condition) {
-    return !(condition.op === ScopeOp.In &amp;&amp; condition.ignoreNoExist !== true);
-}
-</code></pre></div>
-<div class="callout tone-red">
-      <span class="ic">⚠</span>
-      <div><p><strong>这个条件看着绕，语义很直白：</strong></p>
-<p>「给一批 uid」转成「查画像表 <code>where uid in (...)</code>」有个前提 ——
-<mark class="mk-blue">画像表里得有这些人。</mark></p>
-<ul>
-<li><strong>原始语义<strong>（<code>ignoreNoExist = false</code>）：这批人</strong>都要算上</strong></li>
-<li><strong>转成画像后</strong>：<code>where uid in (...)</code> 查不出不存在的人，<mark class="mk-blue">会静默丢掉</mark></li>
-</ul>
-<p>所以只有 <code>ignoreNoExist = true</code>（不存在就忽略）时才允许转。</p>
-</div>
-    </div><h3 id="③-空树有兜底">③ 空树有兜底</h3>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">// treeSimplifier 最后
-if (!mini) {
-    return createRawSqlEntrepot('select `uid` from user_portrait');
-}
-</code></pre></div>
-<div class="callout tone-violet">
-      <span class="ic">💡</span>
-      <div><p><strong>优化后整棵树可能是空的</strong>（所有节点都被压掉了）。</p>
-<p>这时候不能返回空 —— 那会生成一段没有 <code>WHERE</code> 的 SQL，等于「所有人」。</p>
-<p><mark class="mk-blue">兜底成「查画像表所有人」，语义明确。</mark></p>
-</div>
-    </div><h2 id="细节压缩-消掉只有一个孩子的节点"><span class="num">05</span>细节：压缩 —— 消掉只有一个孩子的节点</h2>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">// core/src/utils.ts · treeMinimizer
-export function treeMinimizer(tree, forkKey) {
-    let _subNodes = tree[forkKey];
-    if (_subNodes) {
-        _subNodes = _subNodes.map(递归).filter(非 null);
+    </div><hr>
+<div class="summary">
+      <h3 id="三句话">三句话</h3>
+      <p><strong>预览是读，快照是写。</strong> 读可以同步等 0.2 秒；写几十万行不能占着 HTTP 连接，
+所以有七个状态、三个 worker、一段 <code>CREATE JOB</code>。</p>
+<p><strong>一条约束定住了所有数字。</strong> <mark class="mk-blue"><code>audience_snapshot</code> 的分区只活 5 分钟</mark>，
+于是重试只能 10/20/40 秒、「结果未知」最多等 60 秒。真实系统里 TTL 是 14 天，
+但形状是一样的：<strong>重试窗口不能超过数据还在的时间。</strong></p>
+<p><strong>「不确定」不重试。</strong> <mark class="mk-blue">确定没写才重试；不确定就去表里数</mark> ——
+数到有行就当成功，数到没行就报失败等人工。宁可慢，不能写重。</p>
 
-        if (_subNodes.length === 0) return null;            // ① 全空 → 删掉这个节点
-        if (_subNodes.length === 1) return _subNodes[0];    // ② 单子节点 → 提上来
-        return { ...tree, [forkKey]: _subNodes };
-    } else {
-        return tree;                                        // 叶子
-    }
-}
-</code></pre></div>
-<p><strong>三条规则</strong>：</p>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>情况</th><th>怎么做</th><th>效果</th></tr></thead><tbody><tr><th>子节点全被删了</th><td data-label="怎么做"><span class="tag tone-red">返回 null（自己也被删）</span></td><td data-label="效果">整枝消失</td></tr><tr><th>只剩一个子节点</th><td data-label="怎么做"><span class="tag tone-green"><strong>返回那个子节点</strong></span></td><td data-label="效果">消掉一层树枝</td></tr><tr><th>还有多个</th><td data-label="怎么做">保留结构，递归处理过的子节点塞回去</td><td data-label="效果">结构不变</td></tr></tbody></table></div><div class="callout tone-violet">
-      <span class="ic">💡</span>
-      <div><p><strong>规则 ② 是关键：<code>AND( X )</code> 等价于 <code>X</code>。</strong></p>
-<p>一个只有单个孩子的组合节点是<strong>纯噪音</strong> ——
-它不改变语义，只让树更深、SQL 多一层括号。</p>
-<p><mark class="mk-blue">递归地做这件事，树会自动收敛到最简形状。</mark></p>
-</div>
-    </div><div class="callout tone-amber">
-      <span class="ic">⚠</span>
-      <div><p><strong>注意它的第二个参数 <code>forkKey</code>。</strong></p>
-<p>树的分支字段有两种名字：<code>items</code>（条件树用）和 <code>conditions</code>（组合树用）。
-所以压缩函数要知道自己在处理哪一种。</p>
-<p>这就是 <code>core/src/tree.ts</code> 里那 8 行的用途：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code>export type TreeForkKey = 'items' | 'conditions';
-</code></pre></div>
-</div>
-    </div><h2 id="自测"><span class="num">06</span>自测</h2>
-<div class="quiz"><details>
-        <summary>架构篇画的主干图，缺了哪一步？</summary>
-        <div class="a"><p>缺了<strong>重写</strong>那一步。完整的主干是三步：
-业务条件 →（treeSimplifier 重写）→ 重写后的条件树 →（adapter 翻译）→
-<code>Rule[]</code> →（buildWhere 编译）→ SQL。
-重写在 <code>crowd/src/combi/utils.ts</code> 里，不在 core。
-这也意味着 <mark class="mk-blue"><code>Rule[]</code> 和原始业务条件不是一一对应的</mark>。</p>
+    </div><div class="quiz"><details>
+        <summary>为什么快照不能像预览那样同步返回？</summary>
+        <div class="a"><p>因为<strong>快照要写入几十万行</strong>。</p>
+<p>预览是一条 <code>SELECT COUNT(*)</code>，0.2 秒就回来，什么都不留。
+快照是一条 <code>INSERT ... SELECT</code>，可能跑几分钟，而且必须保证
+「要么全写、要么不写」。</p>
+<p><mark class="mk-blue">占着 HTTP 连接等几分钟不现实，而且进程一崩结果就丢了。</mark>
+所以改成「先登记一个任务，后台慢慢跑」—— 这就是异步。</p>
 </div>
       </details><details>
-        <summary>优化器为什么要做「合并」和「拆开」两件相反的事？</summary>
-        <div class="a"><p>因为判据是同一个：<strong>这些条件能不能写进同一个 <code>WHERE</code>？</strong></p>
-<ul>
-<li>画像：同一张表上的字段值 → 能 → <strong>合并</strong>（省掉 UNION ALL）</li>
-<li>人群包：每一行都是一次独立查询 → 不能 → <strong>拆成组合结构</strong>
-<mark class="mk-blue">目标只有一个：少一次 UNION ALL。</mark></li>
-</ul>
+        <summary>重试为什么只给 10 / 20 / 40 秒，三次就放弃？</summary>
+        <div class="a"><p>因为 <code>audience_snapshot</code> 的分区<strong>只活 5 分钟</strong>。</p>
+<p>三次退避一共 <code>10 + 20 + 40 = 70 秒</code>，加上每次的检查间隔，
+还在 5 分钟窗口里。<mark class="mk-blue">超过 5 分钟，连「结果到底写没写」都查不到了。</mark></p>
+<p>真实系统里 TTL 是 14 天，所以那边可以放宽 ——
+但约束的形状一样：<strong>重试窗口不能超过数据还在的时间。</strong></p>
 </div>
       </details><details>
-        <summary>人群包为什么不能像画像那样合并？</summary>
-        <div class="a"><p>因为一个人群包条件<strong>本身就是一次独立查询</strong>
-（<code>select uid from crowds where crowd_id = 'C_888'</code>）。
-「C_888 <strong>或</strong> C_999」没法写成一个 <code>where</code> ——
-它们是两行数据，不是两个字段值。</p>
-</div>
-      </details><details>
-        <summary>什么情况下优化器会「整个跳过」？</summary>
-        <div class="a"><p>有「自定义计数」（<code>unionCount</code>）的时候。
-那种查询<strong>依赖 <code>UNION ALL</code> 的结构</strong>（要数「命中了几次」），
-一旦合并计数就变了。
-<mark class="mk-blue">宁可慢，不能错。</mark></p>
-</div>
-      </details><details>
-        <summary>为什么有些 uid 条件不能转成画像查询？</summary>
-        <div class="a"><p>因为「给一批 uid」和「查画像表 <code>where uid in (...)</code>」有个前提差异 ——
-画像表里得有这些人。
-如果有人不在画像表，转过去会<strong>静默丢掉</strong>他们，
-而原始语义（<code>ignoreNoExist = false</code>）是「这批人都要算上」。
-所以只有 <code>ignoreNoExist = true</code> 时才允许转。</p>
-</div>
-      </details><details>
-        <summary><code>treeMinimizer</code> 对「只有一个子节点」的树枝做了什么？</summary>
-        <div class="a"><p><strong>返回那个子节点</strong> —— 也就是把树枝提上来，消掉一层。
-因为 <code>AND( X )</code> 等价于 <code>X</code>，单孩子的组合节点是纯噪音：
-不改变语义，只让树更深、SQL 多一层括号。
-递归地做，树会自动收敛到最简形状。</p>
+        <summary>Doris 那边查不到任务状态了，为什么不直接重试一次？</summary>
+        <div class="a"><p>因为<strong>「未知」可能是「已经写进去了，只是没收到回包」</strong>。</p>
+<p>直接重试会造成<strong>重复数据</strong> —— 同一个 <code>snapshot_id</code> 下同一个人出现两次，
+下游拉名单时人数就对不上。</p>
+<p><mark class="mk-blue">代码的处理是「去查事实」</mark>：等 60 秒，然后直接数
+<code>audience_snapshot</code> 里这个 <code>snapshot_id</code> 有没有行。
+有行 → 当成功；没行 → 报失败<strong>并禁止重试</strong>，等人工介入。</p>
 </div>
       </details></div>
 
     <footer>
-      <span>sql_builder_v2 的条件树重写</span>
-      <span>最后更新 2026-09-26 · 单文件可离线打开</span>
+      <span>快照：一次「冻名单」的完整生命周期</span>
+      <span>最后更新 2026-09-30 · 单文件可离线打开</span>
     </footer>
   </main>
 </div>
