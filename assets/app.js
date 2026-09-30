@@ -949,6 +949,23 @@
 
       const headH = head.offsetHeight;
       const bodyH = body.offsetHeight;
+
+      /* 有 segments 时给顶部留余量。
+         时间段框的标签画在框顶上方 7px —— 而头部（参与者卡片）底边
+         和第一行是**紧挨着的**（间隙 0），不放余量的话标签只能落进
+         头部或第一行，两边都撞。 */
+      let segs = [];
+      try {
+        segs = JSON.parse(root.getAttribute('data-segs') || '[]');
+      } catch (e) {
+        segs = [];
+      }
+      const SEG_PAD = segs.length ? 30 : 0;
+      /* 余量必须加在 **DOM** 上，不能只加进 SVG 的 y ——
+         否则箭头下移了、消息文字没动，两边错位。
+         加在 body 的 padding-top，row.offsetTop 就自带它。 */
+      body.style.paddingTop = SEG_PAD ? SEG_PAD + 'px' : '';
+
       const totalH = headH + 18 + bodyH;
       svg.setAttribute('viewBox', `0 0 ${W} ${totalH}`);
       svg.setAttribute('width', W);
@@ -1056,12 +1073,6 @@
 
       /* 4) 时间段框 —— 按消息序号圈出一段，左上方带标签。
             画在生命线后面，所以放前面。 */
-      let segs = [];
-      try {
-        segs = JSON.parse(root.getAttribute('data-segs') || '[]');
-      } catch (e) {
-        segs = [];
-      }
       const xs = Object.values(cx);
       if (xs.length) {
         const left = Math.min(...xs);
@@ -1069,8 +1080,12 @@
         segs.forEach((g) => {
           const inRange = msgGeom.filter((m) => m.i >= g.from && m.i <= g.to);
           if (!inRange.length) return;
-          const top = Math.min(...inRange.map((m) => m.y)) - 14;
-          const bottom = Math.max(...inRange.map((m) => m.y)) + 14;
+          /* 留白要比「消息行的一半」大 —— .smsg 高 56px，半高 28。
+             以前写 14，框顶和标签都落在第一行**内部**，
+             正好撞上自调用放在 lifeline 左边那个序号。 */
+          const PAD = 30;
+          const top = Math.min(...inRange.map((m) => m.y)) - PAD;
+          const bottom = Math.max(...inRange.map((m) => m.y)) + PAD;
           segBoxes.push(
             `<rect class="segbox" x="${left - 30}" y="${top}" width="${
               right - left + 60
