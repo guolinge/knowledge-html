@@ -181,6 +181,27 @@ caption: packages/core 的组成与数据流
 - `tools/archify.mjs` 会自动抠 SVG + 给 CSS 变量加 `--af-` 前缀（不加会覆盖我们的主题）。
 - 两边都用 `data-theme`，所以深浅色天然同步。
 
+## 07b · memmap —— 地址空间 / 分区图
+
+适合：一段**连续空间**被切成几段，要说清各自的位置、大小和增长方向。
+`flow` 画「谁连谁」，它画「谁在哪一段」。
+
+```memmap
+title: 一个进程的虚拟地址空间
+sub: Linux x86-64
+high: "0x7fff_ffff_ffff"
+low: "0x0000_0000_0000"
+segments:
+  - { label: 内核空间, sub: "用户程序碰不到", tone: muted, size: 1.1, addr: "0xffff_8000..." }
+  - { label: 线程 A 的栈, sub: "pthread 默认 8MB 上限，定死不变", tone: blue, size: 2.2, dir: down, mark: "线程独享" }
+  - { label: 堆, sub: "malloc / new，向上长", tone: violet, size: 3.4, dir: up, mark: "全进程共享" }
+  - { label: 代码段, sub: "只读。多进程可共享同一份物理页", tone: green, size: 1.9, mark: "可共享" }
+note: 分界线只有一条：**栈随线程走，其余全随进程走**。
+```
+
+要点：`segments` 的顺序就是高地址到低地址；`size` 是**高度权重**不是真实字节数；
+==`mark` 那一列最值钱== —— 共享 / 独享这种属性竖着排一列，扫一眼就拿到边界了。
+
 ## 08 · journey —— 每一步的形态快照
 
 适合：一个东西（一行数据、一个请求、一次支付）在流转过程中**长什么样**的变化。

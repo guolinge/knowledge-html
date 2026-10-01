@@ -39,6 +39,13 @@ function slugify(text) {
 
 export { slugify };
 
+/* 积木名的唯一真相源 —— 由 blocksPlugin 注册时回填。
+   踩过：tools/block.mjs 里手抄了一份清单，加了 memmap 之后没同步，
+   于是 `npm run block -- <slug> --list` 把它当成代码块，截图也走错分支。
+   ==同一份东西抄两遍，改的时候一定漏。== */
+let REGISTERED_BLOCKS = [];
+export const blockNames = () => REGISTERED_BLOCKS;
+
 /* ---------- 插件 ---------- */
 
 export function blocksPlugin(md) {
@@ -613,6 +620,70 @@ const KIND_TONE = {
     </figure>`;
   }
 
+  /* ===== 积木 18 · memmap =====
+     地址空间的分层图。
+     ------------------------------------------------------------
+     别的积木都画「谁连谁」「谁包含谁」，这个画的是**长度**：
+     一块内存里被切成了几段、各自多高、朝哪个方向长。
+
+     为什么单做一个：内存布局是「一段连续空间里的几个区间」这种形状，
+     flow / lane-stack / tree 都表达不了「它们其实是同一根轴上的一段」。
+     同类形状还有：磁盘分区、协议头、栈帧、位域的字段切分。
+
+     cfg:
+       title / sub      顶部标题与副标题
+       axis: true       右侧画一根地址轴（用 segment 的 addr）
+       low / high       轴两端的标注
+       segments[]       { label, sub, tone, size, dir, addr, mark }
+                          size  高度权重（默认 1）—— 不是真实字节数
+                          dir   'up' / 'down' —— 画增长方向箭头
+                          mark  右侧的旁注（比如「多个进程共享同一份物理页」）
+       note             底部一句话
+  ------------------------------------------------ */
+  function memmap(body) {
+    const cfg = YAML.parse(body) || {};
+    const segs = cfg.segments || [];
+    if (!segs.length) throw new Error('memmap 积木需要 segments: [...]');
+
+    const rows = segs
+      .map((s) => {
+        const tone = s.tone || 'muted';
+        const size = Math.max(0.4, Number(s.size) || 1);
+        const arrow =
+          s.dir === 'down' ? '<span class="mm-dir mm-down" title="向下增长">↓ 向下长</span>'
+          : s.dir === 'up' ? '<span class="mm-dir mm-up" title="向上增长">↑ 向上长</span>'
+          : '';
+        return `<div class="mm-seg tone-${tone}" style="--mm-size:${size}">
+        <div class="mm-body">
+          <div class="mm-head"><b>${inline(s.label || '')}</b>${arrow}</div>
+          ${s.sub ? `<p class="mm-sub">${inline(s.sub)}</p>` : ''}
+        </div>
+        ${cfg.axis !== false && (s.addr || s.mark)
+          ? `<div class="mm-side">
+              ${s.addr ? `<span class="mm-addr">${esc(s.addr)}</span>` : ''}
+              ${s.mark ? `<span class="mm-mark">${inline(s.mark)}</span>` : ''}
+            </div>`
+          : ''}
+      </div>`;
+      })
+      .join('');
+
+    const ends =
+      cfg.axis !== false && (cfg.high || cfg.low)
+        ? `<div class="mm-ends">
+            ${cfg.high ? `<span class="mm-end">高地址 ${esc(cfg.high)}</span>` : ''}
+            ${cfg.low ? `<span class="mm-end">低地址 ${esc(cfg.low)}</span>` : ''}
+          </div>`
+        : '';
+
+    return `<figure class="memmap" data-memmap>
+      ${cfg.title ? `<figcaption class="mm-title">${inline(cfg.title)}${cfg.sub ? `<span class="mm-cap-sub">${inline(cfg.sub)}</span>` : ''}</figcaption>` : ''}
+      <div class="mm-stack">${rows}</div>
+      ${ends}
+      ${cfg.note ? `<p class="mm-note">${inline(cfg.note)}</p>` : ''}
+    </figure>`;
+  }
+
   /* ---------- 注册 ---------- */
   const RENDERERS = {
     'lane-stack': laneStack,
@@ -630,9 +701,11 @@ const KIND_TONE = {
     checklist,
     quiz,
     demo,
+    memmap,
     summary,
     raw: (body) => body,
   };
+  REGISTERED_BLOCKS = Object.keys(RENDERERS);
 
   /** 已知的代码语言。不在这张表里、也不在 RENDERERS 里的围栏名会被报警告 ——
    *  否则积木名拼错会静默退化成普通代码块，作者根本发现不了。 */

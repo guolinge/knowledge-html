@@ -79,7 +79,108 @@ M 的职责就是「把 G 跑起来」。</p>
 M 必须先绑到一个 P 上，才能从它的队列里取 G 执行。</p>
 </div>
         </div></div>
-    </div><p>为什么需要 P 这个东西？为什么不让 M 直接从全局队列取 G？</p>
+    </div><p>把这三样摆到一起，就是 GMP 的全貌：</p>
+<div class="flowd has-grid has-groups" data-flow data-edges="[{&quot;from&quot;:&quot;gfq&quot;,&quot;to&quot;:&quot;p0&quot;,&quot;label&quot;:&quot;本地空了才往下要&quot;},{&quot;from&quot;:&quot;p0&quot;,&quot;to&quot;:&quot;m0&quot;,&quot;label&quot;:&quot;绑定&quot;},{&quot;from&quot;:&quot;p1&quot;,&quot;to&quot;:&quot;m1&quot;},{&quot;from&quot;:&quot;p2&quot;,&quot;to&quot;:&quot;m2&quot;},{&quot;from&quot;:&quot;m0&quot;,&quot;to&quot;:&quot;c0&quot;,&quot;label&quot;:&quot;真线程才谈得上并行&quot;,&quot;labelDx&quot;:78},{&quot;from&quot;:&quot;m1&quot;,&quot;to&quot;:&quot;c1&quot;},{&quot;from&quot;:&quot;m2&quot;,&quot;to&quot;:&quot;c2&quot;}]">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"><div class="fgroup tone-violet" data-group-box="gr">
+          <span class="fgroup-label">Go 运行时自己管</span>
+        </div><div class="fgroup tone-muted" data-group-box="os">
+          <span class="fgroup-label">操作系统管</span>
+        </div></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-muted" data-id="gfq" data-group="gr">
+              
+              
+              <b>全局队列 GFQ</b>
+              <small>P 本地都空了才来这拿。要加锁，所以越少碰越好</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="p0" data-group="gr">
+              
+              
+              <b>P0</b>
+              <small>runnext 1 格 · LRQ 256 个 G · mcache</small>
+            </div><div class="fnode tone-violet" data-id="p1" data-group="gr">
+              
+              
+              <b>P1</b>
+              <small>结构一样。GOMAXPROCS 是几，就有几个 P</small>
+            </div><div class="fnode tone-violet" data-id="p2" data-group="gr">
+              
+              
+              <b>P2</b>
+              <small>结构一样</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="m0" data-group="gr">
+              
+              
+              <b>M0</b>
+              <small>一条内核线程，必须先绑上一个 P 才能取 G</small>
+            </div><div class="fnode tone-green" data-id="m1" data-group="gr">
+              
+              
+              <b>M1</b>
+              <small>同上</small>
+            </div><div class="fnode tone-green" data-id="m2" data-group="gr">
+              
+              
+              <b>M2</b>
+              <small>同上</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-muted" data-id="c0" data-group="os">
+              
+              
+              <b>核 0</b>
+              <small>谁落在哪块核上，由内核调度器定</small>
+            </div><div class="fnode tone-muted" data-id="c1" data-group="os">
+              
+              
+              <b>核 1</b>
+              <small>同上</small>
+            </div><div class="fnode tone-muted" data-id="c2" data-group="os">
+              
+              
+              <b>核 2</b>
+              <small>同上</small>
+            </div></div></div>
+      
+    </div><p>三层的数字关系值得记住：</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>有几个</th>
+<th>谁决定</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>P</td>
+<td><code>GOMAXPROCS</code>，默认等于 CPU 核数</td>
+<td>你（或环境变量）</td>
+</tr>
+<tr>
+<td>M</td>
+<td><strong>可能远多于 P</strong> —— 一旦有 M 卡在系统调用里，运行时会再开一个</td>
+<td>Go 运行时按需创建</td>
+</tr>
+<tr>
+<td>同时在跑 Go 代码的 M</td>
+<td>最多 = P 的个数</td>
+<td>因为每个 M 都要先绑上一个 P</td>
+</tr>
+<tr>
+<td>G</td>
+<td>想开多少开多少，挂在自己的 P 上排队</td>
+<td>你的代码</td>
+</tr>
+</tbody>
+</table>
+<p><mark class="mk-blue">「同时最多几个 M 在跑 Go 代码」由 P 的个数卡死，而 M 的总数可以更多。</mark>
+这是理解后面「阻塞时会发生什么」的钥匙。</p>
+<p>为什么需要 P 这个东西？为什么不让 M 直接从全局队列取 G？</p>
 <p>因为<strong>无锁</strong>。多个 M 抢一条全局队列要加锁，M 越多锁越烫。有了 P，每个 M 平时只碰自己那份队列，不需要抢。第 ⑥ 篇会细讲这件事的来龙去脉。</p>
 <p>那 mcache 为什么也挂在 P 上？因为小对象的内存分配走 P 本地缓存，全程无锁。<mark class="mk-blue">所以没有 P，连分配内存都没有一条无锁通道。</mark> P 不只是队列，它是「无锁执行 Go 代码所需的全部上下文」。</p>
 <hr>

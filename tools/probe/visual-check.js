@@ -258,6 +258,72 @@ setTimeout(function () {
     });
   });
 
+  // ⑥ 文字压文字 —— 全块通用
+  /*
+     用户原话：「线可能你判断线的重叠是比较有难度的，但判断文字重叠应该比较轻松」
+     以及：「尽量不要出现文字被挡到的情况」。
+
+     ==这里只查**文字 vs 文字**。== 文字被线/边框穿过不查 —— 那个要判断
+     「这条线是不是本来就应该在那」，机器判不了，而且排查成本高于收益。
+
+     为什么用 Range 取矩形，而不是拿父元素的 getBoundingClientRect：
+       · 父元素带 padding，盒子比字大一圈，会把「挨着」误判成「压着」
+       · 一段话跨行时，父盒子是一整个大方块，实际墨迹是好几条
+       Range 给的是**每个文本节点自己的墨迹矩形**，跨行会返回多个，正好。
+
+     踩过的真实漏检：flow 的群组标签和边标签叠在一起（字都在，只是读不通），
+     而当时的检查只覆盖了 flow 的 `text.felabel`，其它积木一概没查。
+  */
+  (function () {
+    var scopes = CONTAINERS.concat(['.memmap']);
+    var rects = [];
+    scopes.forEach(function (sel) {
+      document.querySelectorAll(sel).forEach(function (box) {
+        /* archify 的图自己带校验器（会量文字宽度、查标签碰撞），
+           而且 SVG 里有大量装饰性文字（图例、刻度），再查一遍全是噪声。 */
+        if (box.closest('.archfig')) return;
+        var walker = document.createTreeWalker(box, NodeFilter.SHOW_TEXT, null);
+        var n;
+        while ((n = walker.nextNode())) {
+          if (!n.nodeValue || !n.nodeValue.trim()) continue;
+          var el = n.parentElement;
+          if (!el) continue;
+          var cs = window.getComputedStyle(el);
+          if (cs.visibility === 'hidden' || cs.display === 'none' || cs.opacity === '0') continue;
+          var rg = document.createRange();
+          rg.selectNodeContents(n);
+          var rs = rg.getClientRects();
+          for (var i = 0; i < rs.length; i++) {
+            var rr = rs[i];
+            if (rr.width < 2 || rr.height < 2) continue;
+            rects.push({ r: rr, el: el, t: n.nodeValue.trim().slice(0, 26) });
+          }
+        }
+      });
+    });
+
+    var seen = {};
+    for (var a = 0; a < rects.length; a++) {
+      for (var b = a + 1; b < rects.length; b++) {
+        var A = rects[a], B = rects[b];
+        if (A.el === B.el || A.el.contains(B.el) || B.el.contains(A.el)) continue;
+        var ox = Math.min(A.r.right, B.r.right) - Math.max(A.r.left, B.r.left);
+        var oy = Math.min(A.r.bottom, B.r.bottom) - Math.max(A.r.top, B.r.top);
+        if (ox <= TOL || oy <= TOL) continue;
+        var key = A.t + '\u0000' + B.t;
+        if (seen[key]) continue;
+        seen[key] = 1;
+        problems.push(
+          '文字压文字：「' + A.t + '」↔「' + B.t + '」（重叠 ' +
+            Math.round(Math.min(ox, oy)) + 'px）' + NL +
+            '        → ' + (A.el.className || A.el.tagName) + ' 与 ' +
+            (B.el.className || B.el.tagName) + ' 碰上了。' +
+            '最常见的原因是标签比它所在的那条缝还宽',
+        );
+      }
+    }
+  })();
+
   // ④ 整页横向滚动
   var de = document.documentElement;
   if (de.scrollWidth > window.innerWidth + 1) {

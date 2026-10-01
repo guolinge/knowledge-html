@@ -37,19 +37,18 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import MarkdownIt from 'markdown-it';
-import { blocksPlugin, addAnchors, lintFences, lintLinkifyStars } from './lib/blocks.mjs';
+import { blocksPlugin, blockNames, addAnchors, lintFences, lintLinkifyStars } from './lib/blocks.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CHROME =
   process.env.CHROME_PATH || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 
-/* 哪些围栏语言是「积木」—— 其余当普通代码块。
-   和 SKILL.md 的积木清单保持一致（skill-check 会核对两边）。 */
-const BLOCK_LANGS = [
-  'lane-stack', 'journey', 'compare', 'cards', 'timeline', 'flow', 'seq',
-  'matrix', 'tree', 'spec', 'callout', 'checklist', 'quiz', 'demo', 'arch',
-  'summary', 'raw',
-];
+/* 先把插件跑一遍 —— 积木名从渲染器的注册表拿，注册发生在 use() 的那一刻。
+   ==原来这里手抄了一份清单，加了 memmap 之后没同步：==
+   `npm run check` 是绿的，但 block 把它当成代码块，--list 的编号和截图全错。
+   同一份东西抄两遍，改的时候一定漏。 */
+const md = new MarkdownIt({ html: true, linkify: true }).use(blocksPlugin);
+const BLOCK_LANGS = blockNames();
 
 const [, , slug, nthArg] = process.argv;
 const OPEN = process.argv.includes('--open');
@@ -153,7 +152,6 @@ if (target.unclosed) {
 }
 
 /* ---------- ② 渲染 ---------- */
-const md = new MarkdownIt({ html: true, linkify: true }).use(blocksPlugin);
 const env = { file: `notes/${slug}/note.md`, warnings: [] };
 
 let body;

@@ -1,11 +1,55 @@
 ## 01 · 一条执行流由什么构成
 
-进程和线程的区别，卡在「围栏画在哪里」这一件事上。
+进程和线程的区别，卡在「围栏画在哪里」这一件事上。先把一个进程的地址空间摊开看：
 
-```arch
-svg: go-thread-layout
-caption: 隔离发生在进程层（页表围起来的那一圈），执行流是线程。栈随流走，堆随容器走。
+```memmap
+title: 一个进程的虚拟地址空间里有什么
+sub: Linux x86-64
+high: "0x7fff_ffff_ffff"
+low: "0x0000_0000_0000"
+segments:
+  - { label: 内核空间, sub: "用户程序碰不到；每个进程都映射同一份内核", tone: muted, size: 1.1, addr: "0xffff_8000..." }
+  - { label: 线程 A 的栈, sub: "pthread 默认 8MB 上限、定死不变；Go 的 goroutine 是 2KB 起步、用时自己长", tone: blue, size: 2.2, dir: down, mark: "线程独享" }
+  - { label: 线程 B 的栈, sub: "各自独立。越界就撞上护栏页，直接崩", tone: blue, size: 2.2, dir: down, mark: "线程独享" }
+  - { label: 主线程的栈, sub: "进程一启动就有的那一个", tone: blue, size: 2.2, dir: down, addr: "0x7fff_ffff_ffff", mark: "线程独享" }
+  - { label: mmap 区, sub: "共享库、文件映射。Go 的 goroutine 栈也从这里要内存", tone: amber, size: 3, mark: "全进程共享" }
+  - { label: 堆, sub: "malloc / new，向上长。谁都能申请，没人独占", tone: violet, size: 3.4, dir: up, mark: "全进程共享" }
+  - { label: BSS, sub: "未初始化的全局变量", tone: muted, size: 1.5, mark: "全进程共享" }
+  - { label: 数据段, sub: "已初始化的全局变量", tone: muted, size: 1.5, mark: "全进程共享" }
+  - { label: 代码段, sub: "只读。同一份程序跑多个进程时，物理内存里只有一份", tone: green, size: 1.9, mark: "可共享" }
+note: 分界线只有一条：**栈随线程走，其余全随进程走**。页表把这一整圈围起来，围栏外面碰不到 —— 那是别的进程的地盘。
 ```
+
+==只看右边那一列就够了：标着「线程独享」的只有三块栈。== 代码段、数据段、堆、mmap 区全是整个进程共用的。
+
+### 文件描述符不在上面这张图里
+
+这一点很容易搞错。fd 是**一个整数**，但它并不是地址空间里的某个地址：
+
+```flow
+grid: true
+groups:
+  - { id: user, label: "用户态", tone: blue }
+  - { id: kern, label: "内核态", tone: violet }
+nodes:
+  - { id: app,  label: "fd = 3", sub: "程序里唯一拿得到的把手", row: 0, tone: blue, group: user }
+  - { id: arr,  label: "文件描述符表", sub: "一个数组，每个进程一份（files_struct）。它不在你的地址空间里", row: 1, tone: violet, group: kern }
+  - { id: std,  label: "数组[0][1][2]", sub: "标准输入 / 输出 / 错误", row: 2, tone: muted, group: kern }
+  - { id: mine, label: "数组[3]", sub: "你刚 open 出来的那一格", row: 2, tone: green, group: kern }
+  - { id: file, label: "打开文件表项", sub: "读偏移 + 打开标志，一次 open 一份", row: 3, tone: amber, group: kern }
+  - { id: ino,  label: "inode", sub: "权限 · 大小 · 数据块在哪", row: 4, tone: violet, group: kern }
+edges:
+  - { from: app,  to: arr,  label: "3 就是这个数组的下标" }
+  - { from: arr,  to: std }
+  - { from: arr,  to: mine, label: "第 3 格" }
+  - { from: std,  to: file, dashed: true }
+  - { from: mine, to: file, label: "每一格都是一个指针" }
+  - { from: file, to: ino,  label: "多个表项可以指向同一个 inode" }
+```
+
+所以「线程共享文件描述符」这句话的准确含义是：**同一个进程里的线程共用一份 `files_struct`**，不是「栈旁边有一块放 fd 的地方」。
+
+---
 
 那一条执行流本身，拆开来只有三样东西。这三样加起来，就是「暂停一条流时要记下的东西」：
 

@@ -54,6 +54,7 @@
       <a href="#它的硬边界踩过" class="sub">它的硬边界（踩过）</a>
       <a href="#它自带聚焦-关系追踪" class="sub">它自带「聚焦 + 关系追踪」</a>
       <a href="#实现要点" class="sub">实现要点</a>
+      <a href="#15b-memmap-地址空间-分区图">15b. memmap —— 地址空间 / 分区图</a>
       <a href="#16-summary-raw">16. summary / raw</a>
       <a href="#一句话总结" class="sub">一句话总结</a>
       <a href="#yaml-常见坑">YAML 常见坑</a>
@@ -531,8 +532,8 @@
 <td>连线配色</td>
 </tr>
 <tr>
-<td><code>edges[].both</code></td>
-<td>双向箭头</td>
+<td><code>edges[].labelDx</code> / <code>labelDy</code></td>
+<td><strong>手动把边标签挪开</strong>。群组框的标签画在框的左上角，而边标签默认落在那条缝的水平中点 —— 缝一窄两个标签就叠在一起。工具算不出「那里已经有群组标签了」，所以留了这条手动通道</td>
 </tr>
 <tr>
 <td><code>edges[].self</code></td>
@@ -1792,6 +1793,110 @@ node tools/archify.mjs archify/&lt;名字&gt;.json &lt;名字&gt;
 <li>找不到 SVG 时<strong>会直接报错并告诉你怎么生成</strong>，不会静默画空白。</li>
 </ul>
 <hr>
+<h2 id="15b-memmap-地址空间-分区图">15b. <code>memmap</code> —— 地址空间 / 分区图</h2>
+<p><strong>什么时候用<strong>：一段</strong>连续空间</strong>被切成了几段，你要说清各自的位置、大小和增长方向。</p>
+<blockquote>
+<p><code>flow</code> 画「谁连谁」，<code>memmap</code> 画「谁在哪一段」。区别在于它有一根<strong>隐式的地址轴</strong>。</p>
+</blockquote>
+<figure class="memmap" data-memmap>
+      <figcaption class="mm-title">一个进程的虚拟地址空间<span class="mm-cap-sub">Linux x86-64</span></figcaption>
+      <div class="mm-stack"><div class="mm-seg tone-muted" style="--mm-size:1.1">
+        <div class="mm-body">
+          <div class="mm-head"><b>内核空间</b></div>
+          <p class="mm-sub">用户程序碰不到</p>
+        </div>
+        <div class="mm-side">
+              <span class="mm-addr">0xffff_8000...</span>
+              
+            </div>
+      </div><div class="mm-seg tone-blue" style="--mm-size:2.2">
+        <div class="mm-body">
+          <div class="mm-head"><b>线程 A 的栈</b><span class="mm-dir mm-down" title="向下增长">↓ 向下长</span></div>
+          <p class="mm-sub">pthread 默认 8MB 上限，定死不变</p>
+        </div>
+        <div class="mm-side">
+              
+              <span class="mm-mark">线程独享</span>
+            </div>
+      </div><div class="mm-seg tone-violet" style="--mm-size:3.4">
+        <div class="mm-body">
+          <div class="mm-head"><b>堆</b><span class="mm-dir mm-up" title="向上增长">↑ 向上长</span></div>
+          <p class="mm-sub">malloc / new，向上长</p>
+        </div>
+        <div class="mm-side">
+              
+              <span class="mm-mark">全进程共享</span>
+            </div>
+      </div><div class="mm-seg tone-green" style="--mm-size:1.9">
+        <div class="mm-body">
+          <div class="mm-head"><b>代码段</b></div>
+          <p class="mm-sub">只读。多进程可共享同一份物理页</p>
+        </div>
+        <div class="mm-side">
+              
+              <span class="mm-mark">可共享</span>
+            </div>
+      </div></div>
+      <div class="mm-ends">
+            <span class="mm-end">高地址 0x7fff_ffff_ffff</span>
+            <span class="mm-end">低地址 0x0000_0000_0000</span>
+          </div>
+      <p class="mm-note">分界线只有一条：<strong>栈随线程走，其余全随进程走</strong>。</p>
+    </figure><table>
+<thead>
+<tr>
+<th>键</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>title</code> / <code>sub</code></td>
+<td>顶部标题与副标题（<code>sub</code> 渲染成等宽小字）</td>
+</tr>
+<tr>
+<td><code>high</code> / <code>low</code></td>
+<td>轴两端的标注，画在底部</td>
+</tr>
+<tr>
+<td><code>segments[]</code></td>
+<td>从上到下就是高地址到低地址（<strong>顺序有意义，别乱排</strong>）</td>
+</tr>
+<tr>
+<td><code>segments[].label</code> / <code>sub</code></td>
+<td>主文字 / 说明。<code>sub</code> 是放机制和数字的地方</td>
+</tr>
+<tr>
+<td><code>segments[].size</code></td>
+<td><strong>高度权重</strong>（默认 1），不是真实字节数</td>
+</tr>
+<tr>
+<td><code>segments[].dir</code></td>
+<td><code>up</code> / <code>down</code>，画一个增长方向标记</td>
+</tr>
+<tr>
+<td><code>segments[].addr</code></td>
+<td>右侧的地址标注</td>
+</tr>
+<tr>
+<td><code>segments[].mark</code></td>
+<td>右侧的旁注，比如「线程独享」/「可共享」</td>
+</tr>
+<tr>
+<td><code>note</code></td>
+<td>底部一句话</td>
+</tr>
+</tbody>
+</table>
+<p><strong>要点</strong>：</p>
+<ul>
+<li><strong><code>mark</code> 那一列是这张图最值钱的地方。</strong> 共享 / 独享、可读 / 可写这类属性，
+竖着排一列，读者扫一眼就拿到了边界 —— 散在正文里要读三段。</li>
+<li><code>size</code> 是权重不是比例。真实比例会让大部分段小到看不见 ——
+<mark class="mk-blue">地址空间里 99% 是空的，按真实比例画出来就是一张空白</mark>。</li>
+<li>地址用 <code>0x</code> 前缀 + 等宽字体渲染，所以写 <code>0x7fff_ffff_ffff</code> 这种带下划线的形式最易读。</li>
+</ul>
+<p><strong>同类形状都能用</strong>：磁盘分区、ELF 文件布局、TCP 头部字段、位域切分、栈帧。</p>
 <h2 id="16-summary-raw">16. <code>summary</code> / <code>raw</code></h2>
 <div class="summary">
       <h3 id="一句话总结">一句话总结</h3>

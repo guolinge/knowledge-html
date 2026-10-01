@@ -43,6 +43,7 @@ const CONTAINERS = [
   '.keyby-viz',   // keyby-viz（raw 写的）
   '.flarch',      // flarch（raw 写的）
   '.demo',        // demo
+  '.memmap',      // memmap（地址空间 / 分区图）
 ];
 
 /* ---------- 注入浏览器的探针 ---------- */

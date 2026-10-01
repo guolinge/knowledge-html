@@ -28,6 +28,7 @@
       <p class="toc-title">目录</p>
       <a href="../../index.html" class="sub">← 全部笔记</a>
       <a href="#一条执行流由什么构成">一条执行流由什么构成</a>
+      <a href="#文件描述符不在上面这张图里" class="sub">文件描述符不在上面这张图里</a>
       <a href="#一次切换是一趟进出内核的旅程">一次切换，是一趟进出内核的旅程</a>
       <a href="#一次切换并不算慢">一次切换并不算慢</a>
       <a href="#第二条重量线栈">第二条重量线：栈</a>
@@ -49,143 +50,148 @@
     <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">Go</span> <span class="tag tone-muted">协程</span> <span class="tag tone-muted">线程</span> <span class="tag tone-muted">上下文切换</span></span></div>
 
 <h2 id="一条执行流由什么构成"><span class="num">01</span>一条执行流由什么构成</h2>
-<p>进程和线程的区别，卡在「围栏画在哪里」这一件事上。</p>
-<figure class="archfig" data-arch>
-      <svg viewBox="0 0 770 668" role="img" aria-labelledby="archify-diagram-title archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
-        <title id="archify-diagram-title">一条执行流由什么构成：栈随流走，堆随容器走</title>
-        <desc id="archify-diagram-description">隔离发生在进程层（页表），执行流是线程，共享也发生在进程层</desc>
-        <!-- Definitions -->
+<p>进程和线程的区别，卡在「围栏画在哪里」这一件事上。先把一个进程的地址空间摊开看：</p>
+<figure class="memmap" data-memmap>
+      <figcaption class="mm-title">一个进程的虚拟地址空间里有什么<span class="mm-cap-sub">Linux x86-64</span></figcaption>
+      <div class="mm-stack"><div class="mm-seg tone-muted" style="--mm-size:1.1">
+        <div class="mm-body">
+          <div class="mm-head"><b>内核空间</b></div>
+          <p class="mm-sub">用户程序碰不到；每个进程都映射同一份内核</p>
+        </div>
+        <div class="mm-side">
+              <span class="mm-addr">0xffff_8000...</span>
+              
+            </div>
+      </div><div class="mm-seg tone-blue" style="--mm-size:2.2">
+        <div class="mm-body">
+          <div class="mm-head"><b>线程 A 的栈</b><span class="mm-dir mm-down" title="向下增长">↓ 向下长</span></div>
+          <p class="mm-sub">pthread 默认 8MB 上限、定死不变；Go 的 goroutine 是 2KB 起步、用时自己长</p>
+        </div>
+        <div class="mm-side">
+              
+              <span class="mm-mark">线程独享</span>
+            </div>
+      </div><div class="mm-seg tone-blue" style="--mm-size:2.2">
+        <div class="mm-body">
+          <div class="mm-head"><b>线程 B 的栈</b><span class="mm-dir mm-down" title="向下增长">↓ 向下长</span></div>
+          <p class="mm-sub">各自独立。越界就撞上护栏页，直接崩</p>
+        </div>
+        <div class="mm-side">
+              
+              <span class="mm-mark">线程独享</span>
+            </div>
+      </div><div class="mm-seg tone-blue" style="--mm-size:2.2">
+        <div class="mm-body">
+          <div class="mm-head"><b>主线程的栈</b><span class="mm-dir mm-down" title="向下增长">↓ 向下长</span></div>
+          <p class="mm-sub">进程一启动就有的那一个</p>
+        </div>
+        <div class="mm-side">
+              <span class="mm-addr">0x7fff_ffff_ffff</span>
+              <span class="mm-mark">线程独享</span>
+            </div>
+      </div><div class="mm-seg tone-amber" style="--mm-size:3">
+        <div class="mm-body">
+          <div class="mm-head"><b>mmap 区</b></div>
+          <p class="mm-sub">共享库、文件映射。Go 的 goroutine 栈也从这里要内存</p>
+        </div>
+        <div class="mm-side">
+              
+              <span class="mm-mark">全进程共享</span>
+            </div>
+      </div><div class="mm-seg tone-violet" style="--mm-size:3.4">
+        <div class="mm-body">
+          <div class="mm-head"><b>堆</b><span class="mm-dir mm-up" title="向上增长">↑ 向上长</span></div>
+          <p class="mm-sub">malloc / new，向上长。谁都能申请，没人独占</p>
+        </div>
+        <div class="mm-side">
+              
+              <span class="mm-mark">全进程共享</span>
+            </div>
+      </div><div class="mm-seg tone-muted" style="--mm-size:1.5">
+        <div class="mm-body">
+          <div class="mm-head"><b>BSS</b></div>
+          <p class="mm-sub">未初始化的全局变量</p>
+        </div>
+        <div class="mm-side">
+              
+              <span class="mm-mark">全进程共享</span>
+            </div>
+      </div><div class="mm-seg tone-muted" style="--mm-size:1.5">
+        <div class="mm-body">
+          <div class="mm-head"><b>数据段</b></div>
+          <p class="mm-sub">已初始化的全局变量</p>
+        </div>
+        <div class="mm-side">
+              
+              <span class="mm-mark">全进程共享</span>
+            </div>
+      </div><div class="mm-seg tone-green" style="--mm-size:1.9">
+        <div class="mm-body">
+          <div class="mm-head"><b>代码段</b></div>
+          <p class="mm-sub">只读。同一份程序跑多个进程时，物理内存里只有一份</p>
+        </div>
+        <div class="mm-side">
+              
+              <span class="mm-mark">可共享</span>
+            </div>
+      </div></div>
+      <div class="mm-ends">
+            <span class="mm-end">高地址 0x7fff_ffff_ffff</span>
+            <span class="mm-end">低地址 0x0000_0000_0000</span>
+          </div>
+      <p class="mm-note">分界线只有一条：<strong>栈随线程走，其余全随进程走</strong>。页表把这一整圈围起来，围栏外面碰不到 —— 那是别的进程的地盘。</p>
+    </figure><p><mark class="mk-blue">只看右边那一列就够了：标着「线程独享」的只有三块栈。</mark> 代码段、数据段、堆、mmap 区全是整个进程共用的。</p>
+<h3 id="文件描述符不在上面这张图里">文件描述符不在上面这张图里</h3>
+<p>这一点很容易搞错。fd 是<strong>一个整数</strong>，但它并不是地址空间里的某个地址：</p>
+<div class="flowd has-grid has-groups" data-flow data-edges="[{&quot;from&quot;:&quot;app&quot;,&quot;to&quot;:&quot;arr&quot;,&quot;label&quot;:&quot;3 就是这个数组的下标&quot;},{&quot;from&quot;:&quot;arr&quot;,&quot;to&quot;:&quot;std&quot;},{&quot;from&quot;:&quot;arr&quot;,&quot;to&quot;:&quot;mine&quot;,&quot;label&quot;:&quot;第 3 格&quot;},{&quot;from&quot;:&quot;std&quot;,&quot;to&quot;:&quot;file&quot;,&quot;dashed&quot;:true},{&quot;from&quot;:&quot;mine&quot;,&quot;to&quot;:&quot;file&quot;,&quot;label&quot;:&quot;每一格都是一个指针&quot;},{&quot;from&quot;:&quot;file&quot;,&quot;to&quot;:&quot;ino&quot;,&quot;label&quot;:&quot;多个表项可以指向同一个 inode&quot;}]">
+      <svg class="flowd-svg" aria-hidden="true">
         <defs>
-          <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
-            <polygon points="0 0, 10 3.5, 0 7" class="m-default" />
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
           </marker>
-          <marker id="arrowhead-emphasis" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
-            <polygon points="0 0, 10 3.5, 0 7" class="m-emphasis" />
-          </marker>
-          <marker id="arrowhead-security" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
-            <polygon points="0 0, 10 3.5, 0 7" class="m-security" />
-          </marker>
-          <marker id="arrowhead-dashed" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
-            <polygon points="0 0, 10 3.5, 0 7" class="m-dashed" />
-          </marker>
-          <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
-            <path d="M 40 0 L 0 0 0 40" class="c-grid" stroke-width="0.5"/>
-          </pattern>
         </defs>
-
-        <!-- Background Grid -->
-        <rect width="100%" height="100%" fill="url(#grid)" />
-
-        <!-- Boundaries (behind everything) -->
-        <rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="0" x="30" y="74" width="700" height="250" rx="12" class="c-region" stroke-width="1"/>
-        <text x="38" y="92" class="t-cloud" font-size="9" font-weight="600">进程 A —— 页表把这一圈围起来，外面碰不到里面</text>
-
-        <rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="1" x="266" y="350" width="464" height="250" rx="12" class="c-region" stroke-width="1"/>
-        <text x="274" y="368" class="t-cloud" font-size="9" font-weight="600">进程 B —— 同样的结构，但和 A 完全隔离</text>
-
-        <!-- Connection paths (before components for correct z-order) -->
-        <path data-edge-from="sharedA" data-edge-to="ta2" data-edge-label="栈是执行流之间唯一的边界" data-edge-key="0" data-edge-id="e1" data-composition-points="411,166;411,204;380,204;380,242" d="M 411 166 L 411 196 Q 411 204 403 204 L 388 204 Q 380 204 380 212 L 380 242" class="a-dashed" stroke-width="1.5" marker-end="url(#arrowhead-dashed)"/>
-        <path data-edge-from="ta2" data-edge-to="sharedB" data-edge-label="两个进程之间只有显式 IPC 通道" data-edge-key="1" data-edge-id="e2" data-composition-points="380,304;380,342;411,342;411,380" d="M 380 304 L 380 334 Q 380 342 388 342 L 403 342 Q 411 342 411 350 L 411 380" class="a-security" stroke-width="1.5" marker-end="url(#arrowhead-security)"/>
-
-        <!-- Components -->
-        <g id="node-sharedA" data-node-id="sharedA" data-node-label="共享资产" tabindex="0" role="button" aria-label="Focus 共享资产, 代码段 · 堆 · 文件描述符表, 进程 A —— 页表把这一圈围起来，外面碰不到里面" aria-pressed="false" data-node-kind="database" data-node-sublabel="代码段 · 堆 · 文件描述符表" data-node-tag="线程共用" data-node-context="进程 A —— 页表把这一圈围起来，外面碰不到里面">
-          <title>共享资产 · 代码段 · 堆 · 文件描述符表 · 进程 A —— 页表把这一圈围起来，外面碰不到里面 · 线程共用</title>
-          <rect x="296" y="104" width="230" height="62" rx="6" class="c-mask"/>
-          <rect x="296" y="104" width="230" height="62" rx="6" class="c-database" stroke-width="1.5"/>
-          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(302 110) scale(0.6875)">
-            <ellipse cx="8" cy="4" rx="5" ry="2"/>
-            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
-          </g>
-          <text data-detail-anchor x="411" y="133" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">共享资产</text>
-        <text data-detail="context" x="411" y="149" class="t-muted" font-size="9" text-anchor="middle">代码段 · 堆 · 文件描述符表</text>
-        <text data-detail="fine" x="411" y="158" class="t-database" font-size="7" text-anchor="middle">线程共用</text>
-        </g>
-
-        <g id="node-ta1" data-node-id="ta1" data-node-label="线程 A1" tabindex="0" role="button" aria-label="Focus 线程 A1, PC + 寄存器 + 私有栈, 进程 A —— 页表把这一圈围起来，外面碰不到里面" aria-pressed="false" data-node-kind="backend" data-node-sublabel="PC + 寄存器 + 私有栈" data-node-context="进程 A —— 页表把这一圈围起来，外面碰不到里面">
-          <title>线程 A1 · PC + 寄存器 + 私有栈 · 进程 A —— 页表把这一圈围起来，外面碰不到里面</title>
-          <rect x="60" y="242" width="168" height="62" rx="6" class="c-mask"/>
-          <rect x="60" y="242" width="168" height="62" rx="6" class="c-backend" stroke-width="1.5"/>
-          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(66 248) scale(0.6875)">
-            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
-          </g>
-          <text data-detail-anchor x="144" y="271" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">线程 A1</text>
-        <text data-detail="context" x="144" y="287" class="t-muted" font-size="9" text-anchor="middle">PC + 寄存器 + 私有栈</text>
-        </g>
-
-        <g id="node-ta2" data-node-id="ta2" data-node-label="线程 A2" tabindex="0" role="button" aria-label="Focus 线程 A2, PC + 寄存器 + 私有栈, 进程 A —— 页表把这一圈围起来，外面碰不到里面" aria-pressed="false" data-node-kind="backend" data-node-sublabel="PC + 寄存器 + 私有栈" data-node-context="进程 A —— 页表把这一圈围起来，外面碰不到里面">
-          <title>线程 A2 · PC + 寄存器 + 私有栈 · 进程 A —— 页表把这一圈围起来，外面碰不到里面</title>
-          <rect x="296" y="242" width="168" height="62" rx="6" class="c-mask"/>
-          <rect x="296" y="242" width="168" height="62" rx="6" class="c-backend" stroke-width="1.5"/>
-          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(302 248) scale(0.6875)">
-            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
-          </g>
-          <text data-detail-anchor x="380" y="271" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">线程 A2</text>
-        <text data-detail="context" x="380" y="287" class="t-muted" font-size="9" text-anchor="middle">PC + 寄存器 + 私有栈</text>
-        </g>
-
-        <g id="node-ta3" data-node-id="ta3" data-node-label="线程 A3" tabindex="0" role="button" aria-label="Focus 线程 A3, PC + 寄存器 + 私有栈, 进程 A —— 页表把这一圈围起来，外面碰不到里面" aria-pressed="false" data-node-kind="backend" data-node-sublabel="PC + 寄存器 + 私有栈" data-node-context="进程 A —— 页表把这一圈围起来，外面碰不到里面">
-          <title>线程 A3 · PC + 寄存器 + 私有栈 · 进程 A —— 页表把这一圈围起来，外面碰不到里面</title>
-          <rect x="532" y="242" width="168" height="62" rx="6" class="c-mask"/>
-          <rect x="532" y="242" width="168" height="62" rx="6" class="c-backend" stroke-width="1.5"/>
-          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(538 248) scale(0.6875)">
-            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
-          </g>
-          <text data-detail-anchor x="616" y="271" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">线程 A3</text>
-        <text data-detail="context" x="616" y="287" class="t-muted" font-size="9" text-anchor="middle">PC + 寄存器 + 私有栈</text>
-        </g>
-
-        <g id="node-sharedB" data-node-id="sharedB" data-node-label="共享资产" tabindex="0" role="button" aria-label="Focus 共享资产, 代码段 · 堆 · 文件描述符表, 进程 B —— 同样的结构，但和 A 完全隔离" aria-pressed="false" data-node-kind="database" data-node-sublabel="代码段 · 堆 · 文件描述符表" data-node-context="进程 B —— 同样的结构，但和 A 完全隔离">
-          <title>共享资产 · 代码段 · 堆 · 文件描述符表 · 进程 B —— 同样的结构，但和 A 完全隔离</title>
-          <rect x="296" y="380" width="230" height="62" rx="6" class="c-mask"/>
-          <rect x="296" y="380" width="230" height="62" rx="6" class="c-database" stroke-width="1.5"/>
-          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(302 386) scale(0.6875)">
-            <ellipse cx="8" cy="4" rx="5" ry="2"/>
-            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
-          </g>
-          <text data-detail-anchor x="411" y="409" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">共享资产</text>
-        <text data-detail="context" x="411" y="425" class="t-muted" font-size="9" text-anchor="middle">代码段 · 堆 · 文件描述符表</text>
-        </g>
-
-        <g id="node-tb1" data-node-id="tb1" data-node-label="线程 B1" tabindex="0" role="button" aria-label="Focus 线程 B1, PC + 寄存器 + 私有栈, 进程 B —— 同样的结构，但和 A 完全隔离" aria-pressed="false" data-node-kind="backend" data-node-sublabel="PC + 寄存器 + 私有栈" data-node-context="进程 B —— 同样的结构，但和 A 完全隔离">
-          <title>线程 B1 · PC + 寄存器 + 私有栈 · 进程 B —— 同样的结构，但和 A 完全隔离</title>
-          <rect x="532" y="518" width="168" height="62" rx="6" class="c-mask"/>
-          <rect x="532" y="518" width="168" height="62" rx="6" class="c-backend" stroke-width="1.5"/>
-          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(538 524) scale(0.6875)">
-            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
-          </g>
-          <text data-detail-anchor x="616" y="547" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">线程 B1</text>
-        <text data-detail="context" x="616" y="563" class="t-muted" font-size="9" text-anchor="middle">PC + 寄存器 + 私有栈</text>
-        </g>
-
-        <!-- Connection labels -->
-        <g data-detail="context" data-edge-from="sharedA" data-edge-to="ta2" data-edge-label="栈是执行流之间唯一的边界" data-edge-key="0" data-edge-id="e1">
-          <rect x="332.9" y="214" width="125.19999999999999" height="14" rx="3" class="c-mask"/>
-          <text x="395.5" y="224" class="t-messagebus" font-size="8" text-anchor="middle">栈是执行流之间唯一的边界</text>
-        </g>
-        <g data-detail="context" data-edge-from="ta2" data-edge-to="sharedB" data-edge-label="两个进程之间只有显式 IPC 通道" data-edge-key="1" data-edge-id="e2">
-          <rect x="360.9" y="352" width="149.2" height="14" rx="3" class="c-mask"/>
-          <text x="435.5" y="362" class="t-security" font-size="8" text-anchor="middle">两个进程之间只有显式 IPC 通道</text>
-        </g>
-
-        <!-- Legend -->
-        <g data-legend data-legend-bridge>
-          <text x="40" y="632" class="t-primary" font-size="12" font-weight="650">Legend</text>
-          <g data-legend-semantic-kind="backend" data-legend-kind="backend" data-legend-label="Backend" data-legend-x="40" data-legend-baseline="652" data-legend-width="78">
-            <rect x="40" y="643" width="16" height="10" rx="2.5" class="c-backend" stroke-width="1"/>
-            <text x="62" y="652" class="t-muted" font-size="10" font-weight="500">Backend</text>
-          </g>
-          <g data-legend-semantic-kind="database" data-legend-kind="database" data-legend-label="Database" data-legend-x="140" data-legend-baseline="652" data-legend-width="83">
-            <rect x="140" y="643" width="16" height="10" rx="2.5" class="c-database" stroke-width="1"/>
-            <text x="162" y="652" class="t-muted" font-size="10" font-weight="500">Database</text>
-          </g>
-        </g>
       </svg>
-      <figcaption>隔离发生在进程层（页表围起来的那一圈），执行流是线程。栈随流走，堆随容器走。</figcaption>
-      <p class="arch-hint">
-        <span class="idle">点头上的任意一个框，只看它和它连出去的关系</span>
-        <span class="focused">再点一次空白处取消</span>
-      </p>
-    </figure><p>那一条执行流本身，拆开来只有三样东西。这三样加起来，就是「暂停一条流时要记下的东西」：</p>
+      <div class="flowd-groups"><div class="fgroup tone-blue" data-group-box="user">
+          <span class="fgroup-label">用户态</span>
+        </div><div class="fgroup tone-violet" data-group-box="kern">
+          <span class="fgroup-label">内核态</span>
+        </div></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-blue" data-id="app" data-group="user">
+              
+              
+              <b>fd = 3</b>
+              <small>程序里唯一拿得到的把手</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="arr" data-group="kern">
+              
+              
+              <b>文件描述符表</b>
+              <small>一个数组，每个进程一份（files_struct）。它不在你的地址空间里</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-muted" data-id="std" data-group="kern">
+              
+              
+              <b>数组[0][1][2]</b>
+              <small>标准输入 / 输出 / 错误</small>
+            </div><div class="fnode tone-green" data-id="mine" data-group="kern">
+              
+              
+              <b>数组[3]</b>
+              <small>你刚 open 出来的那一格</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-amber" data-id="file" data-group="kern">
+              
+              
+              <b>打开文件表项</b>
+              <small>读偏移 + 打开标志，一次 open 一份</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="ino" data-group="kern">
+              
+              
+              <b>inode</b>
+              <small>权限 · 大小 · 数据块在哪</small>
+            </div></div></div>
+      
+    </div><p>所以「线程共享文件描述符」这句话的准确含义是：<strong>同一个进程里的线程共用一份 <code>files_struct</code></strong>，不是「栈旁边有一块放 fd 的地方」。</p>
+<hr>
+<p>那一条执行流本身，拆开来只有三样东西。这三样加起来，就是「暂停一条流时要记下的东西」：</p>
 <div class="flowd has-grid has-groups" data-flow data-edges="[{&quot;from&quot;:&quot;pc&quot;,&quot;to&quot;:&quot;reg&quot;,&quot;label&quot;:&quot;一起被打包成一份现场&quot;},{&quot;from&quot;:&quot;reg&quot;,&quot;to&quot;:&quot;sp&quot;,&quot;label&quot;:&quot;一起被打包成一份现场&quot;},{&quot;from&quot;:&quot;sp&quot;,&quot;to&quot;:&quot;heap&quot;,&quot;label&quot;:&quot;恢复时不用搬它&quot;,&quot;dashed&quot;:true}]">
       <svg class="flowd-svg" aria-hidden="true">
         <defs>

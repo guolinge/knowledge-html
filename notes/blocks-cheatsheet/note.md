@@ -80,13 +80,13 @@
 grid: true
 legend: true
 groups:
-  - { id: aws, label: "AWS Region: us-east-1", tone: amber }
+  - { id: aws, label: "AWS us-east-1", tone: amber }
 nodes:
   - { id: u,   label: 用户, sub: "Browser", row: 0, kind: external }
   - { id: api, label: API Server, sub: "FastAPI :8000", row: 1, kind: backend, group: aws }
   - { id: pg,  label: PostgreSQL, sub: "primary :5432", row: 2, kind: database, group: aws }
 edges:
-  - { from: u, to: api, label: HTTPS, tone: green }
+  - { from: u, to: api, label: HTTPS, tone: green, labelDx: 60 }
   - { from: api, to: pg, label: SQL }
 ```
 
@@ -474,3 +474,32 @@ npm run build:standalone   # 产出 dist/*.html（内联全部资源，可直接
     围栏会静默退化成普通代码块 —— 页面看着正常，但图没了。
     所以写完一定要跑 npm run check，它会报「未知围栏语言」。
 ```
+
+## 15b. `memmap` —— 地址空间 / 分区图
+
+适合：一段**连续空间**被切成几段，要说清各自的位置、大小和增长方向。
+`flow` 画「谁连谁」，它画「谁在哪一段」。
+
+```memmap
+title: 一个进程的虚拟地址空间
+sub: Linux x86-64
+high: "0x7fff_ffff_ffff"
+low: "0x0000_0000_0000"
+segments:
+  - { label: 内核空间, sub: "用户程序碰不到", tone: muted, size: 1.1, addr: "0xffff_8000..." }
+  - { label: 线程 A 的栈, sub: "pthread 默认 8MB 上限，定死不变", tone: blue, size: 2.2, dir: down, mark: "线程独享" }
+  - { label: 线程 B 的栈, sub: "各自独立，越界撞护栏页", tone: blue, size: 2.2, dir: down, mark: "线程独享" }
+  - { label: mmap 区, sub: "共享库、文件映射", tone: amber, size: 3, mark: "全进程共享" }
+  - { label: 堆, sub: "malloc / new，向上长", tone: violet, size: 3.4, dir: up, mark: "全进程共享" }
+  - { label: 代码段, sub: "只读。多进程可共享同一份物理页", tone: green, size: 1.9, mark: "可共享" }
+note: 分界线只有一条：**栈随线程走，其余全随进程走**。
+```
+
+要点：
+
+- **`segments` 的顺序就是高地址到低地址**，别乱排。
+- `size` 是**高度权重**，不是真实字节数 —— 按真实比例画出来会是一张空白。
+- **`mark` 那一列最值钱**：共享 / 独享这种属性竖着排一列，扫一眼就拿到边界了。
+- `dir: up` / `dir: down` 画增长方向，一眼看出栈和堆是面对面长的。
+
+## 16. `summary` / `raw`

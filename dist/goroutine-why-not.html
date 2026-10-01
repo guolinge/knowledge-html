@@ -282,7 +282,16 @@ a { color: var(--blue); }
 code:not(pre code) {
   font-family: var(--mono); font-size: .87em; padding: .15em .42em;
   background: var(--surface-2); border: 1px solid var(--border);
-  border-radius: 5px; color: var(--text); white-space: nowrap;
+  border-radius: 5px; color: var(--text);
+  /* 内联代码要能换行。
+     踩过：原来是 `white-space: nowrap` —— 于是
+     `INIT → CREATING → SUBMITTED → RUNNING → SUCCESS` 这种长链
+     在 cards 这种窄容器里直接撑出卡片，压到隔壁卡片上。
+     当时只在 `.compare tbody td code` 局部打了补丁，别的窄容器照旧。
+     `pre-wrap` 保留空格（代码里的空格是有意义的），但允许在空格处折行；
+     `anywhere` 兜住「一整串没有空格的路径」那种情况。 */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 ul.plain, ol.plain { margin: 0 0 16px; padding-left: 20px; color: var(--text-2); }
 ul.plain li, ol.plain li { margin-bottom: 6px; }
@@ -3675,6 +3684,71 @@ a.need:hover { color: var(--blue); }
   .ho-grid { grid-template-columns: minmax(0, 1fr); }
 }
 
+/* ============================================================
+   积木 18 · memmap —— 地址空间的分层图
+   ------------------------------------------------------------
+   别的积木画「谁连谁」，这个画「一段连续空间被切成几段、各多高、朝哪长」。
+   --mm-size 是高度权重（不是真实字节数），flex-grow 按权重分配。
+   ============================================================ */
+.memmap {
+  margin: 0 0 22px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  padding: 16px 18px 14px;
+}
+.mm-title {
+  display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+  font: 650 13.5px/1.4 var(--sans); color: var(--text);
+  margin-bottom: 14px;
+}
+.mm-cap-sub { font: 500 11.5px/1.4 var(--mono); color: var(--muted); }
+
+.mm-stack { display: flex; flex-direction: column; gap: 3px; }
+
+.mm-seg {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  flex: var(--mm-size, 1) 1 auto;
+  min-height: calc(34px * var(--mm-size, 1));
+  padding: 9px 13px;
+  border-radius: 7px;
+  border: 1px solid color-mix(in srgb, var(--tone, var(--border-strong)) 34%, var(--border));
+  background: color-mix(in srgb, var(--tone-soft, var(--surface-2)) 62%, var(--surface));
+  border-left: 3px solid var(--tone, var(--border-strong));
+}
+.mm-body { min-width: 0; }
+.mm-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.mm-head b { font: 620 12.5px/1.4 var(--sans); color: var(--text); }
+.mm-sub { margin: 3px 0 0; font: 400 11.5px/1.55 var(--sans); color: var(--text-2); }
+
+/* 增长方向：用 --tone 着色，一眼看出栈和堆是面对面长的 */
+.mm-dir { font: 600 10.5px/1 var(--mono); color: var(--tone, var(--muted)); white-space: nowrap; }
+.mm-down::before { content: ''; }
+
+.mm-side { display: flex; flex-direction: column; align-items: flex-end; gap: 3px; text-align: right; }
+.mm-addr { font: 500 10.5px/1.4 var(--mono); color: var(--muted); white-space: nowrap; }
+.mm-mark { font: 500 10.5px/1.4 var(--sans); color: var(--tone, var(--muted)); }
+
+.mm-ends {
+  display: flex; justify-content: space-between; gap: 10px;
+  margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--border);
+  font: 500 10.5px/1.4 var(--mono); color: var(--muted);
+}
+.mm-note {
+  margin: 12px 0 0; padding-top: 10px; border-top: 1px solid var(--border);
+  font-size: 12.5px; line-height: 1.65; color: var(--text-2);
+}
+
+@media (max-width: 640px) {
+  .memmap { padding: 13px 14px 12px; }
+  .mm-seg { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+  .mm-side { flex-direction: row; gap: 8px; align-items: baseline; }
+  .mm-addr { display: none; }
+}
+
 </style>
   <style>
 /* ==========================================================
@@ -4119,7 +4193,8 @@ svg[data-preset="blueprint"] .c-security-group,
 
 <h2 id="两种并发模型"><span class="num">01</span>两种并发模型</h2>
 <p>最朴素的方案是「一个任务一条线程」。它简单到不需要解释，但和「多路复用」放在一起看，差别立刻出来：</p>
-<div class="flowd has-grid has-groups" data-flow data-edges="[{&quot;from&quot;:&quot;s1&quot;,&quot;to&quot;:&quot;s2&quot;,&quot;label&quot;:&quot;submit&quot;},{&quot;from&quot;:&quot;s2&quot;,&quot;to&quot;:&quot;s3&quot;,&quot;label&quot;:&quot;多路复用&quot;}]">
+<div class="compare-wrap"><table class="compare"><thead><tr><th>维度</th><th>1:1（一个任务一条线程）</th><th>M:N（任务交给用户态调度器）</th></tr></thead><tbody><tr><th>任务和线程的关系</th><td data-label="1:1（一个任务一条线程）">一一对应，开一个任务就开一条线程</td><td data-label="M:N（任务交给用户态调度器）">本来就是两条队伍，任务先排进队列</td></tr><tr><th>谁决定「下一个跑谁」</th><td data-label="1:1（一个任务一条线程）"><span class="tag tone-violet">内核调度器</span></td><td data-label="M:N（任务交给用户态调度器）"><span class="tag tone-green">用户态调度器 —— 整套逻辑在你自己的进程里</span></td></tr><tr><th>每条任务占多少栈</th><td data-label="1:1（一个任务一条线程）">每条都要预留（pthread 默认 8MB）</td><td data-label="M:N（任务交给用户态调度器）">2KB 起步，用到才长</td></tr><tr><th>线程数上限</th><td data-label="1:1（一个任务一条线程）"><span class="tag tone-red">被栈预留和内核成本卡死</span></td><td data-label="M:N（任务交给用户态调度器）">跟任务数无关，约等于核数</td></tr></tbody></table></div><p>把 M:N 这条链一路画到硬件上，就是下面这张。<mark class="mk-blue">注意它是一条完整的通路：任务在哪儿排队、谁在挑、挑完交给谁、最后落在哪个核上。</mark></p>
+<div class="flowd has-grid has-groups" data-flow data-edges="[{&quot;from&quot;:&quot;t1&quot;,&quot;to&quot;:&quot;sch&quot;},{&quot;from&quot;:&quot;t2&quot;,&quot;to&quot;:&quot;sch&quot;},{&quot;from&quot;:&quot;t3&quot;,&quot;to&quot;:&quot;sch&quot;},{&quot;from&quot;:&quot;t4&quot;,&quot;to&quot;:&quot;sch&quot;},{&quot;from&quot;:&quot;t5&quot;,&quot;to&quot;:&quot;sch&quot;},{&quot;from&quot;:&quot;t6&quot;,&quot;to&quot;:&quot;sch&quot;},{&quot;from&quot;:&quot;sch&quot;,&quot;to&quot;:&quot;m1&quot;},{&quot;from&quot;:&quot;sch&quot;,&quot;to&quot;:&quot;m2&quot;},{&quot;from&quot;:&quot;sch&quot;,&quot;to&quot;:&quot;m3&quot;},{&quot;from&quot;:&quot;m1&quot;,&quot;to&quot;:&quot;c1&quot;},{&quot;from&quot;:&quot;m2&quot;,&quot;to&quot;:&quot;c2&quot;},{&quot;from&quot;:&quot;m3&quot;,&quot;to&quot;:&quot;c3&quot;}]">
       <svg class="flowd-svg" aria-hidden="true">
         <defs>
           <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
@@ -4128,43 +4203,107 @@ svg[data-preset="blueprint"] .c-security-group,
           </marker>
         </defs>
       </svg>
-      <div class="flowd-groups"><div class="fgroup tone-amber" data-group-box="one">
-          <span class="fgroup-label">1:1 —— 任务与线程一一对应</span>
-        </div><div class="fgroup tone-green" data-group-box="mn">
-          <span class="fgroup-label">M:N —— 任务交给用户态调度器</span>
+      <div class="flowd-groups"><div class="fgroup tone-green" data-group-box="q">
+          <span class="fgroup-label">① 任务先在这一排格子里排队</span>
+        </div><div class="fgroup tone-blue" data-group-box="m">
+          <span class="fgroup-label">③ 内核线程 —— 同一时刻只有这几条在外面</span>
+        </div><div class="fgroup tone-muted" data-group-box="hw">
+          <span class="fgroup-label">④ 硬件：三个核占满，一个从头到尾空着</span>
         </div></div>
-      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-amber" data-id="t1" data-group="one">
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-green" data-id="t1" data-group="q">
               
               
-              <b>任务 1</b>
-              <small>⟶ 线程 1</small>
-            </div><div class="fnode tone-green" data-id="s1" data-group="mn">
+              <b>T1</b>
+              
+            </div><div class="fnode tone-green" data-id="t2" data-group="q">
               
               
-              <b>任务 1 · 2 · 3 … N</b>
-              <small>都只是一条队列记录</small>
-            </div></div><div class="flowd-row"><div class="fnode tone-amber" data-id="t2" data-group="one">
+              <b>T2</b>
+              
+            </div><div class="fnode tone-green" data-id="t3" data-group="q">
               
               
-              <b>任务 2</b>
-              <small>⟶ 线程 2</small>
-            </div><div class="fnode tone-green" data-id="s2" data-group="mn">
+              <b>T3</b>
+              
+            </div><div class="fnode tone-green" data-id="t4" data-group="q">
+              
+              
+              <b>T4</b>
+              
+            </div><div class="fnode tone-green" data-id="t5" data-group="q">
+              
+              
+              <b>T5</b>
+              
+            </div><div class="fnode tone-green" data-id="t6" data-group="q">
+              
+              
+              <b>T6</b>
+              
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="sch">
               
               
               <b>用户态调度器</b>
-              <small>只在逻辑上暂停与恢复</small>
-            </div></div><div class="flowd-row"><div class="fnode tone-amber" data-id="t3" data-group="one">
+              <small>② 在自己进程里挑下一个，不惊动内核</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-blue" data-id="m1" data-group="m">
               
               
-              <b>… 任务 N</b>
-              <small>⟶ 线程 N</small>
-            </div><div class="fnode tone-green" data-id="s3" data-group="mn">
+              <b>M1</b>
+              <small>正跑着某个 T</small>
+            </div><div class="fnode tone-blue" data-id="m2" data-group="m">
               
               
-              <b>少量线程</b>
-              <small>约等于核数</small>
+              <b>M2</b>
+              <small>正跑着某个 T</small>
+            </div><div class="fnode tone-blue" data-id="m3" data-group="m">
+              
+              
+              <b>M3</b>
+              <small>正跑着某个 T</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="c1" data-group="hw">
+              
+              
+              <b>核 0</b>
+              <small>满的</small>
+            </div><div class="fnode tone-green" data-id="c2" data-group="hw">
+              
+              
+              <b>核 1</b>
+              <small>满的</small>
+            </div><div class="fnode tone-green" data-id="c3" data-group="hw">
+              
+              
+              <b>核 2</b>
+              <small>满的</small>
+            </div><div class="fnode tone-muted" data-id="c4" data-group="hw">
+              
+              
+              <b>核 3</b>
+              <small>从头到尾空着</small>
             </div></div></div>
       
+    </div><p>顺着这张图讲一遍就是整个模型：</p>
+<blockquote>
+<p>六个任务排在队列里（<strong>T1..T6</strong>）→ 用户态调度器一次取一个，不惊动内核 →
+同一时刻只放 <strong>3 个</strong>在外面，交给 3 条真线程 → 3 条线程各自占住一个核 →
+<strong>第 4 个核从头到尾没被用上</strong>。</p>
+</blockquote>
+<p>最后那句就是这套模型的问题所在，也是后面要讲的：线程数约等于核数是<strong>理想情况</strong>；
+真正的麻烦是其中一条线程一旦阻塞在系统调用上，它占着的核就空转了 ——
+<mark class="mk-blue">而用户态调度器管不了这件事，因为阻塞发生在它看不见的那一层。</mark></p>
+<div class="callout tone-amber">
+      <span class="ic">🔍</span>
+      <div><p><strong>顺带看一眼 1:1 在这张图上会长什么样。</strong></p>
+<p>同样 6 个任务，1:1 会开出 <strong>6 条线程</strong>去抢 <strong>4 个核</strong>。
+核还是那 4 个，但队伍变成两排：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code>任务  T1 T2 T3 T4 T5 T6
+线程  M1 M2 M3 M4 M5 M6      ← 六条真实线程，每条占着 8MB 栈预留
+核    [核0][核1][核2][核3]    ← 同一时刻只有 4 条能真的在跑
+       ↑ M1~M4 在跑，M5 M6 在队列里等内核调度
+</code></pre></div>
+<p>多出来的那两条线程不是「更并发」，是<strong>在等核</strong>。
+任务数一大，等核的线程就排成长龙，光是它们之间的上下文切换就把收益吃光了。</p>
+</div>
     </div><p>1:1 的好处很实在：每个任务的逻辑是一条线性同步代码，阻塞就阻塞，线程替你挂起；内核视角也最简单。它曾经是主流 —— Apache 每个连接一个 worker，JVM servlet 每个请求一个线程。衰败从 C10K 开始。</p>
 <p>把 1:1 往规模上推，会<strong>按顺序</strong>撞上三重天花板：</p>
 <div class="pipe"><div class="lane tone-red">
@@ -5224,8 +5363,8 @@ Go 回避这件事的方式是让阻塞留在同步外观里，把复杂度收�
           d = `M ${a.cx - 16} ${a.top} C ${a.cx - 34} ${a.top - r * 1.7}, ${a.cx + 34} ${
             a.top - r * 1.7
           }, ${a.cx + 16} ${a.top}`;
-          lx = a.cx;
-          ly = a.top - r * 1.32;   // 标签放在弧顶上方，不压线
+          lx = a.cx + (e.labelDx || 0);
+          ly = a.top - r * 1.32 + (e.labelDy || 0);   // 标签放在弧顶上方，不压线
           const cls0 = ['fedge', 'self', e.dashed && 'dashed', e.anim && 'anim']
             .filter(Boolean)
             .join(' ');
@@ -5255,6 +5394,15 @@ Go 回避这件事的方式是让阻塞留在同步外观里，把复杂度收�
           lx = mx;
           ly = (l.cy + r.cy) / 2 - 7;
         }
+
+        /* 作者手动微调标签位置。
+           为什么需要：群组框（groups）的标签画在框的左上角，
+           而边标签默认落在那条缝的**水平中点** ——
+           缝一窄，两个标签就叠在一起（字都在，只是读不通）。
+           ==工具算不出「那里已经有群组标签了」，但作者一眼就知道该往哪挪。==
+           所以给一条手动通道，比让人改文案凑位置靠谱。 */
+        if (e.labelDx) lx += e.labelDx;
+        if (e.labelDy) ly += e.labelDy;
 
         /* 同一位置已经有标签了，就往下错开。
            （spread 已经把边上分开了，标签再跟着错。） */

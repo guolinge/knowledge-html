@@ -2,22 +2,83 @@
 
 最朴素的方案是「一个任务一条线程」。它简单到不需要解释，但和「多路复用」放在一起看，差别立刻出来：
 
+```compare
+first: 维度
+head: [1:1（一个任务一条线程）, M:N（任务交给用户态调度器）]
+rows:
+  - 任务和线程的关系: ["一一对应，开一个任务就开一条线程", "本来就是两条队伍，任务先排进队列"]
+  - 谁决定「下一个跑谁」: [{ text: "内核调度器", tone: violet }, { text: "用户态调度器 —— 整套逻辑在你自己的进程里", tone: green }]
+  - 每条任务占多少栈: ["每条都要预留（pthread 默认 8MB）", "2KB 起步，用到才长"]
+  - 线程数上限: [{ text: "被栈预留和内核成本卡死", tone: red }, "跟任务数无关，约等于核数"]
+```
+
+把 M:N 这条链一路画到硬件上，就是下面这张。==注意它是一条完整的通路：任务在哪儿排队、谁在挑、挑完交给谁、最后落在哪个核上。==
+
 ```flow
 grid: true
 groups:
-  - { id: one, label: "1:1 —— 任务与线程一一对应", tone: amber }
-  - { id: mn, label: "M:N —— 任务交给用户态调度器", tone: green }
+  - { id: q,   label: "① 任务先在这一排格子里排队", tone: green }
+  - { id: m,   label: "③ 内核线程 —— 同一时刻只有这几条在外面", tone: blue }
+  - { id: hw,  label: "④ 硬件：三个核占满，一个从头到尾空着", tone: muted }
 nodes:
-  - { id: t1, label: "任务 1", sub: "⟶ 线程 1", row: 0, tone: amber, group: one }
-  - { id: t2, label: "任务 2", sub: "⟶ 线程 2", row: 1, tone: amber, group: one }
-  - { id: t3, label: "… 任务 N", sub: "⟶ 线程 N", row: 2, tone: amber, group: one }
-  - { id: s1, label: "任务 1 · 2 · 3 … N", sub: "都只是一条队列记录", row: 0, tone: green, group: mn }
-  - { id: s2, label: "用户态调度器", sub: "只在逻辑上暂停与恢复", row: 1, tone: green, group: mn }
-  - { id: s3, label: "少量线程", sub: "约等于核数", row: 2, tone: green, group: mn }
+  - { id: t1, label: T1, sub: "", row: 0, tone: green, group: q }
+  - { id: t2, label: T2, sub: "", row: 0, tone: green, group: q }
+  - { id: t3, label: T3, sub: "", row: 0, tone: green, group: q }
+  - { id: t4, label: T4, sub: "", row: 0, tone: green, group: q }
+  - { id: t5, label: T5, sub: "", row: 0, tone: green, group: q }
+  - { id: t6, label: T6, sub: "", row: 0, tone: green, group: q }
+  - { id: sch, label: 用户态调度器, sub: "② 在自己进程里挑下一个，不惊动内核", row: 1, tone: green }
+  - { id: m1, label: M1, sub: "正跑着某个 T", row: 2, tone: blue, group: m }
+  - { id: m2, label: M2, sub: "正跑着某个 T", row: 2, tone: blue, group: m }
+  - { id: m3, label: M3, sub: "正跑着某个 T", row: 2, tone: blue, group: m }
+  - { id: c1, label: 核 0, sub: "满的", row: 3, tone: green, group: hw }
+  - { id: c2, label: 核 1, sub: "满的", row: 3, tone: green, group: hw }
+  - { id: c3, label: 核 2, sub: "满的", row: 3, tone: green, group: hw }
+  - { id: c4, label: 核 3, sub: "从头到尾空着", row: 3, tone: muted, group: hw }
 edges:
-  - { from: s1, to: s2, label: "submit" }
-  - { from: s2, to: s3, label: "多路复用" }
+  - { from: t1, to: sch }
+  - { from: t2, to: sch }
+  - { from: t3, to: sch }
+  - { from: t4, to: sch }
+  - { from: t5, to: sch }
+  - { from: t6, to: sch }
+  - { from: sch, to: m1 }
+  - { from: sch, to: m2 }
+  - { from: sch, to: m3 }
+  - { from: m1, to: c1 }
+  - { from: m2, to: c2 }
+  - { from: m3, to: c3 }
 ```
+
+顺着这张图讲一遍就是整个模型：
+
+> 六个任务排在队列里（**T1..T6**）→ 用户态调度器一次取一个，不惊动内核 →
+> 同一时刻只放 **3 个**在外面，交给 3 条真线程 → 3 条线程各自占住一个核 →
+> **第 4 个核从头到尾没被用上**。
+
+最后那句就是这套模型的问题所在，也是后面要讲的：线程数约等于核数是**理想情况**；
+真正的麻烦是其中一条线程一旦阻塞在系统调用上，它占着的核就空转了 ——
+==而用户态调度器管不了这件事，因为阻塞发生在它看不见的那一层。==
+
+````callout
+tone: amber
+icon: 🔍
+text: |
+  **顺带看一眼 1:1 在这张图上会长什么样。**
+
+  同样 6 个任务，1:1 会开出 **6 条线程**去抢 **4 个核**。
+  核还是那 4 个，但队伍变成两排：
+
+  ```
+  任务  T1 T2 T3 T4 T5 T6
+  线程  M1 M2 M3 M4 M5 M6      ← 六条真实线程，每条占着 8MB 栈预留
+  核    [核0][核1][核2][核3]    ← 同一时刻只有 4 条能真的在跑
+         ↑ M1~M4 在跑，M5 M6 在队列里等内核调度
+  ```
+
+  多出来的那两条线程不是「更并发」，是**在等核**。
+  任务数一大，等核的线程就排成长龙，光是它们之间的上下文切换就把收益吃光了。
+````
 
 1:1 的好处很实在：每个任务的逻辑是一条线性同步代码，阻塞就阻塞，线程替你挂起；内核视角也最简单。它曾经是主流 —— Apache 每个连接一个 worker，JVM servlet 每个请求一个线程。衰败从 C10K 开始。
 

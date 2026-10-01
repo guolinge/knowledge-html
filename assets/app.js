@@ -769,8 +769,8 @@
           d = `M ${a.cx - 16} ${a.top} C ${a.cx - 34} ${a.top - r * 1.7}, ${a.cx + 34} ${
             a.top - r * 1.7
           }, ${a.cx + 16} ${a.top}`;
-          lx = a.cx;
-          ly = a.top - r * 1.32;   // 标签放在弧顶上方，不压线
+          lx = a.cx + (e.labelDx || 0);
+          ly = a.top - r * 1.32 + (e.labelDy || 0);   // 标签放在弧顶上方，不压线
           const cls0 = ['fedge', 'self', e.dashed && 'dashed', e.anim && 'anim']
             .filter(Boolean)
             .join(' ');
@@ -800,6 +800,15 @@
           lx = mx;
           ly = (l.cy + r.cy) / 2 - 7;
         }
+
+        /* 作者手动微调标签位置。
+           为什么需要：群组框（groups）的标签画在框的左上角，
+           而边标签默认落在那条缝的**水平中点** ——
+           缝一窄，两个标签就叠在一起（字都在，只是读不通）。
+           ==工具算不出「那里已经有群组标签了」，但作者一眼就知道该往哪挪。==
+           所以给一条手动通道，比让人改文案凑位置靠谱。 */
+        if (e.labelDx) lx += e.labelDx;
+        if (e.labelDy) ly += e.labelDy;
 
         /* 同一位置已经有标签了，就往下错开。
            （spread 已经把边上分开了，标签再跟着错。） */

@@ -854,7 +854,7 @@ edges:
   - { from: q1, to: rec, label: "是" }
   - { from: q1, to: q2, label: "否", dashed: true }
   - { from: q2, to: q3, label: "是" }
-  - { from: q2, to: bad, label: "否", dashed: true }
+  - { from: q2, to: bad, label: "否", dashed: true, labelDy: -78 }
   - { from: q3, to: plain, label: "否" }
   - { from: q3, to: time, label: "是" }
 ```

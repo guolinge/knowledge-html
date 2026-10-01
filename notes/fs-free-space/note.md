@@ -26,7 +26,7 @@
 ```flow
 grid: true
 groups:
-  - { id: free, label: "被记下来的三块空闲区", tone: green }
+  - { id: free, label: "三块空闲区", tone: green }
 nodes:
   - { id: t, label: 空闲表, sub: "序号 + 起始块 + 块数", row: 0, tone: violet }
   - { id: f1, label: "2 → 4", sub: "3 块连续空闲", row: 1, tone: green, group: free }
@@ -34,7 +34,7 @@ nodes:
   - { id: f3, label: "13 → 14", sub: "2 块连续空闲", row: 1, tone: green, group: free }
   - { id: used, label: "其它块", sub: "已经被文件占了", row: 2, tone: muted }
 edges:
-  - { from: t, to: f1, label: "一项管一段连续的空闲" }
+  - { from: t, to: f1, label: "一项管一段连续的空闲", labelDx: 96 }
   - { from: f1, to: used, label: "分配时从这些段里挑一段", dashed: true }
 ```
 

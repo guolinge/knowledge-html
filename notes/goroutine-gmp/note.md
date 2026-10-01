@@ -31,6 +31,46 @@ rows:
       M 必须先绑到一个 P 上，才能从它的队列里取 G 执行。
 ```
 
+把这三样摆到一起，就是 GMP 的全貌：
+
+```flow
+grid: true
+groups:
+  - { id: gr, label: "Go 运行时自己管", tone: violet }
+  - { id: os, label: "操作系统管", tone: muted }
+nodes:
+  - { id: gfq, label: "全局队列 GFQ", sub: "P 本地都空了才来这拿。要加锁，所以越少碰越好", row: 0, tone: muted, group: gr }
+  - { id: p0,  label: "P0", sub: "runnext 1 格 · LRQ 256 个 G · mcache", row: 1, tone: violet, group: gr }
+  - { id: p1,  label: "P1", sub: "结构一样。GOMAXPROCS 是几，就有几个 P", row: 1, tone: violet, group: gr }
+  - { id: p2,  label: "P2", sub: "结构一样", row: 1, tone: violet, group: gr }
+  - { id: m0,  label: "M0", sub: "一条内核线程，必须先绑上一个 P 才能取 G", row: 2, tone: green, group: gr }
+  - { id: m1,  label: "M1", sub: "同上", row: 2, tone: green, group: gr }
+  - { id: m2,  label: "M2", sub: "同上", row: 2, tone: green, group: gr }
+  - { id: c0,  label: "核 0", sub: "谁落在哪块核上，由内核调度器定", row: 3, tone: muted, group: os }
+  - { id: c1,  label: "核 1", sub: "同上", row: 3, tone: muted, group: os }
+  - { id: c2,  label: "核 2", sub: "同上", row: 3, tone: muted, group: os }
+edges:
+  - { from: gfq, to: p0, label: "本地空了才往下要" }
+  - { from: p0,  to: m0, label: "绑定" }
+  - { from: p1,  to: m1 }
+  - { from: p2,  to: m2 }
+  - { from: m0,  to: c0, label: "真线程才谈得上并行", labelDx: 78 }
+  - { from: m1,  to: c1 }
+  - { from: m2,  to: c2 }
+```
+
+三层的数字关系值得记住：
+
+| | 有几个 | 谁决定 |
+|---|---|---|
+| P | `GOMAXPROCS`，默认等于 CPU 核数 | 你（或环境变量） |
+| M | **可能远多于 P** —— 一旦有 M 卡在系统调用里，运行时会再开一个 | Go 运行时按需创建 |
+| 同时在跑 Go 代码的 M | 最多 = P 的个数 | 因为每个 M 都要先绑上一个 P |
+| G | 想开多少开多少，挂在自己的 P 上排队 | 你的代码 |
+
+==「同时最多几个 M 在跑 Go 代码」由 P 的个数卡死，而 M 的总数可以更多。==
+这是理解后面「阻塞时会发生什么」的钥匙。
+
 为什么需要 P 这个东西？为什么不让 M 直接从全局队列取 G？
 
 因为**无锁**。多个 M 抢一条全局队列要加锁，M 越多锁越烫。有了 P，每个 M 平时只碰自己那份队列，不需要抢。第 ⑥ 篇会细讲这件事的来龙去脉。
