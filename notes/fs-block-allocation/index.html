@@ -1,0 +1,535 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-has-toc="1">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>数据块摆在哪 · 从连续分配到 13 个指针</title>
+<meta name="description" content="一个文件的数据块怎么记下来，决定了它能长多大、读起来有多快。连续、隐式链表、FAT、索引四种摆法各有代价，Unix 最后选了直接 + 多级索引。" />
+<link rel="stylesheet" href="../../assets/theme.css" />
+  <link rel="stylesheet" href="../../assets/blocks.css" />
+  <link rel="stylesheet" href="../../assets/archify-embed.css" />
+</head>
+<body>
+<div id="progress"></div>
+<div id="tocScrim"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
+    <a class="brand" href="../../index.html"><span class="dot"></span>知识笔记</a>
+    
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="toc" id="toc">
+      <p class="toc-title">目录</p>
+      <a href="../../index.html" class="sub">← 全部笔记</a>
+      <a href="#真正要解决的问题">真正要解决的问题</a>
+      <a href="#连续分配最简单也最脆">连续分配：最简单，也最脆</a>
+      <a href="#代价一磁盘碎片" class="sub">代价一：磁盘碎片</a>
+      <a href="#代价二文件长大很麻烦" class="sub">代价二：文件长大很麻烦</a>
+      <a href="#隐式链表把指针藏进数据块">隐式链表：把指针藏进数据块</a>
+      <a href="#显式链接把指针全抽到内存里">显式链接：把指针全抽到内存里</a>
+      <a href="#索引方式给每个文件配一张目录">索引方式：给每个文件配一张目录</a>
+      <a href="#文件太大了怎么办" class="sub">文件太大了怎么办</a>
+      <a href="#unix-的选择13-个指针">Unix 的选择：13 个指针</a>
+      <a href="#四种摆法放在一起看">四种摆法放在一起看</a>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow">● 操作系统 · 文件系统 ③</span>
+      <h1>数据块摆在哪 · 从连续分配到 13 个指针</h1>
+      <p class="lede">一个文件的数据块怎么记下来，决定了它能长多大、读起来有多快。连续、隐式链表、FAT、索引四种摆法各有代价，Unix 最后选了直接 + 多级索引。</p>
+    </div>
+
+    <div class="draft-banner">
+    <span>⚠</span>
+    <span>本页状态为 <b>draft</b>：内容尚未人工核对，引用前请自行验证。</span>
+  </div>
+<aside class="needs">
+      <p class="needs-title">读这篇之前，你需要先知道</p>
+      <a class="need" href="../fs-file-anatomy/">← <b>1. 一个文件长什么样</b><span>inode 与目录项的分工、扇区到逻辑块、磁盘被格式化成的三个区</span></a>
+    </aside>
+    <div class="provenance"><span><b>来源</b> 飞书文档《一口气搞懂「文件系统」，就靠这 25 张图了》 https://futu.feishu.cn/docx/Q3sGdsByKog86txzZiycCErMnSc @ revision 105</span><span><b>生成</b> 2026-10-01</span><span><b>模型</b> claude-opus-4-5</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">操作系统</span> <span class="tag tone-muted">文件系统</span> <span class="tag tone-muted">inode</span> <span class="tag tone-muted">FAT</span></span></div>
+
+<h2 id="真正要解决的问题"><span class="num">01</span>真正要解决的问题</h2>
+<p>上一篇说过，inode 里记着「数据在磁盘的位置」。但那句话太笼统了，真正落地时它是一个很具体的问题：</p>
+<blockquote>
+<p>一个文件可能有 1 个数据块，也可能有 100 万个。这串块号要怎么记在 inode 里？</p>
+</blockquote>
+<p>数据在磁盘上的摆法，和程序在内存里的摆法一样，只有两大类：</p>
+<div class="cards" data-cols="2"><div class="ccard tone-blue">
+          
+          <h4>连续空间存放</h4>
+          <p>文件的所有数据块挨在一起</p>
+          <div class="cbody"><p>文件头里只要记两个数：<strong>起始块号</strong>和<strong>长度</strong>。</p>
+<p>就像在内存里给数组开一块连续空间，简单、快、但也最挑地方。</p>
+</div>
+          
+        </div><div class="ccard tone-violet">
+          
+          <h4>非连续空间存放</h4>
+          <p>数据块散落在磁盘各处，靠某种线索串起来</p>
+          <div class="cbody"><p>又分成两派：</p>
+<ul>
+<li><strong>链表派</strong>：每个块里藏一个指针，指下一个块在哪</li>
+<li><strong>索引派</strong>：单独拿一块出来，集中记所有块号</li>
+</ul>
+<p>下面按「连续 → 链表 → 索引」的顺序看，每一代都在补上一代的窟窿。</p>
+</div>
+          
+        </div></div><hr>
+<h2 id="连续分配最简单也最脆"><span class="num">02</span>连续分配：最简单，也最脆</h2>
+<p>文件的数据全部放在磁盘上连续的一段，文件头里只记两样东西：</p>
+<div class="pipe"><div class="lane tone-blue">
+        <div class="lane-meta">
+          <span class="ln">文件头</span>
+          <b>就两个字段</b>
+          <small>类似 inode 里的一小块</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>起始块</b>
+        <small>从哪一块开始</small>
+        <span class="tag tone-blue">3</span>
+      </div><div class="pnode">
+        <b>长度</b>
+        <small>一共占几块</small>
+        <span class="tag tone-blue">5</span>
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">顺着往后数<span class="note">中间没有断点</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-green">
+        <div class="lane-meta">
+          <span class="ln">磁盘</span>
+          <b>一段连续的空间</b>
+          <small>3 号块开始，连着 5 块</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>块 3</b>
+        <small>文件第 1 块</small>
+        <span class="tag tone-green">起点</span>
+      </div><div class="pnode">
+        <b>块 4</b>
+        <small>第 2 块</small>
+        
+      </div><div class="pnode">
+        <b>块 5</b>
+        <small>第 3 块</small>
+        
+      </div><div class="pnode">
+        <b>块 6</b>
+        <small>第 4 块</small>
+        
+      </div><div class="pnode">
+        <b>块 7</b>
+        <small>第 5 块</small>
+        <span class="tag tone-green">结尾</span>
+      </div></div>
+      </div></div><p>好处很直接：<mark class="mk-blue">一次磁盘寻道就能把整个文件读出来</mark>。磁头移到起点之后，后面的块都在旁边，不用再来回找。</p>
+<p>代价有两个，而且都很致命。</p>
+<h3 id="代价一磁盘碎片">代价一：磁盘碎片</h3>
+<div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-green">一开始</span>
+            <span class="name">磁盘排得整整齐齐</span>
+            <span class="spacer"></span>
+            <span class="tag tone-green">没有空洞</span>
+          </div>
+          <div class="rec"><div class="">
+            <b>A</b><span>占 3 块</span></div><div class="">
+            <b>B</b><span>占 6 块</span></div><div class="">
+            <b>C</b><span>占 2 块</span></div><div class="">
+            <b>D</b><span>占 4 块</span></div></div>
+          
+          <p class="jnote">四个文件各占一段连续空间，边界清楚</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">删掉 B<span class="note">中间空出一段</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-amber">删掉 B</span>
+            <span class="name">空出一段 6 块的洞</span>
+            <span class="spacer"></span>
+            <span class="tag tone-amber">最大可用 6 块</span>
+          </div>
+          <div class="rec"><div class="">
+            <b>A</b><span>还在，3 块</span></div><div class="warn">
+            <b>空闲</b><span>6 块</span><em>最大连续空闲</em></div><div class="">
+            <b>C</b><span>2 块</span></div><div class="">
+            <b>D</b><span>4 块</span></div></div>
+          
+          <p class="jnote bad">这一段的长度，决定了<strong>能塞下多大的新文件</strong></p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">来个 4 块的新文件<span class="note">塞得进去</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-blue">新文件 E</span>
+            <span class="name">4 块，放得进那个洞</span>
+            <span class="spacer"></span>
+            <span class="tag tone-blue">还行</span>
+          </div>
+          <div class="rec"><div class="ok">
+            <b>E</b><span>占 4 块</span><em>占了洞的前半</em></div><div class="">
+            <b>空闲</b><span>剩 2 块</span><em>碎成小块了</em></div></div>
+          
+          
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">来个 5 块的呢<span class="note">麻烦开始了</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-red">装不下的情况</span>
+            <span class="name">明明总共有 8 块空闲，却放不下</span>
+            <span class="spacer"></span>
+            <span class="tag tone-red">装不下</span>
+          </div>
+          <div class="rec"><div class="">
+            <b>空闲</b><span>2 块 + 4 块 = 6 块</span></div><div class="">
+            <b>要装</b><span>5 块文件</span></div></div>
+          
+          <p class="jnote bad"><mark class="mk-blue">空闲总量够，但没有一段连续的 5 块</mark>。这就是外部碎片</p>
+        </div><p><mark class="mk-amber">碎片的陷阱不是「不够」，是「不够连续」。</mark></p>
+<p>理论上可以把现有文件挪一挪，把碎片拼起来。但挪动磁盘上的数据本身就要读写大量数据，代价比碎片本身还高。所以现实里基本不走这条路。</p>
+<h3 id="代价二文件长大很麻烦">代价二：文件长大很麻烦</h3>
+<p>文件 A 当初只申请了 3 块，现在要扩到 8 块。如果它后面紧跟着别的文件，就没地方长。</p>
+<p>办法只剩挪。<mark class="mk-blue">连续分配把「文件的长度」和「它在磁盘上的位置」绑死了，一旦一开始猜错大小，后面每一步都要付代价。</mark></p>
+<p>所以连续分配只适合「写进去之后基本不改」的场景，比如只读的光盘镜像。</p>
+<hr>
+<h2 id="隐式链表把指针藏进数据块"><span class="num">03</span>隐式链表：把指针藏进数据块</h2>
+<p>既然连续这么难伺候，那就让数据块散开来放，再用指针把它们串起来。</p>
+<div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;f&quot;,&quot;to&quot;:&quot;b1&quot;,&quot;label&quot;:&quot;起始块 = 4&quot;},{&quot;from&quot;:&quot;b1&quot;,&quot;to&quot;:&quot;b2&quot;,&quot;label&quot;:&quot;指针说下一块是 9&quot;},{&quot;from&quot;:&quot;b2&quot;,&quot;to&quot;:&quot;b3&quot;,&quot;label&quot;:&quot;下一块是 12&quot;}]">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-violet" data-id="f">
+              
+              
+              <b>文件头</b>
+              <small>记「第一块」和「最后一块」</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-blue" data-id="b1">
+              
+              
+              <b>数据块 4</b>
+              <small>末尾留一个指针位</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-blue" data-id="b2">
+              
+              
+              <b>数据块 9</b>
+              <small>自己的指针写着 12</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-blue" data-id="b3">
+              
+              
+              <b>数据块 12</b>
+              <small>指针写着 −1，到此为止</small>
+            </div></div></div>
+      
+    </div><p><mark class="mk-blue">指针是存在数据块<strong>里面</strong>的</mark>：每个数据块要留出几个字节放「下一块在哪」，剩下的才是真正的文件内容。</p>
+<p>这一代解决了前一代的两个毛病：不会再因为「不连续」而放不下文件，文件也能随时长。</p>
+<p>但它自己带来两个新问题：</p>
+<ul class="check cross"><li>不能随机访问。要读文件的第 5 块，得先读第 1 块拿到指针、再读第 2 块…… 一路链下去</li><li>指针占掉了一部分数据块空间，每个块能装的有效数据变少了</li><li>最要命的：指针坏了整条链就断。链表中间任何一个块的指针被覆盖，后面所有数据都找不回来了</li></ul><p>最后一条是稳定性问题：文件内容本身可以被校验和修复，但指针是<strong>结构</strong>，结构坏了一块，后面整段都成了野数据。</p>
+<hr>
+<h2 id="显式链接把指针全抽到内存里"><span class="num">04</span>显式链接：把指针全抽到内存里</h2>
+<p>把每个数据块里的那个指针抽出来，集中放到内存的一张表里，问题就解决了大半。</p>
+<p>这张表叫<strong>文件分配表</strong>（File Allocation Table，FAT），整个磁盘只有一张。</p>
+<p>假设磁盘有 16 个块，文件 A 依次用了 4、7、2、10、12，文件 B 依次用了 6、3、11、14：</p>
+<table>
+<thead>
+<tr>
+<th>块号</th>
+<th>0</th>
+<th>1</th>
+<th>2</th>
+<th>3</th>
+<th>4</th>
+<th>5</th>
+<th>6</th>
+<th>7</th>
+<th>8</th>
+<th>9</th>
+<th>10</th>
+<th>11</th>
+<th>12</th>
+<th>13</th>
+<th>14</th>
+<th>15</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>FAT</td>
+<td>0</td>
+<td>0</td>
+<td>10</td>
+<td>11</td>
+<td>7</td>
+<td>0</td>
+<td>3</td>
+<td>2</td>
+<td>0</td>
+<td>0</td>
+<td>12</td>
+<td>14</td>
+<td>−1</td>
+<td>0</td>
+<td>−1</td>
+<td>0</td>
+</tr>
+</tbody>
+</table>
+<p>读法就是顺着跳：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code>文件 A 的起点是 4
+  4 → FAT[4] = 7   →  7 → FAT[7] = 2  →  2 → FAT[2] = 10
+   → 10 → FAT[10] = 12 → 12 → FAT[12] = −1   结束
+   A 的全部块：4、7、2、10、12
+
+文件 B 的起点是 6
+  6 → 3 → 11 → 14 → −1   结束
+</code></pre></div>
+<p>表里的 <code>0</code> 表示这块空着，<code>−1</code> 表示到这个文件就没了。</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>做法</th><th>好处</th><th>代价</th></tr></thead><tbody><tr><th>指针全放内存里</th><td data-label="好处">每跳一步都在内存里做，不用读磁盘；检索快很多</td><td data-label="代价">整张表得常驻内存</td></tr><tr><th>支持随机访问</th><td data-label="好处">要读第 5 块，直接从起点顺着 FAT 跳 5 次，跳的是内存</td><td data-label="代价">跳的次数还是线性于偏移量</td></tr><tr><th>磁盘块不再放指针</th><td data-label="好处">数据块能装满了</td><td data-label="代价">需要额外维护这张表的一致性</td></tr></tbody></table></div><p><mark class="mk-blue">它真正的问题是「表太大」。</mark> 算一笔：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code>一块 = 1KB，磁盘 = 200GB
+块总数 = 200GB / 1KB = 2 亿块
+每个表项 4 字节 → 这张表要 2 亿 × 4B = 800MB 内存
+</code></pre></div>
+<p>800MB 常驻内存，只为了记「下一块在哪」。<mark class="mk-blue">磁盘越大这张表越离谱，所以 FAT 方案不适合大磁盘。</mark></p>
+<hr>
+<h2 id="索引方式给每个文件配一张目录"><span class="num">05</span>索引方式：给每个文件配一张目录</h2>
+<p>链表那一路的问题是「不能直接跳到第 N 块」。索引方式换了个思路：<strong>别把块号散在数据块里，集中放在一个专门的块里。</strong></p>
+<div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;f&quot;,&quot;to&quot;:&quot;ix&quot;},{&quot;from&quot;:&quot;ix&quot;,&quot;to&quot;:&quot;b1&quot;,&quot;label&quot;:&quot;第 1 格&quot;},{&quot;from&quot;:&quot;ix&quot;,&quot;to&quot;:&quot;b2&quot;,&quot;label&quot;:&quot;第 2 格&quot;},{&quot;from&quot;:&quot;ix&quot;,&quot;to&quot;:&quot;b3&quot;,&quot;label&quot;:&quot;第 n 格&quot;}]">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-violet" data-id="f">
+              
+              
+              <b>文件头</b>
+              <small>只多记一个指针</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-amber" data-id="ix">
+              
+              
+              <b>索引数据块</b>
+              <small>单独一块，每格一个地址</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-blue" data-id="b1">
+              
+              
+              <b>数据块 5</b>
+              <small>第 1 块的地址在这</small>
+            </div><div class="fnode tone-blue" data-id="b2">
+              
+              
+              <b>数据块 7</b>
+              <small>第 2 块</small>
+            </div><div class="fnode tone-blue" data-id="b3">
+              
+              
+              <b>数据块 14</b>
+              <small>第 n 块</small>
+            </div></div></div>
+      
+    </div><p>文件头里只需要再加<strong>一个</strong>指针，指向自己的索引块。索引块里第 i 格就是文件第 i 块的地址。</p>
+<p>于是要读第 500 块，直接翻索引块的第 500 格就行，不用从第 1 块一路跳过来。</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>特点</th><th>说明</th></tr></thead><tbody><tr><th>支持随机访问</th><td data-label="说明">第 i 块的位置记在索引块第 i 格，查一次就到</td></tr><tr><th>增删容易</th><td data-label="说明">不用维护链，改一格就行</td></tr><tr><th>没有碎片问题</th><td data-label="说明">块本来就散着放</td></tr><tr><th>代价</th><td data-label="说明"><span class="tag tone-amber">每个文件至少多占一个块来放索引</span></td></tr></tbody></table></div><p>最后一条在小文件上很刺眼：一个只要 1 块就装下的文件，也得额外占掉一整块来放索引。<strong>用掉的磁盘空间直接翻倍。</strong></p>
+<h3 id="文件太大了怎么办">文件太大了怎么办</h3>
+<p>一个索引块放不下那么多地址时（比如 4KB 的块能放 1024 个地址），有两种叠法：</p>
+<div class="cards" data-cols="2"><div class="ccard tone-amber">
+          <span class="tag tone-amber">索引 + 链表</span>
+          <h4>链式索引块</h4>
+          <p>索引块用完了，在末尾留个指针指下一个索引块</p>
+          <div class="cbody"><p>结构上跟隐式链表是同一个思路，只是链的粒度从「数据块」变成了「索引块」。</p>
+<p><mark class="mk-blue">链表的老毛病也一起继承了：中间某个索引块的指针坏了，后面整段读不出来。</mark></p>
+</div>
+          
+        </div><div class="ccard tone-violet">
+          <span class="tag tone-violet">索引 + 索引</span>
+          <h4>多级索引块</h4>
+          <p>拿一个索引块来装索引块的地址，一层套一层</p>
+          <div class="cbody"><p>像一个俄罗斯套娃：第一层的每一格指向一个二级索引块，
+二级索引块里的每一格才是指向数据块的地址。</p>
+<p>好处是 <mark class="mk-blue">每一层都能直接算下标定位，不用顺着链走</mark>。</p>
+</div>
+          <pre>一级索引块
+  ├─ 第 0 格 → 二级索引块 → 1024 个数据块的地址
+  ├─ 第 1 格 → 二级索引块 → 1024 个数据块的地址
+  └─ ...
+</pre>
+        </div></div><hr>
+<h2 id="unix-的选择13-个指针"><span class="num">06</span>Unix 的选择：13 个指针</h2>
+<p>早期 Unix 没有选上面任何一种，而是<strong>把它们按文件大小分了档</strong>，每个档用不同的方式：</p>
+<div class="pipe"><div class="lane tone-green">
+        <div class="lane-meta">
+          <span class="ln">档 1</span>
+          <b>小文件</b>
+          <small>10 个直接指针就够</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>直接指针 × 10</b>
+        <small>每一格直接写数据块号</small>
+        <span class="tag tone-green">不额外读块</span>
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">超过 10 块了<span class="note">第一档不够用了</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-blue">
+        <div class="lane-meta">
+          <span class="ln">档 2</span>
+          <b>中文件</b>
+          <small>用一个间接指针兜住后面</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>一次间接指针</b>
+        <small>指向一个索引块</small>
+        <span class="tag tone-blue">多读 1 次</span>
+      </div><div class="pnode">
+        <b>索引块里 1024 格</b>
+        <small>每格一个数据块号</small>
+        
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">一次间接也不够<span class="note">再套一层</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-amber">
+        <div class="lane-meta">
+          <span class="ln">档 3</span>
+          <b>大文件</b>
+          <small>二次间接：索引块再指索引块</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>二次间接指针</b>
+        <small>指向一个二级索引块</small>
+        <span class="tag tone-amber">多读 2 次</span>
+      </div><div class="pnode">
+        <b>二级索引块 → 1024 个索引块</b>
+        <small>每个再管 1024 个数据块</small>
+        
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">还不够<span class="note">再套一层</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-red">
+        <div class="lane-meta">
+          <span class="ln">档 4</span>
+          <b>超大文件</b>
+          <small>三次间接</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>三次间接指针</b>
+        <small>指向一个三级索引块</small>
+        <span class="tag tone-red">多读 3 次</span>
+      </div><div class="pnode">
+        <b>1024³ 个数据块</b>
+        <small>理论上的天花板</small>
+        
+      </div></div>
+      </div></div><p>所以 inode 里总共要放 13 个指针：</p>
+<table>
+<thead>
+<tr>
+<th>第几个</th>
+<th>指向哪</th>
+<th>负责多少块</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1 ~ 10</td>
+<td>数据块</td>
+<td>10</td>
+</tr>
+<tr>
+<td>11</td>
+<td>一级索引块</td>
+<td>1024</td>
+</tr>
+<tr>
+<td>12</td>
+<td>二级索引块</td>
+<td>1024² = 1,048,576</td>
+</tr>
+<tr>
+<td>13</td>
+<td>三级索引块</td>
+<td>1024³ = 1,073,741,824</td>
+</tr>
+</tbody>
+</table>
+<p>拖一下滑块，看一个具体的文件偏移量会走哪条路、要多读几次磁盘：</p>
+<div class="demo" data-widget="inode-trace" data-config="{&quot;blockSize&quot;:4096,&quot;directCount&quot;:10,&quot;pointerPerBlock&quot;:1024,&quot;maxLog&quot;:12}">
+      <div class="demo-head">
+        <span class="title">文件的第 N 个字节，inode 靠什么找到它</span>
+        <span class="status" data-status>拖滑块，或点下面几个预设位置</span>
+        <span class="spacer"></span>
+        
+      </div>
+      <div class="demo-body custom" data-mount></div>
+    </div><p>同一个「读文件的第 X 个字节」，落在这四档里的代价完全不同：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>落在哪一档</th><th>文件大小区间</th><th>找块要额外读几次磁盘</th><th>为什么</th></tr></thead><tbody><tr><th>直接指针</th><td data-label="文件大小区间">前 40 KB</td><td data-label="找块要额外读几次磁盘"><span class="tag tone-green">0 次</span></td><td data-label="为什么">块号就写在 inode 里，inode 本来就在内存</td></tr><tr><th>一次间接</th><td data-label="文件大小区间">约 40 KB ~ 约 4 MB</td><td data-label="找块要额外读几次磁盘"><span class="tag tone-amber">1 次</span></td><td data-label="为什么">要先把那一个索引块读进来</td></tr><tr><th>二次间接</th><td data-label="文件大小区间">约 4 MB ~ 约 4 GB</td><td data-label="找块要额外读几次磁盘"><span class="tag tone-amber">2 次</span></td><td data-label="为什么">两层索引块都要读</td></tr><tr><th>三次间接</th><td data-label="文件大小区间">约 4 GB ~ 约 4 TB</td><td data-label="找块要额外读几次磁盘"><span class="tag tone-red">3 次</span></td><td data-label="为什么">三层索引块都得读，读一个小字节要付三次磁盘 I/O</td></tr></tbody></table></div><p><mark class="mk-blue">这是这套设计最明显的代价：文件越大，读某一个字节越慢。</mark> 小文件走直接指针几乎没开销，但一个 5 GB 的文件想读最后那个字节，得先读三个索引块才能知道它到底在哪。</p>
+<p>Ext 2/3 用的就是这套。Ext 4 做了改进（用 extent 把「连续的一整段」一次记下来），但 13 个指针这个结构在教科书里还是理解索引方式最好的入口。</p>
+<hr>
+<h2 id="四种摆法放在一起看"><span class="num">07</span>四种摆法放在一起看</h2>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>方式</th><th>文件头里记什么</th><th>读第 N 块要几次磁盘 I/O</th><th>主要毛病</th></tr></thead><tbody><tr><th>连续分配</th><td data-label="文件头里记什么">起始块号 + 长度</td><td data-label="读第 N 块要几次磁盘 I/O"><span class="tag tone-green">1 次</span></td><td data-label="主要毛病">外部碎片；文件想长大只能挪</td></tr><tr><th>隐式链表</th><td data-label="文件头里记什么">第一块 + 最后一块</td><td data-label="读第 N 块要几次磁盘 I/O"><span class="tag tone-red">N 次</span></td><td data-label="主要毛病">不能随机访问；断一个指针后面全丢</td></tr><tr><th>显式链接（FAT）</th><td data-label="文件头里记什么">第一块（表在内存里）</td><td data-label="读第 N 块要几次磁盘 I/O"><span class="tag tone-green">0 次额外读，但要查表</span></td><td data-label="主要毛病">表太大，不适合大磁盘</td></tr><tr><th>索引方式</th><td data-label="文件头里记什么">索引块的指针</td><td data-label="读第 N 块要几次磁盘 I/O"><span class="tag tone-amber">1 ~ m 次</span></td><td data-label="主要毛病">小文件也要多占一个索引块</td></tr></tbody></table></div><p><mark class="mk-blue">没有一种摆法是全面赢的。</mark> 连续分配读写最快但扩展最差；链表最省空间但只能顺序读；FAT 检索快但吃内存；索引最灵活但有小文件开销。</p>
+<p>Unix 的 13 个指针之所以值得一提，就是因为它没有二选一，而是<mark class="mk-blue">按文件大小把四种方式的好处拼了起来</mark>：小文件走第一种的「零开销」，大文件走第四种的「能随机访问」。</p>
+<hr>
+<div class="quiz"><details>
+        <summary>连续分配说「读写效率很高」，为什么实际文件系统不都用它？</summary>
+        <div class="a"><p>因为它把文件的长度和位置绑死了。删掉中间的文件会留下空洞，
+空洞的总和可能够，但没有一段连续的够长，新文件就是放不进去（外部碎片）。
+而且文件想长大时，后面往往已经被别人占了，只能整体挪走 —— 挪磁盘数据的代价比碎片本身还大。</p>
+</div>
+      </details><details>
+        <summary>FAT 把指针移到内存里解决了什么问题，又带来了什么新问题？</summary>
+        <div class="a"><p>解决了「链表只能顺序访问、每次跳一步都要读磁盘、指针坏了断链」这三件事：
+跳转全在内存里做，快得多。
+新问题是整张表得常驻内存，而且它的体积正比于磁盘的块数，
+200GB 磁盘配 1KB 块就要 800MB 内存，磁盘越大越不可行。</p>
+</div>
+      </details><details>
+        <summary>Unix inode 里为什么要有三种不同层级的间接指针，全用三级间接不行吗？</summary>
+        <div class="a"><p>因为读某一块的磁盘 I/O 次数正比于索引层数。全用三级间接的话，
+读一个小文件的第一块也要先读三层索引块，白白多三次 I/O。
+分档的意义就是让常见的小文件走「零额外读」的直接指针，
+把多级索引的代价只压给真正需要的大文件。</p>
+</div>
+      </details><details>
+        <summary>一个 4096 字节块、1024 个指针的 inode，理论上能表示多大的文件？</summary>
+        <div class="a"><p>10 + 1024 + 1024² + 1024³ = 1,074,791,434 块，乘 4096 字节约等于 4 TB 多一点。
+这是「块大小 4KB、指针占 4 字节」这套参数下的结果。
+换一个块大小，四个档的分界点和天花板都会跟着变。</p>
+</div>
+      </details></div>
+
+    <footer>
+      <span>数据块摆在哪 · 从连续分配到 13 个指针</span>
+      <span>最后更新 2026-10-01 · 单文件可离线打开</span>
+    </footer>
+  </main>
+</div>
+
+<script src="../../assets/app.js"></script>
+</body>
+</html>

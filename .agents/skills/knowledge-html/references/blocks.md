@@ -836,6 +836,88 @@ config:
 > `tail` 用一句话收尾。==别让分叉点超过两个，也别在 `no` 的那一栏写长句==
 > —— 那一栏本来就窄。
 
+#### `io-models` —— 同一条时间轴上的多方案对比
+
+**讲「一堆名字听着像不同的事」**：把每种模型铺在同一条时间轴上，
+拖一根时间指针走过去，看每一刻「谁在等、谁能干活」。
+
+```demo
+widget: io-models
+title: 五种 I/O 模型挨在同一条时间轴上
+actions: false
+config:
+  tMax: 10
+  tail: 橙色那一段是「数据拷贝」，只有异步 I/O 没有它。
+  models:
+    - id: blocking
+      name: 阻塞 I/O
+      sub: "默认就是这样"
+      sync: sync
+      wait: block
+      copy: block
+      segs:
+        - { from: 0, to: 7, state: wait, text: "一直等到内核把数据准备好" }
+        - { from: 7, to: 9, state: copy, text: "数据到了，拷贝这段也得等" }
+        - { from: 9, to: 10, state: done, text: "read 返回" }
+```
+
+`segs[].state` 取四个值，配四种颜色：
+
+| state | 含义 | 颜色 |
+|---|---|---|
+| `wait` | 卡住等数据准备 | 红 |
+| `copy` | 卡住等数据拷贝 | 橙（**带斜纹**，这是全篇的分界线） |
+| `free` | 应用可以干别的 | 绿 |
+| `done` | 已就绪 / 拿到数据 | 蓝 |
+
+下面那张判定表由 `wait` / `copy` 两个字段直接生成（取值 `block` / `poll` / `no`），
+`sync` 决定归到「同步」还是「异步」。==这两个字段和上面的色块是同一份数据==，
+改一处两边一起变，不会对不上。
+
+#### `inode-trace` —— 一个偏移量走哪条路
+
+**讲「同一个操作，随输入大小落进不同的实现分支」**：拖滑块给一个字节偏移，
+看它落在哪一档、要经过几层、多读几次磁盘。底部那张容量表是现算的。
+
+```demo
+widget: inode-trace
+title: 文件的第 N 个字节，inode 靠什么找到它
+actions: false
+config:
+  blockSize: 4096
+  directCount: 10
+  pointerPerBlock: 1024
+  maxLog: 12
+```
+
+滑块是**对数刻度**（`maxLog: 12` 表示拉到底 = 10¹² 字节），
+否则前 40KB 只占滑块的前 0.001%，根本拖不到。
+
+> 它算的是 Unix inode 的「直接 + 多级间接」那一套。换个领域也能用，
+> 只要那个东西是「按大小分档、每档代价不同」—— 例如缓存层级、分片路由。
+
+#### `link-refcount` —— 删一个名字会发生什么
+
+**讲「引用计数」**：点任意一个名字的删除按钮，看计数怎么掉、数据什么时候真的没。
+每个名字可以带一条自己的「删除说明」。
+
+```demo
+widget: link-refcount
+title: 点「删除」，看引用计数怎么动
+actions: false
+config:
+  inode: 100
+  blocks: "5 / 9 / 12"
+  names:
+    - { path: "/a/file", dir: "原来的名字", kind: origin }
+    - { path: "/b/hardlink1", dir: "硬链接 1", kind: hard }
+  symlink: { path: "/c/symlink1", dir: "软链接", inode: 200, target: "/a/file" }
+```
+
+`names[].kind` 只影响显示（`origin` 与 `hard` 在语义上完全平等，这正是要讲的点）。
+`symlink` 是可选的 —— 给了它，控件会多画一条独立的 inode 线，
+用来说明「软链接有自己的 inode，目标是死是活它都在」。
+
 ### 数据驱动的写法（`config`）
 
 上面三个控件都用 `config`，作者**只写 YAML，不写 HTML**：

@@ -1189,11 +1189,12 @@ text: |
 | `summary` | 小结 |
 | `raw` | 直接写 HTML |
 
-**交互控件 22 个**（在 `assets/app.js` 的 `WIDGETS` 里，供 `demo` 积木引用）：
+**交互控件 25 个**（在 `assets/app.js` 的 `WIDGETS` 里，供 `demo` 积木引用）：
 `polling-vs-cdc` `combination-count` `join-lab` `on-vs-where` `knex-chain`
 `stepper` `tuner` `diff` `stream-modes` `operator-lab` `hashring` `partition-prune`
 `dsl-lab` `null-lab` `config-to-ui` `field-lineage` `count-dedup-lab`
 `row-to-catalog` `sql-inject-lab` `validate-lab` `sched-lab` `switch-cost`
+`io-models` `inode-trace` `link-refcount`
 
 **已知缺口**（按优先级）：
 
@@ -1221,7 +1222,16 @@ text: |
 3. **`flow` 里单节点的 `groups` 会把标签挤没。**
    框只包住一个窄节点时，`groups[].label` 会折成两三行、盖住下面的连线。
    要么把 label 压到 3~4 个字，要么让这个组包住**整张图的所有节点**（框顶就跑到最上面去了）。
-4. **响应式目前按视口宽度写（`@media`）**。如果积木可能被放进窄容器
+
+   ==但「包住所有节点」也有翻车的时候==：节点分两三行时，框会变成一个盖住整张图的大色块，
+   比不画还难看。这次画「索引数据块 → 数据块」时试过，最后退回**不加 groups**。
+4. **`flow` 画不了「跳过中间那一层」的拓扑。**
+   想表达「A 到 C，但绕过了中间的 B」，边必然穿过 B，`visual-check` 会直接报
+   `边 A→C 穿过了无关节点「B」`。
+
+   ++改用 `journey` 表达「数据少坐了一站」++ —— 每一站是一个 `tag`，
+   绕过的那一站就是不写它。语义上比硬画一条穿越线清楚得多。
+5. **响应式目前按视口宽度写（`@media`）**。如果积木可能被放进窄容器
    （比如并排两栏），应该改用 **container queries**（Chrome 105 / FF 110 / Safari 16，
    已广泛可用）。当前所有积木都还没改。
 
@@ -1302,8 +1312,24 @@ archify 是一套完整的图渲染系统，能力**超出**我们自己的积�
 - **边不能穿过无关节点。** archify 直接报
   `crosses component "xxx" (unrelated to this relationship)`，==它不会帮你绕过去==。
   遇到这种拓扑只能拆图、改布局、或手填 `route`/`via` 航点。
+- **`architecture` 必须写顶层 `layout`，不写报的错完全看不出是这件事。**
+
+  ```json
+  "layout": { "mode": "grid", "origin": [60, 104], "cols": 4,
+              "gapX": 48, "gapY": 84, "cellW": 186, "cellH": 62 }
+  ```
+
+  漏了它，六条报错全是 `Component "x" must include pos [x, y] when layout.mode is omitted`
+  加 `has non-finite pos/size` —— ==它让你去给每个组件写坐标，但真正缺的是那个 `layout`。==
 - **组件尺寸是每个显式声明的**（默认 120×60），不随 `layout.cellW` 变。
   标签长了要么裁文案，要么给它加 `size`。
+- **跨行的边要显式写 `fromSide: "bottom"` / `toSide: "top"`。**
+  上下相邻两行的节点，自动推断可能给出 `fromSide: "left"`，然后报
+  `first segment does not honor inferred fromSide "left"` ——
+  ==错误里说的方向和你看到的走向对不上，直接写上 bottom/top 最省事。==
+- **`boundaries` 里的 `kind` 只有 `region` 和 `security-group` 两种**，
+  而 `security-group` 画出来是**红色虚线框**。红色在别处一律表示「出事了」，
+  知识图里没有这个含义，++默认用 `region`++。
 - **边有几何下限**：微段短于 8px、两条边挤在同一条走廊里，都会判失败。
 - 产出是**静态 SVG**，不跟着容器宽度重排。
 - **`lifecycle` 的 lane 语义是写死的**，别拿它画通用状态机。

@@ -3774,6 +3774,418 @@
     go(0);
   };
 
+  /* ============================================================
+     控件：同步 I/O 与异步 I/O 的时间轴
+     ------------------------------------------------------------
+     五种模型并排放在同一条时间轴上，拖一根时间指针走过去，
+     看每一刻「应用到底能不能干别的」。
+
+     要讲清的那一件事：
+       六个名字听着像六件事，判据只有一条 ——
+       数据准备、数据拷贝两个阶段，分别卡不卡你。
+       所有同步模型都卡在「拷贝」上，只有异步 I/O 两段都不卡。
+
+     config:
+       tMax:   10                       时间轴总长
+       models: [{ id, name, sub, tag, tone, sync, segs: [{ from, to, state, text }] }]
+         state: wait 等数据准备 / copy 等数据拷贝 / free 能干别的 / done 已就绪
+         sync:  'sync' | 'async' —— 决定它归到哪一边
+  ============================================================ */
+  const IO_STATE = {
+    wait: { label: '卡住等数据', tone: 'red' },
+    copy: { label: '卡住等拷贝', tone: 'amber' },
+    free: { label: '可以干别的', tone: 'green' },
+    done: { label: '已就绪 / 拿到数据', tone: 'blue' },
+  };
+
+  WIDGETS['io-models'] = (root) => {
+    const cfg = cfgOf(root);
+    const models = cfg.models || [];
+    if (!models.length) return;
+    const box = mountOf(root);
+    const statusEl = root.querySelector('[data-status]');
+    const T = cfg.tMax || 10;
+
+    /* —— ① 图例 —— */
+    const legend = el('div', 'io-legend');
+    Object.entries(IO_STATE).forEach(([k, v]) => {
+      const item = el('span', 'io-lg-item');
+      item.append(el('i', 'io-lg-dot tone-' + v.tone), el('span', '', v.label));
+      legend.append(item);
+    });
+
+    /* —— ② 时间轴：一行一个模型 —— */
+    const stage = el('div', 'io-stage');
+    const axis = el('div', 'io-axis');
+    for (let i = 0; i <= T; i++) {
+      const tk = el('span', 'io-tick', String(i));
+      tk.style.left = (i / T) * 100 + '%';
+      axis.append(tk);
+    }
+    stage.append(axis);
+
+    const rows = models.map((m) => {
+      const row = el('div', 'io-row');
+      const name = el('div', 'io-name');
+      name.append(el('b', '', m.name));
+      if (m.sub) name.append(el('span', 'io-sub', m.sub));
+      const track = el('div', 'io-track');
+
+      const blocks = (m.segs || []).map((s) => {
+        const st = IO_STATE[s.state] || IO_STATE.wait;
+        const b = el('div', 'io-seg', '');
+        b.style.left = (s.from / T) * 100 + '%';
+        b.style.width = ((s.to - s.from) / T) * 100 + '%';
+        b.classList.add('tone-' + st.tone);
+        if (s.text) b.title = s.text;
+        track.append(b);
+        return b;
+      });
+      /* 时间指针：一根竖线扫过所有行 */
+      const cursor = el('div', 'io-cursor');
+      track.append(cursor);
+      row.append(name, track);
+      stage.append(row);
+      return { m, row, blocks, cursor };
+    });
+
+    /* —— ③ 此刻各模型在干什么 —— */
+    const now = el('div', 'io-now');
+
+    /* —— ④ 两个阶段的判定表 —— */
+    const verdict = el('div', 'io-verdict');
+
+    /* —— ⑤ 时间滑块 —— */
+    const bar = el('div', 'io-bar');
+    const range = el('input', 'io-range');
+    range.type = 'range'; range.min = '0'; range.max = String(T * 10); range.value = '0';
+    const clock = el('b', 'io-clock', 't = 0');
+    bar.append(clock, range);
+
+    box.append(legend, stage, now, bar, verdict);
+
+    /* —— 拖动：把时刻落到某个区间里 —— */
+    const segAt = (m, t) => (m.segs || []).find((s) => t >= s.from && t < s.to) ||
+      (t >= T ? (m.segs || [])[m.segs.length - 1] : null);
+
+    function draw(t) {
+      clock.textContent = 't = ' + (Math.round(t * 10) / 10);
+      rows.forEach(({ m, blocks, cursor, row }) => {
+        const hit = segAt(m, t);
+        cursor.style.left = (t / T) * 100 + '%';
+        blocks.forEach((b, i) => b.classList.toggle('on', hit === (m.segs || [])[i]));
+        row.classList.toggle('idle', !hit || hit.state === 'free');
+      });
+      /* 此刻每一行在干什么 */
+      now.textContent = '';
+      now.append(el('div', 'io-now-head', '这一刻，哪个进程真的在干活？'));
+      rows.forEach(({ m }) => {
+        const hit = segAt(m, t);
+        const st = hit ? (IO_STATE[hit.state] || IO_STATE.wait) : IO_STATE.done;
+        const line = el('div', 'io-now-row');
+        line.append(el('span', 'io-now-name', m.name));
+        const chip = el('span', 'io-chip tone-' + st.tone, st.label);
+        line.append(chip, el('span', 'io-now-text', hit && hit.text ? hit.text : ''));
+        now.append(line);
+      });
+      if (statusEl) statusEl.textContent = 't = ' + (Math.round(t * 10) / 10);
+    }
+
+    /* 判定表是静态的 —— 它回答的是「这两个阶段卡不卡」，跟时刻无关 */
+    verdict.textContent = '';
+    verdict.append(el('div', 'io-verdict-head', '把名字去掉，只看两个阶段卡不卡'));
+    const vh = el('div', 'io-vrow io-vhrow');
+    ['模型', '数据准备阶段', '数据拷贝阶段', '归到哪边'].forEach((x) => vh.append(el('div', 'io-vcell', x)));
+    verdict.append(vh);
+    models.forEach((m) => {
+      const r = el('div', 'io-vrow');
+      r.append(el('div', 'io-vcell io-vname', m.name));
+      [m.wait, m.copy].forEach((v) => {
+        const c = el('div', 'io-vcell');
+        c.append(el('span', 'io-chip tone-' + (v === 'no' ? 'green' : v === 'poll' ? 'amber' : 'red'),
+          v === 'no' ? '不卡' : v === 'poll' ? '轮询 / 卡在 select' : '卡住'));
+        r.append(c);
+      });
+      const c = el('div', 'io-vcell');
+      c.append(el('span', 'io-chip tone-' + (m.sync === 'async' ? 'green' : 'red'),
+        m.sync === 'async' ? '异步 I/O' : '同步 I/O'));
+      r.append(c);
+      verdict.append(r);
+    });
+    verdict.append(el('p', 'io-vtail', cfg.tail || ''));
+
+    range.addEventListener('input', () => draw(Number(range.value) / 10));
+    draw(0);
+  };
+
+  /* ============================================================
+     控件：一个文件偏移量，走哪条指针路径
+     ------------------------------------------------------------
+     Unix inode 的 13 个指针不是平均分给所有文件的：
+     小文件走直接指针，文件一大就往多级索引上爬。
+     拖一根滑块看一个具体的偏移量落在哪一条路上、要多读几次磁盘。
+
+     config:
+       blockSize:      4096    一个数据块多少字节
+       directCount:    10      直接指针个数
+       pointerPerBlock: 1024   一个索引块能装多少个块号
+       maxLog:         12      滑块上限 = 10^12 字节（1TB）
+  ============================================================ */
+  WIDGETS['inode-trace'] = (root) => {
+    const cfg = cfgOf(root);
+    const BS = cfg.blockSize || 4096;
+    const D = cfg.directCount || 10;
+    const N = cfg.pointerPerBlock || 1024;
+    const MAXLOG = cfg.maxLog || 12;
+    const box = mountOf(root);
+    const statusEl = root.querySelector('[data-status]');
+
+    /* —— 四档的容量边界（直接算出来，不写死） —— */
+    const caps = [
+      { key: 'direct', name: '直接指针', ptrs: D, extra: 0, blocks: D },
+      { key: 'L1', name: '一次间接', ptrs: 1, extra: 1, blocks: N },
+      { key: 'L2', name: '二次间接', ptrs: 1, extra: 2, blocks: N * N },
+      { key: 'L3', name: '三次间接', ptrs: 1, extra: 3, blocks: N * N * N },
+    ];
+    let acc = 0;
+    caps.forEach((c) => { c.from = acc; acc += c.blocks; c.to = acc; });   /* 单位：块 */
+
+    const fmtBytes = (n) => {
+      if (n < 1024) return n + ' B';
+      const u = ['KB', 'MB', 'GB', 'TB', 'PB'];
+      let i = -1, x = n;
+      while (x >= 1024 && i < u.length - 1) { x /= 1024; i++; }
+      return (x >= 100 ? Math.round(x) : Math.round(x * 10) / 10) + ' ' + u[i];
+    };
+    const fmtInt = (n) => n.toLocaleString('en-US');
+
+    /* —— 滑块：对数刻度，否则小文件区域根本拉不到 —— */
+    const bar = el('div', 'it-bar');
+    const range = el('input', 'it-range');
+    range.type = 'range'; range.min = '0'; range.max = '1000'; range.value = '0';
+    const readout = el('b', 'it-readout', '0 B');
+    bar.append(readout, range);
+
+    /* —— 预设：四档的分界点，点一下直接跳过去 —— */
+    const presets = el('div', 'it-presets');
+    const marks = [
+      { label: '文件第一个字节', bytes: 0 },
+      { label: '最后一个直接指针', bytes: D * BS - 1 },
+      { label: '刚跨进一次间接', bytes: D * BS },
+      { label: '刚跨进二次间接', bytes: caps[2].from * BS },
+      { label: '刚跨进三次间接', bytes: caps[3].from * BS },
+    ];
+    const presetBtns = marks.map((m) => {
+      const b = el('button', 'it-btn', m.label);
+      b.title = fmtBytes(m.bytes);
+      b.addEventListener('click', () => setBytes(m.bytes));
+      presets.append(b);
+      return { b, m };
+    });
+
+    /* —— 结果：走哪条路 + 逐层展开 —— */
+    const answer = el('div', 'it-answer');
+    const path = el('div', 'it-path');
+    const table = el('div', 'it-table');
+
+    box.append(bar, presets, answer, path, table);
+
+    const bytesToVal = (n) => (n <= 1 ? 0 : (Math.log10(n) / MAXLOG) * 1000);
+    const valToBytes = (v) => (v <= 0 ? 0 : Math.round(Math.pow(10, (v / 1000) * MAXLOG)));
+
+    /* —— 容量表：当前档高亮 —— */
+    const capRows = caps.map((c) => {
+      const r = el('div', 'it-trow');
+      r.append(el('div', 'it-tcell it-tname', c.name));
+      r.append(el('div', 'it-tcell', c.ptrs + ' 个指针'));
+      r.append(el('div', 'it-tcell', fmtBytes(c.blocks * BS) + '（' + fmtInt(c.blocks) + ' 块）'));
+      r.append(el('div', 'it-tcell', c.extra === 0 ? '不用额外读' : '额外读 ' + c.extra + ' 次'));
+      table.append(r);
+      return { r, c };
+    });
+
+    /* —— 把字节偏移展开成一条路径 —— */
+    function trace(bytes) {
+      const blk = Math.floor(bytes / BS);
+      const inBlk = bytes % BS;
+      const tier = caps.find((c) => blk >= c.from && blk < c.to) || caps[caps.length - 1];
+      const off = blk - tier.from;
+      const steps = [];
+      steps.push({ k: '字节偏移', v: fmtBytes(bytes), note: '第 ' + fmtInt(bytes) + ' 个字节' });
+      steps.push({ k: '除以块大小', v: '逻辑块号 ' + fmtInt(blk) + '（块内第 ' + inBlk + ' 字节）', note: '一个块 ' + fmtBytes(BS) });
+      steps.push({ k: '查 inode 的指针', v: tier.name, note: '这一号已经超出前面 ' + fmtInt(tier.from) + ' 块了' });
+
+      if (tier.key === 'direct') {
+        steps.push({ k: '取地址', v: '直接指针[' + off + '] 里就是数据块号', note: '不用再读别的块' });
+      } else if (tier.key === 'L1') {
+        steps.push({ k: '第 1 层', v: '一次间接块的第 ' + fmtInt(off) + ' 格', note: '先把这一个索引块读进内存' });
+      } else if (tier.key === 'L2') {
+        const a = Math.floor(off / N), b = off % N;
+        steps.push({ k: '第 1 层', v: '二级索引块的 第 ' + fmtInt(a) + ' 格', note: '读第 1 个索引块' });
+        steps.push({ k: '第 2 层', v: '下面那个索引块的 第 ' + fmtInt(b) + ' 格', note: '再读第 2 个索引块，这里才是数据块号' });
+      } else {
+        const a = Math.floor(off / (N * N)), b = Math.floor((off % (N * N)) / N), c = off % N;
+        steps.push({ k: '第 1 层', v: '三级索引块的 第 ' + fmtInt(a) + ' 格', note: '读第 1 个索引块' });
+        steps.push({ k: '第 2 层', v: '下一层索引块的 第 ' + fmtInt(b) + ' 格', note: '读第 2 个索引块' });
+        steps.push({ k: '第 3 层', v: '再下一层的 第 ' + fmtInt(c) + ' 格', note: '读第 3 个索引块，终于拿到数据块号' });
+      }
+      steps.push({ k: '最后', v: '读出那个数据块', note: tier.extra === 0 ? '总共 1 次磁盘读' : '总共 ' + (tier.extra + 1) + ' 次磁盘读' });
+      return { tier, blk, steps };
+    }
+
+    function draw(bytes) {
+      readout.textContent = fmtBytes(bytes);
+      const { tier, blk, steps } = trace(bytes);
+
+      answer.textContent = '';
+      const a = el('div', 'it-ans');
+      a.append(el('span', 'it-ans-tag', tier.name));
+      a.append(el('span', 'it-ans-text',
+        tier.extra === 0
+          ? 'inode 里那一格直接写着数据块号，不用再读别的块'
+          : '得先读 ' + tier.extra + ' 个索引块才能找到数据块号'));
+      answer.append(a);
+
+      path.textContent = '';
+      steps.forEach((s, i) => {
+        const r = el('div', 'it-prow');
+        r.append(el('span', 'it-pidx', String(i + 1)));
+        r.append(el('span', 'it-pk', s.k));
+        r.append(el('span', 'it-pv', s.v));
+        r.append(el('span', 'it-pnote', s.note));
+        path.append(r);
+      });
+
+      capRows.forEach(({ r, c }) => r.classList.toggle('on', c === tier));
+      presetBtns.forEach(({ b, m }) => {
+        const on = bytes >= m.bytes && (marks.indexOf(m) === marks.length - 1 || bytes < marks[marks.indexOf(m) + 1].bytes);
+        b.classList.toggle('on', on);
+      });
+      if (statusEl) statusEl.textContent = '逻辑块 ' + fmtInt(blk) + ' → ' + tier.name;
+    }
+
+    function setBytes(n) {
+      const v = Math.max(0, Math.min(1000, bytesToVal(Math.max(0, n))));
+      range.value = String(Math.round(v));
+      draw(valToBytes(v));
+    }
+
+    range.addEventListener('input', () => draw(valToBytes(Number(range.value))));
+    setBytes(0);
+  };
+
+  /* ============================================================
+     控件：硬链接的引用计数 —— 删一个名字，到底删掉了什么
+     ------------------------------------------------------------
+     硬链接就是在目录项层多写一个名字，inode 里只多一个计数。
+     点任何一个名字的「删除」，看计数怎么变、数据什么时候真的没。
+     软链接另算一条线 —— 它自己占一个 inode，内容是路径字符串。
+
+     config:
+       inode:      100                      被链接的 inode 号
+       names:      [{ path, dir, kind }]    kind: 'origin' | 'hard'
+       symlink:    { path, dir, inode, target }
+       blocks:     "5 / 9 / 12"             数据块号，只是显示用
+  ============================================================ */
+  WIDGETS['link-refcount'] = (root) => {
+    const cfg = cfgOf(root);
+    const names = (cfg.names || []).map((n) => ({ ...n, alive: true }));
+    if (!names.length) return;
+    const box = mountOf(root);
+    const statusEl = root.querySelector('[data-status]');
+    const sym = cfg.symlink ? { ...cfg.symlink, alive: true } : null;
+    const inoNo = cfg.inode || 100;
+
+    const head = el('div', 'lr-head');
+    const grid = el('div', 'lr-grid');
+    const inode = el('div', 'lr-inode');
+    const log = el('div', 'lr-log');
+    const acts = el('div', 'lr-acts');
+    const reset = el('button', 'lr-btn lr-ghost', '重置');
+    acts.append(reset);
+    box.append(head, grid, inode, acts, log);
+
+    let lines = [];
+    const say = (text, tone) => { lines.push({ text, tone }); };
+
+    function draw() {
+      const aliveHard = names.filter((n) => n.alive);
+      const count = aliveHard.length;
+      const dataAlive = count > 0;
+
+      head.textContent = '现在有 ' + count + ' 个目录项指向 inode ' + inoNo;
+
+      /* —— 目录列表 —— */
+      grid.textContent = '';
+      const mkRow = (dirLabel, item, onDelete) => {
+        const r = el('div', 'lr-row' + (item.alive ? '' : ' dead'));
+        const l = el('div', 'lr-name');
+        l.append(el('span', 'lr-dir', dirLabel));
+        l.append(el('span', 'lr-file', item.alive ? item.path : item.path + '（已删）'));
+        r.append(l);
+        if (onDelete && item.alive) {
+          const b = el('button', 'lr-btn', '删除');
+          b.addEventListener('click', onDelete);
+          r.append(b);
+        } else {
+          r.append(el('span', 'lr-arrow', item.kind === 'sym' ? '指向路径' : '指向 inode ' + inoNo));
+        }
+        grid.append(r);
+      };
+      names.forEach((n) => mkRow(n.dir, n, () => {
+        n.alive = false;
+        say('删除目录项 ' + n.path + '：名字没了，inode ' + inoNo + ' 的引用计数减 1', 'amber');
+        if (names.filter((x) => x.alive).length === 0) {
+          say('引用计数降到 0 —— 现在才真的回收 inode ' + inoNo + ' 和数据块', 'red');
+        } else {
+          say('数据块没事，因为还有 ' + names.filter((x) => x.alive).length + ' 个名字指着它', 'green');
+        }
+        draw();
+      }));
+      if (sym) mkRow(sym.dir, { ...sym, kind: 'sym' }, () => {
+        sym.alive = false;
+        say('删掉软链接 ' + sym.path + '：它自己的 inode ' + sym.inode + ' 被回收，目标文件完全不受影响', 'green');
+        draw();
+      });
+
+      /* —— 被链接的 inode —— */
+      inode.textContent = '';
+      inode.className = 'lr-inode ' + (dataAlive ? 'live' : 'freed');
+      inode.append(el('div', 'lr-ino-title', 'inode ' + inoNo + (dataAlive ? '' : ' · 已回收')));
+      const rc = el('div', 'lr-rc');
+      rc.append(el('span', 'lr-rc-label', '引用计数'));
+      rc.append(el('b', 'lr-rc-num', String(count)));
+      rc.append(el('span', 'lr-rc-note', dataAlive ? '数据块 ' + (cfg.blocks || '') + ' 还占着' : '数据块已释放，空间可以给别人'));
+      inode.append(rc);
+
+      /* 软链接单独一条线：目标是死是活，它自己都在 */
+      if (sym) {
+        const s = el('div', 'lr-sym ' + (sym.alive ? '' : 'dead'));
+        s.append(el('div', 'lr-ino-title', '软链接自己的 inode ' + sym.inode + (sym.alive ? '' : ' · 已回收')));
+        s.append(el('div', 'lr-sym-body',
+          sym.alive
+            ? '内容就是一个字符串「' + sym.target + '」，存在它自己的数据块里' +
+              (names.some((n) => n.alive) ? '' : '。目标已经没了，它现在是悬空链接')
+            : '已经删掉了'));
+        inode.append(s);
+      }
+
+      log.textContent = '';
+      log.append(el('div', 'lr-log-head', '做了什么，发生了什么'));
+      if (!lines.length) log.append(el('div', 'lr-line lr-dim', '从上面随便删一个名字试试'));
+      lines.forEach((l) => log.append(el('div', 'lr-line tone-' + (l.tone || 'muted'), l.text)));
+      if (statusEl) statusEl.textContent = '引用计数 = ' + count;
+    }
+
+    reset.addEventListener('click', () => {
+      names.forEach((n) => { n.alive = true; });
+      if (sym) sym.alive = true;
+      lines = [];
+      draw();
+    });
+    draw();
+  };
+
   /* ---------- 挂载 ---------- */
   document.querySelectorAll('[data-widget]').forEach((root) => {
     var name = root.getAttribute('data-widget');

@@ -1,0 +1,527 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-has-toc="1">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>空闲空间与块组 · 一个位图块够管多大</title>
+<meta name="description" content="新块去哪找、空块怎么记账，以及为什么一个 4KB 的位图块只够管 128MB，逼得 Ext2 把文件系统切成块组。" />
+<link rel="stylesheet" href="../../assets/theme.css" />
+  <link rel="stylesheet" href="../../assets/blocks.css" />
+  <link rel="stylesheet" href="../../assets/archify-embed.css" />
+</head>
+<body>
+<div id="progress"></div>
+<div id="tocScrim"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
+    <a class="brand" href="../../index.html"><span class="dot"></span>知识笔记</a>
+    
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="toc" id="toc">
+      <p class="toc-title">目录</p>
+      <a href="../../index.html" class="sub">← 全部笔记</a>
+      <a href="#新块摆哪">新块摆哪</a>
+      <a href="#空闲表法把空洞列出来">空闲表法：把空洞列出来</a>
+      <a href="#空闲链表法把空闲块串起来">空闲链表法：把空闲块串起来</a>
+      <a href="#位图法一位管一块">位图法：一位管一块</a>
+      <a href="#一个位图块够管多大">一个位图块，够管多大</a>
+      <a href="#块组把文件系统切成很多小块">块组：把文件系统切成很多小块</a>
+      <a href="#为什么每个块组里都重复放全局信息">为什么每个块组里都重复放全局信息</a>
+      <a href="#ext4-后来改了" class="sub">Ext4 后来改了</a>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow">● 操作系统 · 文件系统 ④</span>
+      <h1>空闲空间与块组 · 一个位图块够管多大</h1>
+      <p class="lede">新块去哪找、空块怎么记账，以及为什么一个 4KB 的位图块只够管 128MB，逼得 Ext2 把文件系统切成块组。</p>
+    </div>
+
+    <div class="draft-banner">
+    <span>⚠</span>
+    <span>本页状态为 <b>draft</b>：内容尚未人工核对，引用前请自行验证。</span>
+  </div>
+<aside class="needs">
+      <p class="needs-title">读这篇之前，你需要先知道</p>
+      <a class="need" href="../fs-block-allocation/">← <b>3. 数据块摆在哪</b><span>连续 / 隐式链表 / FAT / 索引四种摆法，以及 Unix inode 的 13 个指针</span></a>
+    </aside>
+    <div class="provenance"><span><b>来源</b> 飞书文档《一口气搞懂「文件系统」，就靠这 25 张图了》 https://futu.feishu.cn/docx/Q3sGdsByKog86txzZiycCErMnSc @ revision 105</span><span><b>生成</b> 2026-10-01</span><span><b>模型</b> claude-opus-4-5</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">操作系统</span> <span class="tag tone-muted">文件系统</span> <span class="tag tone-muted">位图</span> <span class="tag tone-muted">Ext2</span></span></div>
+
+<h2 id="新块摆哪"><span class="num">01</span>新块摆哪</h2>
+<p>前两篇讲的都是「已经存在的数据怎么组织」。现在换一个方向：</p>
+<blockquote>
+<p>我要写一个新块，磁盘上那么多块，该放在哪一块？</p>
+</blockquote>
+<p>最傻的办法是从头扫一遍磁盘，找到空的地方就放。<mark class="mk-blue">但这样每写一块都要扫整块盘，一次都不用想就知道不可行。</mark></p>
+<p>所以磁盘的空闲空间本身也得被管理起来。常见的有三种做法，一步步看它们各自补了什么。</p>
+<hr>
+<h2 id="空闲表法把空洞列出来"><span class="num">02</span>空闲表法：把空洞列出来</h2>
+<p>既然只有空洞是重要的，那就专门给空洞建一张表：</p>
+<table>
+<thead>
+<tr>
+<th>序号</th>
+<th>第一个空闲块号</th>
+<th>空闲块个数</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>2</td>
+<td>3</td>
+</tr>
+<tr>
+<td>2</td>
+<td>8</td>
+<td>3</td>
+</tr>
+<tr>
+<td>3</td>
+<td>13</td>
+<td>2</td>
+</tr>
+<tr>
+<td>…</td>
+<td></td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<p>这张表的意思是：2 到 4 号块空着，8 到 10 号块空着，13 到 14 号块空着。</p>
+<div class="flowd has-grid has-groups" data-flow data-edges="[{&quot;from&quot;:&quot;t&quot;,&quot;to&quot;:&quot;f1&quot;,&quot;label&quot;:&quot;一项管一段连续的空闲&quot;},{&quot;from&quot;:&quot;f1&quot;,&quot;to&quot;:&quot;used&quot;,&quot;label&quot;:&quot;分配时从这些段里挑一段&quot;,&quot;dashed&quot;:true}]">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"><div class="fgroup tone-green" data-group-box="free">
+          <span class="fgroup-label">被记下来的三块空闲区</span>
+        </div></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-violet" data-id="t">
+              
+              
+              <b>空闲表</b>
+              <small>序号 + 起始块 + 块数</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="f1" data-group="free">
+              
+              
+              <b>2 → 4</b>
+              <small>3 块连续空闲</small>
+            </div><div class="fnode tone-green" data-id="f2" data-group="free">
+              
+              
+              <b>8 → 10</b>
+              <small>3 块连续空闲</small>
+            </div><div class="fnode tone-green" data-id="f3" data-group="free">
+              
+              
+              <b>13 → 14</b>
+              <small>2 块连续空闲</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-muted" data-id="used">
+              
+              
+              <b>其它块</b>
+              <small>已经被文件占了</small>
+            </div></div></div>
+      
+    </div><p><mark class="mk-amber">这张表天生只适合连续分配。</mark> 每一行记的是「一段连续的空闲区」，所以从里面挑出来的空间一定是连续的。</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>什么时候好用</th><th>说明</th></tr></thead><tbody><tr><th>空闲区少的时候</th><td data-label="说明"><span class="tag tone-green">表很短，扫描几行就能分配</span></td></tr><tr><th>空闲区多的时候</th><td data-label="说明"><span class="tag tone-red">表变长，每次分配都要顺序扫一遍，查询效率大幅下降</span></td></tr></tbody></table></div><p><mark class="mk-blue">它的根本问题是「表的行数 = 空洞的个数」。</mark> 磁盘用久了必然碎片化，洞一多这张表就失控了。</p>
+<hr>
+<h2 id="空闲链表法把空闲块串起来"><span class="num">03</span>空闲链表法：把空闲块串起来</h2>
+<p>换个思路：不在内存里维护一张表，而是<strong>让空闲块自己串成一条链</strong>。</p>
+<p>每个空闲块里留一个指针，指向下一个空闲块在哪。内存里只要记住链头就行。</p>
+<div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;head&quot;,&quot;to&quot;:&quot;f1&quot;,&quot;label&quot;:&quot;链头&quot;},{&quot;from&quot;:&quot;f1&quot;,&quot;to&quot;:&quot;f2&quot;},{&quot;from&quot;:&quot;f2&quot;,&quot;to&quot;:&quot;f3&quot;}]">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-violet" data-id="head">
+              
+              
+              <b>内存里一个指针</b>
+              <small>指向第一个空闲块</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="f1">
+              
+              
+              <b>空闲块 2</b>
+              <small>指针 → 8</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="f2">
+              
+              
+              <b>空闲块 8</b>
+              <small>指针 → 13</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="f3">
+              
+              
+              <b>空闲块 13</b>
+              <small>指针 → −1 结束</small>
+            </div></div></div>
+      
+    </div><p>分配的时候从链头取，回收的时候把块接到链头上。</p>
+<ul class="check cross"><li>不能随机访问：想找第 100 个空闲块，得顺着链跳 100 次</li><li>每一次跳都可能是一次磁盘 I/O，因为下一个块可能在磁盘的另一头</li><li>指针本身占掉了空闲块的空间，可用的部分变少</li></ul><p>空闲表和空闲链表有一个共同的上限：<mark class="mk-blue">它们都随「磁盘大小」线性增长。</mark> 磁盘越大，表或链就越长，最后都会变得不实用。</p>
+<hr>
+<h2 id="位图法一位管一块"><span class="num">04</span>位图法：一位管一块</h2>
+<p>第三种做法最省：</p>
+<blockquote>
+<p>磁盘上的每一个块，都对应位图里的<strong>一个二进制位</strong>。0 表示空，1 表示已用。</p>
+</blockquote>
+<p>就这么简单。一个 4KB 的块能放 <code>4 × 1024 × 8 = 32768</code> 个二进制位，也就是能管 32768 个块。</p>
+<p>真实的样子长这样（每 4 位一组只是为了方便看，实际是连续的）：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">1111 1100 1111 1111 1000 1110 1101 1111 1111 0011 1...
+</code></pre></div>
+<p>读法：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code>第 1 位 = 1  →  0 号块被占用
+第 2 位 = 1  →  1 号块被占用
+...
+第 7 位 = 0  →  6 号块空着
+第 8 位 = 0  →  7 号块空着
+</code></pre></div>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>对比</th><th>空闲表法</th><th>空闲链表法</th><th>位图法</th></tr></thead><tbody><tr><th>占多少空间</th><td data-label="空闲表法">每段一条记录，随空洞数增长</td><td data-label="空闲链表法">每个空闲块多一个指针</td><td data-label="位图法"><span class="tag tone-green">每块一个 bit，固定不变</span></td></tr><tr><th>找一块空的</th><td data-label="空闲表法">扫表，找到够大的段</td><td data-label="空闲链表法">从链头取</td><td data-label="位图法"><span class="tag tone-green">扫位图找到第一个 0</span></td></tr><tr><th>能表示连续的块吗</th><td data-label="空闲表法">能，每段就是连续的</td><td data-label="空闲链表法">不能，块的顺序是随意的</td><td data-label="位图法">不能，但能立刻看出哪一段是空的</td></tr><tr><th>随磁盘变大</th><td data-label="空闲表法"><span class="tag tone-red">变长</span></td><td data-label="空闲链表法"><span class="tag tone-red">变长</span></td><td data-label="位图法"><span class="tag tone-amber">线性增长，但基数极小</span></td></tr></tbody></table></div><p>位图法最大的好处是<mark class="mk-blue">一张位图就能表示整块磁盘的占用情况，而且通过位运算可以一次检查 64 个块</mark>。Linux 的 Ext 系列用的就是它，而且不只用于数据块，<strong>inode 的分配也用位图管</strong>，因为 inode 也是存在磁盘上的，也得知道哪个 inode 空着。</p>
+<hr>
+<h2 id="一个位图块够管多大"><span class="num">05</span>一个位图块，够管多大</h2>
+<p>现在算一笔账。假设按最朴素的结构来：</p>
+<blockquote>
+<p>一个块的位图 + 跟着它的一串数据块</p>
+</blockquote>
+<p>一个 4KB 的块能表示多少个块？</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code>一个块的位数 = 4 × 1024 字节 × 8 位 = 2^15 = 32768 位
+每一位管一个块 → 最多管 32768 个块
+每个块 4KB → 总共能管 32768 × 4KB = 2^27 字节 = 128 MB
+</code></pre></div>
+<p><strong>只有 128MB。</strong> 现在随便一个视频文件都比这大。</p>
+<p>换成别的块大小也是一样的小，只是数字变一下：</p>
+<div class="demo" data-widget="tuner" data-config="{&quot;param&quot;:{&quot;label&quot;:&quot;块大小&quot;,&quot;unit&quot;:&quot;字节&quot;,&quot;values&quot;:[1024,2048,4096,8192,16384]},&quot;outputs&quot;:[{&quot;label&quot;:&quot;能表示的块数&quot;,&quot;unit&quot;:&quot;块&quot;,&quot;values&quot;:[8192,16384,32768,65536,131072],&quot;tone&quot;:&quot;blue&quot;},{&quot;label&quot;:&quot;最大能管的空间&quot;,&quot;unit&quot;:&quot;MB&quot;,&quot;values&quot;:[8,32,128,512,2048],&quot;tone&quot;:&quot;amber&quot;}]}">
+      <div class="demo-head">
+        <span class="title">一个位图块，最多管多大的空间</span>
+        <span class="status" data-status>拖动滑块换块大小</span>
+        <span class="spacer"></span>
+        
+      </div>
+      <div class="demo-body custom" data-mount></div>
+    </div><p>把块调大能缓解，但很快就到顶了。而且块太大会让「读 1 个字节也要捞一大块」的浪费更严重。</p>
+<p><mark class="mk-blue">真正的问题不是块多大，而是「用一张位图管整个磁盘」这个前提本身。</mark></p>
+<p><strong>解决办法：别用一张位图，把文件系统切开。</strong></p>
+<hr>
+<h2 id="块组把文件系统切成很多小块"><span class="num">06</span>块组：把文件系统切成很多小块</h2>
+<p>既然「一张位图 + 一串块」只能管 128MB，那就 <mark class="mk-blue">让这个结构重复出现 N 次</mark>：</p>
+<figure class="archfig" data-arch>
+      <svg viewBox="0 0 1408 400" role="img" aria-labelledby="archify-diagram-title archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
+        <title id="archify-diagram-title">Ext2 在硬盘上的样子：引导块 + 一堆块组</title>
+        <desc id="archify-diagram-description">每个块组都长一样，因为文件系统被切成了重复的小单元 —— 这样 inode 和数据块才能靠得近</desc>
+        <!-- Definitions -->
+        <defs>
+          <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-default" />
+          </marker>
+          <marker id="arrowhead-emphasis" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-emphasis" />
+          </marker>
+          <marker id="arrowhead-security" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-security" />
+          </marker>
+          <marker id="arrowhead-dashed" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-dashed" />
+          </marker>
+          <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+            <path d="M 40 0 L 0 0 0 40" class="c-grid" stroke-width="0.5"/>
+          </pattern>
+        </defs>
+
+        <!-- Background Grid -->
+        <rect width="100%" height="100%" fill="url(#grid)" />
+
+        <!-- Boundaries (behind everything) -->
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="0" x="252" y="74" width="1096" height="108" rx="12" class="c-region" stroke-width="1"/>
+        <text x="260" y="92" class="t-cloud" font-size="9" font-weight="600">块组 —— 同一个结构在硬盘上重复排布</text>
+
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="1" x="30" y="220" width="1338" height="112" rx="12" class="c-region" stroke-width="1"/>
+        <text x="38" y="238" class="t-cloud" font-size="9" font-weight="600">每个块组内部都是这六样（上面任意一个块组展开就是这个）</text>
+
+        <!-- Connection paths (before components for correct z-order) -->
+
+
+        <!-- Components -->
+        <g id="node-boot" data-node-id="boot" data-node-label="引导块" tabindex="0" role="button" aria-label="Focus 引导块, 系统启动用，1KB, Architecture component" aria-pressed="false" data-node-kind="external" data-node-sublabel="系统启动用，1KB" data-node-context="Architecture component">
+          <title>引导块 · 系统启动用，1KB · Architecture component</title>
+          <rect x="60" y="104" width="148" height="58" rx="6" class="c-mask"/>
+          <rect x="60" y="104" width="148" height="58" rx="6" class="c-external" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="external" class="semantic-sigil s-external" transform="translate(66 110) scale(0.6875)">
+            <rect x="2.5" y="5" width="8.5" height="8" rx="1.5"/>
+            <path d="M8 2.5h5.5V8M13.5 2.5 7.5 8.5"/>
+          </g>
+          <text data-detail-anchor x="134" y="131" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">引导块</text>
+        <text data-detail="context" x="134" y="147" class="t-muted" font-size="9" text-anchor="middle">系统启动用，1KB</text>
+        </g>
+
+        <g id="node-bg0" data-node-id="bg0" data-node-label="块组 0" tabindex="0" role="button" aria-label="Focus 块组 0, 起始位置记在超级块里, 块组 —— 同一个结构在硬盘上重复排布" aria-pressed="false" data-node-kind="backend" data-node-sublabel="起始位置记在超级块里" data-node-context="块组 —— 同一个结构在硬盘上重复排布">
+          <title>块组 0 · 起始位置记在超级块里 · 块组 —— 同一个结构在硬盘上重复排布</title>
+          <rect x="282" y="104" width="148" height="58" rx="6" class="c-mask"/>
+          <rect x="282" y="104" width="148" height="58" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(288 110) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text data-detail-anchor x="356" y="131" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">块组 0</text>
+        <text data-detail="context" x="356" y="147" class="t-muted" font-size="9" text-anchor="middle">起始位置记在超级块里</text>
+        </g>
+
+        <g id="node-bg1" data-node-id="bg1" data-node-label="块组 1" tabindex="0" role="button" aria-label="Focus 块组 1, 结构完全一样, 块组 —— 同一个结构在硬盘上重复排布" aria-pressed="false" data-node-kind="backend" data-node-sublabel="结构完全一样" data-node-context="块组 —— 同一个结构在硬盘上重复排布">
+          <title>块组 1 · 结构完全一样 · 块组 —— 同一个结构在硬盘上重复排布</title>
+          <rect x="504" y="104" width="148" height="58" rx="6" class="c-mask"/>
+          <rect x="504" y="104" width="148" height="58" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(510 110) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text data-detail-anchor x="578" y="131" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">块组 1</text>
+        <text data-detail="context" x="578" y="147" class="t-muted" font-size="9" text-anchor="middle">结构完全一样</text>
+        </g>
+
+        <g id="node-bg2" data-node-id="bg2" data-node-label="块组 2" tabindex="0" role="button" aria-label="Focus 块组 2, 结构完全一样, 块组 —— 同一个结构在硬盘上重复排布" aria-pressed="false" data-node-kind="backend" data-node-sublabel="结构完全一样" data-node-context="块组 —— 同一个结构在硬盘上重复排布">
+          <title>块组 2 · 结构完全一样 · 块组 —— 同一个结构在硬盘上重复排布</title>
+          <rect x="726" y="104" width="148" height="58" rx="6" class="c-mask"/>
+          <rect x="726" y="104" width="148" height="58" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(732 110) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text data-detail-anchor x="800" y="131" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">块组 2</text>
+        <text data-detail="context" x="800" y="147" class="t-muted" font-size="9" text-anchor="middle">结构完全一样</text>
+        </g>
+
+        <g id="node-bg3" data-node-id="bg3" data-node-label="块组 3" tabindex="0" role="button" aria-label="Focus 块组 3, 结构完全一样, 块组 —— 同一个结构在硬盘上重复排布" aria-pressed="false" data-node-kind="backend" data-node-sublabel="结构完全一样" data-node-context="块组 —— 同一个结构在硬盘上重复排布">
+          <title>块组 3 · 结构完全一样 · 块组 —— 同一个结构在硬盘上重复排布</title>
+          <rect x="948" y="104" width="148" height="58" rx="6" class="c-mask"/>
+          <rect x="948" y="104" width="148" height="58" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(954 110) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text data-detail-anchor x="1022" y="131" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">块组 3</text>
+        <text data-detail="context" x="1022" y="147" class="t-muted" font-size="9" text-anchor="middle">结构完全一样</text>
+        </g>
+
+        <g id="node-more" data-node-id="more" data-node-label="… 还有 N 个" tabindex="0" role="button" aria-label="Focus … 还有 N 个, 文件系统就这么被切开, 块组 —— 同一个结构在硬盘上重复排布" aria-pressed="false" data-node-kind="external" data-node-sublabel="文件系统就这么被切开" data-node-context="块组 —— 同一个结构在硬盘上重复排布">
+          <title>… 还有 N 个 · 文件系统就这么被切开 · 块组 —— 同一个结构在硬盘上重复排布</title>
+          <rect x="1170" y="104" width="148" height="58" rx="6" class="c-mask"/>
+          <rect x="1170" y="104" width="148" height="58" rx="6" class="c-external" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="external" class="semantic-sigil s-external" transform="translate(1176 110) scale(0.6875)">
+            <rect x="2.5" y="5" width="8.5" height="8" rx="1.5"/>
+            <path d="M8 2.5h5.5V8M13.5 2.5 7.5 8.5"/>
+          </g>
+          <text data-detail-anchor x="1244" y="131" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">… 还有 N 个</text>
+        <text data-detail="context" x="1244" y="147" class="t-muted" font-size="9" text-anchor="middle">文件系统就这么被切开</text>
+        </g>
+
+        <g id="node-sb" data-node-id="sb" data-node-label="超级块" tabindex="0" role="button" aria-label="Focus 超级块, inode 总数 · 块总数, 每个块组内部都是这六样（上面任意一个块组展开就是这个）" aria-pressed="false" data-node-kind="database" data-node-sublabel="inode 总数 · 块总数" data-node-context="每个块组内部都是这六样（上面任意一个块组展开就是这个）">
+          <title>超级块 · inode 总数 · 块总数 · 每个块组内部都是这六样（上面任意一个块组展开就是这个）</title>
+          <rect x="60" y="250" width="168" height="62" rx="6" class="c-mask"/>
+          <rect x="60" y="250" width="168" height="62" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(66 256) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <text data-detail-anchor x="144" y="279" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">超级块</text>
+        <text data-detail="context" x="144" y="295" class="t-muted" font-size="9" text-anchor="middle">inode 总数 · 块总数</text>
+        </g>
+
+        <g id="node-gd" data-node-id="gd" data-node-label="块组描述符" tabindex="0" role="button" aria-label="Focus 块组描述符, 所有块组的空闲数, 每个块组内部都是这六样（上面任意一个块组展开就是这个）" aria-pressed="false" data-node-kind="database" data-node-sublabel="所有块组的空闲数" data-node-context="每个块组内部都是这六样（上面任意一个块组展开就是这个）">
+          <title>块组描述符 · 所有块组的空闲数 · 每个块组内部都是这六样（上面任意一个块组展开就是这个）</title>
+          <rect x="282" y="250" width="168" height="62" rx="6" class="c-mask"/>
+          <rect x="282" y="250" width="168" height="62" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(288 256) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <text data-detail-anchor x="366" y="279" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">块组描述符</text>
+        <text data-detail="context" x="366" y="295" class="t-muted" font-size="9" text-anchor="middle">所有块组的空闲数</text>
+        </g>
+
+        <g id="node-dbmap" data-node-id="dbmap" data-node-label="数据位图" tabindex="0" role="button" aria-label="Focus 数据位图, 哪些数据块还空着, 每个块组内部都是这六样（上面任意一个块组展开就是这个）" aria-pressed="false" data-node-kind="backend" data-node-sublabel="哪些数据块还空着" data-node-context="每个块组内部都是这六样（上面任意一个块组展开就是这个）">
+          <title>数据位图 · 哪些数据块还空着 · 每个块组内部都是这六样（上面任意一个块组展开就是这个）</title>
+          <rect x="504" y="250" width="168" height="62" rx="6" class="c-mask"/>
+          <rect x="504" y="250" width="168" height="62" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(510 256) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text data-detail-anchor x="588" y="279" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">数据位图</text>
+        <text data-detail="context" x="588" y="295" class="t-muted" font-size="9" text-anchor="middle">哪些数据块还空着</text>
+        </g>
+
+        <g id="node-ibmap" data-node-id="ibmap" data-node-label="inode 位图" tabindex="0" role="button" aria-label="Focus inode 位图, 哪些 inode 还空着, 每个块组内部都是这六样（上面任意一个块组展开就是这个）" aria-pressed="false" data-node-kind="backend" data-node-sublabel="哪些 inode 还空着" data-node-context="每个块组内部都是这六样（上面任意一个块组展开就是这个）">
+          <title>inode 位图 · 哪些 inode 还空着 · 每个块组内部都是这六样（上面任意一个块组展开就是这个）</title>
+          <rect x="726" y="250" width="168" height="62" rx="6" class="c-mask"/>
+          <rect x="726" y="250" width="168" height="62" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(732 256) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text data-detail-anchor x="810" y="279" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">inode 位图</text>
+        <text data-detail="context" x="810" y="295" class="t-muted" font-size="9" text-anchor="middle">哪些 inode 还空着</text>
+        </g>
+
+        <g id="node-ilist" data-node-id="ilist" data-node-label="inode 列表" tabindex="0" role="button" aria-label="Focus inode 列表, 这个块组的 inode, 每个块组内部都是这六样（上面任意一个块组展开就是这个）" aria-pressed="false" data-node-kind="database" data-node-sublabel="这个块组的 inode" data-node-context="每个块组内部都是这六样（上面任意一个块组展开就是这个）">
+          <title>inode 列表 · 这个块组的 inode · 每个块组内部都是这六样（上面任意一个块组展开就是这个）</title>
+          <rect x="948" y="250" width="168" height="62" rx="6" class="c-mask"/>
+          <rect x="948" y="250" width="168" height="62" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(954 256) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <text data-detail-anchor x="1032" y="279" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">inode 列表</text>
+        <text data-detail="context" x="1032" y="295" class="t-muted" font-size="9" text-anchor="middle">这个块组的 inode</text>
+        </g>
+
+        <g id="node-data" data-node-id="data" data-node-label="数据块" tabindex="0" role="button" aria-label="Focus 数据块, 文件真正的内容, 每个块组内部都是这六样（上面任意一个块组展开就是这个）" aria-pressed="false" data-node-kind="database" data-node-sublabel="文件真正的内容" data-node-context="每个块组内部都是这六样（上面任意一个块组展开就是这个）">
+          <title>数据块 · 文件真正的内容 · 每个块组内部都是这六样（上面任意一个块组展开就是这个）</title>
+          <rect x="1170" y="250" width="168" height="62" rx="6" class="c-mask"/>
+          <rect x="1170" y="250" width="168" height="62" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(1176 256) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <text data-detail-anchor x="1254" y="279" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">数据块</text>
+        <text data-detail="context" x="1254" y="295" class="t-muted" font-size="9" text-anchor="middle">文件真正的内容</text>
+        </g>
+
+        <!-- Connection labels -->
+
+
+        <!-- Legend -->
+        <g data-legend data-legend-bridge>
+          <text x="40" y="364" class="t-primary" font-size="12" font-weight="650">Legend</text>
+          <g data-legend-semantic-kind="backend" data-legend-kind="backend" data-legend-label="Backend" data-legend-x="40" data-legend-baseline="384" data-legend-width="78">
+            <rect x="40" y="375" width="16" height="10" rx="2.5" class="c-backend" stroke-width="1"/>
+            <text x="62" y="384" class="t-muted" font-size="10" font-weight="500">Backend</text>
+          </g>
+          <g data-legend-semantic-kind="database" data-legend-kind="database" data-legend-label="Database" data-legend-x="140" data-legend-baseline="384" data-legend-width="83">
+            <rect x="140" y="375" width="16" height="10" rx="2.5" class="c-database" stroke-width="1"/>
+            <text x="162" y="384" class="t-muted" font-size="10" font-weight="500">Database</text>
+          </g>
+          <g data-legend-semantic-kind="external" data-legend-kind="external" data-legend-label="External" data-legend-x="245" data-legend-baseline="384" data-legend-width="83">
+            <rect x="245" y="375" width="16" height="10" rx="2.5" class="c-external" stroke-width="1"/>
+            <text x="267" y="384" class="t-muted" font-size="10" font-weight="500">External</text>
+          </g>
+        </g>
+      </svg>
+      <figcaption>整块盘被切成一个个块组，每个块组内部都有一份自己的位图、自己的 inode 列表和自己的数据块。</figcaption>
+      <p class="arch-hint">
+        <span class="idle">点头上的任意一个框，只看它和它连出去的关系</span>
+        <span class="focused">再点一次空白处取消</span>
+      </p>
+    </figure><p>在 Linux 里，这样一个单元叫一个<strong>块组</strong>。文件系统就是「引导块 + N 个块组」排下去。</p>
+<p>块组内部有六样东西，<mark class="mk-blue">它们各自解决一个具体问题</mark>：</p>
+<div class="spec tone-violet">
+      <div class="spec-head"><b>一个块组里有什么</b><span>Ext2 的划分方式</span></div>
+      <div class="spec-body"><div class="srow">
+          <div class="sk">超级块</div>
+          <div class="sv"><p>文件系统的全局信息：inode 总数、块总数、每个块组多少 inode、每个块组多少块……</p>
+<p><strong>这一份是全局的，不是这个块组自己的。</strong></p>
+</div>
+        </div><div class="srow">
+          <div class="sk">块组描述符</div>
+          <div class="sv"><p>每个块组的空闲块数、空闲 inode 数。</p>
+<p>它的范围也是<strong>所有块组</strong>，不是只有自己。</p>
+</div>
+        </div><div class="srow">
+          <div class="sk">数据位图</div>
+          <div class="sv"><p>这个块组里哪些数据块空着。</p>
+<p>一个块组有多少块，就需要多少位。这才是 128MB 那个上限的作用点。</p>
+</div>
+        </div><div class="srow">
+          <div class="sk">inode 位图</div>
+          <div class="sv"><p>这个块组里哪些 inode 空着。</p>
+<p>inode 也是磁盘上的资源，也需要记账。</p>
+</div>
+        </div><div class="srow">
+          <div class="sk">inode 列表</div>
+          <div class="sv"><p>这个块组里所有的 inode，一个一个挨着排。</p>
+<p>inode 是固定大小的，所以「第几个 inode」可以直接算出它的位置。</p>
+</div>
+        </div><div class="srow">
+          <div class="sk">数据块</div>
+          <div class="sv"><p>文件真正的内容（以及目录的内容）。</p>
+<p>占块组里的绝大部分空间。</p>
+</div>
+        </div></div>
+    </div><p><mark class="mk-blue">位图只管得住自己这个块组</mark>，所以上限从「整个磁盘 128MB」变成了「每个块组 128MB」，而块组可以有很多个。磁盘多大都能用同一套结构拼出来。</p>
+<hr>
+<h2 id="为什么每个块组里都重复放全局信息"><span class="num">07</span>为什么每个块组里都重复放全局信息</h2>
+<p>回头看那个看起来很奇怪的设计：超级块和块组描述符是<strong>全局信息<strong>，却要在</strong>每个块组</strong>里都存一份。</p>
+<div class="cards" data-cols="2"><div class="ccard tone-red">
+          <span class="tag tone-red">容错</span>
+          <h4>理由一：丢了能救回来</h4>
+          
+          <div class="cbody"><p>超级块里有「inode 总数、块总数」这些信息。
+<mark class="mk-blue">它没了，整个文件系统的结构就无从谈起</mark>。
+你不知道该按什么规矩去解析剩下那些字节。</p>
+<p>如果每个块组都有副本，块组 0 的那份坏了，还能拿块组 1 的来恢复。</p>
+</div>
+          
+        </div><div class="ccard tone-green">
+          <span class="tag tone-green">性能</span>
+          <h4>理由二：离数据近一点</h4>
+          
+          <div class="cbody"><p>读一个文件时，需要查它的 inode、查数据块的位置、再读数据。</p>
+<p>如果这些都在同一个块组里，磁头移动距离短；
+如果 inode 全在最前面、数据全在最后面，每次读文件都要横跨整个磁盘。
+<mark class="mk-blue">把管理数据和被管理数据放在一起，减少了寻道和旋转的等待。</mark></p>
+</div>
+          
+        </div></div><h3 id="ext4-后来改了">Ext4 后来改了</h3>
+<p>Ext2 是「每个块组都存一份」。Ext4 觉得太浪费了，改成<strong>稀疏</strong>存放：</p>
+<blockquote>
+<p>超级块和块组描述符只写在块组 0、块组 1，以及其他编号可以表示为 <strong>3、5、7 的幂</strong> 的那些块组里。</p>
+</blockquote>
+<p>也就是说块组 2 号往后，只有 3、9、27、81、243、729…… 这些编号的块组带着备份。</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>版本</th><th>超级块备份放在哪</th><th>代价</th></tr></thead><tbody><tr><th>Ext2</th><td data-label="超级块备份放在哪">每个块组都放一份</td><td data-label="代价">占空间多，但几乎没有单点故障</td></tr><tr><th>Ext4</th><td data-label="超级块备份放在哪"><span class="tag tone-green">块组 0、1 和 3/5/7 的幂次块组</span></td><td data-label="代价">省了空间，同时保留了一串间隔越来越远的备份点</td></tr></tbody></table></div><p>间隔取幂次而不是固定间隔，是为了让备份分布得越来越稀疏。局部损坏（比如一块坏道）不会一次带走所有副本。</p>
+<hr>
+<div class="quiz"><details>
+        <summary>空闲表法和空闲链表法都不适合大文件系统，根本原因是什么？</summary>
+        <div class="a"><p>它们的管理成本都随「磁盘有多大」线性增长。空闲表要记录每一个空洞，
+空闲链表要给每一个空闲块配一个指针；磁盘越大、碎片越多，这两样就越失控。
+位图法的成本是每块一位，基数小得多，而且一个位图块就能管住三万多个块。</p>
+</div>
+      </details><details>
+        <summary>一个 4KB 的位图块，为什么只能管 128MB？</summary>
+        <div class="a"><p>因为一个块里的位数 = 4096 × 8 = 32768 位，一位管一个块，所以最多管 32768 个块；
+每块 4KB，乘起来就是 128MB。
+解决的办法不是把块调大，而是把这个「位图 + 一串块」的结构重复成很多份，也就是块组。</p>
+</div>
+      </details><details>
+        <summary>每个块组都放一份超级块，为什么说是「浪费但值得」？</summary>
+        <div class="a"><p>超级块是全局信息，每个块组存一份确实是冗余。
+但它买到两件事：一是超级块被写坏时能用别的块组的副本恢复整个文件系统；
+二是把管理数据和被管理数据放在一起，减少了磁头寻道的距离。
+Ext4 后来用稀疏存放把浪费压下去了，但这两个好处都还保留着。</p>
+</div>
+      </details><details>
+        <summary>inode 也需要位图管理吗？</summary>
+        <div class="a"><p>需要。inode 也存在磁盘上，也是有限资源。
+一个文件系统能建多少个文件，在格式化的时候就由 inode 总数定死了。
+所以创建文件时要先通过 inode 位图找到一个空位，跟分配数据块是同一个道理。</p>
+</div>
+      </details></div>
+
+    <footer>
+      <span>空闲空间与块组 · 一个位图块够管多大</span>
+      <span>最后更新 2026-10-01 · 单文件可离线打开</span>
+    </footer>
+  </main>
+</div>
+
+<script src="../../assets/app.js"></script>
+</body>
+</html>

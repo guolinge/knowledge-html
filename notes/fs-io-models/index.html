@@ -1,0 +1,397 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-has-toc="1">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>六种文件 I/O · 判据只有「卡在哪一阶段」</title>
+<meta name="description" content="缓冲、直接、阻塞、非阻塞、多路复用、异步 —— 六个名字听着像六件事，判据其实只有一条：数据准备和数据拷贝这两个阶段，各卡不卡你。" />
+<link rel="stylesheet" href="../../assets/theme.css" />
+  <link rel="stylesheet" href="../../assets/blocks.css" />
+  <link rel="stylesheet" href="../../assets/archify-embed.css" />
+</head>
+<body>
+<div id="progress"></div>
+<div id="tocScrim"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
+    <a class="brand" href="../../index.html"><span class="dot"></span>知识笔记</a>
+    
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="toc" id="toc">
+      <p class="toc-title">目录</p>
+      <a href="../../index.html" class="sub">← 全部笔记</a>
+      <a href="#六个名字一条判据">六个名字，一条判据</a>
+      <a href="#一次读盘要拆成两个阶段">一次读盘要拆成两个阶段</a>
+      <a href="#逐个看一眼区别在哪" class="sub">逐个看一眼区别在哪</a>
+      <a href="#缓冲-io标准库那一层">缓冲 I/O：标准库那一层</a>
+      <a href="#直接-io内核那一层">直接 I/O：内核那一层</a>
+      <a href="#非直接-io-什么时候才真的落盘" class="sub">非直接 I/O 什么时候才真的落盘</a>
+      <a href="#换成饭堂打饭">换成饭堂打饭</a>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow">● 操作系统 · 文件系统 ⑥</span>
+      <h1>六种文件 I/O · 判据只有「卡在哪一阶段」</h1>
+      <p class="lede">缓冲、直接、阻塞、非阻塞、多路复用、异步 —— 六个名字听着像六件事，判据其实只有一条：数据准备和数据拷贝这两个阶段，各卡不卡你。</p>
+    </div>
+
+    <div class="draft-banner">
+    <span>⚠</span>
+    <span>本页状态为 <b>draft</b>：内容尚未人工核对，引用前请自行验证。</span>
+  </div>
+<aside class="needs">
+      <p class="needs-title">读这篇之前，你需要先知道</p>
+      <a class="need" href="../fs-vfs-layers/">← <b>2. VFS 与文件的使用</b><span>从 open() 到磁盘要穿几层、文件描述符和打开文件表是什么、字节怎么变成块</span></a>
+    </aside>
+    <div class="provenance"><span><b>来源</b> 飞书文档《一口气搞懂「文件系统」，就靠这 25 张图了》 https://futu.feishu.cn/docx/Q3sGdsByKog86txzZiycCErMnSc @ revision 105</span><span><b>生成</b> 2026-10-01</span><span><b>模型</b> claude-opus-4-5</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">操作系统</span> <span class="tag tone-muted">文件 I/O</span> <span class="tag tone-muted">epoll</span> <span class="tag tone-muted">异步 IO</span></span></div>
+
+<h2 id="六个名字一条判据"><span class="num">01</span>六个名字，一条判据</h2>
+<p>文件 I/O 的分类看着很杂，常见的说法有六种：</p>
+<div class="cards" data-cols="3"><div class="ccard tone-blue">
+          <span class="tag tone-blue">按「用不用标准库缓存」分</span>
+          <h4>缓冲 I/O</h4>
+          <p>走标准库的缓冲</p>
+          
+          
+        </div><div class="ccard tone-blue">
+          <span class="tag tone-blue">按「用不用标准库缓存」分</span>
+          <h4>非缓冲 I/O</h4>
+          <p>直接走系统调用</p>
+          
+          
+        </div><div class="ccard tone-violet">
+          <span class="tag tone-violet">按「用不用内核缓存」分</span>
+          <h4>直接 I/O</h4>
+          <p>不经过内核页缓存</p>
+          
+          
+        </div><div class="ccard tone-violet">
+          <span class="tag tone-violet">按「用不用内核缓存」分</span>
+          <h4>非直接 I/O</h4>
+          <p>默认走内核页缓存</p>
+          
+          
+        </div><div class="ccard tone-amber">
+          <span class="tag tone-amber">按「等不等」分</span>
+          <h4>同步 I/O</h4>
+          <p>阻塞 / 非阻塞 / 多路复用都算</p>
+          
+          
+        </div><div class="ccard tone-amber">
+          <span class="tag tone-amber">按「等不等」分</span>
+          <h4>异步 I/O</h4>
+          <p>内核替你干完再通知你</p>
+          
+          
+        </div></div><p>六种说法，只有三组问题：</p>
+<table>
+<thead>
+<tr>
+<th>问什么</th>
+<th>分出来的名字</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>要不要经过<strong>标准库</strong>那层缓冲？</td>
+<td>缓冲 I/O / 非缓冲 I/O</td>
+</tr>
+<tr>
+<td>要不要经过<strong>内核</strong>那层缓存？</td>
+<td>直接 I/O / 非直接 I/O</td>
+</tr>
+<tr>
+<td>调用返回之前，<strong>要不要等</strong>？</td>
+<td>同步 I/O / 异步 I/O</td>
+</tr>
+</tbody>
+</table>
+<p>前两组是「数据在路上经过谁」，第三组是「你本人要不要蹲在路边看着」。这三组可以自由组合，所以真实项目里会出现「非阻塞 + 直接 I/O + 多路复用」这种叠起来叫法。</p>
+<p><mark class="mk-blue">第三组才是最难的那个，也是面试里最爱问的。</mark> 而它之所以容易混，是因为大家都在拿「名字」记，而不是拿「在哪一段等」记。</p>
+<hr>
+<h2 id="一次读盘要拆成两个阶段"><span class="num">02</span>一次读盘要拆成两个阶段</h2>
+<p>先看一次 <code>read</code> 到底发生了什么：</p>
+<div class="flowd has-grid has-groups" data-flow data-edges="[{&quot;from&quot;:&quot;call&quot;,&quot;to&quot;:&quot;wait&quot;,&quot;label&quot;:&quot;发起&quot;},{&quot;from&quot;:&quot;wait&quot;,&quot;to&quot;:&quot;copy&quot;,&quot;label&quot;:&quot;磁盘的数据到了&quot;},{&quot;from&quot;:&quot;copy&quot;,&quot;to&quot;:&quot;back&quot;,&quot;label&quot;:&quot;拷完了&quot;}]">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"><div class="fgroup tone-violet" data-group-box="ker">
+          <span class="fgroup-label">内核空间</span>
+        </div></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-muted" data-id="call">
+              
+              
+              <b>应用调用 read</b>
+              <small>你交出一个缓冲区</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-amber" data-id="wait" data-group="ker">
+              
+              
+              <b>① 数据准备</b>
+              <small>内核去磁盘把数据取回来</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-blue" data-id="copy" data-group="ker">
+              
+              
+              <b>② 数据拷贝</b>
+              <small>从内核缓冲区拷进你的缓冲区</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="back">
+              
+              
+              <b>read 返回</b>
+              <small>这时候数据才真的在手边</small>
+            </div></div></div>
+      
+    </div><p><mark class="mk-blue">判据就是这两段：你在这个阶段会不会被挂起。</mark></p>
+<p>把五种模型按「这两段卡不卡」列一遍，六种叫法就全部归位了。拖动时间指针，看每一刻应用到底能不能干别的：</p>
+<div class="demo" data-widget="io-models" data-config="{&quot;tMax&quot;:10,&quot;tail&quot;:&quot;橙色那一段是「数据拷贝」。它出现在除异步 I/O 之外的每一个模型里，这就是「同步 / 异步」的真正分界线。&quot;,&quot;models&quot;:[{&quot;id&quot;:&quot;blocking&quot;,&quot;name&quot;:&quot;阻塞 I/O&quot;,&quot;sub&quot;:&quot;默认就是这样&quot;,&quot;sync&quot;:&quot;sync&quot;,&quot;wait&quot;:&quot;block&quot;,&quot;copy&quot;:&quot;block&quot;,&quot;segs&quot;:[{&quot;from&quot;:0,&quot;to&quot;:7,&quot;state&quot;:&quot;wait&quot;,&quot;text&quot;:&quot;read 一调用就交出了控制权，一直等到内核把数据准备好&quot;},{&quot;from&quot;:7,&quot;to&quot;:9,&quot;state&quot;:&quot;copy&quot;,&quot;text&quot;:&quot;数据到了，内核往你的缓冲区里拷，这个过程你也得等&quot;},{&quot;from&quot;:9,&quot;to&quot;:10,&quot;state&quot;:&quot;done&quot;,&quot;text&quot;:&quot;read 返回，终于能用这份数据了&quot;}]},{&quot;id&quot;:&quot;noblock&quot;,&quot;name&quot;:&quot;非阻塞 I/O&quot;,&quot;sub&quot;:&quot;设置 O_NONBLOCK&quot;,&quot;sync&quot;:&quot;sync&quot;,&quot;wait&quot;:&quot;poll&quot;,&quot;copy&quot;:&quot;block&quot;,&quot;segs&quot;:[{&quot;from&quot;:0,&quot;to&quot;:1,&quot;state&quot;:&quot;wait&quot;,&quot;text&quot;:&quot;read 立刻返回 EWOULDBLOCK：还没好，你走吧&quot;},{&quot;from&quot;:1,&quot;to&quot;:2,&quot;state&quot;:&quot;free&quot;,&quot;text&quot;:&quot;这段时间应用可以干别的事&quot;},{&quot;from&quot;:2,&quot;to&quot;:3,&quot;state&quot;:&quot;wait&quot;,&quot;text&quot;:&quot;又来问一次：好了没？还是没有&quot;},{&quot;from&quot;:3,&quot;to&quot;:4,&quot;state&quot;:&quot;free&quot;,&quot;text&quot;:&quot;再去干点别的&quot;},{&quot;from&quot;:4,&quot;to&quot;:6,&quot;state&quot;:&quot;wait&quot;,&quot;text&quot;:&quot;反复问。轮询本身也占着 CPU&quot;},{&quot;from&quot;:6,&quot;to&quot;:7,&quot;state&quot;:&quot;wait&quot;,&quot;text&quot;:&quot;这次有了&quot;},{&quot;from&quot;:7,&quot;to&quot;:9,&quot;state&quot;:&quot;copy&quot;,&quot;text&quot;:&quot;最后一次 read 得等拷贝完成，这一段和非阻塞无关&quot;},{&quot;from&quot;:9,&quot;to&quot;:10,&quot;state&quot;:&quot;done&quot;,&quot;text&quot;:&quot;拿到数据&quot;}]},{&quot;id&quot;:&quot;select&quot;,&quot;name&quot;:&quot;I/O 多路复用&quot;,&quot;sub&quot;:&quot;select / poll / epoll&quot;,&quot;sync&quot;:&quot;sync&quot;,&quot;wait&quot;:&quot;poll&quot;,&quot;copy&quot;:&quot;block&quot;,&quot;segs&quot;:[{&quot;from&quot;:0,&quot;to&quot;:7,&quot;state&quot;:&quot;wait&quot;,&quot;text&quot;:&quot;卡在 epoll_wait 上，但是同时盯着几百个 fd&quot;},{&quot;from&quot;:7,&quot;to&quot;:8,&quot;state&quot;:&quot;done&quot;,&quot;text&quot;:&quot;内核通知：这几个 fd 可读了&quot;},{&quot;from&quot;:8,&quot;to&quot;:9,&quot;state&quot;:&quot;copy&quot;,&quot;text&quot;:&quot;去 read 一下，还得等拷贝&quot;},{&quot;from&quot;:9,&quot;to&quot;:10,&quot;state&quot;:&quot;done&quot;,&quot;text&quot;:&quot;拿到数据&quot;}]},{&quot;id&quot;:&quot;sigio&quot;,&quot;name&quot;:&quot;信号驱动 I/O&quot;,&quot;sub&quot;:&quot;注册 SIGIO&quot;,&quot;sync&quot;:&quot;sync&quot;,&quot;wait&quot;:&quot;no&quot;,&quot;copy&quot;:&quot;block&quot;,&quot;segs&quot;:[{&quot;from&quot;:0,&quot;to&quot;:1,&quot;state&quot;:&quot;done&quot;,&quot;text&quot;:&quot;注册完就回来了，不用守着&quot;},{&quot;from&quot;:1,&quot;to&quot;:7,&quot;state&quot;:&quot;free&quot;,&quot;text&quot;:&quot;这段时间完全属于应用自己&quot;},{&quot;from&quot;:7,&quot;to&quot;:8,&quot;state&quot;:&quot;done&quot;,&quot;text&quot;:&quot;信号到了：数据准备好了&quot;},{&quot;from&quot;:8,&quot;to&quot;:9,&quot;state&quot;:&quot;copy&quot;,&quot;text&quot;:&quot;信号处理里发起 read，还是得等拷贝&quot;},{&quot;from&quot;:9,&quot;to&quot;:10,&quot;state&quot;:&quot;done&quot;,&quot;text&quot;:&quot;拿到数据&quot;}]},{&quot;id&quot;:&quot;aio&quot;,&quot;name&quot;:&quot;异步 I/O&quot;,&quot;sub&quot;:&quot;aio_read / io_uring&quot;,&quot;sync&quot;:&quot;async&quot;,&quot;wait&quot;:&quot;no&quot;,&quot;copy&quot;:&quot;no&quot;,&quot;segs&quot;:[{&quot;from&quot;:0,&quot;to&quot;:1,&quot;state&quot;:&quot;done&quot;,&quot;text&quot;:&quot;aio_read 立刻返回，剩下的事全交给内核&quot;},{&quot;from&quot;:1,&quot;to&quot;:9,&quot;state&quot;:&quot;free&quot;,&quot;text&quot;:&quot;内核自己准备数据、自己拷贝，全程不打扰应用&quot;},{&quot;from&quot;:9,&quot;to&quot;:10,&quot;state&quot;:&quot;done&quot;,&quot;text&quot;:&quot;收到完成通知，数据已经在缓冲区里了&quot;}]}]}">
+      <div class="demo-head">
+        <span class="title">五种 I/O 模型挨在同一条时间轴上</span>
+        <span class="status" data-status>拖动下面的时间滑块</span>
+        <span class="spacer"></span>
+        
+      </div>
+      <div class="demo-body custom" data-mount></div>
+    </div><p>把图上的话翻译成一句：</p>
+<blockquote>
+<p><strong>同步 I/O</strong>：数据准备和拷贝这两段里，至少有一段是你自己在等。
+<strong>异步 I/O</strong>：两段都不用你等，内核干完了通知你。</p>
+</blockquote>
+<div class="callout tone-red">
+      <span class="ic">⚠</span>
+      <div><p><strong>「非阻塞」不是「异步」。这是这里最容易错的一处。</strong></p>
+<p>非阻塞解决的只是「数据准备阶段不用干等」，
+最后一次 <code>read</code> 把数据从内核拷进你的缓冲区时，<mark class="mk-blue">你照样被卡住</mark>。</p>
+<p>所以：非阻塞 I/O、多路复用、信号驱动 I/O，<strong>三个都是同步 I/O</strong>。
+只有 <code>aio_read</code> 那一类才是真的异步。</p>
+</div>
+    </div><h3 id="逐个看一眼区别在哪">逐个看一眼区别在哪</h3>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>模型</th><th>数据准备阶段</th><th>数据拷贝阶段</th><th>这段时间应用在干嘛</th></tr></thead><tbody><tr><th>阻塞 I/O</th><td data-label="数据准备阶段"><span class="tag tone-red">卡住</span></td><td data-label="数据拷贝阶段"><span class="tag tone-red">卡住</span></td><td data-label="这段时间应用在干嘛">什么也干不了</td></tr><tr><th>非阻塞 I/O</th><td data-label="数据准备阶段"><span class="tag tone-amber">轮询</span></td><td data-label="数据拷贝阶段"><span class="tag tone-red">卡住</span></td><td data-label="这段时间应用在干嘛">反复问，问的间隙能干点别的</td></tr><tr><th>I/O 多路复用</th><td data-label="数据准备阶段"><span class="tag tone-amber">卡在 select 上</span></td><td data-label="数据拷贝阶段"><span class="tag tone-red">卡住</span></td><td data-label="这段时间应用在干嘛">一次等很多个 fd，但等的这段时间还是干不了别的</td></tr><tr><th>信号驱动 I/O</th><td data-label="数据准备阶段"><span class="tag tone-green">不卡</span></td><td data-label="数据拷贝阶段"><span class="tag tone-red">卡住</span></td><td data-label="这段时间应用在干嘛">内核准备好了才来找你</td></tr><tr><th>异步 I/O</th><td data-label="数据准备阶段"><span class="tag tone-green">不卡</span></td><td data-label="数据拷贝阶段"><span class="tag tone-green">不卡</span></td><td data-label="这段时间应用在干嘛">全过程都不管，最后收货</td></tr></tbody></table></div><p>非阻塞和多路复用常被合起来用：<mark class="mk-blue">多路复用的价值不在于「不卡」，而在于「一次卡着等很多个 fd」。</mark> 一个个用非阻塞去轮询 500 个连接，CPU 会烧在那 500 次系统调用上。</p>
+<hr>
+<h2 id="缓冲-io标准库那一层"><span class="num">03</span>缓冲 I/O：标准库那一层</h2>
+<p>这一组跟等不等无关，问的是「路上经不经过标准库」。</p>
+<div class="pipe"><div class="lane tone-blue">
+        <div class="lane-meta">
+          <span class="ln">缓冲 I/O</span>
+          <b>带走标准库的缓存</b>
+          <small>数据先攒在用户态，攒够了再进内核</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>你的代码</b>
+        <small>printf(&quot;...\n&quot;)</small>
+        
+      </div><div class="pnode">
+        <b>标准库缓冲区</b>
+        <small>用户在进程内存里</small>
+        <span class="tag tone-blue">攒着</span>
+      </div><div class="pnode">
+        <b>系统调用</b>
+        <small>write(2)</small>
+        <span class="tag tone-blue">攒够才发</span>
+      </div><div class="pnode">
+        <b>内核页缓存</b>
+        <small>内核里的那一层</small>
+        
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">非缓冲 I/O<span class="note">少一层，代价是多发系统调用</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-amber">
+        <div class="lane-meta">
+          <span class="ln">非缓冲 I/O</span>
+          <b>直接调系统调用</b>
+          <small>每次写都真的进内核</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>你的代码</b>
+        <small>write(2)</small>
+        
+      </div><div class="pnode">
+        <b>系统调用</b>
+        <small>每一次都发</small>
+        <span class="tag tone-amber">开销大</span>
+      </div><div class="pnode">
+        <b>内核页缓存</b>
+        <small>内核里的那一层</small>
+        
+      </div></div>
+      </div></div><p>这一层的价值全在「减少系统调用次数」上。系统调用不是免费的函数调用，它要陷入内核，涉及 CPU 上下文的保存和恢复。</p>
+<p>真实感受一下：</p>
+<div class="cards" data-cols="1"><div class="ccard tone-blue">
+          
+          <h4>为什么 printf 不带换行就不输出</h4>
+          <p>不是坏了，是标准库还在替你把内容攒着</p>
+          <div class="cbody"><p>写 C 的时候常遇到这种情况：<code>printf(&quot;hello&quot;);</code> 之后程序还在跑，
+可终端上什么都没有；改成 <code>printf(&quot;hello\n&quot;);</code> 立刻就出来了。</p>
+<p>这不是终端的问题，也不是 printf 的问题。</p>
+<p>标准库积累到一定量、或者遇到换行（行缓冲模式）、或者你主动 <code>fflush(stdout)</code>，
+才会真的发起 <code>write(2)</code>。<mark class="mk-blue">攒着不发，本身就是这一层存在的全部意义。</mark></p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-c">printf(&quot;hello&quot;);          // 还在标准库缓冲区里
+fflush(stdout);           // 现在才真的发出去
+</code></pre></div>
+</div>
+          
+        </div><div class="ccard tone-violet">
+          
+          <h4>对，就是用「多出来的内存」换「少下去的陷内核次数」</h4>
+          <p>一次 write 要陷入内核，攒十次发一次就省了九次</p>
+          <div class="cbody"><p>每次系统调用都要经历：用户态切到内核态、保存现场、执行、再切回来。
+这个开销在单次调用里很小，但百万次累积起来就非常可观。</p>
+<p>标准库的这一层缓冲，就是把 N 次 <code>write(2)</code> 合成一次。</p>
+</div>
+          
+        </div></div><hr>
+<h2 id="直接-io内核那一层"><span class="num">04</span>直接 I/O：内核那一层</h2>
+<p>这一组问的是「路上经不经过内核的页缓存」。</p>
+<div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-blue">非直接 I/O</span>
+            <span class="name">默认路径</span>
+            <span class="spacer"></span>
+            <span class="tag tone-blue">经过内核缓存</span>
+          </div>
+          <div class="rec"><div class="">
+            <b>第 1 站</b><span>应用缓冲区</span><em>你 malloc 出来的那块内存</em></div><div class="warn">
+            <b>第 2 站</b><span>内核页缓存</span><em>多一次内存拷贝</em></div><div class="">
+            <b>第 3 站</b><span>磁盘</span><em>内核自己挑时机刷下去</em></div></div>
+          
+          <p class="jnote">读的时候方向反过来：磁盘 → 页缓存 → 你的缓冲区</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">加一个 O_DIRECT 标志<span class="note">少坐一站</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-green">直接 I/O</span>
+            <span class="name">O_DIRECT</span>
+            <span class="spacer"></span>
+            <span class="tag tone-green">绕过页缓存</span>
+          </div>
+          <div class="rec"><div class="">
+            <b>第 1 站</b><span>应用缓冲区</span></div><div class="ok">
+            <b>第 2 站</b><span>磁盘</span><em>中间不再经手内核缓存</em></div></div>
+          
+          <p class="jnote">省掉一次内存拷贝，也省掉两份缓存占同一份内存</p>
+        </div><div class="compare-wrap"><table class="compare"><thead><tr><th>类型</th><th>数据在内存里走了几趟</th><th>怎么开启</th></tr></thead><tbody><tr><th>非直接 I/O</th><td data-label="数据在内存里走了几趟">用户缓冲区 → 内核页缓存（读时反向）</td><td data-label="怎么开启">默认行为，什么都不用设</td></tr><tr><th>直接 I/O</th><td data-label="数据在内存里走了几趟">用户缓冲区 ↔ 磁盘，中间不经内核页缓存</td><td data-label="怎么开启"><code>open()</code> 时带 <code>O_DIRECT</code> 标志</td></tr></tbody></table></div><p><mark class="mk-blue">页缓存的存在是为了让「读第二次」变便宜。</mark> 第一次读文件时数据会被留在内核里，第二次读同一个文件，直接从内存返回，根本不碰磁盘。</p>
+<p>用 <code>O_DIRECT</code> 把它绕开，通常只有一个理由：<strong>你有自己的缓存策略</strong>（比如数据库自己管缓冲池），不想让内核再缓存一份，省掉一次内存拷贝、也省掉两份缓存争内存。</p>
+<h3 id="非直接-io-什么时候才真的落盘">非直接 I/O 什么时候才真的落盘</h3>
+<p>用了页缓存，<code>write</code> 返回不代表数据在磁盘上。它只是在内存里。触发真正写盘的场合：</p>
+<div class="cards" data-cols="2"><div class="ccard tone-blue">
+          <span class="tag tone-blue">自动</span>
+          <h4>write 的时候攒太多了</h4>
+          <p>内核发现页缓存里堆得太多，顺手就刷一批下去</p>
+          
+          
+        </div><div class="ccard tone-green">
+          <span class="tag tone-green">手动</span>
+          <h4>你主动调 sync / fsync</h4>
+          <p>sync 刷所有文件；fsync(fd) 只刷这一个文件</p>
+          
+          
+        </div><div class="ccard tone-amber">
+          <span class="tag tone-amber">被动</span>
+          <h4>内存不够用了</h4>
+          <p>分配不出新页面时，内核会回收脏页换出空间</p>
+          
+          
+        </div><div class="ccard tone-muted">
+          <span class="tag tone-muted">定时</span>
+          <h4>缓存时间到了</h4>
+          <p>脏页在内存里待够一定时间，就被刷下去</p>
+          
+          
+        </div></div><p><mark class="mk-amber">所以 <code>write</code> 成功 ≠ 数据落盘。断电时丢的就是页缓存里的那部分。</mark> 真要保证落盘，得在 <code>write</code> 之后显式 <code>fsync</code>。</p>
+<hr>
+<h2 id="换成饭堂打饭"><span class="num">05</span>换成饭堂打饭</h2>
+<p>这几个模型干讲很抽象，换成去饭堂打饭就非常直观：</p>
+<div class="cards" data-cols="1"><div class="ccard tone-red">
+          
+          <h4>阻塞 I/O：站在窗口前一直等</h4>
+          
+          <div class="cbody"><p>菜还没做好，你就在窗口前干站着。等菜做好（数据准备），再等阿姨打到你的饭盒里（数据拷贝），
+两个过程都在等，全程你都走不开。</p>
+</div>
+          
+        </div><div class="ccard tone-amber">
+          
+          <h4>非阻塞 I/O：问一句就走，过会儿再来问</h4>
+          
+          <div class="cbody"><p>你跑到窗口问「好了没」，阿姨说没好，你就走了。过一会儿再来问，还是没好。
+反复问了很多次之后终于好了。</p>
+<p>但<mark class="mk-blue">阿姨往你饭盒里打菜这段，你还是得站着等</mark>。这就是最后那次 <code>read</code> 的拷贝阶段。</p>
+</div>
+          
+        </div><div class="ccard tone-violet">
+          
+          <h4>I/O 多路复用：一次问一排窗口</h4>
+          
+          <div class="cbody"><p>饭堂有一排窗口，你告诉管理员「哪个窗口好了叫我」（<code>select</code> / <code>epoll_wait</code>），
+然后你就等着。等管理员喊你，你还得自己一个个窗口看是哪个好了。</p>
+<p>好处是：<strong>你只排了一次队，就把所有窗口都盯上了</strong>。</p>
+</div>
+          
+        </div><div class="ccard tone-blue">
+          
+          <h4>信号驱动 I/O：留个电话，好了叫我</h4>
+          
+          <div class="cbody"><p>你留个电话给阿姨，然后就回去干别的。菜好了阿姨打电话给你。</p>
+<p>但你接到电话之后还得跑过去、还得等阿姨打菜。<mark class="mk-blue">那段等待没省掉，只是从「准备阶段」挪到了「拷贝阶段」</mark>。</p>
+</div>
+          
+        </div><div class="ccard tone-green">
+          
+          <h4>异步 I/O：让阿姨打好送到你面前</h4>
+          
+          <div class="cbody"><p>你跟阿姨说「菜做好、打到我饭盒里，然后送我桌上」，然后就回去干别的了。</p>
+<p>中间所有环节你都不用管，送到你面前时你直接吃。<mark class="mk-blue">这才叫异步</mark>，两项都不用等。</p>
+</div>
+          
+        </div></div><hr>
+<div class="quiz"><details>
+        <summary>非阻塞 I/O 为什么还是同步 I/O？</summary>
+        <div class="a"><p>因为「非阻塞」只作用在数据准备阶段：没准备好就立刻返回，不让你干等。
+但最后一次 read 把数据从内核缓冲区拷进你的缓冲区时，你还是要等。
+这一段跟阻塞不阻塞无关。只要拷贝阶段要等，它就是同步 I/O。</p>
+</div>
+      </details><details>
+        <summary>那我干脆用多路复用，是不是就异步了？</summary>
+        <div class="a"><p>不是。多路复用（select/poll/epoll）解决的是「一次等很多个 fd」，
+它在数据准备阶段照样是卡着的，只是卡在一个地方等很多个来源。
+真正的异步 I/O 是 aio_read / io_uring 那一类：连拷贝都由内核代劳，完成后才通知你。</p>
+</div>
+      </details><details>
+        <summary>页缓存和标准库缓冲是同一个东西吗？</summary>
+        <div class="a"><p>不是。标准库缓冲在用户空间，属于你的进程；页缓存在内核空间，属于操作系统，
+所有进程共用。所以「缓冲/非缓冲 I/O」和「直接/非直接 I/O」是两组独立的分法：
+前者问走不走标准库，后者问走不走内核页缓存。</p>
+</div>
+      </details><details>
+        <summary>写完文件立刻断电，数据一定丢吗？</summary>
+        <div class="a"><p>不一定，但不能假设它在。默认（非直接 I/O）下 write 只是把数据交给页缓存，
+内核什么时候刷盘由它自己决定。要确保落盘，得在 write 之后调 fsync。</p>
+</div>
+      </details></div>
+
+    <footer>
+      <span>六种文件 I/O · 判据只有「卡在哪一阶段」</span>
+      <span>最后更新 2026-10-01 · 单文件可离线打开</span>
+    </footer>
+  </main>
+</div>
+
+<script src="../../assets/app.js"></script>
+</body>
+</html>

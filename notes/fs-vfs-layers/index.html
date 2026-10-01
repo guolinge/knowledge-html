@@ -1,0 +1,518 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-has-toc="1">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>VFS 与文件的使用 · 从 open() 到磁盘</title>
+<meta name="description" content="一次 write() 要穿过用户库、系统调用、VFS、几层缓存、具体文件系统、块层才落到设备。文件描述符和打开文件表是这条路上唯一的把手。" />
+<link rel="stylesheet" href="../../assets/theme.css" />
+  <link rel="stylesheet" href="../../assets/blocks.css" />
+  <link rel="stylesheet" href="../../assets/archify-embed.css" />
+</head>
+<body>
+<div id="progress"></div>
+<div id="tocScrim"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
+    <a class="brand" href="../../index.html"><span class="dot"></span>知识笔记</a>
+    
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="toc" id="toc">
+      <p class="toc-title">目录</p>
+      <a href="../../index.html" class="sub">← 全部笔记</a>
+      <a href="#为什么要多一层">为什么要多一层</a>
+      <a href="#一次-write-要穿过几层">一次 write 要穿过几层</a>
+      <a href="#三层缓存分别缓存什么" class="sub">三层缓存分别缓存什么</a>
+      <a href="#三类文件系统与挂载">三类文件系统与挂载</a>
+      <a href="#文件描述符与打开文件表">文件描述符与打开文件表</a>
+      <a href="#用户按字节内核按块">用户按字节，内核按块</a>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow">● 操作系统 · 文件系统 ②</span>
+      <h1>VFS 与文件的使用 · 从 open() 到磁盘</h1>
+      <p class="lede">一次 write() 要穿过用户库、系统调用、VFS、几层缓存、具体文件系统、块层才落到设备。文件描述符和打开文件表是这条路上唯一的把手。</p>
+    </div>
+
+    <div class="draft-banner">
+    <span>⚠</span>
+    <span>本页状态为 <b>draft</b>：内容尚未人工核对，引用前请自行验证。</span>
+  </div>
+<aside class="needs">
+      <p class="needs-title">读这篇之前，你需要先知道</p>
+      <a class="need" href="../fs-file-anatomy/">← <b>1. 一个文件长什么样</b><span>inode 与目录项的分工、扇区到逻辑块、磁盘被格式化成的三个区</span></a>
+    </aside>
+    <div class="provenance"><span><b>来源</b> 飞书文档《一口气搞懂「文件系统」，就靠这 25 张图了》 https://futu.feishu.cn/docx/Q3sGdsByKog86txzZiycCErMnSc @ revision 105</span><span><b>生成</b> 2026-10-01</span><span><b>模型</b> claude-opus-4-5</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">操作系统</span> <span class="tag tone-muted">文件系统</span> <span class="tag tone-muted">VFS</span> <span class="tag tone-muted">文件描述符</span></span></div>
+
+<h2 id="为什么要多一层"><span class="num">01</span>为什么要多一层</h2>
+<p>文件系统的种类太多了。磁盘上有 Ext2/3/4、XFS、Btrfs，内存里有 <code>/proc</code>、<code>/sys</code>，网络上有 NFS、SMB。</p>
+<p>如果每个程序都要认识这些格式，写一个读文件的代码就得写十份。所以操作系统在中间塞了一层：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code>应用程序
+   ↓  只认这一套接口
+虚拟文件系统（VFS）
+   ↓  向下适配
+Ext4    XFS    NFS    /proc    ...
+</code></pre></div>
+<p><mark class="mk-blue">VFS 定义了一组所有文件系统都要支持的数据结构和标准接口。</mark> 程序员只要学会这一套，底下换成什么文件系统都不用改代码。</p>
+<p>这一层带来的好处是直接的：<code>open(&quot;/mnt/nfs/data.csv&quot;)</code> 和 <code>open(&quot;/tmp/data.csv&quot;)</code> 在写代码的人看来没有任何区别，虽然前者的数据要从网络另一头拿。<strong>差异被 VFS 吃掉了。</strong></p>
+<hr>
+<h2 id="一次-write-要穿过几层"><span class="num">02</span>一次 write 要穿过几层</h2>
+<p>从你的代码到磁盘，中间隔着这么几层：</p>
+<div class="pipe"><div class="wgroup"><div class="wgroup-label">用户空间</div><div class="lane tone-blue">
+        <div class="lane-meta">
+          <span class="ln">用户空间</span>
+          <b>你的程序</b>
+          <small>调的是库函数</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>应用程序</b>
+        <small>write(fd, buf, n)</small>
+        
+      </div><div class="pnode">
+        <b>库函数</b>
+        <small>标准库可能先攒一攒</small>
+        <span class="tag tone-blue">缓冲</span>
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">陷入内核 <span class="en">syscall</span><span class="note">从这里开始，CPU 切到内核态</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div></div><div class="wgroup"><div class="wgroup-label">内核</div><div class="lane tone-violet">
+        <div class="lane-meta">
+          <span class="ln">内核空间</span>
+          <b>系统调用</b>
+          <small>统一入口</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>sys_write</b>
+        <small>检查参数、找到 fd 对应的文件</small>
+        
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">往下交给 VFS<span class="note">它负责屏蔽差异</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-violet">
+        <div class="lane-meta">
+          <span class="ln">内核空间</span>
+          <b>VFS</b>
+          <small>这一层是抽象的，不干实事</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>统一的文件模型</b>
+        <small>inode / dentry / file 三个结构</small>
+        
+      </div><div class="pnode">
+        <b>挑一个具体文件系统</b>
+        <small>这个挂载点下面是谁</small>
+        
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">往下找具体实现<span class="note">规律被抹平了</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-amber">
+        <div class="lane-meta">
+          <span class="ln">内核空间</span>
+          <b>三层缓存</b>
+          <small>能不能不碰磁盘，全看它们</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>页缓存</b>
+        <small>文件内容的副本</small>
+        
+      </div><div class="pnode">
+        <b>dentry 缓存</b>
+        <small>路径解析的结果</small>
+        
+      </div><div class="pnode">
+        <b>inode 缓存</b>
+        <small>用过没释放的 inode</small>
+        
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">缓存里没有<span class="note">这才需要真去读磁盘</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-green">
+        <div class="lane-meta">
+          <span class="ln">内核空间</span>
+          <b>具体文件系统</b>
+          <small>到这里才有真正的算法</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>Ext4 / XFS / Btrfs</b>
+        <small>本地磁盘</small>
+        
+      </div><div class="pnode">
+        <b>NFS / SMB</b>
+        <small>网络文件系统</small>
+        
+      </div><div class="pnode">
+        <b>/proc /sys</b>
+        <small>是内核数据的窗口</small>
+        
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">要读写块了<span class="note">再往下就是设备了</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-muted">
+        <div class="lane-meta">
+          <span class="ln">内核空间</span>
+          <b>块层与驱动</b>
+          <small>把文件操作翻译成硬件操作</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>通用块层</b>
+        <small>合并请求、排序、调度</small>
+        
+      </div><div class="pnode">
+        <b>设备驱动</b>
+        <small>对磁盘控制器说话</small>
+        
+      </div></div>
+      </div></div><div class="wgroup"><div class="wgroup-label">存储</div><div class="lane tone-muted">
+        <div class="lane-meta">
+          <span class="ln">硬件</span>
+          <b>存储设备</b>
+          <small>数据真正落地的地方</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>本地磁盘</b>
+        <small>SSD / HDD</small>
+        
+      </div><div class="pnode">
+        <b>网络存储</b>
+        <small>另一台机器上的盘</small>
+        
+      </div></div>
+      </div></div></div><p><mark class="mk-blue">每一层都只解决一个问题。</mark> 库函数管「少发系统调用」，VFS 管「抹平差异」，缓存管「能不去磁盘就别去」，具体文件系统管「块怎么摆在磁盘上」，块层管「怎么把请求有效率地发给设备」。</p>
+<h3 id="三层缓存分别缓存什么">三层缓存分别缓存什么</h3>
+<p>这三层都叫「缓存」，但缓存的东西完全不同，混起来就说不清了：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>缓存</th><th>缓存的是什么</th><th>命中之后省掉了什么</th></tr></thead><tbody><tr><th>页缓存</th><td data-label="缓存的是什么">文件内容本身（按页/块）</td><td data-label="命中之后省掉了什么"><span class="tag tone-green">不用读磁盘</span></td></tr><tr><th>dentry 缓存</th><td data-label="缓存的是什么">路径解析的结果：名字 → inode</td><td data-label="命中之后省掉了什么"><span class="tag tone-green">不用逐层读目录文件</span></td></tr><tr><th>inode 缓存</th><td data-label="缓存的是什么">已经读进来的 inode</td><td data-label="命中之后省掉了什么"><span class="tag tone-green">不用再从 inode 区读一次元信息</span></td></tr></tbody></table></div><p>第 ⑥ 篇讲的「缓冲 I/O」和「直接 I/O」，说的就是在这个图里<strong>绕不绕过页缓存</strong>这一问题。</p>
+<hr>
+<h2 id="三类文件系统与挂载"><span class="num">03</span>三类文件系统与挂载</h2>
+<p>按数据存在哪，Linux 的文件系统分三类：</p>
+<div class="cards" data-cols="3"><div class="ccard tone-blue">
+          <span class="tag tone-blue">最常见</span>
+          <h4>磁盘文件系统</h4>
+          <p>数据真的存到磁盘上</p>
+          <div class="cbody"><p>Ext2 / 3 / 4、XFS、Btrfs、NTFS……</p>
+<p>这是「文件系统」这个词最原始的含义：把磁盘上的块组织成文件。</p>
+</div>
+          
+        </div><div class="ccard tone-violet">
+          <span class="tag tone-violet">不落盘</span>
+          <h4>内存文件系统</h4>
+          <p>数据在内存里，不在磁盘</p>
+          <div class="cbody"><p><code>/proc</code>、<code>/sys</code>、<code>tmpfs</code> 都是这一类。</p>
+<p><mark class="mk-blue">读写这类文件，实际上是在读写内核里的数据结构。</mark>
+比如 <code>/proc/cpuinfo</code> 并不是一个真实存在的文件，
+是内核在你读它的时候临时拼出来的。</p>
+</div>
+          
+        </div><div class="ccard tone-amber">
+          <span class="tag tone-amber">跨网络</span>
+          <h4>网络文件系统</h4>
+          <p>访问别的机器上的数据</p>
+          <div class="cbody"><p>NFS、SMB、CIFS。</p>
+<p>在你看来 <code>/mnt/nfs/a.txt</code> 就是一个普通路径，
+底下 VFS 会把 read 请求打包成网络请求发出去。</p>
+</div>
+          
+        </div></div><p>另外，文件系统<strong>得挂载到某个目录才能用</strong>。</p>
+<div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-muted">没有挂载时</span>
+            <span class="name">一块有数据的磁盘</span>
+            <span class="spacer"></span>
+            <span class="tag tone-muted">用不了</span>
+          </div>
+          <div class="rec"><div class="">
+            <b>设备</b><span>/dev/sdb1</span><em>内核能看到它</em></div><div class="">
+            <b>里面</b><span>Ext4 格式的数据</span></div></div>
+          
+          <p class="jnote bad">内核知道有这块盘，但没有路径能通向它</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">挂载到一个目录<span class="note">让路径能走到它</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-green">挂载之后</span>
+            <span class="name">mount /dev/sdb1 /mnt/data</span>
+            <span class="spacer"></span>
+            <span class="tag tone-green">能用了</span>
+          </div>
+          <div class="rec"><div class="ok">
+            <b>挂载点</b><span>/mnt/data</span><em>访问入口</em></div><div class="">
+            <b>效果</b><span>访问 /mnt/data/x 就是在访问 sdb1</span></div></div>
+          
+          <p class="jnote">从此这个目录下面的东西，都来自那块盘</p>
+        </div><p>Linux 启动时会把根文件系统挂到 <code>/</code>，之后其他文件系统再一层层挂上去。<mark class="mk-blue">所以整棵目录树可以由好几块不同的物理磁盘拼成。</mark></p>
+<hr>
+<h2 id="文件描述符与打开文件表"><span class="num">04</span>文件描述符与打开文件表</h2>
+<p>打开一个文件时，操作系统要记住「这个进程开着哪些文件、每个读到哪了」。</p>
+<p>用起来很简单：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-c">int fd = open(&quot;notes.md&quot;, O_RDONLY);   // 打开，拿到一个整数
+read(fd, buf, 100);                    // 之后只用这个整数，不再用文件名
+close(fd);                             // 用完要关，不然会泄漏
+</code></pre></div>
+<p>那个整数就是<strong>文件描述符</strong>（file descriptor）。它是<mark class="mk-blue">一个下标，指向进程自己的一张表。</mark></p>
+<figure class="archfig" data-arch>
+      <svg viewBox="0 0 758 658" role="img" aria-labelledby="archify-diagram-title archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
+        <title id="archify-diagram-title">文件描述符、打开文件表、inode 三层</title>
+        <desc id="archify-diagram-description">两个进程打开同一个文件，各自的偏移量是分开的，指向的 inode 是同一个</desc>
+        <!-- Definitions -->
+        <defs>
+          <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-default" />
+          </marker>
+          <marker id="arrowhead-emphasis" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-emphasis" />
+          </marker>
+          <marker id="arrowhead-security" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-security" />
+          </marker>
+          <marker id="arrowhead-dashed" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-dashed" />
+          </marker>
+          <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+            <path d="M 40 0 L 0 0 0 40" class="c-grid" stroke-width="0.5"/>
+          </pattern>
+        </defs>
+
+        <!-- Background Grid -->
+        <rect width="100%" height="100%" fill="url(#grid)" />
+
+        <!-- Boundaries (behind everything) -->
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="0" x="30" y="70" width="688" height="112" rx="12" class="c-region" stroke-width="1"/>
+        <text x="38" y="88" class="t-cloud" font-size="9" font-weight="600">每个进程各有一张 —— fd 只是这张表的下标</text>
+
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="1" x="30" y="206" width="688" height="384" rx="12" class="c-region" stroke-width="1"/>
+        <text x="38" y="224" class="t-cloud" font-size="9" font-weight="600">内核维护：全局打开文件表 + inode</text>
+
+        <!-- Connection paths (before components for correct z-order) -->
+        <path data-edge-from="pa" data-edge-to="e1" data-edge-label="fd 3" data-edge-key="0" data-edge-id="c1" data-composition-points="148,162;148,236" d="M 148 162 L 148 236" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="pb" data-edge-to="e2" data-edge-label="fd 5" data-edge-key="1" data-edge-id="c2" data-composition-points="600,162;600,236" d="M 600 162 L 600 236" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="e1" data-edge-to="ino" data-edge-label="指向同一个 inode" data-edge-key="2" data-edge-id="c3" data-composition-points="236,267;261,267;261,403;286,403" d="M 236 267 L 253 267 Q 261 267 261 275 L 261 395 Q 261 403 269 403 L 286 403" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="e2" data-edge-to="ino" data-edge-label="读到这里了" data-edge-key="3" data-edge-id="c4" data-composition-points="512,267;487,267;487,403;462,403" d="M 512 267 L 495 267 Q 487 267 487 275 L 487 395 Q 487 403 479 403 L 462 403" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="ino" data-edge-to="blk" data-edge-label="块地址" data-edge-key="4" data-edge-id="c5" data-composition-points="374,434;374,508" d="M 374 434 L 374 508" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+
+        <!-- Components -->
+        <g id="node-pa" data-node-id="pa" data-node-label="进程 A" tabindex="0" role="button" aria-label="Focus 进程 A, fd 3 指向哪？, 每个进程各有一张 —— fd 只是这张表的下标" aria-pressed="false" data-node-kind="frontend" data-node-sublabel="fd 3 指向哪？" data-node-context="每个进程各有一张 —— fd 只是这张表的下标">
+          <title>进程 A · fd 3 指向哪？ · 每个进程各有一张 —— fd 只是这张表的下标</title>
+          <rect x="60" y="100" width="176" height="62" rx="6" class="c-mask"/>
+          <rect x="60" y="100" width="176" height="62" rx="6" class="c-frontend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="frontend" class="semantic-sigil s-frontend" transform="translate(66 106) scale(0.6875)">
+            <rect x="2" y="3" width="12" height="10" rx="2"/>
+            <path d="M2 6.5h12"/>
+            <circle cx="4.1" cy="4.8" r=".7" class="sigil-fill"/>
+            <circle cx="6.3" cy="4.8" r=".7" class="sigil-fill"/>
+          </g>
+          <text data-detail-anchor x="148" y="129" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">进程 A</text>
+        <text data-detail="context" x="148" y="145" class="t-muted" font-size="9" text-anchor="middle">fd 3 指向哪？</text>
+        </g>
+
+        <g id="node-pb" data-node-id="pb" data-node-label="进程 B" tabindex="0" role="button" aria-label="Focus 进程 B, fd 5 指向哪？, 每个进程各有一张 —— fd 只是这张表的下标" aria-pressed="false" data-node-kind="frontend" data-node-sublabel="fd 5 指向哪？" data-node-context="每个进程各有一张 —— fd 只是这张表的下标">
+          <title>进程 B · fd 5 指向哪？ · 每个进程各有一张 —— fd 只是这张表的下标</title>
+          <rect x="512" y="100" width="176" height="62" rx="6" class="c-mask"/>
+          <rect x="512" y="100" width="176" height="62" rx="6" class="c-frontend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="frontend" class="semantic-sigil s-frontend" transform="translate(518 106) scale(0.6875)">
+            <rect x="2" y="3" width="12" height="10" rx="2"/>
+            <path d="M2 6.5h12"/>
+            <circle cx="4.1" cy="4.8" r=".7" class="sigil-fill"/>
+            <circle cx="6.3" cy="4.8" r=".7" class="sigil-fill"/>
+          </g>
+          <text data-detail-anchor x="600" y="129" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">进程 B</text>
+        <text data-detail="context" x="600" y="145" class="t-muted" font-size="9" text-anchor="middle">fd 5 指向哪？</text>
+        </g>
+
+        <g id="node-e1" data-node-id="e1" data-node-label="打开文件表项" tabindex="0" role="button" aria-label="Focus 打开文件表项, 偏移 0 · 计数 1, 内核维护：全局打开文件表 + inode" aria-pressed="false" data-node-kind="backend" data-node-sublabel="偏移 0 · 计数 1" data-node-context="内核维护：全局打开文件表 + inode">
+          <title>打开文件表项 · 偏移 0 · 计数 1 · 内核维护：全局打开文件表 + inode</title>
+          <rect x="60" y="236" width="176" height="62" rx="6" class="c-mask"/>
+          <rect x="60" y="236" width="176" height="62" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(66 242) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text data-detail-anchor x="148" y="265" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">打开文件表项</text>
+        <text data-detail="context" x="148" y="281" class="t-muted" font-size="9" text-anchor="middle">偏移 0 · 计数 1</text>
+        </g>
+
+        <g id="node-e2" data-node-id="e2" data-node-label="打开文件表项" tabindex="0" role="button" aria-label="Focus 打开文件表项, 偏移 1024 · 计数 1, 内核维护：全局打开文件表 + inode" aria-pressed="false" data-node-kind="backend" data-node-sublabel="偏移 1024 · 计数 1" data-node-context="内核维护：全局打开文件表 + inode">
+          <title>打开文件表项 · 偏移 1024 · 计数 1 · 内核维护：全局打开文件表 + inode</title>
+          <rect x="512" y="236" width="176" height="62" rx="6" class="c-mask"/>
+          <rect x="512" y="236" width="176" height="62" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(518 242) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text data-detail-anchor x="600" y="265" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">打开文件表项</text>
+        <text data-detail="context" x="600" y="281" class="t-muted" font-size="9" text-anchor="middle">偏移 1024 · 计数 1</text>
+        </g>
+
+        <g id="node-ino" data-node-id="ino" data-node-label="inode 100" tabindex="0" role="button" aria-label="Focus inode 100, 元信息 + 数据块在哪, 内核维护：全局打开文件表 + inode" aria-pressed="false" data-node-kind="database" data-node-sublabel="元信息 + 数据块在哪" data-node-context="内核维护：全局打开文件表 + inode">
+          <title>inode 100 · 元信息 + 数据块在哪 · 内核维护：全局打开文件表 + inode</title>
+          <rect x="286" y="372" width="176" height="62" rx="6" class="c-mask"/>
+          <rect x="286" y="372" width="176" height="62" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(292 378) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <text data-detail-anchor x="374" y="401" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">inode 100</text>
+        <text data-detail="context" x="374" y="417" class="t-muted" font-size="9" text-anchor="middle">元信息 + 数据块在哪</text>
+        </g>
+
+        <g id="node-blk" data-node-id="blk" data-node-label="数据块" tabindex="0" role="button" aria-label="Focus 数据块, 文件真正的内容, 内核维护：全局打开文件表 + inode" aria-pressed="false" data-node-kind="database" data-node-sublabel="文件真正的内容" data-node-context="内核维护：全局打开文件表 + inode">
+          <title>数据块 · 文件真正的内容 · 内核维护：全局打开文件表 + inode</title>
+          <rect x="286" y="508" width="176" height="62" rx="6" class="c-mask"/>
+          <rect x="286" y="508" width="176" height="62" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(292 514) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <text data-detail-anchor x="374" y="537" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">数据块</text>
+        <text data-detail="context" x="374" y="553" class="t-muted" font-size="9" text-anchor="middle">文件真正的内容</text>
+        </g>
+
+        <!-- Connection labels -->
+        <g data-detail="context" data-edge-from="pa" data-edge-to="e1" data-edge-label="fd 3" data-edge-key="0" data-edge-id="c1">
+          <rect x="133" y="176" width="30" height="14" rx="3" class="c-mask"/>
+          <text x="148" y="186" class="t-muted" font-size="8" text-anchor="middle">fd 3</text>
+        </g>
+        <g data-detail="context" data-edge-from="pb" data-edge-to="e2" data-edge-label="fd 5" data-edge-key="1" data-edge-id="c2">
+          <rect x="585" y="176" width="30" height="14" rx="3" class="c-mask"/>
+          <text x="600" y="186" class="t-muted" font-size="8" text-anchor="middle">fd 5</text>
+        </g>
+        <g data-detail="context" data-edge-from="e1" data-edge-to="ino" data-edge-label="指向同一个 inode" data-edge-key="2" data-edge-id="c3">
+          <rect x="217.6" y="315" width="86.8" height="14" rx="3" class="c-mask"/>
+          <text x="261" y="325" class="t-muted" font-size="8" text-anchor="middle">指向同一个 inode</text>
+        </g>
+        <g data-detail="context" data-edge-from="e2" data-edge-to="ino" data-edge-label="读到这里了" data-edge-key="3" data-edge-id="c4">
+          <rect x="458" y="315" width="58" height="14" rx="3" class="c-mask"/>
+          <text x="487" y="325" class="t-muted" font-size="8" text-anchor="middle">读到这里了</text>
+        </g>
+        <g data-detail="context" data-edge-from="ino" data-edge-to="blk" data-edge-label="块地址" data-edge-key="4" data-edge-id="c5">
+          <rect x="354.6" y="448" width="38.8" height="14" rx="3" class="c-mask"/>
+          <text x="374" y="458" class="t-muted" font-size="8" text-anchor="middle">块地址</text>
+        </g>
+
+        <!-- Legend -->
+        <g data-legend data-legend-bridge>
+          <text x="40" y="622" class="t-primary" font-size="12" font-weight="650">Legend</text>
+          <g data-legend-semantic-kind="frontend" data-legend-kind="frontend" data-legend-label="Frontend" data-legend-x="40" data-legend-baseline="642" data-legend-width="83">
+            <rect x="40" y="633" width="16" height="10" rx="2.5" class="c-frontend" stroke-width="1"/>
+            <text x="62" y="642" class="t-muted" font-size="10" font-weight="500">Frontend</text>
+          </g>
+          <g data-legend-semantic-kind="backend" data-legend-kind="backend" data-legend-label="Backend" data-legend-x="145" data-legend-baseline="642" data-legend-width="78">
+            <rect x="145" y="633" width="16" height="10" rx="2.5" class="c-backend" stroke-width="1"/>
+            <text x="167" y="642" class="t-muted" font-size="10" font-weight="500">Backend</text>
+          </g>
+          <g data-legend-semantic-kind="database" data-legend-kind="database" data-legend-label="Database" data-legend-x="245" data-legend-baseline="642" data-legend-width="83">
+            <rect x="245" y="633" width="16" height="10" rx="2.5" class="c-database" stroke-width="1"/>
+            <text x="267" y="642" class="t-muted" font-size="10" font-weight="500">Database</text>
+          </g>
+        </g>
+      </svg>
+      <figcaption>进程 A 和进程 B 各自 open 同一个文件，会得到两个不同的表项（各自的读写偏移），但它们指向同一个 inode。</figcaption>
+      <p class="arch-hint">
+        <span class="idle">点头上的任意一个框，只看它和它连出去的关系</span>
+        <span class="focused">再点一次空白处取消</span>
+      </p>
+    </figure><p>打开文件表里记着四样东西：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>记什么</th><th>什么意思</th><th>为什么需要</th></tr></thead><tbody><tr><th>文件指针</th><td data-label="什么意思">这个文件读到第几个字节了</td><td data-label="为什么需要">同一个文件被两个进程打开时，各自的进度要分开算</td></tr><tr><th>打开计数器</th><td data-label="什么意思">有几个进程正开着它</td><td data-label="为什么需要">计数到 0 才能删掉这个表项 —— 不然会把别人正在用的关掉</td></tr><tr><th>文件磁盘位置</th><td data-label="什么意思">inode 在哪、数据块在哪</td><td data-label="为什么需要">缓存在内存里，省得每次操作都去磁盘读一遍</td></tr><tr><th>访问权限</th><td data-label="什么意思">只读 / 读写 / 追加……</td><td data-label="为什么需要">打开之后要能判断某次 read 或 write 合不合法</td></tr></tbody></table></div><p><mark class="mk-blue">文件指针是「每个打开动作一份」，不是「每个文件一份」。</mark> 这就是为什么两个进程同时读同一个文件时，各自读到的地方互不影响。</p>
+<hr>
+<h2 id="用户按字节内核按块"><span class="num">05</span>用户按字节，内核按块</h2>
+<p>到这里有个绕不开的错位：</p>
+<div class="cards" data-cols="2"><div class="ccard tone-blue">
+          <span class="tag tone-blue">用户视角</span>
+          <h4>你看到的</h4>
+          <p>文件是一条连续的字节流</p>
+          <div class="cbody"><p>你 <code>read(fd, buf, 1)</code> 读一个字节，就真的拿到一个字节。</p>
+<p>文件在程序看来就是一个长长的数组，下标是字节偏移量。</p>
+</div>
+          
+        </div><div class="ccard tone-amber">
+          <span class="tag tone-amber">内核视角</span>
+          <h4>磁盘上真实的</h4>
+          <p>一块一块的 4KB 方块，散落在各处</p>
+          <div class="cbody"><p>磁盘不认字节，只认块。文件的数据块可能根本不连续，
+前后两块可能隔了半个磁盘。</p>
+<p><mark class="mk-blue">操作系统完全不关心你在内存里把它理解成什么数据结构。</mark></p>
+</div>
+          
+        </div></div><p><strong>把这两个视角对上的工作，就是文件系统。</strong></p>
+<div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;one&quot;,&quot;to&quot;:&quot;which&quot;,&quot;label&quot;:&quot;定位&quot;},{&quot;from&quot;:&quot;which&quot;,&quot;to&quot;:&quot;get&quot;,&quot;label&quot;:&quot;要整块&quot;},{&quot;from&quot;:&quot;get&quot;,&quot;to&quot;:&quot;back&quot;,&quot;label&quot;:&quot;按需切出你要的那一段&quot;}]">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-blue" data-id="one">
+              
+              
+              <b>用户读 1 个字节</b>
+              <small>read(fd, buf, 1)</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="which">
+              
+              
+              <b>算出这是第几块</b>
+              <small>字节偏移 ÷ 块大小</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-amber" data-id="get">
+              
+              
+              <b>把那一块读进来</b>
+              <small>从磁盘读一整个 4KB</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="back">
+              
+              
+              <b>只返回那 1 个字节</b>
+              <small>剩下的先留在缓存里</small>
+            </div></div></div>
+      
+    </div><p>写的时候是反过来的：找到那一块、<strong>把整块读进来</strong>、只改其中你要写的那几个字节、再把整块写回去。</p>
+<p><mark class="mk-blue">所以文件系统的最小操作单位是块，不是字节。</mark> 读 1 个字节和读 4096 个字节，在磁盘层面是完全一样的代价。这也是为什么「小文件随机读」在磁盘上特别慢 —— 每次都要捞一整块回来，而你可能只用了其中几个字节。</p>
+<hr>
+<div class="quiz"><details>
+        <summary>有了 VFS，是不是就不需要具体文件系统了？</summary>
+        <div class="a"><p>恰恰相反，VFS 自己不干活。它只是一个统一的接口层和抽象模型，
+真正的读写算法还是各文件系统自己实现的（Ext4 怎么找块、NFS 怎么发网络请求都不一样）。
+VFS 的价值在于让上层不用关心这些差异。</p>
+</div>
+      </details><details>
+        <summary>两个进程同时读同一个文件，一个读到第 100 字节，另一个会受影响吗？</summary>
+        <div class="a"><p>不会。每次 open 都会创建一个独立的「打开文件表项」，各自的读写偏移记在自己的表项里。
+两个表项指向同一个 inode（所以看到的是同一份数据），但进度是分开算的。
+fork 出来的子进程则不同 —— 它共享父进程的表项，所以父子会共用同一个偏移。</p>
+</div>
+      </details><details>
+        <summary>页缓存、dentry 缓存、inode 缓存，这三个是同一回事吗？</summary>
+        <div class="a"><p>不是。页缓存存的是文件内容；dentry 缓存存的是「路径名解析到哪个 inode」这个结果；
+inode 缓存存的是已经读进内存的 inode（元信息）。
+它们分别省掉了「读磁盘」「逐层遍历目录」「读 inode 区」三种不同的开销。</p>
+</div>
+      </details></div>
+
+    <footer>
+      <span>VFS 与文件的使用 · 从 open() 到磁盘</span>
+      <span>最后更新 2026-10-01 · 单文件可离线打开</span>
+    </footer>
+  </main>
+</div>
+
+<script src="../../assets/app.js"></script>
+</body>
+</html>
