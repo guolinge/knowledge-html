@@ -1,6 +1,6 @@
 ## 01 · 选型只看两个变量
 
-一个任务值不值得为 G 付费，看**等待比例**（等 I/O 的时间占比）和**单任务计算量**。选这两个，是因为它们正好对应 G 的两个能力边界：等待能不能被 netpoller 吸收，以及并行度需求是多少。
+一个任务值不值得为 G 付费，看**等待比例**和**单任务计算量** —— 它们正好对应 G 的两个能力边界。
 
 ```matrix
 x: { label: 等待比例, from: 低等待, to: 高等待 }
@@ -41,7 +41,22 @@ for w := 0; w < runtime.NumCPU(); w++ {
 }
 ```
 
-把「G 太多反而慢」落到缓存机制上：每个被换上的 G 都要把自己的工作集拉回 L1，被换下的则被逐出。**切换频率超过工作集复用窗口时，CPU 的有效时间大量花在缓存搬进搬出上。** 算力由核数决定，G 只决定有多少条执行流来分这块算力 —— 分的人太多，切来切去的开销反而把总吞吐往下拖。
+```flow
+grid: true
+groups:
+  - { id: debt, label: "切换频率一旦超过工作集复用窗口，CPU 就一直在这一圈里搬东西", tone: red }
+nodes:
+  - { id: inn, label: "G 被换上", sub: "先把工作集拉回 L1", row: 0, tone: green, group: debt }
+  - { id: work, label: "干一会儿活", sub: "数据刚热起来", row: 1, tone: green, group: debt }
+  - { id: out, label: "时间片用完被换下", sub: "工作集被逐出 L1", row: 2, tone: amber, group: debt }
+  - { id: back, label: "轮到自己了", sub: "刚才白热了，得重新拉一遍", row: 3, tone: red, group: debt }
+edges:
+  - { from: inn, to: work, label: "" }
+  - { from: work, to: out, label: "" }
+  - { from: out, to: back, label: "切换越频繁，这一圈转得越勤" }
+```
+
+算力由核数决定，G 只决定有多少条执行流来分这块算力 —— 分的人太多，切来切去的开销反而把总吞吐往下拖。
 
 ### 扇出扇入：最典型的 G 拓扑
 
@@ -153,7 +168,16 @@ rows:
   - 同步原语失约: ["忘了 Unlock 的 mutex、忘了 Done 的 WaitGroup、忘了 cancel 的 context", "锁用 defer 释放；Wait 放循环外"]
 ```
 
-真实世界的案例都是第三类：CockroachDB 在 break 前漏了 Unlock，etcd 的 channel 操作顺序竞态让 `Status()` 永久阻塞，Kubernetes 把 `WaitGroup.Wait` 误写进循环体。
+==真实世界的案例几乎都是最后一类。== 三个有名的：
+
+```compare
+first: 项目
+head: [现场, 漏掉的是哪一步]
+rows:
+  - CockroachDB: ["一个 goroutine 永远醒不过来", "`break` 之前漏了 `Unlock`"]
+  - etcd: ["`Status()` 永久阻塞", "channel 操作的顺序竞态"]
+  - Kubernetes: ["等待永远不结束", "`WaitGroup.Wait` 误写进循环体"]
+```
 
 ==所有四类的共性是同一个：发送方的「结束条件」依赖了接收方会不会出现。==
 

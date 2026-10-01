@@ -89,7 +89,7 @@ edges:
   - { from: p2, to: g2, label: "并行度上限就是 4" }
 ```
 
-`GOMAXPROCS = 1` 时，一万个 G 可以并发推进（一个让出、下一个接上），但任何瞬间只有一个 G 在执行 Go 代码。这时候的 Go ==就是一个「每个任务都有独立栈、而且能写阻塞式代码」的 Node==。
+==`GOMAXPROCS = 1` 时的 Go，就是一个「每个任务都有独立栈、而且能写阻塞式代码」的 Node。==
 
 ```callout
 tone: amber

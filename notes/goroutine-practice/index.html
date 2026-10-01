@@ -54,7 +54,7 @@
     <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">Go</span> <span class="tag tone-muted">Goroutine 泄漏</span> <span class="tag tone-muted">并发</span> <span class="tag tone-muted">调试</span></span></div>
 
 <h2 id="选型只看两个变量"><span class="num">01</span>选型只看两个变量</h2>
-<p>一个任务值不值得为 G 付费，看<strong>等待比例<strong>（等 I/O 的时间占比）和</strong>单任务计算量</strong>。选这两个，是因为它们正好对应 G 的两个能力边界：等待能不能被 netpoller 吸收，以及并行度需求是多少。</p>
+<p>一个任务值不值得为 G 付费，看<strong>等待比例</strong>和<strong>单任务计算量</strong> —— 它们正好对应 G 的两个能力边界。</p>
 <div class="mx">
       <div class="mx-ylab">单任务计算量</div>
       <div class="mx-body">
@@ -105,7 +105,41 @@ for w := 0; w &lt; runtime.NumCPU(); w++ {
     go worker(jobCh)
 }
 </code></pre></div>
-<p>把「G 太多反而慢」落到缓存机制上：每个被换上的 G 都要把自己的工作集拉回 L1，被换下的则被逐出。<strong>切换频率超过工作集复用窗口时，CPU 的有效时间大量花在缓存搬进搬出上。</strong> 算力由核数决定，G 只决定有多少条执行流来分这块算力 —— 分的人太多，切来切去的开销反而把总吞吐往下拖。</p>
+<div class="flowd has-grid has-groups" data-flow data-edges="[{&quot;from&quot;:&quot;inn&quot;,&quot;to&quot;:&quot;work&quot;,&quot;label&quot;:&quot;&quot;},{&quot;from&quot;:&quot;work&quot;,&quot;to&quot;:&quot;out&quot;,&quot;label&quot;:&quot;&quot;},{&quot;from&quot;:&quot;out&quot;,&quot;to&quot;:&quot;back&quot;,&quot;label&quot;:&quot;切换越频繁，这一圈转得越勤&quot;}]">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"><div class="fgroup tone-red" data-group-box="debt">
+          <span class="fgroup-label">切换频率一旦超过工作集复用窗口，CPU 就一直在这一圈里搬东西</span>
+        </div></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-green" data-id="inn" data-group="debt">
+              
+              
+              <b>G 被换上</b>
+              <small>先把工作集拉回 L1</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="work" data-group="debt">
+              
+              
+              <b>干一会儿活</b>
+              <small>数据刚热起来</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-amber" data-id="out" data-group="debt">
+              
+              
+              <b>时间片用完被换下</b>
+              <small>工作集被逐出 L1</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-red" data-id="back" data-group="debt">
+              
+              
+              <b>轮到自己了</b>
+              <small>刚才白热了，得重新拉一遍</small>
+            </div></div></div>
+      
+    </div><p>算力由核数决定，G 只决定有多少条执行流来分这块算力 —— 分的人太多，切来切去的开销反而把总吞吐往下拖。</p>
 <h3 id="扇出扇入最典型的-g-拓扑">扇出扇入：最典型的 G 拓扑</h3>
 <div class="flowd has-grid has-groups" data-flow data-edges="[{&quot;from&quot;:&quot;src&quot;,&quot;to&quot;:&quot;ch0&quot;,&quot;label&quot;:&quot;扇出：一个发多个收&quot;},{&quot;from&quot;:&quot;ch0&quot;,&quot;to&quot;:&quot;w1&quot;,&quot;label&quot;:&quot;&quot;},{&quot;from&quot;:&quot;ch0&quot;,&quot;to&quot;:&quot;w2&quot;,&quot;label&quot;:&quot;&quot;},{&quot;from&quot;:&quot;ch0&quot;,&quot;to&quot;:&quot;w3&quot;,&quot;label&quot;:&quot;&quot;},{&quot;from&quot;:&quot;w1&quot;,&quot;to&quot;:&quot;agg&quot;,&quot;label&quot;:&quot;扇入：多个发一个收&quot;},{&quot;from&quot;:&quot;w2&quot;,&quot;to&quot;:&quot;agg&quot;,&quot;label&quot;:&quot;&quot;},{&quot;from&quot;:&quot;w3&quot;,&quot;to&quot;:&quot;agg&quot;,&quot;label&quot;:&quot;&quot;}]">
       <svg class="flowd-svg" aria-hidden="true">
@@ -272,8 +306,8 @@ for w := 0; w &lt; runtime.NumCPU(); w++ {
             </div></div></div>
       
     </div><h3 id="另外三类以及一个共性">另外三类，以及一个共性</h3>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>类型</th><th>长什么样</th><th>修复</th></tr></thead><tbody><tr><th>timeout 分支获胜</th><td data-label="长什么样">select 里 ctx.Done() 先赢，发送永远没有接收者</td><td data-label="修复">channel 改成缓冲 1：让发送先落地，再被遗弃</td></tr><tr><th>range 一个永不关闭的 channel</th><td data-label="长什么样">range 循环永远阻塞在等下一个值</td><td data-label="修复">明确所有权：发送方负责 close，接收方 range 加退出条件</td></tr><tr><th>同步原语失约</th><td data-label="长什么样">忘了 Unlock 的 mutex、忘了 Done 的 WaitGroup、忘了 cancel 的 context</td><td data-label="修复">锁用 defer 释放；Wait 放循环外</td></tr></tbody></table></div><p>真实世界的案例都是第三类：CockroachDB 在 break 前漏了 Unlock，etcd 的 channel 操作顺序竞态让 <code>Status()</code> 永久阻塞，Kubernetes 把 <code>WaitGroup.Wait</code> 误写进循环体。</p>
-<p><mark class="mk-blue">所有四类的共性是同一个：发送方的「结束条件」依赖了接收方会不会出现。</mark></p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>类型</th><th>长什么样</th><th>修复</th></tr></thead><tbody><tr><th>timeout 分支获胜</th><td data-label="长什么样">select 里 ctx.Done() 先赢，发送永远没有接收者</td><td data-label="修复">channel 改成缓冲 1：让发送先落地，再被遗弃</td></tr><tr><th>range 一个永不关闭的 channel</th><td data-label="长什么样">range 循环永远阻塞在等下一个值</td><td data-label="修复">明确所有权：发送方负责 close，接收方 range 加退出条件</td></tr><tr><th>同步原语失约</th><td data-label="长什么样">忘了 Unlock 的 mutex、忘了 Done 的 WaitGroup、忘了 cancel 的 context</td><td data-label="修复">锁用 defer 释放；Wait 放循环外</td></tr></tbody></table></div><p><mark class="mk-blue">真实世界的案例几乎都是最后一类。</mark> 三个有名的：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>项目</th><th>现场</th><th>漏掉的是哪一步</th></tr></thead><tbody><tr><th>CockroachDB</th><td data-label="现场">一个 goroutine 永远醒不过来</td><td data-label="漏掉的是哪一步"><code>break</code> 之前漏了 <code>Unlock</code></td></tr><tr><th>etcd</th><td data-label="现场"><code>Status()</code> 永久阻塞</td><td data-label="漏掉的是哪一步">channel 操作的顺序竞态</td></tr><tr><th>Kubernetes</th><td data-label="现场">等待永远不结束</td><td data-label="漏掉的是哪一步"><code>WaitGroup.Wait</code> 误写进循环体</td></tr></tbody></table></div><p><mark class="mk-blue">所有四类的共性是同一个：发送方的「结束条件」依赖了接收方会不会出现。</mark></p>
 <div class="callout tone-red">
       <span class="ic">💧</span>
       <div><p><strong>长期服务里，泄漏的典型表现是 G 数平缓单调上涨</strong> —— 每次异常路径漏一个，一天漏几万。</p>
