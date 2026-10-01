@@ -1,6 +1,13 @@
 # 积木速查
 
-> 这份文件既是新建笔记的模板，也是积木语法参考。**写笔记之前先读一遍。**
+> **这篇只回答一件事：同一个意思，该用哪个积木。** 每节一个能直接跑的例子。
+>
+> - 要**完整字段表**（每个 key 什么意思）→ skill 的[积木参考](../../skill/blocks.html)
+> - 要**加一个新积木**→ skill 的[加新积木](../../skill/extend.html)
+> - 要**怎么写笔记的流程**→ skill 的 [knowledge-html skill](../../skill/skill.html)
+>
+> ==不重复那边已经写全的东西== —— 两边抄同一份 DSL，改一个积木就要改两处。
+>
 > 正文用标准 Markdown，需要更强表达力时用下面的自定义围栏块（围栏内是 YAML）。
 
 ## 01 · 基本约定
@@ -127,8 +134,8 @@ messages:
 tone: violet
 icon: 💡
 text: |
-  **需要更复杂的时候（比如嵌套 alt/loop 框、精确到像素的时间轴），
-  去调 [archify skill](../../.agents/skills/knowledge-html/SKILL.md)。**
+  **需要更复杂的时候（比如嵌套 alt/loop 框、区域框、标签碰撞检测），
+  去调 [archify](../../skill/blocks.html#15-arch-内联-archify-生成的图) —— 它是一套独立的图渲染系统。**
 
   它的 `sequence` 类型支持 `views`（分段聚焦）和显式的 `y` 坐标，
   还有布局校验器。代价是要跑外部工具、生成 SVG 文件。

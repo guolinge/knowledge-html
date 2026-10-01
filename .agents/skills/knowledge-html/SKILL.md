@@ -1888,7 +1888,7 @@ text: |
 
 | 类别 | 例子 | 谁负责 |
 |---|---|---|
-| **共享产物** | `index.html`、`dist/*.html`、`notes/<任意 slug>/index.html` | **每次提交都要带上全部** |
+| **共享产物** | `index.html`、`dist/*.html`、`notes/<任意 slug>/index.html`、**`skill/*.html`** | **每次提交都要带上全部** |
 | **共享源** | `assets/theme.css` `blocks.css` `app.js`、`tools/*.mjs`、`package.json`、`.agents/skills/**` | 谁改谁提交，但**要小心** |
 | **私有源** | `notes/<你的 slug>/`、`archify/<你的名字>.json`、`assets/arch/<你的名字>.svg` | 只有你改 |
 
@@ -1923,6 +1923,7 @@ npm run status
 npm run status              # ① 分类看清 —— 这一条不能省
 npm run check               # ② 校验（含 skill 一致性）
 npm run build:standalone    # ③ 重建全部产物
+npm run skill               # ③b 重建 skill/（改了 skill 文档才需要）
 npm run visual-check        # ④ 量图
 git add <点名清单>          # ⑤ 优先点名；确认过才用 `-A`
 node tools/status.mjs --cached   # ⑥ 再看一遍 staged 的
@@ -2121,6 +2122,8 @@ pre-push 会重建 + 量图。**它拦下来通常不是你的问题。**
 - [ ] 走的是「一个面」时，**知识树的每个节点都有归属**（单独一篇 / 并入哪篇）
 - [ ] 改了 skill 的话，**`npm run check` 会顺带渲染一遍 SKILL.md / blocks.md / extend.md**
       （不用再单独跑 `npm run skill` 才发现围栏崩了）
+- [ ] 改了 skill 的话，**`skill/*.html` 要一起提交** —— 它是进仓库的产物，
+      不提交的话线上那一份会停在你改之前的版本
 
 ## 参考
 
@@ -2136,7 +2139,7 @@ pre-push 会重建 + 量图。**它拦下来通常不是你的问题。**
 | `npm run build:standalone` | 重建全部产物（`dist/*.html` + 首页） |
 | `npm run visual-check` | 无头浏览器量每个积木有没有溢出。==读的是 `dist/`==，不是 `notes/` |
 | `npm run build` | 只重建 `notes/*/index.html` —— **`visual-check` 不看这个** |
-| `npm run skill` | 把这份 skill 渲染成 HTML 看（默认不开浏览器，加 `--open`） |
+| `npm run skill` | 把这份 skill 渲染到 **`skill/`**（**进仓库**，首页链得到）+ 三个页面互链。默认不开浏览器，加 `--open` |
 | `npm run new -- <slug>` | 新建一篇笔记 |
 | `npm run serve` | 起本地服务器 |
 ### 文档
@@ -2146,6 +2149,8 @@ pre-push 会重建 + 量图。**它拦下来通常不是你的问题。**
 - `tools/lib/home.mjs` —— 首页：树视图 + 未归类区
 - [`references/blocks.md`](references/blocks.md) —— 17 个积木的完整 DSL
 - [`references/extend.md`](references/extend.md) —— 积木不够用时怎么加一个
+- `skill/` —— **skill 文档渲染出来的站点页**（`npm run skill` 生成，进仓库）
+- `tools/skill-view.mjs` —— 渲染 skill 到 `skill/`；`.preview/` 留给临时预览（不进仓库）
 - `tools/probe/visual-check.js` —— 浏览器探针（独立文件，不是模板字符串）
 - `tools/visual-baseline.json` —— 已知问题基线（积木画不了的那些）
 - `notes/blocks-cheatsheet/note.md` —— 可运行的积木示例

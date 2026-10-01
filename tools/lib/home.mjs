@@ -93,6 +93,25 @@ export function renderHome(entries, { site, assetPrefix = '', plans = [] }) {
   const orphans = entries.filter((e) => !inTree.has(e.slug));
 
   const trees = plans.map((p) => tree(p, entryBySlug)).join('\n');
+
+  /* 「工具与规范」不来自 notes/ —— 它是 .agents/skills/ 下的 skill 文档，
+     由 tools/skill-view.mjs 渲染到 skill/。单独一块，别混进笔记列表。 */
+  const tools = `<section class="plan" data-plan="__tools">
+    <div class="plan-head">
+      <h2>工具与规范</h2>
+      <span class="plan-progress is-full">1 份</span>
+      <p class="plan-summary">不是笔记 —— 是「怎么写这些笔记」的流程规范。给 agent 读，人也能读。</p>
+    </div>
+    <div class="plan-body">
+      <a class="tnode is-done" data-depth="0" href="skill/index.html">
+        <span class="tnode-num">🛠</span>
+        <span class="tnode-title">knowledge-html skill</span>
+        <span class="tnode-layer">规范</span>
+        <span class="tnode-blurb">原则 · 工作流 · 积木 DSL · 多会话协作 · 硬约束</span>
+        <span class="tnode-state">已产出</span>
+      </a>
+    </div>
+  </section>`;
   const cards = orphans.map(card).join('\n');
 
   const allTags = [...new Set(entries.flatMap((e) => e.tags || []))].sort();
@@ -247,7 +266,8 @@ export function renderHome(entries, { site, assetPrefix = '', plans = [] }) {
   </div>
   <div class="chips" id="chips">${chips}</div>
 
-  <div id="trees">${trees}</div>
+  <div id="trees">${tools}
+${trees}</div>
   ${
     orphans.length
       ? `<div class="orphan-head">

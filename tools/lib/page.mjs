@@ -62,8 +62,9 @@ function tocHtml(toc, backHref) {
  * @param {string} o.backHref     返回索引的链接
  * @param {string} [o.assets]     内联资源 { theme, blocks, app }，用于 --standalone
  * @param {string} [o.needs]      「前置」区块 HTML（来自 plans/*.yaml 的 needs）
+ * @param {string} [o.topNav]     顶栏品牌后面插一段（skill 三页互链用）
  */
-export function renderPage({ meta, body, toc, assetPrefix, backHref, assets, needs = '' }) {
+export function renderPage({ meta, body, toc, assetPrefix, backHref, assets, needs = '', topNav = '' }) {
   const head = assets
     ? `<style>\n${assets.theme}\n</style>\n<style>\n${assets.blocks}\n</style>`
     : `<link rel="stylesheet" href="${assetPrefix}assets/theme.css" />
@@ -97,6 +98,7 @@ ${head}
   <div class="topbar-inner">
     <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
     <a class="brand" href="${esc(backHref)}"><span class="dot"></span>${esc(meta.site || '知识笔记')}</a>
+    ${topNav}
     <span class="spacer"></span>
     <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
   </div>

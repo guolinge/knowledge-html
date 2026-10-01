@@ -5,7 +5,7 @@
    skill 的文档里用了 callout / compare 这些积木，渲染出来读比看
    markdown 源码舒服得多 —— 而且顺带验证了「积木能不能表达复杂文档」。
 
-   node tools/skill-view.mjs        # 渲染 + 打开浏览器
+   node tools/skill-view.mjs        # 渲染到 skill/ + 打开浏览器
    ============================================================ */
 
 import fs from 'node:fs';
@@ -18,7 +18,9 @@ import { renderPage } from './lib/page.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const SKILL = path.join(ROOT, '.agents/skills/knowledge-html');
-const OUT = path.join(ROOT, '.preview');
+/* 渲染到 skill/ —— 这个目录**进仓库**，所以首页能链到它、手机上也能看。
+ `.preview/` 留给临时预览（那些不进仓库）。 */
+const OUT = path.join(ROOT, 'skill');
 
 const md = new MarkdownIt({ html: true, linkify: true }).use(blocksPlugin);
 const CHECK = process.argv.includes('--check');
@@ -99,7 +101,20 @@ for (const p of PAGES) {
 
      教训：blocks.md 是「教人别把围栏套围栏」的那篇，它自己就套了 ——
      而当时只有笔记跑 lint，于是这份文档的下半截全被困在代码块里，没人发现。 */
-  const issues = [...lintFences(anchored, src), ...lintLinkifyStars(anchored, src)];
+  /* SKILL.md 里的链接是**相对它自己目录**写的（`.agents/skills/knowledge-html/`），
+   渲染到 `skill/` 之后全都指不到。这里换一遍：
+     · 两个 reference → 同目录的 HTML
+     · 仓库里的笔记 → ../notes/<slug>/
+   （不换的话线上点进去是 404 —— 链接检查能查出来，但没人会去查整个 skill。） */
+function relink(html) {
+  return html
+    .replace(/href="references\/blocks\.md[^"]*"/g, 'href="./blocks.html"')
+    .replace(/href="references\/extend\.md[^"]*"/g, 'href="./extend.html"')
+    .replace(/href="(\.\.\/)*notes\/([a-z0-9-]+)\/note\.md"/g, 'href="../notes/$2/"')
+    .replace(/href="(?:\.\.\/)*(plans|tools|assets)\//g, 'href="../$1/');
+}
+const anchored2 = relink(anchored);
+const issues = [...lintFences(anchored2, src), ...lintLinkifyStars(anchored2, src)];
   if (issues.length) {
     warned += issues.length;
     console.error(`\n  ⚠ ${p.file}`);
@@ -114,10 +129,14 @@ for (const p of PAGES) {
       summary: p.summary,
       status: 'reference', // 不是笔记，不显示 draft 横幅
     },
-    body: anchored,
+    body: anchored2,
     toc,
     assetPrefix: '../',
-    backHref: './index.html',
+    /* 品牌和「← 全部笔记」都回站点首页 —— 读者可能是从首页点进来的 */
+    backHref: '../index.html',
+    topNav: `<nav class="topnav">${PAGES.map(
+      (q) => `<a href="./${q.slug}.html"${q.slug === p.slug ? ' class="on"' : ''}>${q.title}</a>`,
+    ).join('')}</nav>`,
   });
 
   /* --check：只渲染 + 检验，不写文件。
@@ -166,6 +185,9 @@ fs.writeFileSync(
 <style>
   main { max-width: 720px; margin: 0 auto; padding: 60px 24px; }
   h1 { font-size: 26px; margin: 0 0 6px; }
+  .back { display: inline-block; color: var(--text-muted); text-decoration: none;
+    font-size: 13px; margin-bottom: 20px; }
+  .back:hover { color: var(--blue); }
   .lead { color: var(--text-muted); margin: 0 0 32px; }
   .navcard { display: block; text-decoration: none; color: inherit;
     border: 1px solid var(--border); border-left: 3px solid var(--blue);
@@ -177,6 +199,7 @@ fs.writeFileSync(
   .navcard em { display: block; color: var(--text-faint); font-size: 12px;
     font-style: normal; margin-top: 8px; }
 </style></head><body><main>
+  <a class="back" href="../index.html">← 全部笔记</a>
 <h1>knowledge-html skill</h1>
 <p class="lead">这个 skill 用自己的工具链渲染自己 —— 文档里用的 <code>callout</code> / <code>compare</code>
 就是它要教的积木。</p>
@@ -184,7 +207,7 @@ ${nav}
 </main></body></html>`,
 );
 
-console.log(`  ✓ .preview/index.html (${built.length} 页)`);
+console.log(`  ✓ skill/index.html (${built.length} 页)`);
 if (warned) console.log(`  ⚠ ${warned} 个渲染问题（见上）—— 这些正是文档会「看着对、实际错位」的原因`);
 if (failed) process.exitCode = 1;
 
@@ -195,5 +218,5 @@ if (process.argv.includes('--open')) {
   execFileSync('open', [path.join(OUT, 'index.html')]);
   console.log('\n  → 已在浏览器打开（收尾时自己关掉）\n');
 } else {
-  console.log(`\n  页面  .preview/index.html\n`);
+  console.log(`\n  页面  skill/index.html\n`);
 }
