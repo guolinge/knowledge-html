@@ -93,7 +93,31 @@ try {
 
 let total = 0;
 let known = 0;
-const tmp = path.join(ROOT, 'node_modules', '.vc-tmp.html');
+/* 临时页面必须是**每个进程独一份**的。
+   踩过（而且这个 bug 被误诊了很久）：原来是固定路径
+   `node_modules/.vc-tmp.html`，而 worktree 的 node_modules 是**软链到主仓库**的
+   （这正是本 skill 推荐的省事做法）——
+   于是两个并行会话写的是同一个文件：
+
+     A 写入 crowd 的页面 → B 写入 core-rule 的页面 → A 的 Chrome 读到 B 的页面
+
+   症状是「别人的问题算到了你头上」：报 `crowd` 有 `边 rv→expr 穿过节点`，
+   而 crowd 那张图里根本**没有** rv / expr 这些节点。
+   还有「同一份代码连跑三次挂 2/1/0 处、每次挂不同的笔记」。
+
+   ==当时把它归因成「机器满载、布局没稳定」—— 归因错了。==
+   加载慢最多让测量有噪声；把整页搞错只能是文件被换了。
+   带 PID 之后并发跑也不会串。 */
+const tmp = path.join(ROOT, 'node_modules', `.vc-tmp-${process.pid}.html`);
+/* 上一次被 kill 掉的残留（超时、Ctrl-C）——顺手扫掉，别攒着 */
+try {
+  const dir = path.join(ROOT, 'node_modules');
+  for (const f of fs.readdirSync(dir)) {
+    if (!/^\.vc-tmp-\d+\.html$/.test(f)) continue;
+    const f2 = path.join(dir, f);
+    if (Date.now() - fs.statSync(f2).mtimeMs > 10 * 60 * 1000) fs.unlinkSync(f2);
+  }
+} catch { /* 扫不动就算了，不影响检查 */ }
 
 /* ---------- 已知问题基线 ----------
 
