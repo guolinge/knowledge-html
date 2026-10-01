@@ -1592,12 +1592,12 @@ A 等盘时 CPU 去跑 B 再被中断叫回来、轮询到中断驱动的演进�
 </tr>
 </tbody>
 </table>
-<p><strong>交互控件 27 个</strong>（在 <code>assets/app.js</code> 的 <code>WIDGETS</code> 里，供 <code>demo</code> 积木引用）：
+<p><strong>交互控件 28 个</strong>（在 <code>assets/app.js</code> 的 <code>WIDGETS</code> 里，供 <code>demo</code> 积木引用）：
 <code>polling-vs-cdc</code> <code>combination-count</code> <code>join-lab</code> <code>on-vs-where</code> <code>knex-chain</code>
 <code>stepper</code> <code>tuner</code> <code>diff</code> <code>stream-modes</code> <code>operator-lab</code> <code>hashring</code> <code>partition-prune</code>
 <code>dsl-lab</code> <code>null-lab</code> <code>config-to-ui</code> <code>field-lineage</code> <code>count-dedup-lab</code>
 <code>row-to-catalog</code> <code>sql-inject-lab</code> <code>validate-lab</code> <code>sched-lab</code> <code>switch-cost</code>
-<code>io-models</code> <code>inode-trace</code> <code>link-refcount</code> <code>gmp-lab</code> <code>handoff-lab</code></p>
+<code>io-models</code> <code>inode-trace</code> <code>link-refcount</code> <code>gmp-lab</code> <code>handoff-lab</code> <code>ipc-flow-lab</code></p>
 <p><strong>已知缺口</strong>（按优先级）：</p>
 <table>
 <thead>
@@ -2138,7 +2138,7 @@ FROM (
 </code></pre></div>
 <p>用无头浏览器真的去量每个积木容器：子元素有没有溢出边界、有没有横向滚动。
 <strong>已经接进 pre-push 钩子，推送前自动跑。</strong></p>
-<h4>五次踩坑记录</h4>
+<h4>六次踩坑记录</h4>
 <table>
 <thead>
 <tr>
@@ -2167,8 +2167,72 @@ FROM (
 <td><code>cards</code> 里的 <code>&lt;pre&gt;</code> 撑破容器</td>
 <td><strong>grid item 默认 <code>min-width: auto</code></strong>，不会缩到内容宽度以下</td>
 </tr>
+<tr>
+<td><strong>切换深浅色后，某个色块停在旧主题的颜色上</strong></td>
+<td><code>transition: background</code> + <code>background: color-mix(...)</code> —— 见下面第六次</td>
+</tr>
 </tbody>
 </table>
+<h4>第六次：<code>color-mix</code> 配 <code>transition</code>，换主题时会卡住</h4>
+<div class="callout tone-red">
+      <span class="ic">🌗</span>
+      <div><p><strong>写过 <code>transition: background</code> 的元素，只要它的背景是 <code>color-mix(...)</code>，
+换主题时颜色会卡在旧主题上。</strong></p>
+<p>不是过渡一下就到了 —— 是<strong>永远不更新</strong>，直到这个元素因为别的原因重新布局。</p>
+<p><mark class="mk-blue">这个 bug 只在切主题时出现，<code>npm run check</code> / <code>visual-check</code> 全是绿的。</mark>
+（它们不切主题，只量布局。）</p>
+</div>
+    </div><p><strong>真实经过</strong>（写「三种 IPC 数据流」那个控件时）：</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>症状</td>
+<td>浅色模式下，未激活的格子渲染成深色；但同一张卡片的外壳是白的</td>
+</tr>
+<tr>
+<td>第一反应</td>
+<td>以为变量作用域错了 —— 打印 <code>--surface-2</code>，发现是 <code>#f2f4f7</code>（正确的浅色）</td>
+</tr>
+<tr>
+<td>打印元素的实际值</td>
+<td><code>oklab(0.283 0.003 -0.029)</code> —— 一个<strong>暗色</strong>，和变量对不上</td>
+</tr>
+<tr>
+<td>排除法</td>
+<td>把 <code>transition: background .2s</code> 删掉，<strong>立刻正确</strong>（<code>rgb(234,231,246)</code>，正是手算出来的淡紫）</td>
+</tr>
+</tbody>
+</table>
+<p><strong>根因</strong>：元素在 <code>data-theme</code> 还是 <code>dark</code> 时完成首次渲染，主题切成 <code>light</code> 后
+背景值要变，但 Chrome 对<strong>两个 <code>color-mix()</code> 计算值之间的插值</strong>处理不了，
+于是停在起点。改成普通 <code>var(--x)</code> 的颜色不会中招（那是两个具体颜色之间的插值）。</p>
+<p><mark class="mk-green">规矩：给「背景是 <code>color-mix</code>」的元素写 transition 时，只写具体属性，不写 <code>background</code>、更不要写 <code>all</code>。</mark></p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-css">/* ❌ 换主题会卡住 */
+.pill { background: color-mix(in srgb, var(--blue) 14%, transparent); transition: .18s; }
+
+/* ✅ 只过渡真正会动的东西 */
+.pill { background: color-mix(in srgb, var(--blue) 14%, transparent);
+        transition: color .18s, box-shadow .18s; }
+</code></pre></div>
+<p><strong>查法</strong>（一条命令扫全站）：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-bash">python3 - &lt;&lt;'EOF'
+import re, pathlib
+css = pathlib.Path('assets/blocks.css').read_text()
+for sel, body in re.findall(r'([^{}]+)\{([^}]*)\}', css):
+    if 'transition' not in body: continue
+    if not any('color-mix' in l for l in body.split(';') if l.strip().startswith('background')): continue
+    t = re.search(r'transition:\s*([^;]+)', body).group(1).strip()
+    if 'background' in t or re.fullmatch(r'\.?\d+(\.\d+)?(m?s)?', t):
+        print(sel.strip()[:60], '→', t)
+EOF
+</code></pre></div>
+<p><mark class="mk-blue">写新控件时顺手跑一次，比等用户在浅色模式下发现便宜得多。</mark></p>
 <h4>第五次：archify 的共用 CSS 被削薄</h4>
 <div class="callout tone-red">
       <span class="ic">⚠</span>
@@ -2210,6 +2274,9 @@ FROM (
 <li><strong>绝对定位的装饰元素要考虑「会不会超出容器」。</strong> 加了就配 padding。</li>
 <li><strong>坐标计算必须统一参照系。</strong> 容器一有 padding，相对不同父元素量的坐标就会错开。</li>
 <li><strong>放进 grid / flex 的元素要设 <code>min-width: 0</code></strong>，否则内容会把容器撑破。</li>
+<li><strong><code>background: color-mix(...)</code> 的元素，别写 <code>transition: background</code> 或 <code>transition: .2s</code>。</strong>
+换主题时 Chrome 插值不了两个 <code>color-mix</code> 计算值，颜色会卡在旧主题上 ——
+<code>visual-check</code> 抓不到（它不切主题）。详见上面「第六次」。</li>
 </ol>
 <h2 id="依赖策略默认零依赖">依赖策略：默认零依赖</h2>
 <p>页面要能<strong>单文件发人</strong>，所以每加一个库都在增加分发成本。</p>

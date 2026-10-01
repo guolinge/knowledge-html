@@ -4489,6 +4489,156 @@
     draw(Number(range.value));
   };
 
+  /* ============================================================
+     控件：三种 IPC 的数据流并排跑
+     ------------------------------------------------------------
+     把三种机制摆在同一排，点「下一步」同步推进，
+     看数据到底停在哪里、被拷贝了几次。
+
+     想让人看到的一件事：
+       管道和消息队列的缓冲区确实在内核内存里，
+       但进程碰不到它 —— 得让内核搬两次。
+       只有共享内存是「两个进程真的在看同一块内存」。
+
+     config:
+       payload: "hello"     传送的内容，只影响显示
+       interval: 900        自动播放的间隔
+  ============================================================ */
+  WIDGETS['ipc-flow-lab'] = (root) => {
+    const cfg = cfgOf(root);
+    const box = mountOf(root);
+    const statusEl = root.querySelector('[data-status]');
+    const payload = cfg.payload || 'hello';
+
+    /* 三列的定义：每列描述「数据在三个位置的哪一格」以及各步的计数
+       位置取值：a = 发送方用户空间，k = 中转站，b = 接收方用户空间
+       三列的步数完全一样（0 ~ 3），所以可以同步推进对比 */
+    const COLS = [
+      {
+        id: 'pipe', name: '管道', tone: 'blue', badge: '两次拷贝',
+        kLabel: '管道缓冲区（内核）', kNote: '环形队列。A 和 B 都看不见它',
+        steps: [
+          { at: 'a', copy: 0, sys: 0, what: '还没有人动作，数据就在 A 自己的缓冲区里' },
+          { at: 'k', copy: 1, sys: 1, what: 'A 调 write()，陷入内核，内核把数据拷进管道缓冲区' },
+          { at: 'b', copy: 2, sys: 2, what: 'B 调 read()，陷入内核，内核再把数据拷进 B 的缓冲区' },
+          { at: 'b', copy: 2, sys: 2, what: 'B 拿到了数据。管道缓冲区空了 —— 水已经流过去了' },
+        ],
+      },
+      {
+        id: 'mq', name: '消息队列', tone: 'violet', badge: '两次拷贝',
+        kLabel: '消息队列（内核）', kNote: '一条一条排着，带 type 字段',
+        steps: [
+          { at: 'a', copy: 0, sys: 0, what: 'A 把要发的数据装成一条消息' },
+          { at: 'k', copy: 1, sys: 1, what: 'A 调 msgsnd()，内核把整条消息拷进队列' },
+          { at: 'b', copy: 2, sys: 2, what: 'B 调 msgrcv()，内核把整条消息拷出去' },
+          { at: 'b', copy: 2, sys: 2, what: 'B 收到了完整的一条，边界还在' },
+        ],
+      },
+      {
+        id: 'shm', name: '共享内存', tone: 'green', badge: '零拷贝',
+        kLabel: '同一块物理内存', kNote: '两边的虚拟地址不同，但指向同一块物理内存',
+        steps: [
+          { at: 'a', copy: 0, sys: 0, what: '两边都已经 shmat() 映射好了，之后就不再需要系统调用' },
+          { at: 'k', copy: 0, sys: 0, what: 'A 写 ptr[0] —— 这就是一条普通的内存写指令' },
+          { at: 'b', copy: 0, sys: 0, what: 'B 读 ptr[0] —— 普通的内存读指令，它直接看到了' },
+          { at: 'b', copy: 0, sys: 0, what: '全程 0 次拷贝、0 次系统调用。代价是没人给你保证秩序' },
+        ],
+      },
+    ];
+
+    /* —— 控制条 —— */
+    const bar = el('div', 'ipc-bar');
+    const bNext = el('button', 'ipc-btn ipc-primary', '下一步');
+    const bPlay = el('button', 'ipc-btn', '▶ 自动跑');
+    const bReset = el('button', 'ipc-btn ipc-ghost', '重置');
+    const stepTag = el('span', 'ipc-step', '第 0 / 3 步');
+    bar.append(bNext, bPlay, bReset, stepTag);
+
+    /* —— 三列 —— */
+    const grid = el('div', 'ipc-grid');
+    const built = COLS.map((c) => {
+      const col = el('div', 'ipc-col tone-' + c.tone);
+      const hd = el('div', 'ipc-colhead');
+      hd.append(el('b', '', c.name), el('span', 'ipc-badge', c.badge));
+      col.append(hd);
+      const zones = {};
+      [['a', '进程 A 的用户空间'], ['k', c.kLabel], ['b', '进程 B 的用户空间']].forEach(([key, lab]) => {
+        const z = el('div', 'ipc-zone' + (key === 'k' ? ' ipc-mid' : ''));
+        const l = el('div', 'ipc-zlab', lab);
+        z.append(l);
+        if (key === 'k') z.append(el('div', 'ipc-znote', c.kNote));
+        const slot = el('div', 'ipc-slot');
+        z.append(slot);
+        col.append(z);
+        zones[key] = { z, slot };
+      });
+      const cnt = el('div', 'ipc-count');
+      col.append(cnt);
+      const say = el('p', 'ipc-say', '');
+      col.append(say);
+      grid.append(col);
+      return { c, col, zones, cnt, say };
+    });
+
+    /* —— 收尾结论 —— */
+    const verdict = el('div', 'ipc-verdict');
+    box.append(bar, grid, verdict);
+
+    let step = 0;
+    let timer = null;
+
+    const token = (c, copy) => {
+      const t = el('span', 'ipc-token', c.id === 'shm' ? payload : payload);
+      if (copy) t.classList.add('ipc-copied');
+      return t;
+    };
+
+    function draw() {
+      stepTag.textContent = `第 ${step} / 3 步`;
+      bNext.disabled = step >= 3;
+      built.forEach(({ c, zones, cnt, say, col }) => {
+        const st = c.steps[step];
+        Object.entries(zones).forEach(([k, z]) => {
+          z.z.classList.toggle('on', k === st.at);
+          z.slot.textContent = '';
+        });
+        /* 数据画在它当前所在的那一格 */
+        zones[st.at].slot.append(token(c, st.copy > 0));
+        if (c.id === 'shm' && st.at === 'k') zones.k.slot.append(el('span', 'ipc-both', 'A 和 B 都看得见'));
+        cnt.textContent = `拷贝 ${st.copy} 次 · 系统调用 ${st.sys} 次`;
+        cnt.className = 'ipc-count ' + (st.copy === 0 ? 'ipc-zero' : 'ipc-nonzero');
+        say.textContent = st.what;
+        col.classList.toggle('is-done', step === 3);
+      });
+
+      verdict.textContent = '';
+      verdict.append(el('div', 'ipc-vhead', step === 3 ? '跑完了，看计数' : '往下走，看计数怎么变'));
+      const done = built.map((b) => ({ name: b.c.name, copy: b.c.steps[step].copy, sys: b.c.steps[step].sys }));
+      verdict.append(el('div', 'ipc-vline',
+        done.map((d) => `${d.name}：拷贝 ${d.copy} 次、系统调用 ${d.sys} 次`).join('　·　')));
+      if (step === 3) {
+        verdict.append(el('div', 'ipc-vline ipc-vdim',
+          '管道和消息队列的缓冲区确实在内核内存里，但进程碰不到它 —— 得让内核搬两次。只有共享内存是真正「两个进程在看同一块内存」。'));
+      }
+      if (statusEl) statusEl.textContent = `第 ${step} / 3 步`;
+    }
+
+    function stop() { if (timer) { clearInterval(timer); timer = null; bPlay.textContent = '▶ 自动跑'; } }
+    bNext.addEventListener('click', () => { stop(); if (step < 3) { step++; draw(); } });
+    bReset.addEventListener('click', () => { stop(); step = 0; draw(); });
+    bPlay.addEventListener('click', () => {
+      if (timer) return stop();
+      if (step >= 3) step = 0;
+      bPlay.textContent = '⏸ 暂停';
+      draw();
+      timer = setInterval(() => {
+        if (step >= 3) return stop();
+        step++; draw();
+      }, cfg.interval || 900);
+    });
+    draw();
+  };
+
   /* ---------- 挂载 ---------- */
   document.querySelectorAll('[data-widget]').forEach((root) => {
     var name = root.getAttribute('data-widget');

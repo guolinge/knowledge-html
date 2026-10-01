@@ -1,0 +1,454 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-has-toc="1">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>管道 / 消息队列 / 共享内存 · 三种 IPC 到底差在哪</title>
+<meta name="description" content="「它们都是把信息放在一块公共内存上」—— 这句话对了一半。管道和消息队列的缓冲区确实在内核里，但进程碰不到它；只有共享内存是真正两个进程在看同一块内存。差别全在拷贝次数、边界、以及内核帮不帮你管秩序。" />
+<link rel="stylesheet" href="../../assets/theme.css" />
+  <link rel="stylesheet" href="../../assets/blocks.css" />
+  <link rel="stylesheet" href="../../assets/archify-embed.css" />
+</head>
+<body>
+<div id="progress"></div>
+<div id="tocScrim"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
+    <a class="brand" href="../../index.html"><span class="dot"></span>知识笔记</a>
+    
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="toc" id="toc">
+      <p class="toc-title">目录</p>
+      <a href="../../index.html" class="sub">← 全部笔记</a>
+      <a href="#你的直觉对了一半">你的直觉对了一半</a>
+      <a href="#数据怎么走三种并排跑一遍">数据怎么走：三种并排跑一遍</a>
+      <a href="#管道两次拷贝a-和-b-永远看不到那个缓冲区">管道：两次拷贝，A 和 B 永远看不到那个缓冲区</a>
+      <a href="#消息队列也是两次拷贝但一条一条有边界">消息队列：也是两次拷贝，但一条一条有边界</a>
+      <a href="#共享内存零拷贝但内核什么都不管">共享内存：零拷贝，但内核什么都不管</a>
+      <a href="#三者核心区别一览">三者核心区别一览</a>
+      <a href="#三个区别各自意味着什么">三个区别各自意味着什么</a>
+      <a href="#区别一拷贝次数的差距会随数据量放大" class="sub">区别一：拷贝次数的差距，会随数据量放大</a>
+      <a href="#区别二字节流-vs-消息-vs-自由格式" class="sub">区别二：字节流 vs 消息 vs 自由格式</a>
+      <a href="#区别三内核帮不帮你管秩序" class="sub">区别三：内核帮不帮你管秩序</a>
+      <a href="#用类比一次说清">用类比一次说清</a>
+      <a href="#什么时候用哪个">什么时候用哪个</a>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow">● 操作系统 · 进程间通信</span>
+      <h1>管道 / 消息队列 / 共享内存 · 三种 IPC 到底差在哪</h1>
+      <p class="lede">「它们都是把信息放在一块公共内存上」—— 这句话对了一半。管道和消息队列的缓冲区确实在内核里，但进程碰不到它；只有共享内存是真正两个进程在看同一块内存。差别全在拷贝次数、边界、以及内核帮不帮你管秩序。</p>
+    </div>
+
+    <div class="draft-banner">
+    <span>⚠</span>
+    <span>本页状态为 <b>draft</b>：内容尚未人工核对，引用前请自行验证。</span>
+  </div>
+
+    <div class="provenance"><span><b>来源</b> 飞书文档《管道，共享内存，消息队列》 https://futu.feishu.cn/docx/XRqldrpn8oL9OIxHLbWcZxrOnKd @ revision 105</span><span><b>生成</b> 2026-10-01</span><span><b>模型</b> claude-opus-4-5</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">操作系统</span> <span class="tag tone-muted">IPC</span> <span class="tag tone-muted">共享内存</span> <span class="tag tone-muted">消息队列</span></span></div>
+
+<h2 id="你的直觉对了一半"><span class="num">01</span>你的直觉对了一半</h2>
+<blockquote>
+<p>我的理解是，它们都是把一些信息放在一块公共内存上而已。</p>
+</blockquote>
+<p>这句话里<strong>「缓冲区在哪」说对了，「谁能碰它」说错了。</strong></p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>机制</th><th>缓冲区在哪</th><th>进程能直接访问吗</th><th>数据怎么过去</th></tr></thead><tbody><tr><th>共享内存</th><td data-label="缓冲区在哪">同一块物理内存</td><td data-label="进程能直接访问吗"><span class="tag tone-green">能。这才是它唯一的卖点</span></td><td data-label="数据怎么过去">不用过去 —— A 写进去，B 直接就看到</td></tr><tr><th>管道</th><td data-label="缓冲区在哪">内核内存里的环形队列</td><td data-label="进程能直接访问吗"><span class="tag tone-red">不能。进程碰不到那块内存</span></td><td data-label="数据怎么过去">让内核拷贝两次</td></tr><tr><th>消息队列</th><td data-label="缓冲区在哪">内核内存里的一段</td><td data-label="进程能直接访问吗"><span class="tag tone-red">不能。同上</span></td><td data-label="数据怎么过去">让内核拷贝两次</td></tr></tbody></table></div><p><mark class="mk-blue">管道和消息队列的缓冲区确实在内核内存里，但那是内核的内存，不是「公共内存」。</mark> 进程只能通过系统调用请内核帮你搬。</p>
+<p>这个区别的后果很具体：<strong>拷贝次数从 2 变成 0。</strong></p>
+<hr>
+<h2 id="数据怎么走三种并排跑一遍"><span class="num">02</span>数据怎么走：三种并排跑一遍</h2>
+<p>把三种机制摆在同一排，同步推进，看数据停在哪一格、计数怎么变：</p>
+<div class="demo" data-widget="ipc-flow-lab" data-config="{&quot;payload&quot;:&quot;hello&quot;,&quot;interval&quot;:900}">
+      <div class="demo-head">
+        <span class="title">同一份数据，三种走法</span>
+        <span class="status" data-status>点「下一步」或「自动跑」</span>
+        <span class="spacer"></span>
+        
+      </div>
+      <div class="demo-body custom" data-mount></div>
+    </div><p>三列的上格和下格长得一样（发送方 / 接收方的用户空间）。<mark class="mk-blue">有差别的只有中间那格。</mark></p>
+<hr>
+<h2 id="管道两次拷贝a-和-b-永远看不到那个缓冲区"><span class="num">03</span>管道：两次拷贝，A 和 B 永远看不到那个缓冲区</h2>
+<div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-blue">第 1 站</span>
+            <span class="name">进程 A 的缓冲区</span>
+            <span class="spacer"></span>
+            <span class="tag tone-blue">拷贝 0 次</span>
+          </div>
+          <div class="rec"><div class="">
+            <b>内容</b><span>hello</span></div><div class="">
+            <b>谁能看见</b><span>只有 A 自己</span></div></div>
+          
+          <p class="jnote">这就是一块普通的用户态内存，跟内核没关系</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">A 调 write()<span class="note">陷入内核，请内核帮忙搬</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-violet">第 2 站</span>
+            <span class="name">管道缓冲区（内核里）</span>
+            <span class="spacer"></span>
+            <span class="tag tone-violet">拷贝 1 次</span>
+          </div>
+          <div class="rec"><div class="">
+            <b>结构</b><span>环形队列</span></div><div class="warn">
+            <b>谁能看见</b><span>只有内核。A 和 B 都不知道它长什么样</span><em>关键</em></div></div>
+          
+          <p class="jnote">数据到这里就已经被搬过一次了。但还没到 B 手上</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">B 调 read()<span class="note">再陷入内核一次</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-green">第 3 站</span>
+            <span class="name">进程 B 的缓冲区</span>
+            <span class="spacer"></span>
+            <span class="tag tone-green">拷贝 2 次</span>
+          </div>
+          <div class="rec"><div class="ok">
+            <b>内容</b><span>hello</span><em>和 A 写进去的一样</em></div><div class="">
+            <b>管道缓冲区</b><span>空了 —— 水已经流过去了</span></div></div>
+          
+          <p class="jnote">读完就没了，像水流过水管</p>
+        </div><div class="compare-wrap"><table class="compare"><thead><tr><th>谁来搬</th><th>次数</th><th>说明</th></tr></thead><tbody><tr><th>拷贝</th><td data-label="次数"><span class="tag tone-amber">2 次</span></td><td data-label="说明">A 的用户态 → 内核，内核 → B 的用户态</td></tr><tr><th>系统调用</th><td data-label="次数"><span class="tag tone-amber">2 次</span></td><td data-label="说明">write() 一次，read() 一次。每次都要陷入内核</td></tr><tr><th>进程直接碰缓冲区</th><td data-label="次数"><span class="tag tone-red">碰不到</span></td><td data-label="说明">它只能递一个指针给内核，剩下的内核办</td></tr></tbody></table></div><p><mark class="mk-blue">管道的格式是「字节流」，没有边界。</mark> 这一点后面单独说，它会造成一个很实际的麻烦。</p>
+<hr>
+<h2 id="消息队列也是两次拷贝但一条一条有边界"><span class="num">04</span>消息队列：也是两次拷贝，但一条一条有边界</h2>
+<div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-blue">第 1 站</span>
+            <span class="name">进程 A 装好一条消息</span>
+            <span class="spacer"></span>
+            <span class="tag tone-blue">拷贝 0 次</span>
+          </div>
+          <div class="rec"><div class="">
+            <b>type</b><span>1</span></div><div class="">
+            <b>data</b><span>order#99</span></div></div>
+          
+          <p class="jnote">消息是一个带类型标记的完整单位，不是一串字节</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">A 调 msgsnd()<span class="note">陷入内核</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-violet">第 2 站</span>
+            <span class="name">消息队列（内核里）</span>
+            <span class="spacer"></span>
+            <span class="tag tone-violet">拷贝 1 次</span>
+          </div>
+          <div class="rec"><div class="">
+            <b>排队</b><span>type=1 order#99</span></div><div class="">
+            <b>后面还排着</b><span>type=2 hello</span></div><div class="ok">
+            <b>还能按 type 分拣</b><span>B 可以选择只取某一种</span><em>管道做不到</em></div></div>
+          
+          <p class="jnote">队列是有序的，消息之间的边界被完整保留</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">B 调 msgrcv()<span class="note">再陷入内核一次</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-green">第 3 站</span>
+            <span class="name">进程 B 收到一整条</span>
+            <span class="spacer"></span>
+            <span class="tag tone-green">拷贝 2 次</span>
+          </div>
+          <div class="rec"><div class="ok">
+            <b>拿到的</b><span>type=1 · order#99</span><em>边界还在</em></div></div>
+          
+          <p class="jnote">取走就没了，像从邮局取走信件</p>
+        </div><p><mark class="mk-blue">拷贝次数和管道一样，但它多给你一样东西：边界和类型。</mark></p>
+<hr>
+<h2 id="共享内存零拷贝但内核什么都不管"><span class="num">05</span>共享内存：零拷贝，但内核什么都不管</h2>
+<div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-blue">第 1 站</span>
+            <span class="name">两个进程各自 shmat()</span>
+            <span class="spacer"></span>
+            <span class="tag tone-blue">拷贝 0 次</span>
+          </div>
+          <div class="rec"><div class="">
+            <b>A 的虚拟地址</b><span>0x7f001000</span></div><div class="warn">
+            <b>B 的虚拟地址</b><span>0x7f009000</span><em>地址不一样</em></div><div class="ok">
+            <b>指向的物理内存</b><span>同一块</span><em>关键就在这</em></div></div>
+          
+          <p class="jnote">页表把两个不同的虚拟地址翻译到同一块物理内存上</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">A 开始写<span class="note">之后就不需要内核了</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-green">第 2 站</span>
+            <span class="name">A 写 ptr[0]</span>
+            <span class="spacer"></span>
+            <span class="tag tone-green">拷贝 0 次 · 系统调用 0 次</span>
+          </div>
+          <div class="rec"><div class="ok">
+            <b>这是一条什么指令</b><span>就是最普通的内存写</span><em>不是系统调用</em></div><div class="">
+            <b>数据去了哪</b><span>直接落在了那块共享的物理内存上</span></div></div>
+          
+          <p class="jnote">没有拷贝 —— 因为它写的就是最终目的地</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">B 去读<span class="note">也不需要内核</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-green">第 3 站</span>
+            <span class="name">B 读 ptr[0]</span>
+            <span class="spacer"></span>
+            <span class="tag tone-green">全程 0 拷贝</span>
+          </div>
+          <div class="rec"><div class="ok">
+            <b>拿到的</b><span>'H' —— 它直接看到了</span><em>中间没有任何搬运</em></div><div class="">
+            <b>代价</b><span>内核不帮你保证任何秩序</span></div></div>
+          
+          <p class="jnote">像两个人在同一块黑板上写字和看字</p>
+        </div><p>但<strong>快不等于好。</strong> 内核在这里什么都不管，包括「A 写到一半 B 就来读」：</p>
+<div class="flowd has-grid has-groups" data-flow data-edges="[{&quot;from&quot;:&quot;a1&quot;,&quot;to&quot;:&quot;switch&quot;,&quot;label&quot;:&quot;&quot;},{&quot;from&quot;:&quot;switch&quot;,&quot;to&quot;:&quot;b&quot;,&quot;label&quot;:&quot;B 不知道它只写了一半&quot;},{&quot;from&quot;:&quot;b&quot;,&quot;to&quot;:&quot;b2&quot;,&quot;label&quot;:&quot;&quot;}]">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"><div class="fgroup tone-red" data-group-box="race">
+          <span class="fgroup-label">共享内存里没有「一条消息」这个概念，只有裸的内存</span>
+        </div></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-green" data-id="a1" data-group="race">
+              
+              
+              <b>A 写了 count = 42</b>
+              <small>结构体的第一个字段</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-amber" data-id="switch" data-group="race">
+              
+              
+              <b>A 还没写 name 就被换下了</b>
+              <small>时间片到了</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-red" data-id="b" data-group="race">
+              
+              
+              <b>B 读到了 count = 42</b>
+              <small>新数据</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-red" data-id="b2" data-group="race">
+              
+              
+              <b>但 name 是旧值或垃圾</b>
+              <small>内核不会阻止这件事发生</small>
+            </div></div></div>
+      
+    </div><p><mark class="mk-blue">这就是为什么共享内存几乎总是和信号量一起用。</mark> 那份「谁该等谁」的秩序，得你自己补上。</p>
+<hr>
+<h2 id="三者核心区别一览"><span class="num">06</span>三者核心区别一览</h2>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>维度</th><th>管道</th><th>消息队列</th><th>共享内存</th></tr></thead><tbody><tr><th>数据拷贝</th><td data-label="管道"><span class="tag tone-amber">2 次</span></td><td data-label="消息队列"><span class="tag tone-amber">2 次</span></td><td data-label="共享内存"><span class="tag tone-green">0 次</span></td></tr><tr><th>需要系统调用搬数据</th><td data-label="管道">每次 read/write 都要进内核</td><td data-label="消息队列">每次 msgsnd/msgrcv 都要进内核</td><td data-label="共享内存"><span class="tag tone-green">只在建立映射时；之后就是普通内存读写</span></td></tr><tr><th>速度</th><td data-label="管道">中等</td><td data-label="消息队列">中等</td><td data-label="共享内存"><span class="tag tone-green">最快</span></td></tr><tr><th>数据格式</th><td data-label="管道">字节流，没有边界</td><td data-label="消息队列">一条一条的消息，有边界有类型</td><td data-label="共享内存">随便你，结构体数组都行</td></tr><tr><th>内核帮你管秩序吗</th><td data-label="管道"><span class="tag tone-green">管。读空自动阻塞，写满自动阻塞</span></td><td data-label="消息队列"><span class="tag tone-green">管。队列空/满都自动阻塞</span></td><td data-label="共享内存"><span class="tag tone-red">不管。要自己配信号量</span></td></tr><tr><th>数据持久性</th><td data-label="管道">读完就没了，像水流过水管</td><td data-label="消息队列">取走就没了，像取走信件</td><td data-label="共享内存">一直在那里，直到你覆盖或删除</td></tr></tbody></table></div><hr>
+<h2 id="三个区别各自意味着什么"><span class="num">07</span>三个区别各自意味着什么</h2>
+<h3 id="区别一拷贝次数的差距会随数据量放大">区别一：拷贝次数的差距，会随数据量放大</h3>
+<div class="flowd has-grid has-groups" data-flow data-edges="[{&quot;from&quot;:&quot;s1&quot;,&quot;to&quot;:&quot;s2&quot;,&quot;label&quot;:&quot;&quot;},{&quot;from&quot;:&quot;b1&quot;,&quot;to&quot;:&quot;b2&quot;,&quot;label&quot;:&quot;&quot;}]">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"><div class="fgroup tone-muted" data-group-box="small">
+          <span class="fgroup-label">小数据（几十字节）</span>
+        </div><div class="fgroup tone-red" data-group-box="big">
+          <span class="fgroup-label">大数据（视频帧、大文件）</span>
+        </div></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-muted" data-id="s1" data-group="small">
+              
+              
+              <b>拷贝两次也就几百纳秒</b>
+              <small>小消息传个命令，谁快谁慢感知不到</small>
+            </div><div class="fnode tone-red" data-id="b1" data-group="big">
+              
+              
+              <b>同样两次拷贝，但要搬几 MB</b>
+              <small>内存带宽直接成了瓶颈</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-muted" data-id="s2" data-group="small">
+              
+              
+              <b>系统调用开销反而更显眼</b>
+              <small>两次陷入内核是固定成本</small>
+            </div><div class="fnode tone-green" data-id="b2" data-group="big">
+              
+              
+              <b>共享内存优势在这里才真正体现</b>
+              <small>写一次对方就看到，中间不搬家</small>
+            </div></div></div>
+      
+    </div><div class="callout tone-violet">
+      <span class="ic">📐</span>
+      <div><p><strong>所以「共享内存最快」这句话只在数据量大时才成立。</strong></p>
+<p>小消息场景里，省下来的那次拷贝可能还不如「共享内存要自己加信号量」带来的复杂度。</p>
+<p><mark class="mk-blue">选它的理由应该是「数据大」或「访问频繁」，而不是「它最快」。</mark></p>
+</div>
+    </div><h3 id="区别二字节流-vs-消息-vs-自由格式">区别二：字节流 vs 消息 vs 自由格式</h3>
+<p><strong>管道不保留边界</strong>，这件事在写得比读得快的时候会立刻暴露：</p>
+<div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-blue">A 这边</span>
+            <span class="name">三次 write，三次都是一小段</span>
+            <span class="spacer"></span>
+            <span class="tag tone-blue">写入方很清楚边界</span>
+          </div>
+          <div class="rec"><div class="">
+            <b>第 1 次</b><span>write(fd, &quot;aaa&quot;, 3)</span></div><div class="">
+            <b>第 2 次</b><span>write(fd, &quot;bb&quot;, 2)</span></div><div class="">
+            <b>第 3 次</b><span>write(fd, &quot;cccc&quot;, 4)</span></div></div>
+          
+          <p class="jnote">在 A 看来，这是三个逻辑上独立的东西</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">写进了同一条字节流<span class="note">边界在这就没了</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-red">B 这边</span>
+            <span class="name">一次 read，全糊在一起</span>
+            <span class="spacer"></span>
+            <span class="tag tone-red">边界丢失</span>
+          </div>
+          <div class="rec"><div class="">
+            <b>read(fd</b><span>&quot;aaabbcccc&quot;</span></div><div class="warn">
+            <b>B 想知道的</b><span>哪里是第一段的结尾？</span><em>读不出来了</em></div></div>
+          
+          <p class="jnote bad"><mark class="mk-blue">管道不保证「写三次就读三次」。</mark> 想要边界，就得自己在协议里划（长度前缀、分隔符）</p>
+        </div><p>消息队列把这件事替你做掉了：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>机制</th><th>边界</th><th>能不能挑着收</th></tr></thead><tbody><tr><th>管道</th><td data-label="边界"><span class="tag tone-red">没有。「三次写」可能被一次读全拿走</span></td><td data-label="能不能挑着收">不能，只能按顺序读</td></tr><tr><th>消息队列</th><td data-label="边界"><span class="tag tone-green">有。一条就是一条，边界完整保留</span></td><td data-label="能不能挑着收"><span class="tag tone-green">能。可以只取 type=1 的那些</span></td></tr><tr><th>共享内存</th><td data-label="边界">你自己在内存里怎么摆就有怎么样的边界</td><td data-label="能不能挑着收">无所谓边界，你直接读结构体</td></tr></tbody></table></div><h3 id="区别三内核帮不帮你管秩序">区别三：内核帮不帮你管秩序</h3>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>情况</th><th>管道 / 消息队列</th><th>共享内存</th></tr></thead><tbody><tr><th>空了</th><td data-label="管道 / 消息队列"><span class="tag tone-green">read 自动阻塞，等数据来</span></td><td data-label="共享内存"><span class="tag tone-red">读到一半的旧数据，你自己保证</span></td></tr><tr><th>满了</th><td data-label="管道 / 消息队列"><span class="tag tone-green">write 自动阻塞，等对方取走</span></td><td data-label="共享内存">根本没有「满」的概念</td></tr><tr><th>写了一半被换下</th><td data-label="管道 / 消息队列">不可能 —— 一次 write 是原子的（小于 PIPE_BUF 时）</td><td data-label="共享内存"><span class="tag tone-red">完全可能，B 会看到半成品</span></td></tr><tr><th>你还要写多少代码</th><td data-label="管道 / 消息队列"><span class="tag tone-green">几乎不用</span></td><td data-label="共享内存"><span class="tag tone-amber">一套信号量或互斥锁，而且很容易写错</span></td></tr></tbody></table></div><p><mark class="mk-blue">这三种机制是「内核替你担了多少责任」的三档。</mark> 管道和消息队列把它全担了；共享内存一点都不担，换来的是那两次拷贝。</p>
+<hr>
+<h2 id="用类比一次说清"><span class="num">08</span>用类比一次说清</h2>
+<div class="cards" data-cols="3"><div class="ccard tone-blue">
+          <span class="tag tone-blue">单向、连续</span>
+          <h4>管道 = 水管</h4>
+          <p>倒进去的是水，接出来的也是水，看不出你倒了几杯</p>
+          <div class="cbody"><ul>
+<li><strong>单向流动</strong>：一端写，另一端读</li>
+<li><strong>连续的水流</strong>：没有「一份一份」的概念</li>
+<li><strong>有背压</strong>：管满了就倒不进去，管空了就接不到</li>
+<li>水流过去就没了，不能再取一次</li>
+</ul>
+</div>
+          
+        </div><div class="ccard tone-violet">
+          <span class="tag tone-violet">一件一件</span>
+          <h4>消息队列 = 邮局</h4>
+          <p>每封信是独立的，还能按类型分拣</p>
+          <div class="cbody"><ul>
+<li><strong>每封信独立</strong>：边界完整，取一次就是完整的一封</li>
+<li><strong>可以按类型取</strong>：先拿紧急的那封</li>
+<li><strong>取走就没了</strong></li>
+<li><strong>经过邮局中转</strong>：内核帮你搬，但你看不到中转仓</li>
+</ul>
+</div>
+          
+        </div><div class="ccard tone-green">
+          <span class="tag tone-green">大家都看得见</span>
+          <h4>共享内存 = 公共黑板</h4>
+          <p>直接在黑板上写，但别人也可能同时在写</p>
+          <div class="cbody"><ul>
+<li><strong>不需要中间人</strong>：省掉了搬运</li>
+<li><strong>没有边界、没有顺序、没有背压</strong>：一块内存而已</li>
+<li><strong>两个人同时写就会打架</strong>（竞态）</li>
+<li><mark class="mk-blue">所以几乎总是配一把锁（信号量）</mark></li>
+</ul>
+</div>
+          
+        </div></div><hr>
+<h2 id="什么时候用哪个"><span class="num">09</span>什么时候用哪个</h2>
+<div class="mx">
+      <div class="mx-ylab">你能接受多少复杂度</div>
+      <div class="mx-body">
+        <div class="mx-y mx-yto">愿意自己管同步</div>
+        <div class="mx-grid">
+          <div class="mcell tone-blue">
+            <b>管道就够了</b>
+            <span>父子进程传个命令、shell 管线。字节流、有背压，代码三行</span>
+          </div>
+          <div class="mcell tone-violet">
+            <b>消息队列</b>
+            <span>要边界、要按类型分拣。内核帮你排队和阻塞，省心</span>
+          </div>
+          <div class="mcell tone-muted">
+            <b>管道也够用</b>
+            <span>小数据下两次拷贝感知不到，别为省这点开销背上一套锁</span>
+          </div>
+          <div class="mcell tone-green">
+            <b>共享内存 + 信号量</b>
+            <span>视频帧、大缓冲区、高频共享表。零拷贝的收益在这里才划算</span>
+          </div>
+        </div>
+        <div class="mx-y mx-yfrom">越省心越好</div>
+        <div class="mx-xrow">
+          <span>小消息</span><span>大数据 / 高频访问</span>
+        </div>
+        <div class="mx-xlab">数据量</div>
+      </div>
+    </div><div class="callout tone-violet">
+      <span class="ic">🎯</span>
+      <div><p><strong>一句话记住这三者的定位。</strong></p>
+<ul>
+<li>管道：<mark class="mk-blue">内核帮你搬数据</mark>，字节流，有背压，简单省心</li>
+<li>消息队列：<mark class="mk-blue">内核帮你搬数据</mark>，一条一条的，还能按类型取</li>
+<li>共享内存：<mark class="mk-blue">不搬数据</mark>，两个进程直接看同一块内存，最快但最危险</li>
+</ul>
+<p><mark class="mk-green">它们不是「都放在公共内存上」。前两个是「让内核当快递员帮你搬」，
+只有第三个是「真正的公共黑板，你们自己直接读写」。</mark></p>
+</div>
+    </div><hr>
+<div class="quiz"><details>
+        <summary>管道和消息队列的缓冲区也在内核内存里，那为什么不能说它们是「共享内存」？</summary>
+        <div class="a"><p>因为「在哪」和「谁能碰」是两件事。缓冲区确实在内核内存里，但那是内核的内存，
+进程没有权限直接访问，也没有映射到自己的地址空间里。
+进程能做的只是递一个指针给内核，请它帮忙搬，于是有了两次拷贝。
+共享内存是把同一块物理内存映射进两个进程的地址空间，两边都能直接读写，所以是零拷贝。</p>
+</div>
+      </details><details>
+        <summary>共享内存比管道快，是不是应该尽量用共享内存？</summary>
+        <div class="a"><p>要看数据量。小消息场景下，省掉的那次拷贝可能还不如系统调用的固定开销显眼，
+而共享内存要自己补一整套信号量或锁，复杂度和出错概率都上去了。
+它真正的优势在大数据量（视频帧、大缓冲区）或高频访问时才体现出来。
+选它的理由应该是「数据大」或「访问频繁」，不是「它最快」。</p>
+</div>
+      </details><details>
+        <summary>为什么共享内存几乎总是和信号量一起用？</summary>
+        <div class="a"><p>因为内核在这里什么都不管。管道和消息队列满了会阻塞、空了会阻塞，
+而且一次 write 或 msgsnd 是原子的；共享内存里没有「一条消息」这个概念，
+只有裸的内存。A 写完结构体的第一个字段就被换下，B 就可能读到半成品。
+这份「谁该等谁」的秩序内核不会给你，只能自己用信号量或互斥锁补上。</p>
+</div>
+      </details><details>
+        <summary>往管道里 write 三次，另一端 read 一次会把三次的内容一起读走吗？</summary>
+        <div class="a"><p>可能会。管道是字节流，不保留写入的边界，三次写进去的内容在缓冲区里是连成一片的。
+一次 read 完全可能把三段的拼接一起拿走，读的人没法从数据本身判断哪里是第一段的结尾。
+想要边界，要么自己在协议里加长度前缀或分隔符，要么改用消息队列。</p>
+</div>
+      </details></div>
+
+    <footer>
+      <span>管道 / 消息队列 / 共享内存 · 三种 IPC 到底差在哪</span>
+      <span>最后更新 2026-10-01 · 单文件可离线打开</span>
+    </footer>
+  </main>
+</div>
+
+<script src="../../assets/app.js"></script>
+</body>
+</html>

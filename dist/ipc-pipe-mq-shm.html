@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>sql_builder_v2 的 crowd 包</title>
-<meta name="description" content="业务主体这一层：core 之上加了什么。五个目录各装什么、业务条件怎么变成 Rule[]、时间条件为什么会膨胀成一棵子树，以及三个反直觉的设计取舍。" />
+<title>管道 / 消息队列 / 共享内存 · 三种 IPC 到底差在哪</title>
+<meta name="description" content="「它们都是把信息放在一块公共内存上」—— 这句话对了一半。管道和消息队列的缓冲区确实在内核里，但进程碰不到它；只有共享内存是真正两个进程在看同一块内存。差别全在拷贝次数、边界、以及内核帮不帮你管秩序。" />
 <style>
 /* ============================================================
    theme.css — 设计 token 与页面骨架
@@ -4247,269 +4247,197 @@ svg[data-preset="blueprint"] .c-security-group,
   <aside class="toc" id="toc">
       <p class="toc-title">目录</p>
       <a href="../../index.html" class="sub">← 全部笔记</a>
-      <a href="#它是什么core-之上加了什么">它是什么：core 之上加了什么</a>
-      <a href="#具体加了哪三件事" class="sub">具体加了哪三件事</a>
-      <a href="#组织五个目录的分工">组织：五个目录的分工</a>
-      <a href="#组织根文件与业务词汇表">组织：根文件与业务词汇表</a>
-      <a href="#架构业务条件进来rule-出去">架构：业务条件进来，Rule[] 出去</a>
-      <a href="#先更正一个容易搞错的地方" class="sub">先更正一个容易搞错的地方</a>
-      <a href="#翻译长什么样以画像为例" class="sub">翻译长什么样：以画像为例</a>
-      <a href="#架构时间条件为什么会膨胀">架构：时间条件为什么会「膨胀」</a>
-      <a href="#取舍三个为什么">取舍：三个「为什么」</a>
-      <a href="#为什么时间条件要强制包一层-and" class="sub">为什么时间条件要强制包一层 AND</a>
-      <a href="#为什么没有一个统一的-adapter" class="sub">为什么没有一个统一的 adapter</a>
-      <a href="#为什么方言调用散在这一层" class="sub">为什么方言调用散在这一层</a>
-      <a href="#自测">自测</a>
+      <a href="#你的直觉对了一半">你的直觉对了一半</a>
+      <a href="#数据怎么走三种并排跑一遍">数据怎么走：三种并排跑一遍</a>
+      <a href="#管道两次拷贝a-和-b-永远看不到那个缓冲区">管道：两次拷贝，A 和 B 永远看不到那个缓冲区</a>
+      <a href="#消息队列也是两次拷贝但一条一条有边界">消息队列：也是两次拷贝，但一条一条有边界</a>
+      <a href="#共享内存零拷贝但内核什么都不管">共享内存：零拷贝，但内核什么都不管</a>
+      <a href="#三者核心区别一览">三者核心区别一览</a>
+      <a href="#三个区别各自意味着什么">三个区别各自意味着什么</a>
+      <a href="#区别一拷贝次数的差距会随数据量放大" class="sub">区别一：拷贝次数的差距，会随数据量放大</a>
+      <a href="#区别二字节流-vs-消息-vs-自由格式" class="sub">区别二：字节流 vs 消息 vs 自由格式</a>
+      <a href="#区别三内核帮不帮你管秩序" class="sub">区别三：内核帮不帮你管秩序</a>
+      <a href="#用类比一次说清">用类比一次说清</a>
+      <a href="#什么时候用哪个">什么时候用哪个</a>
   </aside>
 
   <main>
     <div class="hero">
-      <span class="eyebrow">● 从零理解 · 模块</span>
-      <h1>sql_builder_v2 的 crowd 包</h1>
-      <p class="lede">业务主体这一层：core 之上加了什么。五个目录各装什么、业务条件怎么变成 Rule[]、时间条件为什么会膨胀成一棵子树，以及三个反直觉的设计取舍。</p>
+      <span class="eyebrow">● 操作系统 · 进程间通信</span>
+      <h1>管道 / 消息队列 / 共享内存 · 三种 IPC 到底差在哪</h1>
+      <p class="lede">「它们都是把信息放在一块公共内存上」—— 这句话对了一半。管道和消息队列的缓冲区确实在内核里，但进程碰不到它；只有共享内存是真正两个进程在看同一块内存。差别全在拷贝次数、边界、以及内核帮不帮你管秩序。</p>
     </div>
 
     <div class="draft-banner">
     <span>⚠</span>
     <span>本页状态为 <b>draft</b>：内容尚未人工核对，引用前请自行验证。</span>
   </div>
-<aside class="needs">
-      <p class="needs-title">读这篇之前，你需要先知道</p>
-      <a class="need" href="../sql-builder-v2-organization/">← <b>2. 组织</b><span>仓库形状、三个包的分工、改哪里速查</span></a><a class="need" href="../sql-builder-v2-architecture/">← <b>3. 架构</b><span>主干 7 条边 + 四条机制 + 设计取舍</span></a>
-    </aside>
-    <div class="provenance"><span><b>来源</b> sources/gitlab/sql_builder_v2 @ 2c500b2</span><span><b>生成</b> 2026-09-26</span><span><b>模型</b> deepseek-v4.1-flash</span></div>
-    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">架构</span> <span class="tag tone-muted">SQL</span> <span class="tag tone-muted">TypeScript</span> <span class="tag tone-muted">圈人</span></span></div>
 
-<div class="callout tone-blue">
-      <span class="ic">🧭</span>
-      <div><p>前置是 <a href="../sql-builder-v2-organization/">② 组织篇</a> 和 <a href="../sql-builder-v2-architecture/">③ 架构篇</a>。</p>
-<p>架构篇讲的是「整条链路怎么走」。这篇<strong>钻进 <code>packages/crowd</code> 里面</strong>，
-按同样的六层走一遍：它是什么 / 由什么组成 / 怎么工作 / 为什么这么设计。</p>
-<p>读完你应该能说出：「<mark class="mk-blue">core 只认 <code>Rule[]</code>，crowd 认识六种业务条件，中间那层翻译是每种条件自己做的。</mark>」</p>
-</div>
-    </div><h2 id="它是什么core-之上加了什么"><span class="num">01</span>它是什么：core 之上加了什么</h2>
-<p>先看两个包的分工差在哪：</p>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>维度</th><th>core</th><th>crowd</th></tr></thead><tbody><tr><th>认识的输入</th><td data-label="core"><code>Rule[]</code> —— 一棵纯数据的表达式树</td><td data-label="crowd"><strong>六种业务条件</strong> —— 画像 / 事件 / 关系 / 人群包 / uid / rawSql</td></tr><tr><th>认识业务词吗</th><td data-label="core"><span class="tag tone-green">一个都不认识</span></td><td data-label="crowd">认识，且有 45 行业务枚举</td></tr><tr><th>干的活</th><td data-label="core">把表达式树编译成 SQL</td><td data-label="crowd">把业务条件<strong>翻译成</strong>表达式树，再拼成集合运算</td></tr><tr><th>依赖谁</th><td data-label="core">knex</td><td data-label="crowd">core + lodash + murmurhash</td></tr><tr><th>代码量</th><td data-label="core">1347 行 / 13 文件</td><td data-label="crowd">4475 行 / 27 文件</td></tr></tbody></table></div><div class="callout tone-violet quote">
-      <span class="ic">💡</span>
-      <div><p><mark class="mk-blue">crowd 干的事，用一句话说就是：</mark></p>
-<p><strong>把「运营说的那句话」，变成 core 能吃的 <code>Rule[]</code>。</strong></p>
-<p>这中间隔着两个世界的距离：业务世界说「最近 7 天加购过」，
-core 只认「一个列、一个操作符、一个值」。</p>
-</div>
-    </div><h3 id="具体加了哪三件事">具体加了哪三件事</h3>
-<div class="cards" data-cols="3"><div class="ccard tone-green">
-          <span class="tag tone-green">翻译</span>
-          <h4>认识业务条件</h4>
-          <p>六种条件各有各的语义，各有各的表。
+    <div class="provenance"><span><b>来源</b> 飞书文档《管道，共享内存，消息队列》 https://futu.feishu.cn/docx/XRqldrpn8oL9OIxHLbWcZxrOnKd @ revision 105</span><span><b>生成</b> 2026-10-01</span><span><b>模型</b> claude-opus-4-5</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">操作系统</span> <span class="tag tone-muted">IPC</span> <span class="tag tone-muted">共享内存</span> <span class="tag tone-muted">消息队列</span></span></div>
 
-<strong>每种条件自己知道自己该查哪张表、怎么写查询</strong> ——
-这部分 core 完全不管。</p>
-          
-          <pre>画像 → 查画像表
-事件 → 查事件表 + 按人算次数
-人群包 → 查人群包表
-</pre>
-        </div><div class="ccard tone-violet">
-          <span class="tag tone-violet">组合</span>
-          <h4>做集合运算</h4>
-          <p>架构篇讲的 AND / OR = <code>UNION ALL + GROUP BY + HAVING</code>。
-
-还有第二层 include / exclude 的增删。</p>
-          
-          <pre>AND → HAVING count(uid) = N
-OR  → 不加 HAVING
-include → UNION ALL
-exclude → NOT IN
-</pre>
-        </div><div class="ccard tone-amber">
-          <span class="tag tone-amber">方言</span>
-          <h4>处理库差异</h4>
-          <p><strong>方言的调用全在这一层。</strong> core 的 <code>buildWhere</code> 是静态方法，
-签名里根本没有 dialect。
-
-这是架构的一条裂缝（架构篇第 06 节讲过）。</p>
-          
-          <pre>crowd/src/dialect/
-  getEventTable()  ← core 没有这个
-</pre>
-        </div></div><h2 id="组织五个目录的分工"><span class="num">02</span>组织：五个目录的分工</h2>
-<div class="pipe"><div class="lane tone-green">
-        <div class="lane-meta">
-          
-          <b>对外</b>
-          <small>调用方只看这两个</small>
-        </div>
-        <div class="lane-body"><div class="pnode">
-        <b>index.ts</b>
-        <small>63 行 · 统一出口</small>
+<h2 id="你的直觉对了一半"><span class="num">01</span>你的直觉对了一半</h2>
+<blockquote>
+<p>我的理解是，它们都是把一些信息放在一块公共内存上而已。</p>
+</blockquote>
+<p>这句话里<strong>「缓冲区在哪」说对了，「谁能碰它」说错了。</strong></p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>机制</th><th>缓冲区在哪</th><th>进程能直接访问吗</th><th>数据怎么过去</th></tr></thead><tbody><tr><th>共享内存</th><td data-label="缓冲区在哪">同一块物理内存</td><td data-label="进程能直接访问吗"><span class="tag tone-green">能。这才是它唯一的卖点</span></td><td data-label="数据怎么过去">不用过去 —— A 写进去，B 直接就看到</td></tr><tr><th>管道</th><td data-label="缓冲区在哪">内核内存里的环形队列</td><td data-label="进程能直接访问吗"><span class="tag tone-red">不能。进程碰不到那块内存</span></td><td data-label="数据怎么过去">让内核拷贝两次</td></tr><tr><th>消息队列</th><td data-label="缓冲区在哪">内核内存里的一段</td><td data-label="进程能直接访问吗"><span class="tag tone-red">不能。同上</span></td><td data-label="数据怎么过去">让内核拷贝两次</td></tr></tbody></table></div><p><mark class="mk-blue">管道和消息队列的缓冲区确实在内核内存里，但那是内核的内存，不是「公共内存」。</mark> 进程只能通过系统调用请内核帮你搬。</p>
+<p>这个区别的后果很具体：<strong>拷贝次数从 2 变成 0。</strong></p>
+<hr>
+<h2 id="数据怎么走三种并排跑一遍"><span class="num">02</span>数据怎么走：三种并排跑一遍</h2>
+<p>把三种机制摆在同一排，同步推进，看数据停在哪一格、计数怎么变：</p>
+<div class="demo" data-widget="ipc-flow-lab" data-config="{&quot;payload&quot;:&quot;hello&quot;,&quot;interval&quot;:900}">
+      <div class="demo-head">
+        <span class="title">同一份数据，三种走法</span>
+        <span class="status" data-status>点「下一步」或「自动跑」</span>
+        <span class="spacer"></span>
         
-      </div><div class="pnode">
-        <b>context.ts</b>
-        <small>48 行 · SqlContext —— 唯一入口</small>
-        
-      </div></div>
-      </div><div class="conn">
+      </div>
+      <div class="demo-body custom" data-mount></div>
+    </div><p>三列的上格和下格长得一样（发送方 / 接收方的用户空间）。<mark class="mk-blue">有差别的只有中间那格。</mark></p>
+<hr>
+<h2 id="管道两次拷贝a-和-b-永远看不到那个缓冲区"><span class="num">03</span>管道：两次拷贝，A 和 B 永远看不到那个缓冲区</h2>
+<div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-blue">第 1 站</span>
+            <span class="name">进程 A 的缓冲区</span>
+            <span class="spacer"></span>
+            <span class="tag tone-blue">拷贝 0 次</span>
+          </div>
+          <div class="rec"><div class="">
+            <b>内容</b><span>hello</span></div><div class="">
+            <b>谁能看见</b><span>只有 A 自己</span></div></div>
+          
+          <p class="jnote">这就是一块普通的用户态内存，跟内核没关系</p>
+        </div><div class="conn">
       <span class="stem"></span>
-      <span class="pill">模块层<span class="note">按业务场景分</span></span>
+      <span class="pill">A 调 write()<span class="note">陷入内核，请内核帮忙搬</span></span>
       <span class="stem"></span><span class="head"></span>
-    </div><div class="lane tone-blue">
-        <div class="lane-meta">
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-violet">第 2 站</span>
+            <span class="name">管道缓冲区（内核里）</span>
+            <span class="spacer"></span>
+            <span class="tag tone-violet">拷贝 1 次</span>
+          </div>
+          <div class="rec"><div class="">
+            <b>结构</b><span>环形队列</span></div><div class="warn">
+            <b>谁能看见</b><span>只有内核。A 和 B 都不知道它长什么样</span><em>关键</em></div></div>
           
-          <b>modules/</b>
-          <small>三个模块，各管一类业务场景</small>
-        </div>
-        <div class="lane-body"><div class="pnode">
-        <b>segmentation.ts</b>
-        <small>324 行 · 分群，最复杂</small>
-        
-      </div><div class="pnode">
-        <b>tag.ts</b>
-        <small>105 行 · 标签</small>
-        
-      </div><div class="pnode">
-        <b>crowd.ts</b>
-        <small>59 行 · 人群包</small>
-        
-      </div></div>
-      </div><div class="conn">
+          <p class="jnote">数据到这里就已经被搬过一次了。但还没到 B 手上</p>
+        </div><div class="conn">
       <span class="stem"></span>
-      <span class="pill">组合层<span class="note">把条件拼起来</span></span>
+      <span class="pill">B 调 read()<span class="note">再陷入内核一次</span></span>
       <span class="stem"></span><span class="head"></span>
-    </div><div class="lane tone-violet">
-        <div class="lane-meta">
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-green">第 3 站</span>
+            <span class="name">进程 B 的缓冲区</span>
+            <span class="spacer"></span>
+            <span class="tag tone-green">拷贝 2 次</span>
+          </div>
+          <div class="rec"><div class="ok">
+            <b>内容</b><span>hello</span><em>和 A 写进去的一样</em></div><div class="">
+            <b>管道缓冲区</b><span>空了 —— 水已经流过去了</span></div></div>
           
-          <b>combi/</b>
-          <small>组合 + 二次加工 + 树结构修正</small>
-        </div>
-        <div class="lane-body"><div class="pnode">
-        <b>utils.ts</b>
-        <small>381 行 · 树修正与入口</small>
-        
-      </div><div class="pnode">
-        <b>combination.ts</b>
-        <small>165 行 · AND / OR</small>
-        
-      </div><div class="pnode">
-        <b>pkg.ts</b>
-        <small>123 行 · include / exclude</small>
-        
-      </div><div class="pnode">
-        <b>interface.ts</b>
-        <small>63 行 · 结构类型</small>
-        
-      </div></div>
-      </div><div class="conn">
+          <p class="jnote">读完就没了，像水流过水管</p>
+        </div><div class="compare-wrap"><table class="compare"><thead><tr><th>谁来搬</th><th>次数</th><th>说明</th></tr></thead><tbody><tr><th>拷贝</th><td data-label="次数"><span class="tag tone-amber">2 次</span></td><td data-label="说明">A 的用户态 → 内核，内核 → B 的用户态</td></tr><tr><th>系统调用</th><td data-label="次数"><span class="tag tone-amber">2 次</span></td><td data-label="说明">write() 一次，read() 一次。每次都要陷入内核</td></tr><tr><th>进程直接碰缓冲区</th><td data-label="次数"><span class="tag tone-red">碰不到</span></td><td data-label="说明">它只能递一个指针给内核，剩下的内核办</td></tr></tbody></table></div><p><mark class="mk-blue">管道的格式是「字节流」，没有边界。</mark> 这一点后面单独说，它会造成一个很实际的麻烦。</p>
+<hr>
+<h2 id="消息队列也是两次拷贝但一条一条有边界"><span class="num">04</span>消息队列：也是两次拷贝，但一条一条有边界</h2>
+<div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-blue">第 1 站</span>
+            <span class="name">进程 A 装好一条消息</span>
+            <span class="spacer"></span>
+            <span class="tag tone-blue">拷贝 0 次</span>
+          </div>
+          <div class="rec"><div class="">
+            <b>type</b><span>1</span></div><div class="">
+            <b>data</b><span>order#99</span></div></div>
+          
+          <p class="jnote">消息是一个带类型标记的完整单位，不是一串字节</p>
+        </div><div class="conn">
       <span class="stem"></span>
-      <span class="pill">条件实现<span class="note">六种叶子</span></span>
+      <span class="pill">A 调 msgsnd()<span class="note">陷入内核</span></span>
       <span class="stem"></span><span class="head"></span>
-    </div><div class="lane tone-violet">
-        <div class="lane-meta">
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-violet">第 2 站</span>
+            <span class="name">消息队列（内核里）</span>
+            <span class="spacer"></span>
+            <span class="tag tone-violet">拷贝 1 次</span>
+          </div>
+          <div class="rec"><div class="">
+            <b>排队</b><span>type=1 order#99</span></div><div class="">
+            <b>后面还排着</b><span>type=2 hello</span></div><div class="ok">
+            <b>还能按 type 分拣</b><span>B 可以选择只取某一种</span><em>管道做不到</em></div></div>
           
-          <b>entrepots/</b>
-          <small>六种条件各自的实现 + 工厂</small>
-        </div>
-        <div class="lane-body"><div class="pnode">
-        <b>event.ts</b>
-        <small>906 行 · 最复杂</small>
-        
-      </div><div class="pnode">
-        <b>relation.ts</b>
-        <small>715 行</small>
-        
-      </div><div class="pnode">
-        <b>portrait.ts</b>
-        <small>233 行</small>
-        
-      </div><div class="pnode">
-        <b>factory.ts</b>
-        <small>192 行 · 工厂与分发</small>
-        
-      </div><div class="pnode">
-        <b>uid / crowd / rawSql</b>
-        <small>141 / 134 / 107 行</small>
-        
-      </div></div>
-      </div><div class="lane tone-amber">
-        <div class="lane-meta">
+          <p class="jnote">队列是有序的，消息之间的边界被完整保留</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">B 调 msgrcv()<span class="note">再陷入内核一次</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-green">第 3 站</span>
+            <span class="name">进程 B 收到一整条</span>
+            <span class="spacer"></span>
+            <span class="tag tone-green">拷贝 2 次</span>
+          </div>
+          <div class="rec"><div class="ok">
+            <b>拿到的</b><span>type=1 · order#99</span><em>边界还在</em></div></div>
           
-          <b>dialect/ + ast/</b>
-          <small>方言扩展；另一套独立的 AST</small>
-        </div>
-        <div class="lane-body"><div class="pnode">
-        <b>dialect/</b>
-        <small>比 core 多一个 getEventTable</small>
-        
-      </div><div class="pnode">
-        <b>ast/</b>
-        <small>信号 DAG，独立体系</small>
-        
-      </div></div>
-      </div></div><div class="callout tone-amber">
-      <span class="ic">⚠</span>
-      <div><p><strong><code>combi/utils.ts</code> 有 381 行、导出 8 个函数，是第二难读的文件。</strong></p>
-<p>里面有一半是<strong>历史包袱</strong>：<code>isOldUidAdditionalStruct</code> / <code>isOldCrowdAdditionalStruct</code> /
-<code>optionCorrector</code> 都是给旧结构做兼容的，注释里直接写着「后续线上没有这个结构可以删除」。</p>
-<p><mark class="mk-blue">读的时候可以先跳过这些。</mark></p>
-</div>
-    </div><h2 id="组织根文件与业务词汇表"><span class="num">03</span>组织：根文件与业务词汇表</h2>
-<p><code>src/</code> 根下只有三个文件：</p>
-<div class="cards" data-cols="3"><div class="ccard tone-blue">
-          <span class="tag tone-blue">43 行 · 起点</span>
-          <h4>define.ts</h4>
-          <p><strong>所有业务枚举</strong>：Entrepots / Tables / Modules / UidFields /
-CombineType / DimensionType / IntervalType / DbName。
-
-<mark class="mk-blue">想知道「系统认识哪些表、哪些条件类型」，看这一个文件就够了。</mark></p>
+          <p class="jnote">取走就没了，像从邮局取走信件</p>
+        </div><p><mark class="mk-blue">拷贝次数和管道一样，但它多给你一样东西：边界和类型。</mark></p>
+<hr>
+<h2 id="共享内存零拷贝但内核什么都不管"><span class="num">05</span>共享内存：零拷贝，但内核什么都不管</h2>
+<div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-blue">第 1 站</span>
+            <span class="name">两个进程各自 shmat()</span>
+            <span class="spacer"></span>
+            <span class="tag tone-blue">拷贝 0 次</span>
+          </div>
+          <div class="rec"><div class="">
+            <b>A 的虚拟地址</b><span>0x7f001000</span></div><div class="warn">
+            <b>B 的虚拟地址</b><span>0x7f009000</span><em>地址不一样</em></div><div class="ok">
+            <b>指向的物理内存</b><span>同一块</span><em>关键就在这</em></div></div>
           
-          <pre>export enum Entrepots {
-  Portrait = 'portrait',
-  Event    = 'event',
-  Relation = 'relation',
-  Crowd    = 'crowd',
-  Uid      = 'uid',
-  RawSql   = 'rawSql',
-}
-</pre>
-        </div><div class="ccard tone-green">
-          <span class="tag tone-green">48 行 · 唯一入口</span>
-          <h4>context.ts</h4>
-          <p><strong>SqlContext</strong>。选方言、构造三个模块，之后一路传下去。
-
-它把方言<strong>注入</strong>三个模块，模块持有方言实例。</p>
+          <p class="jnote">页表把两个不同的虚拟地址翻译到同一块物理内存上</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">A 开始写<span class="note">之后就不需要内核了</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-green">第 2 站</span>
+            <span class="name">A 写 ptr[0]</span>
+            <span class="spacer"></span>
+            <span class="tag tone-green">拷贝 0 次 · 系统调用 0 次</span>
+          </div>
+          <div class="rec"><div class="ok">
+            <b>这是一条什么指令</b><span>就是最普通的内存写</span><em>不是系统调用</em></div><div class="">
+            <b>数据去了哪</b><span>直接落在了那块共享的物理内存上</span></div></div>
           
-          <pre>SqlContext.create(DbType.Doris, { eventTableMap })
-</pre>
-        </div><div class="ccard tone-muted">
-          <span class="tag tone-muted">63 行 · 出口</span>
-          <h4>index.ts</h4>
-          <p>统一出口。还聚合了一个 <code>utils</code> 对象，
-把零散工具打包给外部用。</p>
+          <p class="jnote">没有拷贝 —— 因为它写的就是最终目的地</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">B 去读<span class="note">也不需要内核</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-green">第 3 站</span>
+            <span class="name">B 读 ptr[0]</span>
+            <span class="spacer"></span>
+            <span class="tag tone-green">全程 0 拷贝</span>
+          </div>
+          <div class="rec"><div class="ok">
+            <b>拿到的</b><span>'H' —— 它直接看到了</span><em>中间没有任何搬运</em></div><div class="">
+            <b>代价</b><span>内核不帮你保证任何秩序</span></div></div>
           
-          
-        </div></div><div class="callout tone-green">
-      <span class="ic">✅</span>
-      <div><p><mark class="mk-blue">读 crowd 包，从 <code>define.ts</code> 开始。</mark></p>
-<p>43 行，但它是<strong>整个业务词汇表</strong>。看完你就知道：
-系统认识哪六种条件、有哪几个模块、查哪些表。</p>
-<p>然后再去看 <code>context.ts</code>（入口），最后才进 <code>entrepots/</code>（实现）。</p>
-</div>
-    </div><h2 id="架构业务条件进来rule-出去"><span class="num">04</span>架构：业务条件进来，<code>Rule[]</code> 出去</h2>
-<h3 id="先更正一个容易搞错的地方">先更正一个容易搞错的地方</h3>
-<div class="callout tone-red quote">
-      <span class="ic">⚠</span>
-      <div><p><mark class="mk-blue"><strong>没有统一的 <code>adapter</code> 层。</strong></mark></p>
-<p>业务条件 → <code>Rule[]</code> 的翻译，是<strong>每种条件自己做的</strong> ——
-六种实现各写各的，没有一个公共的翻译函数。</p>
-</div>
-    </div><div class="compare-wrap"><table class="compare"><thead><tr><th>条件</th><th>它内部的转换方法</th><th>代码量</th></tr></thead><tbody><tr><th>画像</th><td data-label="它内部的转换方法"><code>adapter()</code>（私有）+ <code>addHackRules()</code></td><td data-label="代码量">233 行</td></tr><tr><th>事件</th><td data-label="它内部的转换方法"><code>getPropRules</code> / <code>getBaseRules</code> / <code>buildTimeRangRules</code> / <code>createMapPropRule</code> …（十几个）</td><td data-label="代码量">906 行</td></tr><tr><th>关系</th><td data-label="它内部的转换方法"><code>getDetailBaseRule</code> / <code>getPropRules</code> / <code>buildDetailSql</code> / <code>addHackRules</code> …</td><td data-label="代码量">715 行</td></tr><tr><th>uid / 人群包 / rawSql</th><td data-label="它内部的转换方法"><span class="tag tone-muted">没有 —— 太简单，直接用</span></td><td data-label="代码量">141 / 134 / 107 行</td></tr></tbody></table></div><div class="callout tone-amber">
-      <span class="ic">⚠</span>
-      <div><p><strong><code>addHackRules</code> 在 <code>portrait.ts</code> 和 <code>relation.ts</code> 里各有一份，逐字节相同。</strong></p>
-<p>这是复制粘贴的重复代码 —— 改一处不会同步另一处。
-<mark class="mk-blue">看到「这里的行为不对」时，记得两份都要改。</mark></p>
-</div>
-    </div><h3 id="翻译长什么样以画像为例">翻译长什么样：以画像为例</h3>
-<p><code>portrait.ts</code> 里的 <code>adapter()</code> 是<strong>递归函数</strong>，处理一棵条件树：</p>
-<div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;in&quot;,&quot;to&quot;:&quot;loop&quot;},{&quot;from&quot;:&quot;loop&quot;,&quot;to&quot;:&quot;q1&quot;,&quot;label&quot;:&quot;是&quot;},{&quot;from&quot;:&quot;q1&quot;,&quot;to&quot;:&quot;rec&quot;,&quot;label&quot;:&quot;是&quot;},{&quot;from&quot;:&quot;q1&quot;,&quot;to&quot;:&quot;q2&quot;,&quot;label&quot;:&quot;否&quot;,&quot;dashed&quot;:true},{&quot;from&quot;:&quot;q2&quot;,&quot;to&quot;:&quot;q3&quot;,&quot;label&quot;:&quot;是&quot;},{&quot;from&quot;:&quot;q2&quot;,&quot;to&quot;:&quot;bad&quot;,&quot;label&quot;:&quot;否&quot;,&quot;dashed&quot;:true,&quot;labelDy&quot;:-78},{&quot;from&quot;:&quot;q3&quot;,&quot;to&quot;:&quot;plain&quot;,&quot;label&quot;:&quot;否&quot;},{&quot;from&quot;:&quot;q3&quot;,&quot;to&quot;:&quot;time&quot;,&quot;label&quot;:&quot;是&quot;}]">
+          <p class="jnote">像两个人在同一块黑板上写字和看字</p>
+        </div><p>但<strong>快不等于好。</strong> 内核在这里什么都不管，包括「A 写到一半 B 就来读」：</p>
+<div class="flowd has-grid has-groups" data-flow data-edges="[{&quot;from&quot;:&quot;a1&quot;,&quot;to&quot;:&quot;switch&quot;,&quot;label&quot;:&quot;&quot;},{&quot;from&quot;:&quot;switch&quot;,&quot;to&quot;:&quot;b&quot;,&quot;label&quot;:&quot;B 不知道它只写了一半&quot;},{&quot;from&quot;:&quot;b&quot;,&quot;to&quot;:&quot;b2&quot;,&quot;label&quot;:&quot;&quot;}]">
       <svg class="flowd-svg" aria-hidden="true">
         <defs>
           <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
@@ -4518,251 +4446,225 @@ CombineType / DimensionType / IntervalType / DbName。
           </marker>
         </defs>
       </svg>
-      <div class="flowd-groups"></div>
-      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-green" data-id="in">
-              
-              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5L3 8l3 4.5M10 3.5L13 8l-3 4.5"/></svg>
-              <b>adapter(rules)</b>
-              <small>单个条件或数组</small>
-            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="loop">
+      <div class="flowd-groups"><div class="fgroup tone-red" data-group-box="race">
+          <span class="fgroup-label">共享内存里没有「一条消息」这个概念，只有裸的内存</span>
+        </div></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-green" data-id="a1" data-group="race">
               
               
-              <b>遍历每个 rule</b>
-              
-            </div></div><div class="flowd-row"><div class="fnode tone-amber shape-note" data-id="q1">
-              
-              
-              <b>有 'logic'？</b>
-              <small>是树</small>
-            </div><div class="fnode tone-amber shape-note" data-id="q2">
+              <b>A 写了 count = 42</b>
+              <small>结构体的第一个字段</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-amber" data-id="switch" data-group="race">
               
               
-              <b>有 'op'？</b>
-              <small>是叶子</small>
-            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="rec">
+              <b>A 还没写 name 就被换下了</b>
+              <small>时间片到了</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-red" data-id="b" data-group="race">
               
               
-              <b>递归 adapter(items)</b>
-              <small>保持 logic 不变</small>
-            </div><div class="fnode tone-amber shape-note" data-id="q3">
+              <b>B 读到了 count = 42</b>
+              <small>新数据</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-red" data-id="b2" data-group="race">
               
               
-              <b>有 'dateType'？</b>
-              <small>时间条件</small>
-            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="plain">
-              
-              
-              <b>直接改名</b>
-              <small>name → column</small>
-            </div><div class="fnode tone-red" data-id="time">
-              
-              
-              <b>展开成 AND 子树</b>
-              <small>调方言或 utils</small>
-            </div><div class="fnode tone-red" data-id="bad">
-              
-              
-              <b>throw</b>
-              <small>条件错误</small>
+              <b>但 name 是旧值或垃圾</b>
+              <small>内核不会阻止这件事发生</small>
             </div></div></div>
       
-    </div><p><strong>五个出口各产出什么</strong>：</p>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>分支</th><th>产出</th><th>真实数据</th></tr></thead><tbody><tr><th>有 <code>logic</code></th><td data-label="产出"><strong>递归</strong>，结构不变</td><td data-label="真实数据"><code>{ logic: 'OR', items: [...] }</code> → 递归后塞回去</td></tr><tr><th>有 <code>dateType</code>\n且是相对时间戳</th><td data-label="产出"><strong>调方言</strong>，展开成 AND 子树</td><td data-label="真实数据"><code>{ op: Gte, name: '..._time', value: 30 }</code> → <code>{ logic: AND, items: [3 个 Expression] }</code></td></tr><tr><th>有 <code>dateType</code>\n其它时间</th><td data-label="产出"><strong>调 utils</strong>，展开成 AND 子树</td><td data-label="真实数据">同上，但生成的是通用 Rule</td></tr><tr><th>有 <code>rawValue</code></th><td data-label="产出">改名 + 透传</td><td data-label="真实数据"><code>{ op: Eq, name: 'c', rawValue: 'a+b' }</code> → <code>{ column: 'c', op: Eq, rawValue: 'a+b' }</code></td></tr><tr><th>普通条件</th><td data-label="产出"><strong>只改名</strong></td><td data-label="真实数据"><code>{ op: IN, name: 'city', value: ['杭州'] }</code> → <code>{ column: 'city', op: IN, value: ['杭州'] }</code></td></tr><tr><th>都不是</th><td data-label="产出"><span class="tag tone-red">throw</span></td><td data-label="真实数据"><code>portrait adapter: 条件错误: {...}</code></td></tr></tbody></table></div><div class="callout tone-violet">
-      <span class="ic">💡</span>
-      <div><p><strong>看第 4 和第 5 行 —— 大部分条件其实只做了一件事：把 <code>name</code> 改成 <code>column</code>。</strong></p>
-<p>真正有分量的只有<strong>时间条件那一支</strong>（展开成一棵子树）。
-<mark class="mk-blue">翻译之所以「轻」，是因为两套词汇用的是同一个树形结构。</mark></p>
+    </div><p><mark class="mk-blue">这就是为什么共享内存几乎总是和信号量一起用。</mark> 那份「谁该等谁」的秩序，得你自己补上。</p>
+<hr>
+<h2 id="三者核心区别一览"><span class="num">06</span>三者核心区别一览</h2>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>维度</th><th>管道</th><th>消息队列</th><th>共享内存</th></tr></thead><tbody><tr><th>数据拷贝</th><td data-label="管道"><span class="tag tone-amber">2 次</span></td><td data-label="消息队列"><span class="tag tone-amber">2 次</span></td><td data-label="共享内存"><span class="tag tone-green">0 次</span></td></tr><tr><th>需要系统调用搬数据</th><td data-label="管道">每次 read/write 都要进内核</td><td data-label="消息队列">每次 msgsnd/msgrcv 都要进内核</td><td data-label="共享内存"><span class="tag tone-green">只在建立映射时；之后就是普通内存读写</span></td></tr><tr><th>速度</th><td data-label="管道">中等</td><td data-label="消息队列">中等</td><td data-label="共享内存"><span class="tag tone-green">最快</span></td></tr><tr><th>数据格式</th><td data-label="管道">字节流，没有边界</td><td data-label="消息队列">一条一条的消息，有边界有类型</td><td data-label="共享内存">随便你，结构体数组都行</td></tr><tr><th>内核帮你管秩序吗</th><td data-label="管道"><span class="tag tone-green">管。读空自动阻塞，写满自动阻塞</span></td><td data-label="消息队列"><span class="tag tone-green">管。队列空/满都自动阻塞</span></td><td data-label="共享内存"><span class="tag tone-red">不管。要自己配信号量</span></td></tr><tr><th>数据持久性</th><td data-label="管道">读完就没了，像水流过水管</td><td data-label="消息队列">取走就没了，像取走信件</td><td data-label="共享内存">一直在那里，直到你覆盖或删除</td></tr></tbody></table></div><hr>
+<h2 id="三个区别各自意味着什么"><span class="num">07</span>三个区别各自意味着什么</h2>
+<h3 id="区别一拷贝次数的差距会随数据量放大">区别一：拷贝次数的差距，会随数据量放大</h3>
+<div class="flowd has-grid has-groups" data-flow data-edges="[{&quot;from&quot;:&quot;s1&quot;,&quot;to&quot;:&quot;s2&quot;,&quot;label&quot;:&quot;&quot;},{&quot;from&quot;:&quot;b1&quot;,&quot;to&quot;:&quot;b2&quot;,&quot;label&quot;:&quot;&quot;}]">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"><div class="fgroup tone-muted" data-group-box="small">
+          <span class="fgroup-label">小数据（几十字节）</span>
+        </div><div class="fgroup tone-red" data-group-box="big">
+          <span class="fgroup-label">大数据（视频帧、大文件）</span>
+        </div></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-muted" data-id="s1" data-group="small">
+              
+              
+              <b>拷贝两次也就几百纳秒</b>
+              <small>小消息传个命令，谁快谁慢感知不到</small>
+            </div><div class="fnode tone-red" data-id="b1" data-group="big">
+              
+              
+              <b>同样两次拷贝，但要搬几 MB</b>
+              <small>内存带宽直接成了瓶颈</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-muted" data-id="s2" data-group="small">
+              
+              
+              <b>系统调用开销反而更显眼</b>
+              <small>两次陷入内核是固定成本</small>
+            </div><div class="fnode tone-green" data-id="b2" data-group="big">
+              
+              
+              <b>共享内存优势在这里才真正体现</b>
+              <small>写一次对方就看到，中间不搬家</small>
+            </div></div></div>
+      
+    </div><div class="callout tone-violet">
+      <span class="ic">📐</span>
+      <div><p><strong>所以「共享内存最快」这句话只在数据量大时才成立。</strong></p>
+<p>小消息场景里，省下来的那次拷贝可能还不如「共享内存要自己加信号量」带来的复杂度。</p>
+<p><mark class="mk-blue">选它的理由应该是「数据大」或「访问频繁」，而不是「它最快」。</mark></p>
 </div>
-    </div><h2 id="架构时间条件为什么会膨胀"><span class="num">05</span>架构：时间条件为什么会「膨胀」</h2>
-<p><strong>一个输入条件，变成一棵子树。</strong> 这是整个翻译里最有内容的一步。</p>
+    </div><h3 id="区别二字节流-vs-消息-vs-自由格式">区别二：字节流 vs 消息 vs 自由格式</h3>
+<p><strong>管道不保留边界</strong>，这件事在写得比读得快的时候会立刻暴露：</p>
 <div class="jcard">
           <div class="jcard-head">
-            <span class="tag tone-muted">输入</span>
-            <span class="name">业务条件</span>
+            <span class="tag tone-blue">A 这边</span>
+            <span class="name">三次 write，三次都是一小段</span>
             <span class="spacer"></span>
-            <span class="tag tone-muted">1 行</span>
+            <span class="tag tone-blue">写入方很清楚边界</span>
           </div>
+          <div class="rec"><div class="">
+            <b>第 1 次</b><span>write(fd, &quot;aaa&quot;, 3)</span></div><div class="">
+            <b>第 2 次</b><span>write(fd, &quot;bb&quot;, 2)</span></div><div class="">
+            <b>第 3 次</b><span>write(fd, &quot;cccc&quot;, 4)</span></div></div>
           
-          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>{ op: 'Gte', name: '..._opened_time',
-  dateType: 'Relative', value: 30 }
-</pre></div>
-          <p class="jnote">业务侧说的是一句话：「开户时间在<strong>最近 30 天</strong>内」。</p>
+          <p class="jnote">在 A 看来，这是三个逻辑上独立的东西</p>
         </div><div class="conn">
       <span class="stem"></span>
-      <span class="pill">adapter<span class="note">遇到 dateType 分支</span></span>
+      <span class="pill">写进了同一条字节流<span class="note">边界在这就没了</span></span>
       <span class="stem"></span><span class="head"></span>
     </div><div class="jcard">
           <div class="jcard-head">
-            <span class="tag tone-violet">展开</span>
-            <span class="name">时间表达式</span>
+            <span class="tag tone-red">B 这边</span>
+            <span class="name">一次 read，全糊在一起</span>
             <span class="spacer"></span>
-            <span class="tag tone-violet">变成两个</span>
+            <span class="tag tone-red">边界丢失</span>
           </div>
+          <div class="rec"><div class="">
+            <b>read(fd</b><span>&quot;aaabbcccc&quot;</span></div><div class="warn">
+            <b>B 想知道的</b><span>哪里是第一段的结尾？</span><em>读不出来了</em></div></div>
           
-          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>{ op: 'Gte', column: '..._opened_time', value: 开始 }
-{ op: 'Lte', column: '..._opened_time', value: 结束 }
-</pre></div>
-          <p class="jnote"><mark class="mk-blue">因为「最近 30 天」在 SQL 里必须写成「&gt;= 开始 AND &lt;= 结束」。</mark>
-一个语义，两个条件。</p>
-        </div><div class="conn">
-      <span class="stem"></span>
-      <span class="pill">补丁<span class="note">某些操作符还要再加一个</span></span>
-      <span class="stem"></span><span class="head"></span>
-    </div><div class="jcard">
-          <div class="jcard-head">
-            <span class="tag tone-amber">补丁</span>
-            <span class="name">addHackRules</span>
-            <span class="spacer"></span>
-            <span class="tag tone-amber">再加一个条件</span>
-          </div>
-          
-          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>如果是 '&lt;' 或 '&lt;='
-  → 再加 { op: 'Gt', column: '...', value: 0 }
-</pre></div>
-          <p class="jnote">代码注释写着原因：
-
-&gt; 对于 <code>&lt;</code> 和 <code>&lt;=</code> 的时间范围，需要加上 <code>&gt; 0</code> 的限制条件，
-&gt; 否则会筛选出值为 0 的数据。
-
-<mark class="mk-blue">「值为 0」在时间戳语义里代表「从没发生过」</mark>，
-不加会被当成「很久以前发生过」。</p>
-        </div><div class="conn">
-      <span class="stem"></span>
-      <span class="pill">包一层<span class="note">强制 AND</span></span>
-      <span class="stem"></span><span class="head"></span>
-    </div><div class="jcard">
-          <div class="jcard-head">
-            <span class="tag tone-green">输出</span>
-            <span class="name">Rule[]</span>
-            <span class="spacer"></span>
-            <span class="tag tone-green">一棵子树</span>
-          </div>
-          
-          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>{ logic: 'AND', items: [ 3 个 Expression ] }
-</pre></div>
-          <p class="jnote"><strong>外面强制包一层 <code>logic: 'AND'</code>。</strong> 见下一节。</p>
-        </div><div class="callout tone-violet">
-      <span class="ic">💡</span>
-      <div><p><strong>这一支还暴露了架构的一条裂缝。</strong></p>
-<p>上面写着「调方言<strong>或</strong> utils」—— 因为：</p>
-<ul>
-<li>相对时间 + <strong>时间戳</strong>格式 → 调<strong>方言</strong>（两个库的包装不一样）</li>
-<li>其它时间 → 调 <strong>core 的 utils</strong>（<code>getTimeRules</code>，通用逻辑）</li>
+          <p class="jnote bad"><mark class="mk-blue">管道不保证「写三次就读三次」。</mark> 想要边界，就得自己在协议里划（长度前缀、分隔符）</p>
+        </div><p>消息队列把这件事替你做掉了：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>机制</th><th>边界</th><th>能不能挑着收</th></tr></thead><tbody><tr><th>管道</th><td data-label="边界"><span class="tag tone-red">没有。「三次写」可能被一次读全拿走</span></td><td data-label="能不能挑着收">不能，只能按顺序读</td></tr><tr><th>消息队列</th><td data-label="边界"><span class="tag tone-green">有。一条就是一条，边界完整保留</span></td><td data-label="能不能挑着收"><span class="tag tone-green">能。可以只取 type=1 的那些</span></td></tr><tr><th>共享内存</th><td data-label="边界">你自己在内存里怎么摆就有怎么样的边界</td><td data-label="能不能挑着收">无所谓边界，你直接读结构体</td></tr></tbody></table></div><h3 id="区别三内核帮不帮你管秩序">区别三：内核帮不帮你管秩序</h3>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>情况</th><th>管道 / 消息队列</th><th>共享内存</th></tr></thead><tbody><tr><th>空了</th><td data-label="管道 / 消息队列"><span class="tag tone-green">read 自动阻塞，等数据来</span></td><td data-label="共享内存"><span class="tag tone-red">读到一半的旧数据，你自己保证</span></td></tr><tr><th>满了</th><td data-label="管道 / 消息队列"><span class="tag tone-green">write 自动阻塞，等对方取走</span></td><td data-label="共享内存">根本没有「满」的概念</td></tr><tr><th>写了一半被换下</th><td data-label="管道 / 消息队列">不可能 —— 一次 write 是原子的（小于 PIPE_BUF 时）</td><td data-label="共享内存"><span class="tag tone-red">完全可能，B 会看到半成品</span></td></tr><tr><th>你还要写多少代码</th><td data-label="管道 / 消息队列"><span class="tag tone-green">几乎不用</span></td><td data-label="共享内存"><span class="tag tone-amber">一套信号量或互斥锁，而且很容易写错</span></td></tr></tbody></table></div><p><mark class="mk-blue">这三种机制是「内核替你担了多少责任」的三档。</mark> 管道和消息队列把它全担了；共享内存一点都不担，换来的是那两次拷贝。</p>
+<hr>
+<h2 id="用类比一次说清"><span class="num">08</span>用类比一次说清</h2>
+<div class="cards" data-cols="3"><div class="ccard tone-blue">
+          <span class="tag tone-blue">单向、连续</span>
+          <h4>管道 = 水管</h4>
+          <p>倒进去的是水，接出来的也是水，看不出你倒了几杯</p>
+          <div class="cbody"><ul>
+<li><strong>单向流动</strong>：一端写，另一端读</li>
+<li><strong>连续的水流</strong>：没有「一份一份」的概念</li>
+<li><strong>有背压</strong>：管满了就倒不进去，管空了就接不到</li>
+<li>水流过去就没了，不能再取一次</li>
 </ul>
-<p><mark class="mk-blue">同一件事分了两条路，取决于属性格式。</mark>
-而 <code>getTimeRules</code> 本身被<strong>三个文件</strong>调用：<code>portrait</code> / <code>event</code> / <code>relation</code>。</p>
 </div>
-    </div><h2 id="取舍三个为什么"><span class="num">06</span>取舍：三个「为什么」</h2>
-<h3 id="为什么时间条件要强制包一层-and">为什么时间条件要强制包一层 <code>AND</code></h3>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">// portrait.ts · adapter()
-const timeRules = addHackRules(rule.name, rule.op, timeExprs);
-// 这里包装一层，因为 timeRules 必须是 And 的关系
-// 而 result 这一层的关系可能是 Or
-result.push({ logic: Logic.And, items: timeRules });
-</code></pre></div>
-<p><strong>代码注释直接给了答案。</strong> 具体会错在哪：</p>
-<div class="jcard">
-          <div class="jcard-head">
-            <span class="tag tone-muted">假设</span>
-            <span class="name">用户说的是</span>
-            <span class="spacer"></span>
-            
-          </div>
           
-          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>「最近 3 天加购过，或者是 VIP」
-</pre></div>
-          <p class="jnote">顶层是 <code>OR</code>，左边是时间条件，右边是画像条件。</p>
-        </div><div class="conn">
-      <span class="stem"></span>
-      <span class="pill">不包 <span class="en">展开</span><span class="note">直接塞进去</span></span>
-      <span class="stem"></span><span class="head"></span>
-    </div><div class="jcard">
-          <div class="jcard-head">
-            <span class="tag tone-red">不包会怎样</span>
-            <span class="name">三个条件平铺在 OR 里</span>
-            <span class="spacer"></span>
-            
-          </div>
-          
-          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>&gt;= 开始   OR   &lt;= 结束   OR   是 VIP
-</pre></div>
-          <p class="jnote"><mark class="mk-blue">语义完全错了。</mark>
-
-任何时间都满足「&gt;= 开始」，所以左边这一支<strong>永远为真</strong> ——
-等于「所有人都要」。</p>
-        </div><div class="conn">
-      <span class="stem"></span>
-      <span class="pill">包一层<span class="note">把三个绑成一个</span></span>
-      <span class="stem"></span><span class="head"></span>
-    </div><div class="jcard">
-          <div class="jcard-head">
-            <span class="tag tone-green">包一层</span>
-            <span class="name">三个变成一个整体</span>
-            <span class="spacer"></span>
-            
-          </div>
-          
-          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>(&gt;= 开始 AND &lt;= 结束)   OR   是 VIP
-</pre></div>
-          <p class="jnote">外层是 <code>AND</code>，把三个条件绑成一个节点，
-再参与上层的 <code>OR</code>。<mark class="mk-blue">语义就对了。</mark></p>
-        </div><div class="callout tone-green">
-      <span class="ic">✅</span>
-      <div><p><mark class="mk-blue">这就是「展开」必须配「包一层」的原因。</mark></p>
-<p>展开把一个条件变成三个 —— 但它们在语义上<strong>仍然是同一个条件</strong>。
-如果不包，上层逻辑会把它们当成三个独立的判断。</p>
+        </div><div class="ccard tone-violet">
+          <span class="tag tone-violet">一件一件</span>
+          <h4>消息队列 = 邮局</h4>
+          <p>每封信是独立的，还能按类型分拣</p>
+          <div class="cbody"><ul>
+<li><strong>每封信独立</strong>：边界完整，取一次就是完整的一封</li>
+<li><strong>可以按类型取</strong>：先拿紧急的那封</li>
+<li><strong>取走就没了</strong></li>
+<li><strong>经过邮局中转</strong>：内核帮你搬，但你看不到中转仓</li>
+</ul>
 </div>
-    </div><h3 id="为什么没有一个统一的-adapter">为什么没有一个统一的 <code>adapter</code></h3>
-<p><strong>因为六种条件的翻译逻辑差得太远。</strong></p>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>条件</th><th>翻译的难点</th></tr></thead><tbody><tr><th>画像</th><td data-label="翻译的难点">时间条件要展开、要补 hack 规则</td></tr><tr><th>事件</th><td data-label="翻译的难点">事件名 + 时间范围 + 属性过滤 + 次数阈值，四件事都要处理</td></tr><tr><th>关系</th><td data-label="翻译的难点">分 DETAIL / TIMES 两种形态，要判分区</td></tr><tr><th>uid / 人群包 / rawSql</th><td data-label="翻译的难点"><span class="tag tone-muted">基本没有难点，直接用</span></td></tr></tbody></table></div><p>硬抽一个公共层，只会得到一堆「参数不一样、分支不一样」的 if。
-<mark class="mk-blue">所以它选了「各写各的」，代价是 <code>addHackRules</code> 这种重复。</mark></p>
-<h3 id="为什么方言调用散在这一层">为什么方言调用散在这一层</h3>
-<p><strong>因为方言是「业务条件遇到的具体问题」，不是「表达式树的通用问题」。</strong></p>
-<div class="callout tone-amber">
-      <span class="ic">⚠</span>
-      <div><p>core 的 <code>buildWhere</code> 是<strong>静态方法</strong>，签名里没有 dialect —— 它不知道方言存在。</p>
-<p>所以所有方言调用都落在 <code>crowd</code> 里，散在 <code>portrait</code> / <code>event</code> / <code>relation</code> 各自的分支里。</p>
-<p><mark class="mk-blue">这是一条真实的架构裂缝。</mark> 好在它有边界：
-方言方法都只返回「片段」或「表达式节点」，不生成 SQL（架构篇第 06 节）。</p>
+          
+        </div><div class="ccard tone-green">
+          <span class="tag tone-green">大家都看得见</span>
+          <h4>共享内存 = 公共黑板</h4>
+          <p>直接在黑板上写，但别人也可能同时在写</p>
+          <div class="cbody"><ul>
+<li><strong>不需要中间人</strong>：省掉了搬运</li>
+<li><strong>没有边界、没有顺序、没有背压</strong>：一块内存而已</li>
+<li><strong>两个人同时写就会打架</strong>（竞态）</li>
+<li><mark class="mk-blue">所以几乎总是配一把锁（信号量）</mark></li>
+</ul>
 </div>
-    </div><h2 id="自测"><span class="num">07</span>自测</h2>
+          
+        </div></div><hr>
+<h2 id="什么时候用哪个"><span class="num">09</span>什么时候用哪个</h2>
+<div class="mx">
+      <div class="mx-ylab">你能接受多少复杂度</div>
+      <div class="mx-body">
+        <div class="mx-y mx-yto">愿意自己管同步</div>
+        <div class="mx-grid">
+          <div class="mcell tone-blue">
+            <b>管道就够了</b>
+            <span>父子进程传个命令、shell 管线。字节流、有背压，代码三行</span>
+          </div>
+          <div class="mcell tone-violet">
+            <b>消息队列</b>
+            <span>要边界、要按类型分拣。内核帮你排队和阻塞，省心</span>
+          </div>
+          <div class="mcell tone-muted">
+            <b>管道也够用</b>
+            <span>小数据下两次拷贝感知不到，别为省这点开销背上一套锁</span>
+          </div>
+          <div class="mcell tone-green">
+            <b>共享内存 + 信号量</b>
+            <span>视频帧、大缓冲区、高频共享表。零拷贝的收益在这里才划算</span>
+          </div>
+        </div>
+        <div class="mx-y mx-yfrom">越省心越好</div>
+        <div class="mx-xrow">
+          <span>小消息</span><span>大数据 / 高频访问</span>
+        </div>
+        <div class="mx-xlab">数据量</div>
+      </div>
+    </div><div class="callout tone-violet">
+      <span class="ic">🎯</span>
+      <div><p><strong>一句话记住这三者的定位。</strong></p>
+<ul>
+<li>管道：<mark class="mk-blue">内核帮你搬数据</mark>，字节流，有背压，简单省心</li>
+<li>消息队列：<mark class="mk-blue">内核帮你搬数据</mark>，一条一条的，还能按类型取</li>
+<li>共享内存：<mark class="mk-blue">不搬数据</mark>，两个进程直接看同一块内存，最快但最危险</li>
+</ul>
+<p><mark class="mk-green">它们不是「都放在公共内存上」。前两个是「让内核当快递员帮你搬」，
+只有第三个是「真正的公共黑板，你们自己直接读写」。</mark></p>
+</div>
+    </div><hr>
 <div class="quiz"><details>
-        <summary>crowd 包在 core 之上加了哪三件事？</summary>
-        <div class="a"><p>① <strong>认识六种业务条件</strong> —— 每种自己知道该查哪张表；
-② <strong>做集合运算</strong> —— AND / OR（<code>UNION ALL + GROUP BY + HAVING</code>）和 include / exclude；
-③ <strong>处理库差异</strong> —— 所有方言调用都在这一层，core 的 <code>buildWhere</code> 根本不知道方言存在。</p>
+        <summary>管道和消息队列的缓冲区也在内核内存里，那为什么不能说它们是「共享内存」？</summary>
+        <div class="a"><p>因为「在哪」和「谁能碰」是两件事。缓冲区确实在内核内存里，但那是内核的内存，
+进程没有权限直接访问，也没有映射到自己的地址空间里。
+进程能做的只是递一个指针给内核，请它帮忙搬，于是有了两次拷贝。
+共享内存是把同一块物理内存映射进两个进程的地址空间，两边都能直接读写，所以是零拷贝。</p>
 </div>
       </details><details>
-        <summary>有没有一个统一的 adapter 把业务条件翻译成 Rule[]？</summary>
-        <div class="a"><p><strong>没有。</strong> 翻译是<strong>每种条件自己做的</strong> —— 六种实现各写各的，没有公共的翻译函数。
-画像有私有的 <code>adapter()</code>，事件有十几个 <code>getPropRules</code> / <code>getBaseRules</code> 之类的函数，
-uid / 人群包 / rawSql 基本没有转换逻辑。
-代价是 <code>addHackRules</code> 在 portrait 和 relation 里各有一份，逐字节相同。</p>
+        <summary>共享内存比管道快，是不是应该尽量用共享内存？</summary>
+        <div class="a"><p>要看数据量。小消息场景下，省掉的那次拷贝可能还不如系统调用的固定开销显眼，
+而共享内存要自己补一整套信号量或锁，复杂度和出错概率都上去了。
+它真正的优势在大数据量（视频帧、大缓冲区）或高频访问时才体现出来。
+选它的理由应该是「数据大」或「访问频繁」，不是「它最快」。</p>
 </div>
       </details><details>
-        <summary>「最近 30 天」这一个条件，为什么最后变成了三个条件？</summary>
-        <div class="a"><p>因为它在 SQL 里必须写成 <code>&gt;= 开始 AND &lt;= 结束</code> —— 一个语义，两个条件。
-某些操作符（<code>&lt;</code> / <code>&lt;=</code>）还要再加一个 <code>&gt; 0</code>，否则会把「值为 0」
-误当成「很久以前发生过」（0 在时间戳语义里代表「从没发生过」）。</p>
+        <summary>为什么共享内存几乎总是和信号量一起用？</summary>
+        <div class="a"><p>因为内核在这里什么都不管。管道和消息队列满了会阻塞、空了会阻塞，
+而且一次 write 或 msgsnd 是原子的；共享内存里没有「一条消息」这个概念，
+只有裸的内存。A 写完结构体的第一个字段就被换下，B 就可能读到半成品。
+这份「谁该等谁」的秩序内核不会给你，只能自己用信号量或互斥锁补上。</p>
 </div>
       </details><details>
-        <summary>时间条件展开后，为什么要强制在外面包一层 logic: AND？</summary>
-        <div class="a"><p>因为展开出来的三个条件在语义上<strong>仍然是同一个条件</strong>，但上层逻辑可能是个 <code>OR</code>。
-不包的话，「最近 3 天 <strong>或</strong> 是 VIP」会变成
-「<code>&gt;= 开始</code> <strong>或</strong> <code>&lt;= 结束</code> <strong>或</strong> 是 VIP」——
-任何时间都满足「&gt;= 开始」，左边这支永远为真，<mark class="mk-blue">等于所有人都要</mark>。</p>
-</div>
-      </details><details>
-        <summary>读 crowd 包应该从哪个文件开始？</summary>
-        <div class="a"><p><code>src/define.ts</code>（43 行）。它是<strong>整个业务词汇表</strong> ——
-系统认识哪六种条件、有哪几个模块、查哪些表，全在这里。
-然后再看 <code>context.ts</code>（入口），最后才进 <code>entrepots/</code>（实现）。</p>
+        <summary>往管道里 write 三次，另一端 read 一次会把三次的内容一起读走吗？</summary>
+        <div class="a"><p>可能会。管道是字节流，不保留写入的边界，三次写进去的内容在缓冲区里是连成一片的。
+一次 read 完全可能把三段的拼接一起拿走，读的人没法从数据本身判断哪里是第一段的结尾。
+想要边界，要么自己在协议里加长度前缀或分隔符，要么改用消息队列。</p>
 </div>
       </details></div>
 
     <footer>
-      <span>sql_builder_v2 的 crowd 包</span>
-      <span>最后更新 2026-09-26 · 单文件可离线打开</span>
+      <span>管道 / 消息队列 / 共享内存 · 三种 IPC 到底差在哪</span>
+      <span>最后更新 2026-10-01 · 单文件可离线打开</span>
     </footer>
   </main>
 </div>

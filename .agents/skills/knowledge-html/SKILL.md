@@ -1570,12 +1570,12 @@ text: |
 | `summary` | 小结 |
 | `raw` | 直接写 HTML |
 
-**交互控件 27 个**（在 `assets/app.js` 的 `WIDGETS` 里，供 `demo` 积木引用）：
+**交互控件 28 个**（在 `assets/app.js` 的 `WIDGETS` 里，供 `demo` 积木引用）：
 `polling-vs-cdc` `combination-count` `join-lab` `on-vs-where` `knex-chain`
 `stepper` `tuner` `diff` `stream-modes` `operator-lab` `hashring` `partition-prune`
 `dsl-lab` `null-lab` `config-to-ui` `field-lineage` `count-dedup-lab`
 `row-to-catalog` `sql-inject-lab` `validate-lab` `sched-lab` `switch-cost`
-`io-models` `inode-trace` `link-refcount` `gmp-lab` `handoff-lab`
+`io-models` `inode-trace` `link-refcount` `gmp-lab` `handoff-lab` `ipc-flow-lab`
 
 **已知缺口**（按优先级）：
 
@@ -2048,7 +2048,7 @@ npm run visual-check
 用无头浏览器真的去量每个积木容器：子元素有没有溢出边界、有没有横向滚动。
 **已经接进 pre-push 钩子，推送前自动跑。**
 
-#### 五次踩坑记录
+#### 六次踩坑记录
 
 | 症状 | 根因 |
 |---|---|
@@ -2057,6 +2057,63 @@ npm run visual-check
 | 加 padding 后所有图错位 | **坐标系不统一**：节点坐标相对 `.flowd-grid`，SVG/区域框相对 `.flowd` |
 | 两个区域框重叠 | **每行独立居中** → 同组节点跨行会水平错位，两组包围盒几乎相接，框一往外扩就重叠 |
 | `cards` 里的 `<pre>` 撑破容器 | **grid item 默认 `min-width: auto`**，不会缩到内容宽度以下 |
+| **切换深浅色后，某个色块停在旧主题的颜色上** | `transition: background` + `background: color-mix(...)` —— 见下面第六次 |
+
+#### 第六次：`color-mix` 配 `transition`，换主题时会卡住
+
+```callout
+tone: red
+icon: 🌗
+text: |
+  **写过 `transition: background` 的元素，只要它的背景是 `color-mix(...)`，
+  换主题时颜色会卡在旧主题上。**
+
+  不是过渡一下就到了 —— 是**永远不更新**，直到这个元素因为别的原因重新布局。
+
+  ==这个 bug 只在切主题时出现，`npm run check` / `visual-check` 全是绿的。==
+  （它们不切主题，只量布局。）
+```
+
+**真实经过**（写「三种 IPC 数据流」那个控件时）：
+
+| | |
+|---|---|
+| 症状 | 浅色模式下，未激活的格子渲染成深色；但同一张卡片的外壳是白的 |
+| 第一反应 | 以为变量作用域错了 —— 打印 `--surface-2`，发现是 `#f2f4f7`（正确的浅色） |
+| 打印元素的实际值 | `oklab(0.283 0.003 -0.029)` —— 一个**暗色**，和变量对不上 |
+| 排除法 | 把 `transition: background .2s` 删掉，**立刻正确**（`rgb(234,231,246)`，正是手算出来的淡紫） |
+
+**根因**：元素在 `data-theme` 还是 `dark` 时完成首次渲染，主题切成 `light` 后
+背景值要变，但 Chrome 对**两个 `color-mix()` 计算值之间的插值**处理不了，
+于是停在起点。改成普通 `var(--x)` 的颜色不会中招（那是两个具体颜色之间的插值）。
+
+++规矩：给「背景是 `color-mix`」的元素写 transition 时，只写具体属性，不写 `background`、更不要写 `all`。++
+
+```css
+/* ❌ 换主题会卡住 */
+.pill { background: color-mix(in srgb, var(--blue) 14%, transparent); transition: .18s; }
+
+/* ✅ 只过渡真正会动的东西 */
+.pill { background: color-mix(in srgb, var(--blue) 14%, transparent);
+        transition: color .18s, box-shadow .18s; }
+```
+
+**查法**（一条命令扫全站）：
+
+```bash
+python3 - <<'EOF'
+import re, pathlib
+css = pathlib.Path('assets/blocks.css').read_text()
+for sel, body in re.findall(r'([^{}]+)\{([^}]*)\}', css):
+    if 'transition' not in body: continue
+    if not any('color-mix' in l for l in body.split(';') if l.strip().startswith('background')): continue
+    t = re.search(r'transition:\s*([^;]+)', body).group(1).strip()
+    if 'background' in t or re.fullmatch(r'\.?\d+(\.\d+)?(m?s)?', t):
+        print(sel.strip()[:60], '→', t)
+EOF
+```
+
+==写新控件时顺手跑一次，比等用户在浅色模式下发现便宜得多。==
 
 #### 第五次：archify 的共用 CSS 被削薄
 
@@ -2098,6 +2155,9 @@ text: |
 2. **绝对定位的装饰元素要考虑「会不会超出容器」。** 加了就配 padding。
 3. **坐标计算必须统一参照系。** 容器一有 padding，相对不同父元素量的坐标就会错开。
 4. **放进 grid / flex 的元素要设 `min-width: 0`**，否则内容会把容器撑破。
+5. **`background: color-mix(...)` 的元素，别写 `transition: background` 或 `transition: .2s`。**
+   换主题时 Chrome 插值不了两个 `color-mix` 计算值，颜色会卡在旧主题上 ——
+   `visual-check` 抓不到（它不切主题）。详见上面「第六次」。
 
 ## 依赖策略：默认零依赖
 
