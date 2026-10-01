@@ -1,0 +1,390 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-has-toc="1">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>前人两条路线怎么死的 · 从 1:1 到 async/await</title>
+<meta name="description" content="「一任务一线程」会依次撞上三重天花板；旧式 M:N 死于「一个阻塞全船停」；async/await 虽然活下来了，但把函数染成了两种颜色。Go 的第三条路是分流，不是消灭阻塞。" />
+<link rel="stylesheet" href="../../assets/theme.css" />
+  <link rel="stylesheet" href="../../assets/blocks.css" />
+  <link rel="stylesheet" href="../../assets/archify-embed.css" />
+</head>
+<body>
+<div id="progress"></div>
+<div id="tocScrim"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
+    <a class="brand" href="../../index.html"><span class="dot"></span>知识笔记</a>
+    
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="toc" id="toc">
+      <p class="toc-title">目录</p>
+      <a href="../../index.html" class="sub">← 全部笔记</a>
+      <a href="#两种并发模型">两种并发模型</a>
+      <a href="#前人两条路线各栽在哪">前人两条路线，各栽在哪</a>
+      <a href="#go-的第三条路">Go 的第三条路</a>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow">● Go 协程 · ②</span>
+      <h1>前人两条路线怎么死的 · 从 1:1 到 async/await</h1>
+      <p class="lede">「一任务一线程」会依次撞上三重天花板；旧式 M:N 死于「一个阻塞全船停」；async/await 虽然活下来了，但把函数染成了两种颜色。Go 的第三条路是分流，不是消灭阻塞。</p>
+    </div>
+
+    <div class="draft-banner">
+    <span>⚠</span>
+    <span>本页状态为 <b>draft</b>：内容尚未人工核对，引用前请自行验证。</span>
+  </div>
+<aside class="needs">
+      <p class="needs-title">读这篇之前，你需要先知道</p>
+      <a class="need" href="../goroutine-weight/">← <b>1. 一条执行流有多重</b><span>执行流由三样东西构成、线程切换的直接成本与缓存还债、8MiB 栈只是虚拟预留</span></a>
+    </aside>
+    <div class="provenance"><span><b>来源</b> 飞书文档《从进程线程理解 Go 协程》 https://futu.feishu.cn/docx/MtjTdgOM2okwOdxpPDecVZMrnqc @ revision 105</span><span><b>生成</b> 2026-10-01</span><span><b>模型</b> claude-opus-4-5</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">Go</span> <span class="tag tone-muted">协程</span> <span class="tag tone-muted">M:N 线程</span> <span class="tag tone-muted">async/await</span></span></div>
+
+<h2 id="两种并发模型"><span class="num">01</span>两种并发模型</h2>
+<p>最朴素的方案是「一个任务一条线程」。它简单到不需要解释，但和「多路复用」放在一起看，差别立刻出来：</p>
+<div class="flowd has-grid has-groups" data-flow data-edges="[{&quot;from&quot;:&quot;s1&quot;,&quot;to&quot;:&quot;s2&quot;,&quot;label&quot;:&quot;submit&quot;},{&quot;from&quot;:&quot;s2&quot;,&quot;to&quot;:&quot;s3&quot;,&quot;label&quot;:&quot;多路复用&quot;}]">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"><div class="fgroup tone-amber" data-group-box="one">
+          <span class="fgroup-label">1:1 —— 任务与线程一一对应</span>
+        </div><div class="fgroup tone-green" data-group-box="mn">
+          <span class="fgroup-label">M:N —— 任务交给用户态调度器</span>
+        </div></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-amber" data-id="t1" data-group="one">
+              
+              
+              <b>任务 1</b>
+              <small>⟶ 线程 1</small>
+            </div><div class="fnode tone-green" data-id="s1" data-group="mn">
+              
+              
+              <b>任务 1 · 2 · 3 … N</b>
+              <small>都只是一条队列记录</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-amber" data-id="t2" data-group="one">
+              
+              
+              <b>任务 2</b>
+              <small>⟶ 线程 2</small>
+            </div><div class="fnode tone-green" data-id="s2" data-group="mn">
+              
+              
+              <b>用户态调度器</b>
+              <small>只在逻辑上暂停与恢复</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-amber" data-id="t3" data-group="one">
+              
+              
+              <b>… 任务 N</b>
+              <small>⟶ 线程 N</small>
+            </div><div class="fnode tone-green" data-id="s3" data-group="mn">
+              
+              
+              <b>少量线程</b>
+              <small>约等于核数</small>
+            </div></div></div>
+      
+    </div><p>1:1 的好处很实在：每个任务的逻辑是一条线性同步代码，阻塞就阻塞，线程替你挂起；内核视角也最简单。它曾经是主流 —— Apache 每个连接一个 worker，JVM servlet 每个请求一个线程。衰败从 C10K 开始。</p>
+<p>把 1:1 往规模上推，会<strong>按顺序</strong>撞上三重天花板：</p>
+<div class="pipe"><div class="lane tone-red">
+        <div class="lane-meta">
+          <span class="ln">天花板一</span>
+          <b>栈预留封顶数量</b>
+          <small>最硬性，最先撞上</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>每线程固定预留</b>
+        <small>Linux 8MiB / JVM 1MB</small>
+        <span class="tag tone-red">创建时定死</span>
+      </div><div class="pnode">
+        <b>不能中途搬家</b>
+        <small>内核不会帮你扩栈</small>
+        <span class="tag tone-red">只能按最坏情况留</span>
+      </div><div class="pnode">
+        <b>结果</b>
+        <small>32 位约 1500 条；JVM 实测 1.15 万条 OOM</small>
+        <span class="tag tone-red">想开十万先问内存</span>
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">内存缓解不了<span class="note">下一重天花板随负载显现</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-amber">
+        <div class="lane-meta">
+          <span class="ln">天花板二</span>
+          <b>切换成本随任务数放大</b>
+          <small>其次，负载一上来就显现</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>直接成本</b>
+        <small>微秒级，单次不痛</small>
+        
+      </div><div class="pnode">
+        <b>间接成本</b>
+        <small>缓存与 TLB 污染，乘以任务数</small>
+        
+      </div><div class="pnode">
+        <b>一笔账</b>
+        <small>单核每秒的切换预算只养得起约十万线程</small>
+        <span class="tag tone-amber">还没算干活时间</span>
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">前两重还能靠硬件缓解<span class="note">第三重不行</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-violet">
+        <div class="lane-meta">
+          <span class="ln">天花板三</span>
+          <b>内核看不懂等待语义</b>
+          <small>最隐蔽，规模够大才成为主要矛盾</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>内核只认两个状态</b>
+        <small>可运行 / 阻塞</small>
+        <span class="tag tone-violet">没有第三种</span>
+      </div><div class="pnode">
+        <b>但等待有四种</b>
+        <small>等 channel、等定时器、等业务结果、等网络</small>
+        
+      </div><div class="pnode">
+        <b>于是只能干等</b>
+        <small>调度器无法择优唤醒</small>
+        <span class="tag tone-violet">要靠换调度者解决</span>
+      </div></div>
+      </div></div><p>第三重是真正把需求逼出来的那一重。前两重可以靠「更多内存、更快切换」缓解，第三重要求<strong>换一个更懂业务的调度者</strong> —— 而这正是 Go 后来做的事。</p>
+<p>同一个需求在别处出现过：HTTP/1.1 每个请求独占一条 TCP 连接，连接数上限把并发卡死；HTTP/2 把多个逻辑 stream 多路复用到少量 TCP 连接上。<mark class="mk-blue">记住这个映射：stream 对应 goroutine，TCP 连接对应线程。</mark></p>
+<hr>
+<h2 id="前人两条路线各栽在哪"><span class="num">02</span>前人两条路线，各栽在哪</h2>
+<p>用户态调度不是 Go 首创。Java 1.1 有 green threads，Solaris 和 FreeBSD 都有 M:N 线程库。先看它们怎么死的。</p>
+<div class="timeline"><div class="titem tone-blue">
+          <span class="when">SunOS 5.2</span>
+          <h4>Solaris 开始做 M:N</h4>
+          <p>把用户线程多路复用到少量内核线程上，当时的「正确答案」</p>
+        </div><div class="titem tone-red">
+          <span class="when">Solaris 9 · 2002</span>
+          <h4>Solaris 放弃 M:N</h4>
+          <p>退回 1:1，十几年试验结束</p>
+        </div><div class="titem tone-blue">
+          <span class="when">FreeBSD 5 · 2003</span>
+          <h4>FreeBSD 也做 M:N</h4>
+          <p>换了个系统，同一个方向又来一遍</p>
+        </div><div class="titem tone-red">
+          <span class="when">FreeBSD 7 · 2008</span>
+          <h4>默认回到 1:1</h4>
+          <p>一年后彻底移除 M:N</p>
+        </div></div><p>两个系统、十几年、同一个结论。死法只有一条主线：</p>
+<div class="flowd has-grid has-groups" data-flow data-edges="[{&quot;from&quot;:&quot;u1&quot;,&quot;to&quot;:&quot;kern&quot;,&quot;label&quot;:&quot;一个阻塞&quot;},{&quot;from&quot;:&quot;u2&quot;,&quot;to&quot;:&quot;dead&quot;,&quot;label&quot;:&quot;骑在同一根线程上&quot;},{&quot;from&quot;:&quot;u3&quot;,&quot;to&quot;:&quot;dead&quot;,&quot;label&quot;:&quot;&quot;}]">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"><div class="fgroup tone-red" data-group-box="kt">
+          <span class="fgroup-label">三个用户线程骑在同一个内核线程 K1 上</span>
+        </div></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-blue" data-id="u1" data-group="kt">
+              
+              
+              <b>U1</b>
+              <small>发起一次磁盘 read</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-red" data-id="kern" data-group="kt">
+              
+              
+              <b>内核把 K1 整个挂起</b>
+              <small>执行权被内核收走了</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-muted" data-id="u2" data-group="kt">
+              
+              
+              <b>U2</b>
+              <small>本来能跑</small>
+            </div><div class="fnode tone-muted" data-id="u3" data-group="kt">
+              
+              
+              <b>U3</b>
+              <small>本来能跑</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-red" data-id="dead" data-group="kt">
+              
+              
+              <b>U2 / U3 全部连坐</b>
+              <small>用户态调度器想救都救不了</small>
+            </div></div></div>
+      
+    </div><p>一句话总结这件事：<strong>M:N 线程是操作系统支持不足的产物，核心问题是系统调用会阻塞。</strong></p>
+<p>补救方向本来是「给每个易阻塞的调用配一个专属内核线程」—— 可补着补着，就退化成 1:1 了。</p>
+<p>第二条现代路线不救阻塞，而是<strong>消灭「阻塞的线程」</strong>：</p>
+<div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-blue">起点</span>
+            <span class="name">一个普通的同步函数</span>
+            <span class="spacer"></span>
+            <span class="tag tone-blue">一个颜色</span>
+          </div>
+          <div class="rec"><div class="">
+            <b>写起来</b><span>顺序、直观、好读</span></div><div class="">
+            <b>问题</b><span>它内部要发网络请求</span></div></div>
+          
+          <p class="jnote">编译器把 async 函数切成状态机，每个 await 是一个断点</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">想拿异步结果<span class="note">调用链开始变色</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-red">传染</span>
+            <span class="name">颜色沿调用链往上爬</span>
+            <span class="spacer"></span>
+            <span class="tag tone-red">两种颜色</span>
+          </div>
+          <div class="rec"><div class="">
+            <b>helper</b><span>自己也得改成 async</span></div><div class="">
+            <b>上层</b><span>一路传染到入口</span></div><div class="">
+            <b>断不开</b><span>同步代码无法直接调用异步函数</span></div></div>
+          
+          <p class="jnote bad">「这段代码会不会让出线程」变成了编译期可见的契约，中间层必须站队</p>
+        </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-amber">代价</span>
+            <span class="name">语法糖解决不了</span>
+            <span class="spacer"></span>
+            <span class="tag tone-amber">契约问题</span>
+          </div>
+          <div class="rec"><div class="">
+            <b>好处</b><span>线程永不睡眠，调度权在 runtime 手里</span></div><div class="">
+            <b>代价</b><span>函数签名里多了不可消除的信息</span></div></div>
+          
+          <p class="jnote">两条路线只是把「异步的难」放在了不同位置</p>
+        </div><div class="compare-wrap"><table class="compare"><thead><tr><th>路线</th><th>阻塞怎么处理</th><th>谁在调度</th><th>API 侵入性</th></tr></thead><tbody><tr><th>旧式 M:N 线程</th><td data-label="阻塞怎么处理"><span class="tag tone-red">连坐：一个阻塞全船停</span></td><td data-label="谁在调度">用户态库，但被内核架空</td><td data-label="API 侵入性">无（同步外观）</td></tr><tr><th>async / await</th><td data-label="阻塞怎么处理">消灭阻塞：状态机 + 非阻塞 I/O</td><td data-label="谁在调度">runtime 的事件循环</td><td data-label="API 侵入性"><span class="tag tone-red">高：颜色侵入函数签名</span></td></tr><tr><th>Goroutine</th><td data-label="阻塞怎么处理"><span class="tag tone-green">分流：能异步的走 netpoller，真阻塞换 M</span></td><td data-label="谁在调度">Go runtime（用户态）</td><td data-label="API 侵入性"><span class="tag tone-green">无（同步外观）</span></td></tr></tbody></table></div><hr>
+<h2 id="go-的第三条路"><span class="num">03</span>Go 的第三条路</h2>
+<p>Go 回到了 green thread，但把当年的死穴逐个补上：</p>
+<p>Go 的两条修复路径是分开的两张图 —— 它们要解决的根本不是同一件事。</p>
+<div class="flowd has-grid has-groups" data-flow data-edges="[{&quot;from&quot;:&quot;g1&quot;,&quot;to&quot;:&quot;m1&quot;,&quot;label&quot;:&quot;挂起的只是 G&quot;},{&quot;from&quot;:&quot;m1&quot;,&quot;to&quot;:&quot;ok&quot;,&quot;label&quot;:&quot;&quot;}]">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"><div class="fgroup tone-green" data-group-box="p1">
+          <span class="fgroup-label">路径一 · 网络 I/O：等待移交给 netpoller</span>
+        </div></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-green" data-id="g1" data-group="p1">
+              
+              
+              <b>G1 等待网络数据</b>
+              <small>注册 epoll，然后被挂起</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="m1" data-group="p1">
+              
+              
+              <b>M 没睡</b>
+              <small>转头继续跑 G3、G4</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="ok" data-group="p1">
+              
+              
+              <b>连坐没有发生的机会</b>
+              <small>P 一直有 M 在跑 Go 代码</small>
+            </div></div></div>
+      
+    </div><div class="flowd has-grid has-groups" data-flow data-edges="[{&quot;from&quot;:&quot;g2&quot;,&quot;to&quot;:&quot;m2&quot;,&quot;label&quot;:&quot;解绑 P&quot;},{&quot;from&quot;:&quot;m2&quot;,&quot;to&quot;:&quot;m3&quot;,&quot;label&quot;:&quot;P 交给别人&quot;},{&quot;from&quot;:&quot;m3&quot;,&quot;to&quot;:&quot;back&quot;,&quot;label&quot;:&quot;&quot;}]">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"><div class="fgroup tone-amber" data-group-box="p2">
+          <span class="fgroup-label">路径二 · 真阻塞系统调用：换一个 M 顶上</span>
+        </div></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-amber" data-id="g2" data-group="p2">
+              
+              
+              <b>G2 进入文件 read</b>
+              <small>没有 poll 接口可用</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-amber" data-id="m2" data-group="p2">
+              
+              
+              <b>M1 陪 G2 沉进内核</b>
+              <small>先把 P 解绑交出去</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="m3" data-group="p2">
+              
+              
+              <b>M2 接管 P</b>
+              <small>继续跑 G5，没受影响</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-muted" data-id="back" data-group="p2">
+              
+              
+              <b>read 返回后 M1 变备用</b>
+              <small>P 早已还回来了</small>
+            </div></div></div>
+      
+    </div><p>同一个 <code>conn.Read</code>，在两种语言里的样子差别就在这：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-go">// Go：同步外观。conn.Read 可能真的阻塞 —— 但阻塞的是 G，不是 M
+func handle(conn net.Conn) {
+    data, err := conn.Read(buf)   // 底层走 netpoller；M 转头去跑别的 G
+    if err != nil {
+        return
+    }
+    conn.Write(process(data))
+}
+</code></pre></div>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-javascript">// JS：显式异步。每多一个 await，签名就多一个 async，颜色一路传上去
+async function handle(conn) {
+  const data = await conn.read();   // 状态机断点
+  await conn.write(process(data));
+}
+</code></pre></div>
+<p><mark class="mk-blue">Go 的代码没有颜色，但「读完之后再写」的顺序感完整保留。</mark> 哪种更好没有标准答案 —— 这是两条路线，不是「goroutine 完胜 async」。</p>
+<hr>
+<div class="quiz"><details>
+        <summary>旧式 M:N 线程的死穴到底是什么？</summary>
+        <div class="a"><p>多个用户线程骑在同一个内核线程上，只要其中一个进入阻塞系统调用，
+整个内核线程被内核挂起，骑在它身上的其他人全部连坐。
+用户态调度器救不了，因为执行权已经被内核整个收走了。
+补救办法是给每个易阻塞的调用配专属内核线程 —— 补着补着就退化成 1:1 了。</p>
+</div>
+      </details><details>
+        <summary>async/await 的「函数颜色」问题为什么语法糖解决不了？</summary>
+        <div class="a"><p>因为颜色不是语法问题，是契约问题。它把「这段代码会不会让出线程」
+变成了编译期可见的信息，于是函数的签名里多了一样东西。
+同步代码一旦要调用异步函数，自己也得变异步，颜色只能沿调用链往上传染。
+Go 回避这件事的方式是让阻塞留在同步外观里，把复杂度收进 runtime。</p>
+</div>
+      </details><details>
+        <summary>三重天花板是按什么顺序撞上的？</summary>
+        <div class="a"><p>内存最硬性，最先到（栈预留把线程数锁死）；
+切换成本其次，随负载显现（直接成本加缓存还债，再乘任务数）；
+语义盲区最隐蔽，规模大到一定程度才成为主要矛盾。
+前两重可以靠更多内存和更快切换缓解，第三重要求换一个更懂业务的调度者。</p>
+</div>
+      </details></div>
+
+    <footer>
+      <span>前人两条路线怎么死的 · 从 1:1 到 async/await</span>
+      <span>最后更新 2026-10-01 · 单文件可离线打开</span>
+    </footer>
+  </main>
+</div>
+
+<script src="../../assets/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-has-toc="1">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>调度器怎么挑 G · 队列、窃取与两次抢占</title>
+<meta name="description" content="一条全局队列会死于锁竞争和缓存失配，所以每个 P 有自己的本地队列；本地队列又带来负载不均，于是有了「偷一半」。紧循环曾经能把 P 占死，直到 Go 1.14 用 SIGURG 兜底。" />
+<link rel="stylesheet" href="../../assets/theme.css" />
+  <link rel="stylesheet" href="../../assets/blocks.css" />
+  <link rel="stylesheet" href="../../assets/archify-embed.css" />
+</head>
+<body>
+<div id="progress"></div>
+<div id="tocScrim"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
+    <a class="brand" href="../../index.html"><span class="dot"></span>知识笔记</a>
+    
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="toc" id="toc">
+      <p class="toc-title">目录</p>
+      <a href="../../index.html" class="sub">← 全部笔记</a>
+      <a href="#为什么不是一条大队列">为什么不是一条大队列</a>
+      <a href="#取下一个-g-的顺序">取下一个 G 的顺序</a>
+      <a href="#正在跑的-g-不撒手怎么办">正在跑的 G 不撒手怎么办</a>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow">● Go 协程 · ⑥</span>
+      <h1>调度器怎么挑 G · 队列、窃取与两次抢占</h1>
+      <p class="lede">一条全局队列会死于锁竞争和缓存失配，所以每个 P 有自己的本地队列；本地队列又带来负载不均，于是有了「偷一半」。紧循环曾经能把 P 占死，直到 Go 1.14 用 SIGURG 兜底。</p>
+    </div>
+
+    <div class="draft-banner">
+    <span>⚠</span>
+    <span>本页状态为 <b>draft</b>：内容尚未人工核对，引用前请自行验证。</span>
+  </div>
+<aside class="needs">
+      <p class="needs-title">读这篇之前，你需要先知道</p>
+      <a class="need" href="../goroutine-gmp/">← <b>4. GMP · G 怎么挂回线程</b><span>G / M / P 各自的职责与生命周期，LRQ、runnext、mcache 和 GOMAXPROCS</span></a>
+    </aside>
+    <div class="provenance"><span><b>来源</b> 飞书文档《从进程线程理解 Go 协程》 https://futu.feishu.cn/docx/MtjTdgOM2okwOdxpPDecVZMrnqc @ revision 105</span><span><b>生成</b> 2026-10-01</span><span><b>模型</b> claude-opus-4-5</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">Go</span> <span class="tag tone-muted">调度器</span> <span class="tag tone-muted">工作窃取</span> <span class="tag tone-muted">抢占</span></span></div>
+
+<h2 id="为什么不是一条大队列"><span class="num">01</span>为什么不是一条大队列</h2>
+<p>最省脑子的实现是：所有可运行 G 放一条全局队列，任何 M 都从这里取。它会挨两刀，刀刀致命。</p>
+<div class="flowd has-grid has-groups" data-flow data-edges="[{&quot;from&quot;:&quot;m1&quot;,&quot;to&quot;:&quot;grq&quot;,&quot;label&quot;:&quot;一起抢锁&quot;},{&quot;from&quot;:&quot;m2&quot;,&quot;to&quot;:&quot;grq&quot;,&quot;label&quot;:&quot;&quot;},{&quot;from&quot;:&quot;m3&quot;,&quot;to&quot;:&quot;grq&quot;,&quot;label&quot;:&quot;&quot;},{&quot;from&quot;:&quot;grq&quot;,&quot;to&quot;:&quot;k1&quot;,&quot;label&quot;:&quot;M 一多就显现&quot;},{&quot;from&quot;:&quot;k1&quot;,&quot;to&quot;:&quot;k2&quot;,&quot;label&quot;:&quot;工作集刚被逐出，又要在新核重建&quot;}]">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"><div class="fgroup tone-red" data-group-box="bad">
+          <span class="fgroup-label">一条全局队列 + 一把锁</span>
+        </div></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-blue" data-id="m1" data-group="bad">
+              
+              
+              <b>M1</b>
+              <small>要取 G</small>
+            </div><div class="fnode tone-blue" data-id="m2" data-group="bad">
+              
+              
+              <b>M2</b>
+              <small>也要取 G</small>
+            </div><div class="fnode tone-blue" data-id="m3" data-group="bad">
+              
+              
+              <b>M3 … 都要取 G</b>
+              <small>M 越多，锁越烫</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-red" data-id="grq" data-group="bad">
+              
+              
+              <b>全局队列 GRQ</b>
+              <small>所有人抢同一把锁</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-red" data-id="k1" data-group="bad">
+              
+              
+              <b>第一刀：锁竞争</b>
+              <small>取 G 这件事本身成了瓶颈</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-red" data-id="k2" data-group="bad">
+              
+              
+              <b>第二刀：缓存失配</b>
+              <small>G 上次在核 0 跑，这次被核 7 取走</small>
+            </div></div></div>
+      
+    </div><p>这两刀都有历史证据：<strong>Go 1.1 之前真的只有一条全局队列</strong>，当时的调度 trace 里锁竞争一望便知。今天的 per-P 本地队列就是那个教训的产物。</p>
+<p>改进来自内核自己的教科书 —— 学 per-CPU 运行队列：</p>
+<div class="flowd has-grid has-groups" data-flow data-edges="[{&quot;from&quot;:&quot;p0&quot;,&quot;to&quot;:&quot;q0&quot;,&quot;label&quot;:&quot;各吃各的&quot;},{&quot;from&quot;:&quot;p1&quot;,&quot;to&quot;:&quot;q1&quot;,&quot;label&quot;:&quot;各吃各的&quot;},{&quot;from&quot;:&quot;q1&quot;,&quot;to&quot;:&quot;grq2&quot;,&quot;label&quot;:&quot;本地空了才回头找全局&quot;,&quot;dashed&quot;:true}]">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"><div class="fgroup tone-green" data-group-box="good">
+          <span class="fgroup-label">每个 P 一条本地队列：平时只碰自己那份</span>
+        </div></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-green" data-id="p0" data-group="good">
+              
+              
+              <b>P0</b>
+              <small>M0 绑定</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-blue" data-id="q0" data-group="good">
+              
+              
+              <b>LRQ: G1 G2 G3</b>
+              <small>无锁或低竞争</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="p1" data-group="good">
+              
+              
+              <b>P1</b>
+              <small>M1 绑定</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-blue" data-id="q1" data-group="good">
+              
+              
+              <b>LRQ: G8 G9</b>
+              <small>同样无锁</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-muted" data-id="grq2" data-group="good">
+              
+              
+              <b>GRQ 降级为兜底队列</b>
+              <small>只在本地空了的时候才看</small>
+            </div></div></div>
+      
+    </div><p>但局部性会带来新毛病：<strong>负载不均</strong>。任务长短不一，新 G 又都由 <code>go</code> 语句创建在本地 P —— 一个扇出型任务会把一百个新 G 全灌进创建者的队列，别的 P 却空转。</p>
+<div class="callout tone-violet">
+      <span class="ic">⚖️</span>
+      <div><p><mark class="mk-blue">负载不均不需要极端场景。</mark></p>
+<p>一个扇出任务在新 G 落进本地队列的那一刻，不均衡就已经注定了。</p>
+<p>所以在多核上，<strong>工作窃取不是锦上添花的优化，而是这套设计的常态机制。</strong></p>
+</div>
+    </div><div class="flowd has-grid has-groups" data-flow data-edges="[{&quot;from&quot;:&quot;p1&quot;,&quot;to&quot;:&quot;p2&quot;,&quot;label&quot;:&quot;P2 空转&quot;},{&quot;from&quot;:&quot;p2&quot;,&quot;to&quot;:&quot;half&quot;,&quot;label&quot;:&quot;盯上最长的那个&quot;},{&quot;from&quot;:&quot;half&quot;,&quot;to&quot;:&quot;why&quot;,&quot;label&quot;:&quot;&quot;}]">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"><div class="fgroup tone-amber" data-group-box="steal">
+          <span class="fgroup-label">空闲的 P 主动去偷 —— 一次拿走一半</span>
+        </div></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-blue" data-id="p1" data-group="steal">
+              
+              
+              <b>P1 的 LRQ</b>
+              <small>G1 G2 G3 G4 G5 G6</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-muted" data-id="p2" data-group="steal">
+              
+              
+              <b>P2 的 LRQ: 空</b>
+              <small>M2 先原地自旋一小会儿</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="half" data-group="steal">
+              
+              
+              <b>偷走 G4 G5 G6</b>
+              <small>只偷一半</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="why" data-group="steal">
+              
+              
+              <b>为什么偷一半</b>
+              <small>摊薄「动别人队列」的同步成本，也避免为一个小任务反复上门</small>
+            </div></div></div>
+      
+    </div><p>干这事的 M 在源码里叫 <strong>spinning M</strong>：它先原地自旋一小会儿，实在没活才去睡 —— 因为「马上可能有活」的概率很高。它自旋时不是盲转，同时盯着其他 P 的队列和 netpoller。</p>
+<hr>
+<h2 id="取下一个-g-的顺序"><span class="num">02</span>取下一个 G 的顺序</h2>
+<div class="flowd has-grid has-groups" data-flow data-edges="[{&quot;from&quot;:&quot;rn&quot;,&quot;to&quot;:&quot;lrq&quot;,&quot;label&quot;:&quot;没有就往下&quot;},{&quot;from&quot;:&quot;lrq&quot;,&quot;to&quot;:&quot;grq&quot;,&quot;label&quot;:&quot;本地空了&quot;},{&quot;from&quot;:&quot;grq&quot;,&quot;to&quot;:&quot;th&quot;,&quot;label&quot;:&quot;兜底也没拿到&quot;},{&quot;from&quot;:&quot;th&quot;,&quot;to&quot;:&quot;np&quot;,&quot;label&quot;:&quot;还是没有，才去问网络&quot;}]">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"><div class="fgroup tone-violet" data-group-box="order">
+          <span class="fgroup-label">一个 M 要取材时，按这个顺序找下去</span>
+        </div></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-amber" data-id="rn" data-group="order">
+              
+              
+              <b>runnext</b>
+              <small>单槽缓存：刚刚让出的那个 G</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="lrq" data-group="order">
+              
+              
+              <b>本 P 的 LRQ</b>
+              <small>本地优先：无锁 + 缓存友好</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="grq" data-group="order">
+              
+              
+              <b>全局队列 GRQ</b>
+              <small>每 61 次取 G 才查一次</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-amber" data-id="th" data-group="order">
+              
+              
+              <b>偷其他 P 的 LRQ</b>
+              <small>拿一半</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-blue" data-id="np" data-group="order">
+              
+              
+              <b>netpoller</b>
+              <small>都没有了，看网络事件唤醒了谁</small>
+            </div></div></div>
+      
+    </div><p><strong>runnext 值得单独说一句。</strong> 它放的是「刚刚变得可运行的那个 G」—— 比如刚从一次短阻塞里醒来。调度器优先取它，是因为<mark class="mk-blue">这个 G 最可能马上要接着跑，它的数据还热在缓存里</mark>。优先取它，等于白捡一次局部性。</p>
+<p><strong>1/61 这个比例也有它的道理。</strong> 局部性与公平性是对头：LRQ 偏袒局部性，GRQ 维护公平性。定期抽查一次全局队列，既防止 GRQ 里的 G 被饿死，又不让 GRQ 成为常态竞争点。</p>
+<p>换个熟悉的锚点：<mark class="mk-blue">这和 git 的对象访问同构 —— 平时只看本地对象库，隔一段时间 fetch 一次 origin，1/61 就是那个「定期 fetch」的节流阀。</mark></p>
+<div class="callout tone-amber">
+      <span class="ic">🔧</span>
+      <div><p><strong>这个顺序和 1/61 都是 runtime 实现细节，随时可变。</strong></p>
+<p>业务代码不应依赖它们。理解它的价值在于知道「平衡点在哪」——
+而不是把它当成一份稳定的 API 契约。</p>
+</div>
+    </div><hr>
+<h2 id="正在跑的-g-不撒手怎么办"><span class="num">03</span>正在跑的 G 不撒手怎么办</h2>
+<p>队列决定「取谁」，抢占解决「上一个赖着不走」。先纠正一句过时的话：<strong>「Go 调度器是协作式的」对 Go 1.14 之后的紧循环已经不成立。</strong></p>
+<div class="flowd has-grid has-groups" data-flow data-edges="[{&quot;from&quot;:&quot;sm&quot;,&quot;to&quot;:&quot;poison&quot;,&quot;label&quot;:&quot;下单&quot;},{&quot;from&quot;:&quot;poison&quot;,&quot;to&quot;:&quot;prologue&quot;,&quot;label&quot;:&quot;毒就这样等在那&quot;},{&quot;from&quot;:&quot;prologue&quot;,&quot;to&quot;:&quot;yield&quot;,&quot;label&quot;:&quot;搭了个便车&quot;}]">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"><div class="fgroup tone-blue" data-group-box="coop">
+          <span class="fgroup-label">协作抢占（Go 1.2 起）：给栈守卫下毒</span>
+        </div></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-violet" data-id="sm" data-group="coop">
+              
+              
+              <b>sysmon</b>
+              <small>后台监控线程，发现某 G 跑超 10ms</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-red" data-id="poison" data-group="coop">
+              
+              
+              <b>把 stackguard0 改成毒值</b>
+              <small>stackPreempt</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-blue" data-id="prologue" data-group="coop">
+              
+              
+              <b>等 G 走到下一次函数序言</b>
+              <small>序言本来就要检查栈边界</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="yield" data-group="coop">
+              
+              
+              <b>触发 morestack，发现守卫被下毒</b>
+              <small>当作它自己调了 Gosched，让出 P</small>
+            </div></div></div>
+      
+    </div><p>妙处是<strong>零额外成本</strong>：栈检查本来就要做，抢占只是搭便车。</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>为什么不能任意点切换</th><th>说明</th></tr></thead><tbody><tr><th>栈可能正在搬迁</th><td data-label="说明">上一节说的连续栈扩容，拷贝到一半把 G 换下去，指针修正就乱套了</td></tr><tr><th>GC 可能正在扫描栈找指针</th><td data-label="说明">扫到一半换人，GC 的记录和实际栈就对不上了</td></tr><tr><th>所以需要「安全点」</th><td data-label="说明"><span class="tag tone-green">安全点就是「这些不变量都不处于中途」的代码位置</span></td></tr></tbody></table></div><p>但协作抢占有一个死穴，而且非常致命：</p>
+<div class="flowd has-grid has-groups" data-flow data-edges="[{&quot;from&quot;:&quot;loop&quot;,&quot;to&quot;:&quot;nope&quot;,&quot;label&quot;:&quot;&quot;},{&quot;from&quot;:&quot;nope&quot;,&quot;to&quot;:&quot;starve&quot;,&quot;label&quot;:&quot;Go 1.14 之前就是这样&quot;}]">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"><div class="fgroup tone-red" data-group-box="bug">
+          <span class="fgroup-label">没有函数调用的紧循环，毒值永远没人查收</span>
+        </div></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-red" data-id="loop" data-group="bug">
+              
+              
+              <b>for { i++ }</b>
+              <small>一个函数调用都没有</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-red" data-id="nope" data-group="bug">
+              
+              
+              <b>没有序言可查</b>
+              <small>毒值躺在守卫里，没人看</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-red" data-id="starve" data-group="bug">
+              
+              
+              <b>P 被占死</b>
+              <small>其他 G 饿死，GC 的 STW 也拖不动</small>
+            </div></div></div>
+      
+    </div><p>Go 1.14 官方发布说明承认了这件事：紧循环「可能饿死调度器或严重拖延 GC」。</p>
+<p>于是有了异步抢占：</p>
+<div class="flowd has-grid has-groups" data-flow data-edges="[{&quot;from&quot;:&quot;sig&quot;,&quot;to&quot;:&quot;hdl&quot;,&quot;label&quot;:&quot;打断&quot;},{&quot;from&quot;:&quot;hdl&quot;,&quot;to&quot;:&quot;pc&quot;,&quot;label&quot;:&quot;确认安全&quot;},{&quot;from&quot;:&quot;pc&quot;,&quot;to&quot;:&quot;done&quot;,&quot;label&quot;:&quot;接管&quot;}]">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"><div class="fgroup tone-green" data-group-box="async">
+          <span class="fgroup-label">异步抢占（Go 1.14 起）：直接发信号打断</span>
+        </div></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-violet" data-id="sig" data-group="async">
+              
+              
+              <b>sysmon 发 SIGURG</b>
+              <small>选它正因为它是「无事发生」型信号</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-blue" data-id="hdl" data-group="async">
+              
+              
+              <b>信号处理器确认在异步安全点</b>
+              <small>不在 runtime 关键段里</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-amber" data-id="pc" data-group="async">
+              
+              
+              <b>把 PC 改成 asyncPreempt 入口</b>
+              <small>一段汇编：保存全部用户寄存器</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="done" data-group="async">
+              
+              
+              <b>转入 gopreempt_m，让出 P</b>
+              <small>紧循环不再可能饿死调度器</small>
+            </div></div></div>
+      
+    </div><div class="timeline"><div class="titem tone-blue">
+          <span class="when">Go 1.2 · 2013</span>
+          <h4>协作抢占</h4>
+          <p>靠函数序言里的栈边界检查搭便车。成本几乎为零，但紧循环会饿死 GC</p>
+        </div><div class="titem tone-green">
+          <span class="when">Go 1.14 · 2020</span>
+          <h4>异步抢占兜底</h4>
+          <p>用 SIGURG 打断任意用户态代码点。紧循环饿死成为历史，代价是每次打断要保存全套寄存器</p>
+        </div></div><div class="compare-wrap"><table class="compare"><thead><tr><th>维度</th><th>协作抢占</th><th>异步抢占</th></tr></thead><tbody><tr><th>触发</th><td data-label="协作抢占">G 自己跑到安全点</td><td data-label="异步抢占">runtime 发 SIGURG 打断</td></tr><tr><th>时机</th><td data-label="协作抢占">函数序言、同步操作处</td><td data-label="异步抢占">任意用户态代码点（异步安全点）</td></tr><tr><th>代价</th><td data-label="协作抢占"><span class="tag tone-green">几乎为零（搭栈检查的便车）</span></td><td data-label="异步抢占"><span class="tag tone-amber">每次打断要保存全部寄存器</span></td></tr><tr><th>边界</th><td data-label="协作抢占"><span class="tag tone-red">紧循环永不触发</span></td><td data-label="异步抢占">runtime 关键段与信号处理中不可打断</td></tr></tbody></table></div><p><mark class="mk-amber">副作用要知道：Unix 下信号会打断慢速系统调用，使它们更常以 EINTR 失败。</mark></p>
+<p>标准库的多数调用已经按契约自动重试了，但自己写 raw syscall 或包装 C 库时，要保留「错误是 EINTR 就重试」的循环。</p>
+<p>所以今天准确的定性是：<strong>协作为主、异步抢占兜底</strong>。正常代码在安全点自己让出（便宜），长期不合作者被信号打断（兜底）。</p>
+<div class="callout tone-violet">
+      <span class="ic">🎲</span>
+      <div><p><strong>这也解释了一个观感：Go 的调度「看起来像抢占式、行为不可预测」。</strong></p>
+<p>因为决策权在 runtime 手里，不在开发者手里 ——
+<mark class="mk-blue">你永远不知道 G 会在哪两条语句之间被换下去。</mark></p>
+<p>sysmon 除了抢占，还负责：把 GRQ 里的 G 灌给空闲 P、唤醒休眠的 M、
+驱动 netpoll、回收空闲资源。它是调度器里唯一「不管业务」的角色。</p>
+</div>
+    </div><hr>
+<div class="quiz"><details>
+        <summary>为什么每个 P 要有一条自己的本地队列，而不是共用一条全局队列？</summary>
+        <div class="a"><p>因为共用一条会挨两刀：一是锁竞争（每个 M 每次取 G 都要抢同一把锁，M 越多越烫），
+二是缓存局部性差（G 上次在核 0 跑，下次被核 7 取走，工作集刚被逐出又要重建）。
+本地队列让 M 平时只碰自己那份，无锁且缓存友好。代价是负载不均，于是有了工作窃取。</p>
+</div>
+      </details><details>
+        <summary>工作窃取为什么偷一半，而不是偷一个？</summary>
+        <div class="a"><p>偷一个的话，每次本地队列空了都要上门一次，而「动别人队列」本身有同步成本 ——
+为一个小任务反复上门不划算。一次拿一半把这份同步成本摊薄了，
+同时也让被偷的 P 还能剩下一些活干。</p>
+</div>
+      </details><details>
+        <summary>Go 1.14 之前，一个 <code>for { i++ }</code> 为什么能把调度器饿死？</summary>
+        <div class="a"><p>因为协作抢占只在安全点生效，而安全点之一是函数序言里的栈边界检查。
+紧循环里没有任何函数调用，也就没有序言 ——
+sysmon 把 stackguard0 改成毒值后，那个毒值永远没人查收，P 被占死，
+其他 G 饿死，GC 的 STW 也拖不动。
+Go 1.14 起改用 SIGURG 直接打断，这个问题才消失。</p>
+</div>
+      </details></div>
+
+    <footer>
+      <span>调度器怎么挑 G · 队列、窃取与两次抢占</span>
+      <span>最后更新 2026-10-01 · 单文件可离线打开</span>
+    </footer>
+  </main>
+</div>
+
+<script src="../../assets/app.js"></script>
+</body>
+</html>

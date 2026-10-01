@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-has-toc="1">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>该开还是不该开 · 选型、泄漏与版本坑</title>
+<meta name="description" content="G 便宜不等于该多开：算力由核数决定，G 只决定有多少条执行流来分。再加上四类泄漏、容器里的 GOMAXPROCS 坑，和一批随版本过期的「常识」。" />
+<link rel="stylesheet" href="../../assets/theme.css" />
+  <link rel="stylesheet" href="../../assets/blocks.css" />
+  <link rel="stylesheet" href="../../assets/archify-embed.css" />
+</head>
+<body>
+<div id="progress"></div>
+<div id="tocScrim"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
+    <a class="brand" href="../../index.html"><span class="dot"></span>知识笔记</a>
+    
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="toc" id="toc">
+      <p class="toc-title">目录</p>
+      <a href="../../index.html" class="sub">← 全部笔记</a>
+      <a href="#选型只看两个变量">选型只看两个变量</a>
+      <a href="#扇出扇入最典型的-g-拓扑" class="sub">扇出扇入：最典型的 G 拓扑</a>
+      <a href="#泄漏轻量不等于没有生命周期成本">泄漏：轻量不等于没有生命周期成本</a>
+      <a href="#原型一个早退的父-g" class="sub">原型：一个早退的父 G</a>
+      <a href="#另外三类以及一个共性" class="sub">另外三类，以及一个共性</a>
+      <a href="#一批随版本过期的常识">一批随版本过期的「常识」</a>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow">● Go 协程 · ⑦</span>
+      <h1>该开还是不该开 · 选型、泄漏与版本坑</h1>
+      <p class="lede">G 便宜不等于该多开：算力由核数决定，G 只决定有多少条执行流来分。再加上四类泄漏、容器里的 GOMAXPROCS 坑，和一批随版本过期的「常识」。</p>
+    </div>
+
+    <div class="draft-banner">
+    <span>⚠</span>
+    <span>本页状态为 <b>draft</b>：内容尚未人工核对，引用前请自行验证。</span>
+  </div>
+<aside class="needs">
+      <p class="needs-title">读这篇之前，你需要先知道</p>
+      <a class="need" href="../goroutine-gmp/">← <b>4. GMP · G 怎么挂回线程</b><span>G / M / P 各自的职责与生命周期，LRQ、runnext、mcache 和 GOMAXPROCS</span></a><a class="need" href="../goroutine-poller/">← <b>5. 阻塞了怎么办 · 两条路</b><span>网络 I/O 交给 netpoller，真阻塞走 hand-off —— 这是能复兴 M:N 的真正核心</span></a>
+    </aside>
+    <div class="provenance"><span><b>来源</b> 飞书文档《从进程线程理解 Go 协程》 https://futu.feishu.cn/docx/MtjTdgOM2okwOdxpPDecVZMrnqc @ revision 105</span><span><b>生成</b> 2026-10-01</span><span><b>模型</b> claude-opus-4-5</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">Go</span> <span class="tag tone-muted">Goroutine 泄漏</span> <span class="tag tone-muted">并发</span> <span class="tag tone-muted">调试</span></span></div>
+
+<h2 id="选型只看两个变量"><span class="num">01</span>选型只看两个变量</h2>
+<p>一个任务值不值得为 G 付费，看<strong>等待比例<strong>（等 I/O 的时间占比）和</strong>单任务计算量</strong>。选这两个，是因为它们正好对应 G 的两个能力边界：等待能不能被 netpoller 吸收，以及并行度需求是多少。</p>
+<div class="mx">
+      <div class="mx-ylab">单任务计算量</div>
+      <div class="mx-body">
+        <div class="mx-y mx-yto">大计算</div>
+        <div class="mx-grid">
+          <div class="mcell tone-amber">
+            <b>先并行化计算</b>
+            <span>批处理、报表。G 的并发帮不上忙，先把计算拆开再说</span>
+          </div>
+          <div class="mcell tone-green">
+            <b>直接 goroutine</b>
+            <span>流水线、扇出扇入。每任务一条 G，这是 G 的主场</span>
+          </div>
+          <div class="mcell tone-muted">
+            <b>连 G 都省了</b>
+            <span>低等待小计算：直接同步执行，开 G 只多一份开销</span>
+          </div>
+          <div class="mcell tone-blue">
+            <b>有界 worker 池</b>
+            <span>网络服务、每请求一条 G。等待被 netpoller 吸收</span>
+          </div>
+        </div>
+        <div class="mx-y mx-yfrom">小计算</div>
+        <div class="mx-xrow">
+          <span>低等待</span><span>高等待</span>
+        </div>
+        <div class="mx-xlab">等待比例</div>
+      </div>
+    </div><p>两个变量都会漂移 —— 等待比例随负载和下游延迟变化，计算量随数据规模变化。所以这张表是<strong>对话框架，不是一次性答案</strong>。</p>
+<p><code>G</code> 的主场是「高等待 + 小计算」那一格：等待被 netpoller 吸收，M 全程在干别的。反过来，<strong>CPU 密集任务里 G 帮不上忙</strong>：</p>
+<div class="demo" data-widget="tuner" data-config="{&quot;param&quot;:{&quot;label&quot;:&quot;并发执行流的数量&quot;,&quot;unit&quot;:&quot;条&quot;,&quot;values&quot;:[1,2,4,8,16,32,64]},&quot;outputs&quot;:[{&quot;label&quot;:&quot;相对吞吐（8 核）&quot;,&quot;unit&quot;:&quot;&quot;,&quot;values&quot;:[12,25,50,100,92,78,61],&quot;tone&quot;:&quot;red&quot;}]}">
+      <div class="demo-head">
+        <span class="title">CPU 密集任务：G 数超过核数之后，吞吐反而往下掉</span>
+        <span class="status" data-status>拖动滑块换 G 的数量</span>
+        <span class="spacer"></span>
+        
+      </div>
+      <div class="demo-body custom" data-mount></div>
+    </div><div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-go">// 反例：CPU 密集任务无限开 G。十万个 G 抢 8 个核，
+// 切换与缓存还债吃掉大量有效时间
+for _, job := range jobs {
+    go compute(job)
+}
+
+// 正例：worker 数贴住核数。并行度决定执行流数量，
+// 多余的任务在队列里等，不参与抢核
+for w := 0; w &lt; runtime.NumCPU(); w++ {
+    go worker(jobCh)
+}
+</code></pre></div>
+<p>把「G 太多反而慢」落到缓存机制上：每个被换上的 G 都要把自己的工作集拉回 L1，被换下的则被逐出。<strong>切换频率超过工作集复用窗口时，CPU 的有效时间大量花在缓存搬进搬出上。</strong> 算力由核数决定，G 只决定有多少条执行流来分这块算力 —— 分的人太多，切来切去的开销反而把总吞吐往下拖。</p>
+<h3 id="扇出扇入最典型的-g-拓扑">扇出扇入：最典型的 G 拓扑</h3>
+<div class="flowd has-grid has-groups" data-flow data-edges="[{&quot;from&quot;:&quot;src&quot;,&quot;to&quot;:&quot;ch0&quot;,&quot;label&quot;:&quot;扇出：一个发多个收&quot;},{&quot;from&quot;:&quot;ch0&quot;,&quot;to&quot;:&quot;w1&quot;,&quot;label&quot;:&quot;&quot;},{&quot;from&quot;:&quot;ch0&quot;,&quot;to&quot;:&quot;w2&quot;,&quot;label&quot;:&quot;&quot;},{&quot;from&quot;:&quot;ch0&quot;,&quot;to&quot;:&quot;w3&quot;,&quot;label&quot;:&quot;&quot;},{&quot;from&quot;:&quot;w1&quot;,&quot;to&quot;:&quot;agg&quot;,&quot;label&quot;:&quot;扇入：多个发一个收&quot;},{&quot;from&quot;:&quot;w2&quot;,&quot;to&quot;:&quot;agg&quot;,&quot;label&quot;:&quot;&quot;},{&quot;from&quot;:&quot;w3&quot;,&quot;to&quot;:&quot;agg&quot;,&quot;label&quot;:&quot;&quot;}]">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"><div class="fgroup tone-violet" data-group-box="topo">
+          <span class="fgroup-label">并发骨架画在 channel 拓扑上 —— 这就是「用通信共享内存」的直观形态</span>
+        </div></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-blue" data-id="src" data-group="topo">
+              
+              
+              <b>任务源</b>
+              <small>一个 G 读任务</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-muted" data-id="ch0" data-group="topo">
+              
+              
+              <b>ch0</b>
+              <small>分发</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="w1" data-group="topo">
+              
+              
+              <b>worker</b>
+              <small>并行处理</small>
+            </div><div class="fnode tone-green" data-id="w2" data-group="topo">
+              
+              
+              <b>worker</b>
+              <small>并行处理</small>
+            </div><div class="fnode tone-green" data-id="w3" data-group="topo">
+              
+              
+              <b>worker</b>
+              <small>并行处理</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="agg" data-group="topo">
+              
+              
+              <b>汇总器</b>
+              <small>一个 G 收结果</small>
+            </div></div></div>
+      
+    </div><p>每一级 channel 都要回答三个问题：<strong>谁发、谁收、谁关。</strong> 回答不上来，就是下面那一节的泄漏。</p>
+<hr>
+<h2 id="泄漏轻量不等于没有生命周期成本"><span class="num">02</span>泄漏：轻量不等于没有生命周期成本</h2>
+<p>官方定义很严格：<strong>「一个 goroutine 被阻塞，且解除阻塞所需的条件永远无法满足」</strong>。</p>
+<p>关键词是「永远」：暂时等得久的 G 不是泄漏，条件永不到达的才是。</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>现象</th><th>是什么</th><th>怎么查</th></tr></thead><tbody><tr><th>泄漏</th><td data-label="是什么">卡住且永不恢复</td><td data-label="怎么查">看 G 数是不是单调上涨</td></tr><tr><th>死锁</th><td data-label="是什么">互相等对方</td><td data-label="怎么查">看等待环</td></tr><tr><th>饥饿</th><td data-label="是什么">等得到，但排不上</td><td data-label="怎么查">看等待时间的分布</td></tr></tbody></table></div><p>三者共享「阻塞」的表象，但查法完全不同。<strong>泄漏的代价是三重</strong>：G 的栈内存、G 引用着不肯放手的对象、GC 每轮还要扫描它们。</p>
+<h3 id="原型一个早退的父-g">原型：一个早退的父 G</h3>
+<div class="flowd has-grid has-groups" data-flow data-edges="[{&quot;from&quot;:&quot;dad&quot;,&quot;to&quot;:&quot;w2&quot;,&quot;label&quot;:&quot;人走了&quot;},{&quot;from&quot;:&quot;w2&quot;,&quot;to&quot;:&quot;stuck&quot;,&quot;label&quot;:&quot;发不出去&quot;},{&quot;from&quot;:&quot;w3&quot;,&quot;to&quot;:&quot;stuck&quot;,&quot;label&quot;:&quot;也发不出去&quot;},{&quot;from&quot;:&quot;stuck&quot;,&quot;to&quot;:&quot;fossil&quot;,&quot;label&quot;:&quot;内存 + CPU 双重账单&quot;}]">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"><div class="fgroup tone-red" data-group-box="leak">
+          <span class="fgroup-label">无缓冲 channel：发送必须有接收者在场</span>
+        </div></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-red" data-id="dad" data-group="leak">
+              
+              
+              <b>父 G</b>
+              <small>收到一个 error，直接 return</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-red" data-id="w2" data-group="leak">
+              
+              
+              <b>worker2</b>
+              <small>ch &lt;- result2</small>
+            </div><div class="fnode tone-red" data-id="w3" data-group="leak">
+              
+              
+              <b>worker3</b>
+              <small>ch &lt;- result3</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-red" data-id="stuck" data-group="leak">
+              
+              
+              <b>永远等不到接收者</b>
+              <small>卡死在发送语句上</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-red" data-id="fossil" data-group="leak">
+              
+              
+              <b>变成化石</b>
+              <small>连同它引用的中间数据一起，GC 每轮还要扫一遍</small>
+            </div></div></div>
+      
+    </div><p>修复有两条，第二条更通用：</p>
+<div class="flowd has-grid has-groups" data-flow data-edges="[{&quot;from&quot;:&quot;f1&quot;,&quot;to&quot;:&quot;f1w&quot;,&quot;label&quot;:&quot;针对这一种形态&quot;},{&quot;from&quot;:&quot;f1w&quot;,&quot;to&quot;:&quot;f2&quot;,&quot;label&quot;:&quot;但它只在「接收者缺席」时成立&quot;},{&quot;from&quot;:&quot;f2&quot;,&quot;to&quot;:&quot;f2w&quot;,&quot;label&quot;:&quot;更通用&quot;}]">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"><div class="fgroup tone-green" data-group-box="fix">
+          <span class="fgroup-label">两条修复路径</span>
+        </div></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-green" data-id="f1" data-group="fix">
+              
+              
+              <b>修一：缓冲匹配 worker 数</b>
+              <small>make(chan result, len(queries))</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="f1w" data-group="fix">
+              
+              
+              <b>发送不再需要接收者在场</b>
+              <small>结果先落地，worker 发完就走</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="f2" data-group="fix">
+              
+              
+              <b>修二：用 context 把「不再需要」通知出去</b>
+              <small>select { case ch &lt;- r: case &lt;-ctx.Done(): return }</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="f2w" data-group="fix">
+              
+              
+              <b>任何深度、任何分支都能收到</b>
+              <small>不靠 channel 巧合，靠显式广播</small>
+            </div></div></div>
+      
+    </div><div class="flowd has-grid has-groups" data-flow data-edges="[{&quot;from&quot;:&quot;cancel&quot;,&quot;to&quot;:&quot;w1&quot;,&quot;label&quot;:&quot;广播&quot;},{&quot;from&quot;:&quot;cancel&quot;,&quot;to&quot;:&quot;w2&quot;,&quot;label&quot;:&quot;&quot;},{&quot;from&quot;:&quot;cancel&quot;,&quot;to&quot;:&quot;w3&quot;,&quot;label&quot;:&quot;&quot;},{&quot;from&quot;:&quot;w1&quot;,&quot;to&quot;:&quot;free&quot;,&quot;label&quot;:&quot;&quot;},{&quot;from&quot;:&quot;w2&quot;,&quot;to&quot;:&quot;free&quot;,&quot;label&quot;:&quot;&quot;},{&quot;from&quot;:&quot;w3&quot;,&quot;to&quot;:&quot;free&quot;,&quot;label&quot;:&quot;&quot;}]">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"><div class="fgroup tone-violet" data-group-box="bcast">
+          <span class="fgroup-label">context 取消：一次广播，所有 worker 收敛</span>
+        </div></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-violet" data-id="cancel" data-group="bcast">
+              
+              
+              <b>父 G 调 cancel()</b>
+              <small>一次调用</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="w1" data-group="bcast">
+              
+              
+              <b>worker1 收到 ctx.Done()</b>
+              <small>return</small>
+            </div><div class="fnode tone-green" data-id="w2" data-group="bcast">
+              
+              
+              <b>worker2 收到 ctx.Done()</b>
+              <small>return</small>
+            </div><div class="fnode tone-green" data-id="w3" data-group="bcast">
+              
+              
+              <b>worker3 收到 ctx.Done()</b>
+              <small>return</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="free" data-group="bcast">
+              
+              
+              <b>全部退出，引用释放</b>
+              <small>G 正常结束，不是泄漏</small>
+            </div></div></div>
+      
+    </div><h3 id="另外三类以及一个共性">另外三类，以及一个共性</h3>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>类型</th><th>长什么样</th><th>修复</th></tr></thead><tbody><tr><th>timeout 分支获胜</th><td data-label="长什么样">select 里 ctx.Done() 先赢，发送永远没有接收者</td><td data-label="修复">channel 改成缓冲 1：让发送先落地，再被遗弃</td></tr><tr><th>range 一个永不关闭的 channel</th><td data-label="长什么样">range 循环永远阻塞在等下一个值</td><td data-label="修复">明确所有权：发送方负责 close，接收方 range 加退出条件</td></tr><tr><th>同步原语失约</th><td data-label="长什么样">忘了 Unlock 的 mutex、忘了 Done 的 WaitGroup、忘了 cancel 的 context</td><td data-label="修复">锁用 defer 释放；Wait 放循环外</td></tr></tbody></table></div><p>真实世界的案例都是第三类：CockroachDB 在 break 前漏了 Unlock，etcd 的 channel 操作顺序竞态让 <code>Status()</code> 永久阻塞，Kubernetes 把 <code>WaitGroup.Wait</code> 误写进循环体。</p>
+<p><mark class="mk-blue">所有四类的共性是同一个：发送方的「结束条件」依赖了接收方会不会出现。</mark></p>
+<div class="callout tone-red">
+      <span class="ic">💧</span>
+      <div><p><strong>长期服务里，泄漏的典型表现是 G 数平缓单调上涨</strong> —— 每次异常路径漏一个，一天漏几万。</p>
+<p>数量级给个直觉：一个每请求泄漏一个 G 的服务，QPS 一千，<strong>一天就是八千六百万个</strong>。
+再轻的 G 也扛不住线性堆积。</p>
+<p><mark class="mk-green">泄漏的根因不是 G 本身，而是所有权不明 —— 没人声明这个 G 由谁等、等多久、等不到怎么办。</mark></p>
+</div>
+    </div><p>修复原则四条：<strong>缓冲容量匹配消费者缺口<strong>（而不是默认无缓冲）、</strong>取消信号沿 context 传播<strong>、</strong>close 责任单点化<strong>、</strong>结构化等待</strong>（Wait 放循环外、锁用 defer 释放）。</p>
+<hr>
+<h2 id="一批随版本过期的常识"><span class="num">03</span>一批随版本过期的「常识」</h2>
+<div class="timeline"><div class="titem tone-blue">
+          <span class="when">Go 1.14</span>
+          <h4>紧循环不再饿死调度器</h4>
+          <p>异步抢占兜底。之前 for { i++ } 能把 P 占死</p>
+        </div><div class="titem tone-green">
+          <span class="when">Go 1.22</span>
+          <h4>闭包共享循环变量的坑被填平</h4>
+          <p>每轮迭代新建变量。之前 go func(){ fmt.Println(v) }() 会打出 c,c,c</p>
+        </div><div class="titem tone-amber">
+          <span class="when">Go 1.25</span>
+          <h4>GOMAXPROCS 默认感知 cgroup</h4>
+          <p>之前默认取宿主机核数，容器限 4 核却配出 64 个 P，触发 CFS 节流</p>
+        </div><div class="titem tone-violet">
+          <span class="when">Go 1.27</span>
+          <h4>内置 goroutine 泄漏检测器</h4>
+          <p>但只覆盖 channel 与 sync 原语上的阻塞，文件/网络 I/O 与自旋不检测</p>
+        </div></div><p>版本表的读法<strong>按角色对号入座</strong>，比按时间顺序背版本有效：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>你是谁</th><th>最该关心</th><th>为什么</th></tr></thead><tbody><tr><th>写并发库的人</th><td data-label="最该关心">Go 1.14</td><td data-label="为什么">紧循环能不能被抢占，直接关系到库的公平性</td></tr><tr><th>写闭包的人</th><td data-label="最该关心">Go 1.22</td><td data-label="为什么">循环变量捕获的语义变了，旧写法在新版本上含义不同</td></tr><tr><th>容器部署者</th><td data-label="最该关心">Go 1.25</td><td data-label="为什么">GOMAXPROCS 算错会直接把延迟打抖</td></tr><tr><th>SRE</th><td data-label="最该关心">Go 1.27</td><td data-label="为什么">泄漏检测器能查到什么、查不到什么，决定你还需不需要 goleak</td></tr></tbody></table></div><p>调试入口按<strong>现象</strong>分工，不要一把抓：</p>
+<div class="tree" data-tree><ul class="tlist"><li class="has-kids">
+            <div class="tnode tone-violet" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>先看现象，再挑工具</b>
+              
+              <span class="tnote">数据竞争、死锁、泄漏是三类问题，别混成一种去查</span>
+            </div>
+            <ul class="tlist"><li class="has-kids">
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>偶发错误结果</b>
+              <code>数据竞争</code>
+              <span class="tnote">工具是 go run -race</span>
+            </div>
+            <ul class="tlist"><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>边界：只覆盖执行过的路径</b>
+              
+              <span class="tnote">没跑到的那条分支里的竞争，它看不见</span>
+            </div>
+            
+          </li></ul>
+          </li><li class="has-kids">
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>G 数单调上涨</b>
+              <code>泄漏</code>
+              <span class="tnote">goroutine profile、goleak、synctest、1.27 内置 profiler</span>
+            </div>
+            <ul class="tlist"><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>边界：1.27 那个只认 channel 与 sync 阻塞</b>
+              
+              <span class="tnote">文件、网络 I/O 与自旋不检测</span>
+            </div>
+            
+          </li></ul>
+          </li><li class="has-kids">
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>卡死不前进</b>
+              <code>死锁或饥饿</code>
+              <span class="tnote">goroutine profile 看阻塞栈</span>
+            </div>
+            <ul class="tlist"><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>边界：需要现场触发</b>
+              
+              <span class="tnote">复现不了就很难抓到</span>
+            </div>
+            
+          </li></ul>
+          </li><li class="has-kids">
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>慢</b>
+              <code>调度与等待</code>
+              <span class="tnote">execution trace、block profile</span>
+            </div>
+            <ul class="tlist"><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>边界：解读成本高</b>
+              
+              <span class="tnote">trace 的信息量大，要有明确假设再去读</span>
+            </div>
+            
+          </li></ul>
+          </li></ul>
+          </li></ul></div><p>使用顺序的直觉：<strong>先用 <code>-race</code> 排除数据竞争 → 再看 goroutine profile 数 G 和看栈 → 最后用 trace 理解时间线。</strong></p>
+<hr>
+<div class="quiz"><details>
+        <summary>一个任务该不该开 goroutine，看哪两个变量？</summary>
+        <div class="a"><p>等待比例和单任务计算量。这两个正好对应 G 的两个能力边界：
+等待能不能被 netpoller 吸收，以及并行度需求是多少。
+高等待 + 小计算是 G 的主场；低等待 + 大计算时 G 帮不上忙，
+该用贴住核数的有界 worker 池。两个变量都会漂移，所以这是对话框架而不是标准答案。</p>
+</div>
+      </details><details>
+        <summary>goroutine 泄漏的根因是什么？为什么说「轻量不代表没有生命周期成本」？</summary>
+        <div class="a"><p>根因是所有权不明 —— 没人声明这个 goroutine 由谁等、等多久、等不到怎么办。
+四类泄漏（父流程早退、timeout 分支获胜、range 永不关闭的 channel、同步原语失约）
+的共性是同一个：发送方的结束条件依赖了接收方会不会出现。
+单个 G 轻，但一个每请求漏一个、QPS 一千的服务一天就漏八千六百万个，
+再轻也扛不住线性堆积 —— 轻量改变的是单个成本，不是生命周期纪律。</p>
+</div>
+      </details><details>
+        <summary>为什么 CPU 密集任务里开更多 goroutine 反而更慢？</summary>
+        <div class="a"><p>因为算力由核数决定，G 只决定有多少条执行流来分这块算力。
+超过并行度之后，调度器白白切来切去：每个被换上的 G 要把工作集拉回 L1，
+被换下的被逐出；切换频率超过工作集复用窗口时，
+CPU 的有效时间大量花在缓存搬进搬出上，吞吐不升反降。</p>
+</div>
+      </details></div>
+
+    <footer>
+      <span>该开还是不该开 · 选型、泄漏与版本坑</span>
+      <span>最后更新 2026-10-01 · 单文件可离线打开</span>
+    </footer>
+  </main>
+</div>
+
+<script src="../../assets/app.js"></script>
+</body>
+</html>

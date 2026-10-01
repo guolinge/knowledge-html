@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-has-toc="1">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>阻塞了怎么办 · netpoller 与 hand-off 两条路</title>
+<meta name="description" content="同样是「等」，网络 fd 能被 epoll 监视、交给 netpoller，文件 read 只能在核心里睡到磁盘把数据搬上来。Go 必须准备两条路，而这两条路的边界决定了它的优势在哪打折。" />
+<link rel="stylesheet" href="../../assets/theme.css" />
+  <link rel="stylesheet" href="../../assets/blocks.css" />
+  <link rel="stylesheet" href="../../assets/archify-embed.css" />
+</head>
+<body>
+<div id="progress"></div>
+<div id="tocScrim"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
+    <a class="brand" href="../../index.html"><span class="dot"></span>知识笔记</a>
+    
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="toc" id="toc">
+      <p class="toc-title">目录</p>
+      <a href="../../index.html" class="sub">← 全部笔记</a>
+      <a href="#同样是等内核给不给句柄">同样是「等」，内核给不给句柄</a>
+      <a href="#泳道一网络-io等待被-netpoller-吸收">泳道一：网络 I/O，等待被 netpoller 吸收</a>
+      <a href="#泳道二真阻塞换一条-m-顶上">泳道二：真阻塞，换一条 M 顶上</a>
+      <a href="#旧-mn-为什么没有这条路">旧 M:N 为什么没有这条路</a>
+      <a href="#内核看到的和-runtime-看到的">内核看到的，和 runtime 看到的</a>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow">● Go 协程 · ⑤</span>
+      <h1>阻塞了怎么办 · netpoller 与 hand-off 两条路</h1>
+      <p class="lede">同样是「等」，网络 fd 能被 epoll 监视、交给 netpoller，文件 read 只能在核心里睡到磁盘把数据搬上来。Go 必须准备两条路，而这两条路的边界决定了它的优势在哪打折。</p>
+    </div>
+
+    <div class="draft-banner">
+    <span>⚠</span>
+    <span>本页状态为 <b>draft</b>：内容尚未人工核对，引用前请自行验证。</span>
+  </div>
+<aside class="needs">
+      <p class="needs-title">读这篇之前，你需要先知道</p>
+      <a class="need" href="../goroutine-gmp/">← <b>4. GMP · G 怎么挂回线程</b><span>G / M / P 各自的职责与生命周期，LRQ、runnext、mcache 和 GOMAXPROCS</span></a>
+    </aside>
+    <div class="provenance"><span><b>来源</b> 飞书文档《从进程线程理解 Go 协程》 https://futu.feishu.cn/docx/MtjTdgOM2okwOdxpPDecVZMrnqc @ revision 105</span><span><b>生成</b> 2026-10-01</span><span><b>模型</b> claude-opus-4-5</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">Go</span> <span class="tag tone-muted">netpoller</span> <span class="tag tone-muted">epoll</span> <span class="tag tone-muted">系统调用</span></span></div>
+
+<h2 id="同样是等内核给不给句柄"><span class="num">01</span>同样是「等」，内核给不给句柄</h2>
+<p>G 已经挂回了 M，那 G 阻塞了怎么办？</p>
+<p>答案是<strong>分流<strong>。而分流的原因只有一条：</strong>「等待」能不能被内核以外的机制接管，取决于内核给不给句柄。</strong></p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>等的是什么</th><th>内核给不给句柄</th><th>于是怎么处理</th></tr></thead><tbody><tr><th>网络 fd</th><td data-label="内核给不给句柄"><span class="tag tone-green">给。epoll / kqueue / IOCP 能统一监视</span></td><td data-label="于是怎么处理">注册一个事件，数据到了内核来喊你 → 交给 netpoller</td></tr><tr><th>文件 I/O</th><td data-label="内核给不给句柄"><span class="tag tone-red">不给。read 就是要在内核里睡到磁盘把数据搬上来</span></td><td data-label="于是怎么处理">只能真的阻塞一条 M → 走 hand-off</td></tr><tr><th>CGO / 部分同步系统调用</th><td data-label="内核给不给句柄"><span class="tag tone-red">同理，没有 poll 接口</span></td><td data-label="于是怎么处理">同上</td></tr></tbody></table></div><p><mark class="mk-blue">这就是「网络 I/O 与阻塞系统调用为什么走两条路」的全部理由。</mark> runtime 必须准备两条路，因为有一类等待它接管不了。</p>
+<hr>
+<h2 id="泳道一网络-io等待被-netpoller-吸收"><span class="num">02</span>泳道一：网络 I/O，等待被 netpoller 吸收</h2>
+<div class="flowd has-grid has-groups" data-flow data-edges="[{&quot;from&quot;:&quot;g&quot;,&quot;to&quot;:&quot;park&quot;,&quot;label&quot;:&quot;挂起&quot;},{&quot;from&quot;:&quot;park&quot;,&quot;to&quot;:&quot;m&quot;,&quot;label&quot;:&quot;它去干别的了&quot;},{&quot;from&quot;:&quot;m&quot;,&quot;to&quot;:&quot;ready&quot;,&quot;label&quot;:&quot;epoll 通知 fd 就绪&quot;}]">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"><div class="fgroup tone-green" data-group-box="np">
+          <span class="fgroup-label">G 挂在 netpoller 上，M 全程没睡</span>
+        </div></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-green" data-id="g" data-group="np">
+              
+              
+              <b>G 调 conn.Read</b>
+              <small>数据还没到</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-amber" data-id="park" data-group="np">
+              
+              
+              <b>gopark</b>
+              <small>fd 注册进 epoll，G 状态改成 Waiting</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="m" data-group="np">
+              
+              
+              <b>M 立刻取下一个 G</b>
+              <small>从 LRQ 拿一个继续跑</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="ready" data-group="np">
+              
+              
+              <b>goready</b>
+              <small>fd 就绪，G 被放回 LRQ</small>
+            </div></div></div>
+      
+    </div><p><mark class="mk-blue">gopark 和 goready 这两个名字值得记住：所谓「阻塞」在 Go 里就是一次状态改写加一次入队，没有任何内核参与。</mark> 这正是第 ① 篇那趟「进出内核的旅程」被绕开的全部秘密。</p>
+<p>谁在驱动 netpoller？两条路：<strong>空闲的 M 取不到 G 时会顺带 poll 一次<strong>；</strong>后台的 sysmon 也会周期性检查</strong>。就绪的 G 被批量放回 LRQ，等下一次被选中。</p>
+<div class="seqd has-grid" data-seq data-n="3">
+      <svg class="seqd-svg" aria-hidden="true">
+        <defs>
+          <marker id="s-fill" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+          <marker id="s-open" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10" fill="none" stroke="currentColor" stroke-width="1.4"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="seqd-head"><div class="scell"><div class="spart tone-green" data-id="g1">
+          <b>G1</b><small>要读网络</small>
+        </div></div><div class="scell"><div class="spart tone-violet" data-id="rt">
+          <b>runtime</b><small>netpoller 在这</small>
+        </div></div><div class="scell"><div class="spart tone-blue" data-id="m">
+          <b>M</b><small>那条真线程</small>
+        </div></div></div>
+      <div class="seqd-body"><div class="smsg" data-from="g1" data-to="rt" data-kind="sync" data-i="1" data-note="1"><span class="snote">1</span><span class="slabel">conn.Read → 数据没到</span></div><div class="smsg is-self" data-from="rt" data-to="rt" data-kind="self" data-i="2" data-note="2"><span class="snote">2</span><span class="slabel">fd 注册进 epoll；G1 状态改为 Waiting</span></div><div class="smsg" data-from="rt" data-to="m" data-kind="sync" data-i="3" data-note="3"><span class="snote">3</span><span class="slabel">M 转头去跑 LRQ 里的 G3</span></div><div class="smsg is-self" data-from="rt" data-to="rt" data-kind="self" data-i="4" data-note="4" style="margin-top:40px"><span class="snote">4</span><span class="slabel">epoll 通知 fd 就绪 → goready，G1 回 LRQ</span></div><div class="smsg" data-from="rt" data-to="g1" data-kind="reply" data-i="5" data-note="5"><span class="snote">5</span><span class="slabel">下次被选中时，它像什么都没发生过</span></div></div>
+    </div><hr>
+<h2 id="泳道二真阻塞换一条-m-顶上"><span class="num">03</span>泳道二：真阻塞，换一条 M 顶上</h2>
+<div class="flowd has-grid has-groups" data-flow data-edges="[{&quot;from&quot;:&quot;g&quot;,&quot;to&quot;:&quot;unbind&quot;,&quot;label&quot;:&quot;entersyscall&quot;},{&quot;from&quot;:&quot;unbind&quot;,&quot;to&quot;:&quot;m1&quot;,&quot;label&quot;:&quot;解绑之后才敢进去睡&quot;},{&quot;from&quot;:&quot;m1&quot;,&quot;to&quot;:&quot;m2&quot;,&quot;label&quot;:&quot;不能让它拖着 P 一起睡&quot;},{&quot;from&quot;:&quot;m2&quot;,&quot;to&quot;:&quot;back&quot;,&quot;label&quot;:&quot;exitsyscall&quot;}]">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"><div class="fgroup tone-amber" data-group-box="ho">
+          <span class="fgroup-label">hand-off：M 与 P 解绑，P 交给别人</span>
+        </div></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-amber" data-id="g" data-group="ho">
+              
+              
+              <b>G 要读文件</b>
+              <small>没有 poll 接口可用</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="unbind" data-group="ho">
+              
+              
+              <b>先解绑 P</b>
+              <small>交出「运行 Go 代码的许可」</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-amber" data-id="m1" data-group="ho">
+              
+              
+              <b>M1 陪 G 沉进内核</b>
+              <small>它这下是真的睡了</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="m2" data-group="ho">
+              
+              
+              <b>P 交给 M2</b>
+              <small>继续消费 LRQ，服务没停</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-muted" data-id="back" data-group="ho">
+              
+              
+              <b>read 返回</b>
+              <small>G 重新入队，M1 变成备用线程</small>
+            </div></div></div>
+      
+    </div><div class="callout tone-red">
+      <span class="ic">⚠</span>
+      <div><p><strong>hand-off 是兜底，不是免费。</strong></p>
+<p>每个真阻塞的调用都要一条 M 沉底陪着。一百个 G 同时做文件 I/O，
+runtime 就要维持一百条 M —— <mark class="mk-blue">M 膨胀，内核调度压力回升，第 ① 篇的线程成本原样回来。</mark></p>
+<p>这也是为什么重文件 I/O 场景里，goroutine 的优势会打折：
+netpoller 才是优势的主引擎，hand-off 只是止损。</p>
+</div>
+    </div><p>拖一下滑块，看两条路的代价怎么分道扬镳：</p>
+<div class="demo" data-widget="handoff-lab" data-config="{&quot;gomaxprocs&quot;:4,&quot;blocked&quot;:30,&quot;max&quot;:120}">
+      <div class="demo-head">
+        <span class="title">同样在等，M 的数量不一样</span>
+        <span class="status" data-status>拖动滑块改阻塞的 G 数</span>
+        <span class="spacer"></span>
+        
+      </div>
+      <div class="demo-body custom" data-mount></div>
+    </div><p>顺带解释一个常见疑问：<strong>为什么 M2 是「新建或唤醒」，而不是等 M1 回来复用？</strong> 因为阻塞的 M1 何时醒来无人知晓，runtime 不会把赌注压在它身上 —— 先补一个可用的，等 M1 回来再收编。</p>
+<hr>
+<h2 id="旧-mn-为什么没有这条路"><span class="num">04</span>旧 M:N 为什么没有这条路</h2>
+<div class="cards" data-cols="2"><div class="ccard tone-red">
+          <span class="tag tone-red">机制缺口</span>
+          <h4>缺一半：没有 netpoller</h4>
+          <p>没人把网络等待统一收进用户态调度器</p>
+          <div class="cbody"><p>旧式线程库只能<strong>包裹既有的系统调用接口</strong>，
+它无法要求内核把等待语义交出来。</p>
+<p>于是网络等待只能和文件等待一样，一条 M 配一个 —— 或者干脆连坐。</p>
+</div>
+          
+        </div><div class="ccard tone-amber">
+          <span class="tag tone-amber">契约缺口</span>
+          <h4>缺另一半：语言级封装</h4>
+          <p>没有语言级 I/O 封装来保证「每次阻塞前都先解绑」</p>
+          <div class="cbody"><p>就算有 netpoller，也得保证<strong>每一次</strong>可能阻塞的调用都走正确的路径。
+这件事只能由语言和标准库一起保证。</p>
+<p><mark class="mk-blue">Go 能做成，是因为 runtime 与标准库是一起设计的</mark> ——
+netpoller 是 runtime 的一部分，net 包天生知道该怎么配合它。</p>
+</div>
+          
+        </div></div><hr>
+<h2 id="内核看到的和-runtime-看到的"><span class="num">05</span>内核看到的，和 runtime 看到的</h2>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>视角</th><th>看到的画面</th><th>结论</th></tr></thead><tbody><tr><th>OS 看到的</th><td data-label="看到的画面">M 一直在跑，<strong>从未进入等待态</strong></td><td data-label="结论"><span class="tag tone-violet">「这个进程是 CPU 密集的」</span></td></tr><tr><th>runtime 看到的</th><td data-label="看到的画面">G 在等：等网络、等 channel、等定时器</td><td data-label="结论"><span class="tag tone-green">「绝大多数 G 只是暂时睡着」</span></td></tr></tbody></table></div><p><mark class="mk-blue">从 OS 的视角看，那条线程从未进入等待态。</mark> Go 在操作系统层面，把 I/O 密集型活折叠成了 CPU 密集型活。</p>
+<p>这就是「看起来会阻塞、实际不阻塞」的完整含义 —— 阻塞的语义被 netpoller 与 hand-off 消化在用户态，内核看到的只是一台一直在干活的机器。</p>
+<div class="callout tone-amber">
+      <span class="ic">🔄</span>
+      <div><p><strong>一个正在发生的变化。</strong></p>
+<p>io_uring 让普通文件也能提交异步读、由内核完成队列回调，正在改变文件 I/O 的处境。</p>
+<p>但截至 Go 1.27，标准库的文件 I/O 仍走<strong>阻塞系统调用加 hand-off</strong>，
+io_uring 的集成仍在演进。<mark class="mk-blue">读这类文档时要分清版本。</mark></p>
+</div>
+    </div><hr>
+<div class="quiz"><details>
+        <summary>为什么网络 I/O 和文件 I/O 在 Go 里走两条完全不同的路？</summary>
+        <div class="a"><p>因为「等待」能不能被内核以外的机制接管，取决于内核给不给句柄。
+网络 fd 可以被 epoll/kqueue/IOCP 统一监视，所以能交给 netpoller；
+文件 read 在经典模型里没有 poll 接口，就是要在内核里睡到磁盘把数据搬上来，
+只能走 hand-off，让一条 M 陪着沉下去。</p>
+</div>
+      </details><details>
+        <summary>hand-off 的代价是什么，什么时候会显出来？</summary>
+        <div class="a"><p>每个真阻塞的调用都要一条 M 陪着。一百个 G 同时做文件 I/O，
+runtime 就要维持一百条 M，内核调度压力回升，线程成本原样回来。
+所以在重文件 I/O 或 CGO 场景里，goroutine 的优势会明显打折 ——
+netpoller 才是优势主引擎，hand-off 只是止损。</p>
+</div>
+      </details><details>
+        <summary>为什么说「从 OS 视角，那条线程从未进入等待态」？</summary>
+        <div class="a"><p>因为网络等待被 netpoller 消化了：G 被挂起，M 转头去跑别的 G，内核看不到 M 睡过。
+文件 I/O 确实会让一条 M 睡下去，但那条 M 已经把 P 交了出去，
+剩下的 P 继续在跑 Go 代码。所以内核看到的是一台一直在干活的机器，
+而 runtime 看到的是「绝大多数 G 只是暂时睡着」。</p>
+</div>
+      </details></div>
+
+    <footer>
+      <span>阻塞了怎么办 · netpoller 与 hand-off 两条路</span>
+      <span>最后更新 2026-10-01 · 单文件可离线打开</span>
+    </footer>
+  </main>
+</div>
+
+<script src="../../assets/app.js"></script>
+</body>
+</html>
