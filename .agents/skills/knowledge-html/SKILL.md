@@ -2239,6 +2239,25 @@ text: |
 
 这不是假设，是常态。所以有一套规则必须共同遵守。
 
+```callout
+tone: green
+icon: 📌
+text: |
+  **开工第一件事：读会话板。**
+
+  ```bash
+  BOARD="$(dirname "$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")")/.kh-board.md"
+  tail -30 "$BOARD"
+  ```
+
+  ==那是几个会话之间唯一的通信渠道。== 谁在改什么、谁要推了、谁给你留了话，都在上面。
+
+  完整协议见 [`references/multi-session-board.md`](references/multi-session-board.md)，
+  一句话版：**看 `tail -30`；发 `printf '...\n' >> "$BOARD"`；永远不要重写整个文件。**
+
+  **动共享源之前、推送之前，各读一次。** 这个板子不会通知你 —— 只有你去读的时候才生效。
+```
+
 ### 先搞清楚：这不是分支的问题
 
 ```callout

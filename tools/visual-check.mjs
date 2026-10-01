@@ -169,6 +169,16 @@ function probeOnce(html) {
 
 const ATTEMPTS = 3;
 
+/* 哪些篇的诊断是**可信的** —— 只有可信的篇，才能拿它的结果去判断
+   「基线条目是不是过期了」。
+   踩过：整机 load 46 的时候推送被拦，报「基线里有 3 条已经不成立了」，
+   而那 3 条所属的篇里有两篇**我根本没改过**。
+   根因：一篇重试第 2 次才通过时，它的基线条目压根不会被记录进 baselineHits
+   —— 于是「没命中」被误读成「过期了」。
+   ==「没命中」和「命中不了」是两回事。== */
+const reliable = new Set();
+const unreliable = new Set();
+
 for (const file of files) {
   const slug = path.basename(file, '.html');
   const html = fs
@@ -197,8 +207,14 @@ for (const file of files) {
     /* 中途挂过 = 这篇笔记的检查不稳定。不阻塞，但要让人知道 ——
        否则「某次跑过了」会掩盖一个真的偶发问题。 */
     const flaky = runs.some((r) => !r.ok || r.problems.length);
-    if (flaky) console.error(`  ⚠ ${slug}  第 ${runs.length} 次才通过 —— 检查不稳定，见上（不阻塞）`);
-    else console.log(`  ✓ ${slug}`);
+    if (flaky) {
+      console.error(`  ⚠ ${slug}  第 ${runs.length} 次才通过 —— 检查不稳定，见上（不阻塞）`);
+      unreliable.add(slug);
+    } else {
+      console.log(`  ✓ ${slug}`);
+    }
+    /* 干净就是干净：这一篇的诊断可信（基线条目没命中就是真没命中）。 */
+    reliable.add(slug);
     continue;
   }
 
@@ -211,6 +227,7 @@ for (const file of files) {
 
   const same = runs.every((r) => r.ok && JSON.stringify(r.problems) === JSON.stringify(last.problems));
   if (!same) {
+    unreliable.add(slug);
     console.error(
       `  ⚠ ${slug}  ${ATTEMPTS} 次的诊断不一致（${runs.map((r) => (r.ok ? r.problems.length : '?')).join('/')} 处）` +
         `\n      → 多半是机器负载高、探针量到的是不同时刻的布局。**不阻塞**。` +
@@ -219,6 +236,7 @@ for (const file of files) {
     continue;
   }
 
+  reliable.add(slug);   /* 三次诊断一致 —— 这一篇的结果可信 */
   const problems = last.problems;
   const fresh = problems.filter((p) => !isKnown(slug, p));
   const old = problems.length - fresh.length;
@@ -238,13 +256,32 @@ for (const file of files) {
 
 if (fs.existsSync(tmp)) fs.unlinkSync(tmp);
 
-/* 基线里的条目不再命中 = 问题已经被修了。提示删掉，让基线只能变小。 */
-const stale = baseline.known.filter((k) => !baselineHits.has(JSON.stringify(k)));
+/* 基线里的条目不再命中 = 问题已经被修了。提示删掉，让基线只能变小。
+
+   ==但只在「可信的篇」上判。== 一篇因为负载重试才通过、或者三次诊断不一致时，
+   它的基线条目命中不了 —— 那不是「过期」，是「这次没量准」。
+   拿它去删基线，下一次负载一高就会真的被拦下，而且再也拦不住。
+
+   这次真踩了：load 46 时推送被拦，报的 3 条里有 2 条属于我根本没改过的篇。 */
+const checked = new Set(files.map((f) => path.basename(f, '.html')));
+const skipped = baseline.known.filter(
+  (k) => checked.has(k.slug) && !reliable.has(k.slug),
+);
+const stale = baseline.known.filter(
+  (k) => reliable.has(k.slug) && !baselineHits.has(JSON.stringify(k)),
+);
 if (stale.length) {
   console.error(`\n  基线里有 ${stale.length} 条已经不成立了：`);
   for (const k of stale) console.error(`      ${k.slug} — ${k.why || k.match[0]}`);
   console.error('  这些问题已经不存在（好事）—— 把对应条目从 tools/visual-baseline.json 里删掉。');
   total += stale.length;
+}
+if (skipped.length) {
+  console.error(
+    `\n  ⚠ 有 ${skipped.length} 条基线这次**没法判**（所属的篇检查不稳定，或没跑）：` +
+      `\n      ${[...new Set(skipped.map((k) => k.slug))].join('  ')}` +
+      `\n      → 「没命中」不等于「过期」。等负载降下来重跑再判，别据此删基线。`,
+  );
 }
 
 if (total) {
