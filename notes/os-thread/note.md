@@ -157,11 +157,25 @@ edges:
 
 ### 栈：每个线程一个
 
-栈不是一块被动分配的内存，它是运行时的函数调用链。
+栈不是一块被动分配的内存，它是**运行时的函数调用链**。每调一层函数就往上压一帧，返回时弹掉：
 
-线程 A 正在 `play()` → `decode()` → `read_frame()` 这样一层层往下调，这条链就码在线程 A 的栈上。线程 B 可能在完全不同的位置（比如 `main()` → `loop()`）。
+```flow
+grid: true
+nodes:
+  - { id: a0, label: "main()", sub: "线程 A 的栈底", row: 0, tone: green }
+  - { id: b0, label: "main()", sub: "线程 B 的栈底", row: 0, tone: blue }
+  - { id: a1, label: "loop()", sub: "A 调进来了一层", row: 1, tone: green }
+  - { id: b1, label: "loop()", sub: "B 也调了一层，是它自己那份", row: 1, tone: blue }
+  - { id: a2, label: "decode()", sub: "A 现在停在这", row: 2, tone: green }
+  - { id: b2, label: "handle_input()", sub: "B 现在停在这", row: 2, tone: blue }
+edges:
+  - { from: a0, to: a1, label: "调用" }
+  - { from: a1, to: a2 }
+  - { from: b0, to: b1 }
+  - { from: b1, to: b2 }
+```
 
-!!!两个线程不可能共用一个栈。!! 共用的话，A 调用的返回地址会被 B 覆盖掉，两个人都回不去。
+!!!两个线程不可能共用一个栈。!! 共用的话，B 的调用会把 A 压在下面的返回地址覆盖掉，两个人都回不去。
 
 所以：
 
@@ -373,7 +387,24 @@ rows:
 
 !!用户线程最致命的缺陷是第一条。!!
 
-一个用户线程发起了系统调用被阻塞，**内核只看到「这个进程阻塞了」**，于是把整个进程挂起。同进程里其他用户线程明明可以干活，也一起停了。原因很直接：内核根本不知道它们的存在。
+```flow
+grid: true
+nodes:
+  - { id: p,   label: "一个进程", sub: "U1 / U2 / U3 由用户态的线程库管着", row: 0, tone: violet }
+  - { id: u1,  label: "用户线程 U1", sub: "发起一次读盘系统调用", row: 1, tone: green }
+  - { id: u2,  label: "用户线程 U2", sub: "手头还有活要算", row: 1, tone: blue }
+  - { id: u3,  label: "用户线程 U3", sub: "也有活要算", row: 1, tone: blue }
+  - { id: k,   label: "内核只看到「这个进程」", sub: "它根本不知道 U2 和 U3 存在", row: 2, tone: violet }
+  - { id: stop, label: "整个进程被挂起", sub: "U2 和 U3 明明能干活，也一起停了", row: 3, tone: red }
+edges:
+  - { from: p,  to: u1 }
+  - { from: p,  to: u2 }
+  - { from: p,  to: u3 }
+  - { from: u1, to: k, label: "只有 U1 走进了内核", labelDx: -44 }
+  - { from: k,  to: stop, label: "于是内核把整个进程挂起" }
+```
+
+看这张图：U2 和 U3 下面**一根线都没有** —— 它们压根到不了内核。所以内核做决定时，世界里只有「这个进程要等 I/O」这一件事。
 
 ### 用户线程和内核线程怎么对应
 

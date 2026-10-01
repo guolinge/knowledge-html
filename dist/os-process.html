@@ -3973,6 +3973,7 @@ svg[data-preset="blueprint"] .c-security-group,
       <a href="../../index.html" class="sub">← 全部笔记</a>
       <a href="#一行代码要跑起来中间隔了什么">一行代码要跑起来，中间隔了什么</a>
       <a href="#cpu-为什么不能干等" class="sub">CPU 为什么不能干等</a>
+      <a href="#从轮询换成中断花了十几年" class="sub">从轮询换成中断，花了十几年</a>
       <a href="#并发的错觉" class="sub">并发的错觉</a>
       <a href="#进程的七种状态">进程的七种状态</a>
       <a href="#先看内存里的五个状态" class="sub">先看内存里的五个状态</a>
@@ -4017,69 +4018,88 @@ svg[data-preset="blueprint"] .c-security-group,
  8412 pts/3  00:12:37 python
 </code></pre></div>
 <p>这一行就是一个<strong>进程</strong>：一个正在运行的程序。</p>
-<p>程序本身只是个文件。它躺在硬盘上，不占 CPU、不占内存、也不会自己变。只有当操作系统把它装载进内存、CPU 开始执行里面的指令，它才成为一个进程。</p>
-<table>
-<thead>
-<tr>
-<th></th>
-<th>程序</th>
-<th>进程</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td>存在形态</td>
-<td>硬盘上的可执行文件</td>
-<td>内存里正在跑的一份执行</td>
-</tr>
-<tr>
-<td>有几份</td>
-<td>一份文件</td>
-<td>同一个程序可以同时跑出好几个进程</td>
-</tr>
-<tr>
-<td>会自己变吗</td>
-<td>不会</td>
-<td>每时每刻都在变：跑到哪了、占了多少内存、打开了哪些文件</td>
-</tr>
-</tbody>
-</table>
-<p>用做饭打个比方：菜谱是程序，食材是数据，照着菜谱把菜做出来这件事，才是进程。同一份菜谱，三个人可以同时各做一份、互不干扰，那是三个进程。</p>
+<p>程序本身只是个文件，躺在硬盘上，不占 CPU、不占内存、也不会自己变。<mark class="mk-blue">只有当操作系统把它装载进内存、CPU 开始执行里面的指令，它才成为一个进程。</mark></p>
+<div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;file&quot;,&quot;to&quot;:&quot;run&quot;,&quot;label&quot;:&quot;同一个文件&quot;},{&quot;from&quot;:&quot;run&quot;,&quot;to&quot;:&quot;p1&quot;,&quot;label&quot;:&quot;每跑一次就多一个进程&quot;},{&quot;from&quot;:&quot;run&quot;,&quot;to&quot;:&quot;p2&quot;},{&quot;from&quot;:&quot;run&quot;,&quot;to&quot;:&quot;p3&quot;}]">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-muted" data-id="file">
+              
+              
+              <b>python 可执行文件</b>
+              <small>硬盘上的一份文件，4.2 MB</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="run">
+              
+              
+              <b>运行它</b>
+              <small>装载进内存，CPU 开始执行指令</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="p1">
+              
+              
+              <b>进程 8412</b>
+              <small>吃 1.2 GB · 开着 3 个文件</small>
+            </div><div class="fnode tone-green" data-id="p2">
+              
+              
+              <b>进程 8413</b>
+              <small>同一份代码，另一份数据</small>
+            </div><div class="fnode tone-green" data-id="p3">
+              
+              
+              <b>进程 9021</b>
+              <small>只是在看 --help</small>
+            </div></div></div>
+      
+    </div><p><mark class="mk-blue">同一个文件可以同时跑出好几个进程，而文件本身一动不动。</mark> 用做饭打个比方：菜谱是程序，食材是数据，照着菜谱做菜这件事才是进程。同一份菜谱，三个人同时各做一份。</p>
 <h3 id="cpu-为什么不能干等">CPU 为什么不能干等</h3>
-<p>假设有一段代码要「从硬盘读一个 500 MB 的文件」。硬盘读完要几百毫秒，而 CPU 执行一条指令是纳秒级，这两件事差了<strong>八个数量级</strong>。</p>
-<p>CPU 在这几百毫秒里干等着，那它 99.99% 的时间都在发呆。</p>
-<p>所以操作系统不让它等：进程 A 发出读盘请求后，CPU 立刻转去执行进程 B；硬盘把数据准备好了，发一个<strong>中断</strong>告诉 CPU，CPU 再回到 A 继续往下跑。</p>
-<p>烧水的类比很贴切。你不会站在水壶前面盯着它烧开，而是先去干别的，听到「嘀」的一声再回来倒水。那声「嘀」就是中断。</p>
-<div class="callout tone-violet">
-      <span class="ic">📜</span>
-      <div><p><strong>「别等，让事件来敲门」不是一开始就有的。</strong></p>
-<p>早期机器用<strong>轮询</strong>：CPU 反复去读设备的状态寄存器，问「好了没」。浪费 CPU，但实现简单。</p>
-<p>转向中断驱动是 1950 年代中后期到 1960 年代慢慢完成的，<strong>没有一个确切的日期</strong>：</p>
-<table>
-<thead>
-<tr>
-<th>时间</th>
-<th>发生了什么</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td>1950s 中期</td>
-<td>中断机制出现。UNIVAC 1103 / 1103A 和 NBS 的 DYSEAC 都被算作早期实现，<mark class="mk-blue">「谁是第一台」至今有争议</mark></td>
-</tr>
-<tr>
-<td>1958</td>
-<td>IBM 709 用上 DMA：数据在设备和内存之间直接搬，CPU 连「搬」这个动作都不参与了</td>
-</tr>
-<tr>
-<td>1964</td>
-<td>CDC 6600，当时最快的机器之一，对 I/O <strong>仍然用轮询</strong></td>
-</tr>
-</tbody>
-</table>
-<p>最后一行才是重点：中断不是一夜之间取代轮询的，两套办法长期并存。</p>
-</div>
-    </div><h3 id="并发的错觉">并发的错觉</h3>
+<p>假设有一段代码要「从硬盘读一个 500 MB 的文件」。硬盘读完要几百毫秒，而 CPU 执行一条指令是纳秒级，这两件事差了<strong>八个数量级</strong>。CPU 要是在这几百毫秒里干等着，那它 99.99% 的时间都在发呆。</p>
+<p>所以操作系统不让它等：</p>
+<div class="seqd has-grid" data-seq data-n="4">
+      <svg class="seqd-svg" aria-hidden="true">
+        <defs>
+          <marker id="s-fill" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+          <marker id="s-open" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10" fill="none" stroke="currentColor" stroke-width="1.4"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="seqd-head"><div class="scell"><div class="spart tone-green" data-id="a">
+          <b>进程 A</b><small>要读那 500 MB</small>
+        </div></div><div class="scell"><div class="spart tone-violet" data-id="cpu">
+          <b>CPU</b><small>只有一个</small>
+        </div></div><div class="scell"><div class="spart tone-amber" data-id="d">
+          <b>硬盘</b><small>慢六个数量级</small>
+        </div></div><div class="scell"><div class="spart tone-blue" data-id="b">
+          <b>进程 B</b><small>就绪队列里的另一个</small>
+        </div></div></div>
+      <div class="seqd-body"><div class="smsg" data-from="a" data-to="cpu" data-kind="sync" data-i="1" data-note="1"><span class="snote">1</span><span class="slabel">read(fd, buf, 500MB)</span></div><div class="smsg" data-from="cpu" data-to="d" data-kind="async" data-i="2" data-note="2"><span class="snote">2</span><span class="slabel">把请求交给硬盘</span></div><div class="smsg" data-from="cpu" data-to="b" data-kind="sync" data-i="3" data-note="3" style="margin-top:12px"><span class="snote">3</span><span class="slabel">不等了，转去跑 B</span></div><div class="smsg" data-from="d" data-to="cpu" data-kind="sync" data-i="4" data-note="4" style="margin-top:34px"><span class="snote">4</span><span class="slabel">数据好了：发一个中断</span></div><div class="smsg" data-from="cpu" data-to="a" data-kind="reply" data-i="5" data-note="5"><span class="snote">5</span><span class="slabel">A 被唤醒，接着上次往下跑</span></div></div>
+    </div><p><mark class="mk-blue">第 4 步那条中断，是整个机制的关键。</mark> 没有它，CPU 就只能隔一会儿去问一次硬盘「好了没」，也就是轮询。</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>做法</th><th>CPU 在等硬盘时干什么</th><th>代价</th></tr></thead><tbody><tr><th>轮询</th><td data-label="CPU 在等硬盘时干什么">反复去读设备的状态寄存器，问「好了没」</td><td data-label="代价">CPU 被白白烧掉，但它实现简单</td></tr><tr><th>中断驱动</th><td data-label="CPU 在等硬盘时干什么"><span class="tag tone-green">把请求交出去，转头去干别的</span></td><td data-label="代价">多了一套中断机制和对应的硬件支持</td></tr></tbody></table></div><p>烧水的类比很贴切：你不会站在水壶前面盯着它烧开，而是先去干别的，听到「嘀」的一声再回来倒水。那声「嘀」就是中断。</p>
+<h3 id="从轮询换成中断花了十几年">从轮询换成中断，花了十几年</h3>
+<div class="timeline"><div class="titem tone-blue">
+          <span class="when">1950s 中期</span>
+          <h4>中断机制出现</h4>
+          <p>UNIVAC 1103 / 1103A 和 NBS 的 DYSEAC 都被算作早期实现，「谁是第一台」至今有争议</p>
+        </div><div class="titem tone-violet">
+          <span class="when">1958</span>
+          <h4>IBM 709 用上 DMA</h4>
+          <p>数据在设备和内存之间直接搬，CPU 连「搬」这个动作都不参与了</p>
+        </div><div class="titem tone-amber">
+          <span class="when">1964</span>
+          <h4>CDC 6600 对 I/O 仍然用轮询</h4>
+          <p>当时最快的机器之一，却没走这条路</p>
+        </div></div><p>最后一行的意思很明确：<mark class="mk-blue">中断不是一夜之间取代轮询的，两套办法长期并存。</mark> 所以「CPU 什么时候开始事件驱动」这个问题，本来就没有一个确切的日期。</p>
+<h3 id="并发的错觉">并发的错觉</h3>
 <p>单核 CPU 在某一瞬间只能执行一个进程。但在 1 秒钟里它可能切换几十次，每个进程跑几十到几百毫秒。</p>
 <p>于是在人眼看来，音乐在放、浏览器在渲染、下载在下，好像是同时在跑。</p>
 <p><mark class="mk-blue">这叫并发：宏观上同时，微观上轮流。</mark></p>
@@ -4183,29 +4203,7 @@ svg[data-preset="blueprint"] .c-security-group,
 <p>如果一个进程被阻塞了，它占的物理内存还留着吗？</p>
 </blockquote>
 <p>物理内存就那么点，让一堆啥也干不了的进程占着，是纯浪费。虚拟内存管理会把阻塞进程的物理内存换出到硬盘，等要跑了再换回来。</p>
-<p>于是多出一个独立的维度：<strong>进程在不在物理内存里</strong>。把「在不在内存」和「就绪 / 阻塞」交叉一下，就从三个状态变出五个：</p>
-<table>
-<thead>
-<tr>
-<th></th>
-<th>在内存里</th>
-<th>被换到硬盘上</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td>就绪</td>
-<td>就绪</td>
-<td>就绪挂起</td>
-</tr>
-<tr>
-<td>阻塞</td>
-<td>阻塞</td>
-<td>阻塞挂起</td>
-</tr>
-</tbody>
-</table>
-<p><mark class="mk-blue">「挂起」说的就是右边这一列：进程不占物理内存。</mark> 它和「就绪还是阻塞」是两件互不相干的事。</p>
+<p>于是多出一个独立的维度：<strong>进程在不在物理内存里</strong>。把「在不在内存」和「就绪 / 阻塞」交叉一下，三个状态就变成了四个：</p>
 <div class="flowd has-grid has-groups" data-flow data-edges="[{&quot;from&quot;:&quot;ready&quot;,&quot;to&quot;:&quot;rsusp&quot;,&quot;label&quot;:&quot;换出&quot;,&quot;dashed&quot;:true},{&quot;from&quot;:&quot;rsusp&quot;,&quot;to&quot;:&quot;ready&quot;,&quot;label&quot;:&quot;换入&quot;},{&quot;from&quot;:&quot;block&quot;,&quot;to&quot;:&quot;bsusp&quot;,&quot;label&quot;:&quot;换出&quot;,&quot;dashed&quot;:true},{&quot;from&quot;:&quot;bsusp&quot;,&quot;to&quot;:&quot;block&quot;,&quot;label&quot;:&quot;换入&quot;},{&quot;from&quot;:&quot;bsusp&quot;,&quot;to&quot;:&quot;rsusp&quot;,&quot;label&quot;:&quot;等的事发生了&quot;}]">
       <svg class="flowd-svg" aria-hidden="true">
         <defs>
@@ -4216,7 +4214,7 @@ svg[data-preset="blueprint"] .c-security-group,
         </defs>
       </svg>
       <div class="flowd-groups"><div class="fgroup tone-muted" data-group-box="mem">
-          <span class="fgroup-label">内存里（上排） ↔ 硬盘上（下排）</span>
+          <span class="fgroup-label">上排：在物理内存里　　下排：已被换出到硬盘</span>
         </div></div>
       <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-blue shape-pill" data-id="ready" data-group="mem">
               
@@ -4240,8 +4238,9 @@ svg[data-preset="blueprint"] .c-security-group,
               <small>在硬盘，也还在等</small>
             </div></div></div>
       
-    </div><p><mark class="mk-amber">「阻塞挂起」是两件事叠在一起，不是第三种等待。</mark></p>
-<p>进程可以既阻塞又挂起：它在等一个事件（阻塞），同时它不占物理内存（挂起）。这两个条件互相独立，前面那张表的四个格子就是全部组合。</p>
+    </div><p>「挂起」说的就是下面那一排：进程不占物理内存。<mark class="mk-blue">它和「就绪还是阻塞」是两件互不相干的事</mark>，所以能交叉出四个格子。</p>
+<p><mark class="mk-amber">「阻塞挂起」是两件事叠在一起，不是第三种等待。</mark></p>
+<p>进程可以既阻塞又挂起：它在等一个事件（阻塞），同时它不占物理内存（挂起）。这两个条件互相独立，上面那四个框就是全部组合。</p>
 <p>触发挂起的原因不止内存不够：</p>
 <div class="cards" data-cols="2"><div class="ccard tone-blue">
           <span class="tag tone-blue">系统决定</span>
@@ -4377,13 +4376,7 @@ svg[data-preset="blueprint"] .c-security-group,
             
           </li></ul>
           </li></ul>
-          </li></ul></div><p>队列本身是<strong>链表</strong>：</p>
-<ul>
-<li>就绪队列：所有就绪的 PCB 串在一起，调度器从头取一个。</li>
-<li>阻塞队列：不是一条，而是每个事件一条。等磁盘的有等磁盘的队列，等锁的有等锁的队列。事件类型不同，叫醒的时机就不同。</li>
-<li>运行队列：单核 CPU 上只可能有一个正在跑的进程，所以它退化成「一个指针」。</li>
-</ul>
-<p>为什么用链表而不是数组？因为进程会频繁地被创建、终止、阻塞、唤醒，PCB 要不停地在队列之间搬家。链表的插入删除是 O(1)，不用搬数据。</p>
+          </li></ul></div><p>为什么要用链表，而不是数组？因为进程会频繁地被创建、终止、阻塞、唤醒，PCB 要不停地在队列之间搬家。链表的插入删除是 O(1)，不用搬数据。</p>
 <p>另一种组织方式是索引：状态相同的 PCB 放进一张索引表，表项指向 PCB。查起来快，但插入删除时要维护表。实际系统多用链表。</p>
 <hr>
 <h2 id="进程的四件事创建终止阻塞唤醒"><span class="num">04</span>进程的四件事：创建、终止、阻塞、唤醒</h2>
@@ -4461,13 +4454,46 @@ if (pid == 0) {
 }
 // 两个进程都会走到这里
 </code></pre></div>
-<p>内存不是真的复制一份。Linux 用<strong>写时复制</strong>（copy-on-write）：
-父子暂时指向同一批物理页，谁要写哪一页，才把那一页复制出来。</p>
-<p>子进程可以 <code>exec()</code> 换成另一个程序，那就彻底变成别的进程了。</p>
-<p>父进程如果先退出，Linux 会把它的子进程交给 <strong>1 号进程</strong>（<code>systemd</code>）接管，
-而不是让它们变成孤儿。</p>
 </div>
-    </div><h3 id="终止进程">终止进程</h3>
+    </div><div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;fork&quot;,&quot;to&quot;:&quot;dad&quot;,&quot;label&quot;:&quot;返回值不同&quot;},{&quot;from&quot;:&quot;fork&quot;,&quot;to&quot;:&quot;kid&quot;},{&quot;from&quot;:&quot;dad&quot;,&quot;to&quot;:&quot;next&quot;},{&quot;from&quot;:&quot;kid&quot;,&quot;to&quot;:&quot;next&quot;,&quot;label&quot;:&quot;两条路又汇合&quot;},{&quot;from&quot;:&quot;next&quot;,&quot;to&quot;:&quot;cow&quot;,&quot;label&quot;:&quot;内存并没有真的复制两份&quot;}]">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-violet" data-id="fork">
+              
+              
+              <b>pid = fork()</b>
+              <small>父进程执行到这一行</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="dad">
+              
+              
+              <b>父进程</b>
+              <small>pid &gt; 0：拿到子进程的号</small>
+            </div><div class="fnode tone-blue" data-id="kid">
+              
+              
+              <b>子进程</b>
+              <small>pid == 0：刚复制出来的那一份</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-muted" data-id="next">
+              
+              
+              <b>都从 fork 的下一行继续跑</b>
+              <small>代码是同一份，靠返回值分岔</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-amber" data-id="cow">
+              
+              
+              <b>共享同一批物理页</b>
+              <small>写时复制：谁要写哪一页，才复制哪一页</small>
+            </div></div></div>
+      
+    </div><p>子进程可以 <code>exec()</code> 换成另一个程序，那就彻底变成别的进程了。父进程如果先退出，Linux 会把它的子进程交给 <strong>1 号进程</strong>（<code>systemd</code>）接管，而不是让它们变成孤儿。</p>
+<h3 id="终止进程">终止进程</h3>
 <p>三种终止方式：正常结束、异常结束、被外界 <code>kill</code> 掉。</p>
 <div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code>① 找到要终止的进程的 PCB
 ② 如果它正在运行，立刻停掉，把 CPU 让出去
@@ -4516,12 +4542,40 @@ if (pid == 0) {
 </table>
 <p>桌面上的东西放口袋，比从书包里掏快得多。寄存器相对内存就是这样：寄存器纳秒级，内存几十纳秒，硬盘毫秒级。</p>
 <p>这两样合起来叫 <strong>CPU 上下文</strong>：CPU 运行任何任务前都要依赖的环境。</p>
-<p>于是 <strong>CPU 上下文切换</strong>就是三步：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code>① 把上一个任务的 CPU 上下文（寄存器的值、PC 的值）存到某处
-② 把新任务的上下文加载进这些寄存器和 PC
-③ 跳到 PC 指向的新位置，开始跑新任务
-</code></pre></div>
-<h3 id="进程上下文比-cpu-上下文多什么">进程上下文比 CPU 上下文多什么</h3>
+<p>于是 <strong>CPU 上下文切换</strong>就是这么一趟往返：</p>
+<div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;old&quot;,&quot;to&quot;:&quot;save&quot;,&quot;label&quot;:&quot;换下去之前&quot;},{&quot;from&quot;:&quot;save&quot;,&quot;to&quot;:&quot;load&quot;,&quot;label&quot;:&quot;存在内核里&quot;},{&quot;from&quot;:&quot;load&quot;,&quot;to&quot;:&quot;nw&quot;,&quot;label&quot;:&quot;换上来之后&quot;}]">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-muted" data-id="old">
+              
+              
+              <b>旧任务</b>
+              <small>寄存器里是它的状态</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-amber" data-id="save">
+              
+              
+              <b>① 存起来</b>
+              <small>寄存器的值 + PC 的值</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="load">
+              
+              
+              <b>② 装回去</b>
+              <small>把新任务的上下文填进寄存器和 PC</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="nw">
+              
+              
+              <b>新任务</b>
+              <small>③ 跳到 PC 指的位置开始跑</small>
+            </div></div></div>
+      
+    </div><h3 id="进程上下文比-cpu-上下文多什么">进程上下文比 CPU 上下文多什么</h3>
 <p>「任务」有三种：进程、线程、中断。所以 CPU 上下文切换也分三类。</p>
 <p>进程这块要复杂一些，因为进程是由内核管理和调度的，<mark class="mk-blue">切换只能发生在内核态</mark>。</p>
 <p>它要多搬两样东西：</p>

@@ -15,44 +15,76 @@ $ python train.py --epochs 30
 
 这一行就是一个**进程**：一个正在运行的程序。
 
-程序本身只是个文件。它躺在硬盘上，不占 CPU、不占内存、也不会自己变。只有当操作系统把它装载进内存、CPU 开始执行里面的指令，它才成为一个进程。
+程序本身只是个文件，躺在硬盘上，不占 CPU、不占内存、也不会自己变。==只有当操作系统把它装载进内存、CPU 开始执行里面的指令，它才成为一个进程。==
 
-| | 程序 | 进程 |
-|---|---|---|
-| 存在形态 | 硬盘上的可执行文件 | 内存里正在跑的一份执行 |
-| 有几份 | 一份文件 | 同一个程序可以同时跑出好几个进程 |
-| 会自己变吗 | 不会 | 每时每刻都在变：跑到哪了、占了多少内存、打开了哪些文件 |
+```flow
+grid: true
+nodes:
+  - { id: file, label: "python 可执行文件", sub: "硬盘上的一份文件，4.2 MB", row: 0, tone: muted }
+  - { id: run,  label: "运行它", sub: "装载进内存，CPU 开始执行指令", row: 1, tone: violet }
+  - { id: p1, label: "进程 8412", sub: "吃 1.2 GB · 开着 3 个文件", row: 2, tone: green }
+  - { id: p2, label: "进程 8413", sub: "同一份代码，另一份数据", row: 2, tone: green }
+  - { id: p3, label: "进程 9021", sub: "只是在看 --help", row: 2, tone: green }
+edges:
+  - { from: file, to: run, label: "同一个文件" }
+  - { from: run,  to: p1,  label: "每跑一次就多一个进程" }
+  - { from: run,  to: p2 }
+  - { from: run,  to: p3 }
+```
 
-用做饭打个比方：菜谱是程序，食材是数据，照着菜谱把菜做出来这件事，才是进程。同一份菜谱，三个人可以同时各做一份、互不干扰，那是三个进程。
+==同一个文件可以同时跑出好几个进程，而文件本身一动不动。== 用做饭打个比方：菜谱是程序，食材是数据，照着菜谱做菜这件事才是进程。同一份菜谱，三个人同时各做一份。
 
 ### CPU 为什么不能干等
 
-假设有一段代码要「从硬盘读一个 500 MB 的文件」。硬盘读完要几百毫秒，而 CPU 执行一条指令是纳秒级，这两件事差了**八个数量级**。
+假设有一段代码要「从硬盘读一个 500 MB 的文件」。硬盘读完要几百毫秒，而 CPU 执行一条指令是纳秒级，这两件事差了**八个数量级**。CPU 要是在这几百毫秒里干等着，那它 99.99% 的时间都在发呆。
 
-CPU 在这几百毫秒里干等着，那它 99.99% 的时间都在发呆。
+所以操作系统不让它等：
 
-所以操作系统不让它等：进程 A 发出读盘请求后，CPU 立刻转去执行进程 B；硬盘把数据准备好了，发一个**中断**告诉 CPU，CPU 再回到 A 继续往下跑。
+```seq
+grid: true
+participants:
+  - { id: a,   label: 进程 A, sub: 要读那 500 MB, tone: green }
+  - { id: cpu, label: CPU, sub: 只有一个, tone: violet }
+  - { id: d,   label: 硬盘, sub: 慢六个数量级, tone: amber }
+  - { id: b,   label: 进程 B, sub: 就绪队列里的另一个, tone: blue }
+messages:
+  - { from: a,   to: cpu, label: "read(fd, buf, 500MB)", kind: sync, note: 1 }
+  - { from: cpu, to: d,   label: 把请求交给硬盘, kind: async, note: 2 }
+  - { from: cpu, to: b,   label: 不等了，转去跑 B, kind: sync, note: 3, gap: 12 }
+  - { from: d,   to: cpu, label: "数据好了：发一个中断", kind: sync, note: 4, gap: 34 }
+  - { from: cpu, to: a,   label: A 被唤醒，接着上次往下跑, kind: reply, note: 5 }
+```
 
-烧水的类比很贴切。你不会站在水壶前面盯着它烧开，而是先去干别的，听到「嘀」的一声再回来倒水。那声「嘀」就是中断。
+==第 4 步那条中断，是整个机制的关键。== 没有它，CPU 就只能隔一会儿去问一次硬盘「好了没」，也就是轮询。
 
-````callout
-tone: violet
-icon: 📜
-text: |
-  **「别等，让事件来敲门」不是一开始就有的。**
+```compare
+first: 做法
+head: [CPU 在等硬盘时干什么, 代价]
+rows:
+  - 轮询: ["反复去读设备的状态寄存器，问「好了没」", "CPU 被白白烧掉，但它实现简单"]
+  - 中断驱动: [{ text: "把请求交出去，转头去干别的", tone: green }, "多了一套中断机制和对应的硬件支持"]
+```
 
-  早期机器用**轮询**：CPU 反复去读设备的状态寄存器，问「好了没」。浪费 CPU，但实现简单。
+烧水的类比很贴切：你不会站在水壶前面盯着它烧开，而是先去干别的，听到「嘀」的一声再回来倒水。那声「嘀」就是中断。
 
-  转向中断驱动是 1950 年代中后期到 1960 年代慢慢完成的，**没有一个确切的日期**：
+### 从轮询换成中断，花了十几年
 
-  | 时间 | 发生了什么 |
-  |---|---|
-  | 1950s 中期 | 中断机制出现。UNIVAC 1103 / 1103A 和 NBS 的 DYSEAC 都被算作早期实现，==「谁是第一台」至今有争议== |
-  | 1958 | IBM 709 用上 DMA：数据在设备和内存之间直接搬，CPU 连「搬」这个动作都不参与了 |
-  | 1964 | CDC 6600，当时最快的机器之一，对 I/O **仍然用轮询** |
+```timeline
+- when: 1950s 中期
+  title: 中断机制出现
+  desc: UNIVAC 1103 / 1103A 和 NBS 的 DYSEAC 都被算作早期实现，「谁是第一台」至今有争议
+  tone: blue
+- when: "1958"
+  title: IBM 709 用上 DMA
+  desc: 数据在设备和内存之间直接搬，CPU 连「搬」这个动作都不参与了
+  tone: violet
+- when: "1964"
+  title: CDC 6600 对 I/O 仍然用轮询
+  desc: 当时最快的机器之一，却没走这条路
+  tone: amber
+```
 
-  最后一行才是重点：中断不是一夜之间取代轮询的，两套办法长期并存。
-````
+最后一行的意思很明确：==中断不是一夜之间取代轮询的，两套办法长期并存。== 所以「CPU 什么时候开始事件驱动」这个问题，本来就没有一个确切的日期。
 
 ### 并发的错觉
 
@@ -146,24 +178,17 @@ rows:
 
 物理内存就那么点，让一堆啥也干不了的进程占着，是纯浪费。虚拟内存管理会把阻塞进程的物理内存换出到硬盘，等要跑了再换回来。
 
-于是多出一个独立的维度：**进程在不在物理内存里**。把「在不在内存」和「就绪 / 阻塞」交叉一下，就从三个状态变出五个：
-
-|  | 在内存里 | 被换到硬盘上 |
-|---|---|---|
-| 就绪 | 就绪 | 就绪挂起 |
-| 阻塞 | 阻塞 | 阻塞挂起 |
-
-==「挂起」说的就是右边这一列：进程不占物理内存。== 它和「就绪还是阻塞」是两件互不相干的事。
+于是多出一个独立的维度：**进程在不在物理内存里**。把「在不在内存」和「就绪 / 阻塞」交叉一下，三个状态就变成了四个：
 
 ```flow
 grid: true
 groups:
-  - { id: mem, label: "内存里（上排） ↔ 硬盘上（下排）", tone: muted }
+  - { id: mem, label: "上排：在物理内存里　　下排：已被换出到硬盘", tone: muted }
 nodes:
-  - { id: ready,  label: 就绪,     sub: "在内存，就差 CPU",   row: 0, tone: blue,  shape: pill, group: mem }
-  - { id: block,  label: 阻塞,     sub: "在内存，在等事件",   row: 0, tone: amber, shape: pill, group: mem }
+  - { id: ready,  label: 就绪,     sub: "在内存，就差 CPU",     row: 0, tone: blue,  shape: pill, group: mem }
+  - { id: block,  label: 阻塞,     sub: "在内存，在等事件",     row: 0, tone: amber, shape: pill, group: mem }
   - { id: rsusp,  label: 就绪挂起, sub: "在硬盘，进内存就能跑", row: 1, tone: blue,  shape: pill, group: mem }
-  - { id: bsusp,  label: 阻塞挂起, sub: "在硬盘，也还在等",   row: 1, tone: amber, shape: pill, group: mem }
+  - { id: bsusp,  label: 阻塞挂起, sub: "在硬盘，也还在等",     row: 1, tone: amber, shape: pill, group: mem }
 edges:
   - { from: ready, to: rsusp, label: "换出", dashed: true }
   - { from: rsusp, to: ready, label: "换入" }
@@ -172,9 +197,11 @@ edges:
   - { from: bsusp, to: rsusp, label: "等的事发生了" }
 ```
 
+「挂起」说的就是下面那一排：进程不占物理内存。==它和「就绪还是阻塞」是两件互不相干的事==，所以能交叉出四个格子。
+
 !!「阻塞挂起」是两件事叠在一起，不是第三种等待。!!
 
-进程可以既阻塞又挂起：它在等一个事件（阻塞），同时它不占物理内存（挂起）。这两个条件互相独立，前面那张表的四个格子就是全部组合。
+进程可以既阻塞又挂起：它在等一个事件（阻塞），同时它不占物理内存（挂起）。这两个条件互相独立，上面那四个框就是全部组合。
 
 触发挂起的原因不止内存不够：
 
@@ -281,13 +308,7 @@ rows:
         - { label: "pointer → PCB(F)", note: 正在 CPU 上的那一个 }
 ```
 
-队列本身是**链表**：
-
-- 就绪队列：所有就绪的 PCB 串在一起，调度器从头取一个。
-- 阻塞队列：不是一条，而是每个事件一条。等磁盘的有等磁盘的队列，等锁的有等锁的队列。事件类型不同，叫醒的时机就不同。
-- 运行队列：单核 CPU 上只可能有一个正在跑的进程，所以它退化成「一个指针」。
-
-为什么用链表而不是数组？因为进程会频繁地被创建、终止、阻塞、唤醒，PCB 要不停地在队列之间搬家。链表的插入删除是 O(1)，不用搬数据。
+为什么要用链表，而不是数组？因为进程会频繁地被创建、终止、阻塞、唤醒，PCB 要不停地在队列之间搬家。链表的插入删除是 O(1)，不用搬数据。
 
 另一种组织方式是索引：状态相同的 PCB 放进一张索引表，表项指向 PCB。查起来快，但插入删除时要维护表。实际系统多用链表。
 
@@ -361,14 +382,25 @@ text: |
   // 两个进程都会走到这里
   ```
 
-  内存不是真的复制一份。Linux 用**写时复制**（copy-on-write）：
-  父子暂时指向同一批物理页，谁要写哪一页，才把那一页复制出来。
-
-  子进程可以 `exec()` 换成另一个程序，那就彻底变成别的进程了。
-
-  父进程如果先退出，Linux 会把它的子进程交给 **1 号进程**（`systemd`）接管，
-  而不是让它们变成孤儿。
 ````
+
+```flow
+grid: true
+nodes:
+  - { id: fork, label: "pid = fork()", sub: "父进程执行到这一行", row: 0, tone: violet }
+  - { id: dad,  label: "父进程", sub: "pid > 0：拿到子进程的号", row: 1, tone: green }
+  - { id: kid,  label: "子进程", sub: "pid == 0：刚复制出来的那一份", row: 1, tone: blue }
+  - { id: next, label: "都从 fork 的下一行继续跑", sub: "代码是同一份，靠返回值分岔", row: 2, tone: muted }
+  - { id: cow,  label: "共享同一批物理页", sub: "写时复制：谁要写哪一页，才复制哪一页", row: 3, tone: amber }
+edges:
+  - { from: fork, to: dad, label: "返回值不同" }
+  - { from: fork, to: kid }
+  - { from: dad,  to: next }
+  - { from: kid,  to: next, label: "两条路又汇合" }
+  - { from: next, to: cow, label: "内存并没有真的复制两份" }
+```
+
+子进程可以 `exec()` 换成另一个程序，那就彻底变成别的进程了。父进程如果先退出，Linux 会把它的子进程交给 **1 号进程**（`systemd`）接管，而不是让它们变成孤儿。
 
 ### 终止进程
 
@@ -423,12 +455,19 @@ CPU 执行指令时，靠两样东西知道自己在干什么：
 
 这两样合起来叫 **CPU 上下文**：CPU 运行任何任务前都要依赖的环境。
 
-于是 **CPU 上下文切换**就是三步：
+于是 **CPU 上下文切换**就是这么一趟往返：
 
-```
-① 把上一个任务的 CPU 上下文（寄存器的值、PC 的值）存到某处
-② 把新任务的上下文加载进这些寄存器和 PC
-③ 跳到 PC 指向的新位置，开始跑新任务
+```flow
+grid: true
+nodes:
+  - { id: old,  label: "旧任务", sub: "寄存器里是它的状态", row: 0, tone: muted }
+  - { id: save, label: "① 存起来", sub: "寄存器的值 + PC 的值", row: 1, tone: amber }
+  - { id: load, label: "② 装回去", sub: "把新任务的上下文填进寄存器和 PC", row: 2, tone: violet }
+  - { id: nw,   label: "新任务", sub: "③ 跳到 PC 指的位置开始跑", row: 3, tone: green }
+edges:
+  - { from: old,  to: save, label: "换下去之前" }
+  - { from: save, to: load, label: "存在内核里" }
+  - { from: load, to: nw,   label: "换上来之后" }
 ```
 
 ### 进程上下文比 CPU 上下文多什么

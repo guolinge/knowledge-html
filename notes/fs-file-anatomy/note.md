@@ -8,9 +8,30 @@ Linux 有一句名言：
 
 > **一切皆文件。**
 
-这不只是修辞。普通文件、目录、块设备、管道、socket，在 Linux 里都归文件系统统一管，都通过同一套 `open` / `read` / `write` / `close` 来操作。`/dev/sda` 是一块硬盘，但你 `dd if=/dev/sda of=x` 的时候，用的就是读文件的方式。
+这不只是修辞。下面这些完全不同的东西，在 Linux 里都归文件系统统一管：
 
-好处很实在：==多出来的设备类型不用再各造一套 API。== 学一次 `read`，什么都能读。
+```flow
+grid: true
+groups:
+  - { id: objs, label: "这些「东西」本质上都是文件", tone: muted }
+nodes:
+  - { id: f,  label: 普通文件, sub: "/home/a.txt", row: 0, tone: blue, group: objs }
+  - { id: d,  label: 目录, sub: "/home/", row: 0, tone: blue, group: objs }
+  - { id: b,  label: 块设备, sub: "/dev/sda，一整块硬盘", row: 0, tone: blue, group: objs }
+  - { id: pi, label: 管道, sub: "两个进程之间那根竖线", row: 0, tone: blue, group: objs }
+  - { id: so, label: socket, sub: "一条网络连接", row: 0, tone: blue, group: objs }
+  - { id: api, label: "同一套系统调用", sub: "open / read / write / close", row: 1, tone: violet }
+  - { id: eff, label: "学一次就够", sub: "`dd if=/dev/sda` 读硬盘，写法和读文件一模一样", row: 2, tone: green }
+edges:
+  - { from: f,  to: api, label: "都走这一套" }
+  - { from: d,  to: api }
+  - { from: b,  to: api }
+  - { from: pi, to: api }
+  - { from: so, to: api }
+  - { from: api, to: eff, label: "不用给每种东西各造一套 API" }
+```
+
+好处很实在：==多出来的设备类型不用再各造一套接口。== 学一次 `read`，硬盘、管道、网络连接都能读。
 
 那这样一套东西，底下的基本零件是什么？
 
@@ -46,13 +67,13 @@ rows:
       `ls -l` 显示出来的那堆东西，几乎全部来自 inode。
   - k: 我的内容在哪
     v: |
-      **数据块的位置**。这是 inode 最重要的一项 ——
+      **数据块的位置**。这是 inode 最重要的一项。
       文件真正的内容不在 inode 里，inode 只记「去哪儿找」。
 
       第 ③ 篇整篇都在讲这一项怎么记。
 ```
 
-==inode 是文件的唯一标识，而且它存在磁盘上。== 也就是说 inode 自己也要占空间，也要被管理。一个文件系统能存多少个文件，取决于它能分出多少个 inode —— 这是格式化的时候就定下来的。
+==inode 是文件的唯一标识，而且它存在磁盘上。== 也就是说 inode 自己也要占空间，也要被管理。一个文件系统能存多少个文件，取决于它能分出多少个 inode，而这是格式化的时候就定下来的。
 
 ### 目录项（dentry）
 
@@ -182,7 +203,7 @@ rows:
   - 数据块区: ["读写到哪一块就载哪一块", "按需读，通常还会在内存里留一份副本（页缓存）"]
 ```
 
-没人会把整个 inode 区加载进内存 —— 一个有 100 万个文件的文件系统，光 inode 就要占掉几十上百 MB，而同一时刻真正在用的可能只有几百个。
+没人会把整个 inode 区加载进内存。一个有 100 万个文件的文件系统，光 inode 就要占掉几十上百 MB，而同一时刻真正在用的可能只有几百个。
 
 ---
 
@@ -194,7 +215,7 @@ rows:
     目录项为了效率经常缓存在内存里，改名字就更快了。
 - q: inode 为什么必须存在磁盘上，而目录项可以只在内存里？
   a: |
-    inode 是文件的唯一标识，它记着数据块在哪 —— 这个信息丢了文件就找不回来了，必须持久化。
+    inode 是文件的唯一标识，它记着数据块在哪，这个信息丢了文件就找不回来了，必须持久化。
     目录项只是「某个名字解析到了哪个 inode」这个结果的缓存，
     丢了可以重新读目录再解析一遍，所以不需要落盘。
 - q: 为什么文件系统不直接按扇区（512 字节）读写？

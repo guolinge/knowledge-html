@@ -50,9 +50,24 @@ rows:
   - { text: 抢占式, tone: blue }: ["时间片一到就换，或来了更高优先级的就换", { text: "时钟中断", tone: amber }, "要频繁保存/恢复现场，切换开销更大"]
 ```
 
-==抢占式调度的前提是硬件能定时打断 CPU。== 这个「定时打断」就是时钟中断：硬件每隔一段固定时间发一次中断，操作系统在中断处理里检查「这个进程跑够时间片了吗」。
+==抢占式调度的前提是硬件能定时打断 CPU。== 没有时钟中断，操作系统就只能在进程主动让出 CPU 时才有机会插手 —— 那就退化成非抢占式了。
 
-没有时钟中断，操作系统就只能在进程主动让出 CPU 时才有机会插手。
+这个「定时打断」是怎么起作用的：
+
+```seq
+grid: true
+participants:
+  - { id: p,  label: 进程 A, sub: 正占着 CPU, tone: green }
+  - { id: hw, label: 时钟, sub: 每隔 20ms 响一次, tone: amber }
+  - { id: k,  label: 内核, sub: 中断处理 + 调度器, tone: violet }
+messages:
+  - { from: p,  to: p, label: 一直在跑，没有任何让出的意思, kind: self, note: 1 }
+  - { from: hw, to: k, label: 时钟中断, kind: sync, note: 2, gap: 14 }
+  - { from: k,  to: k, label: "把 A 的现场保存进 PCB，A 改成就绪", kind: self, note: 3 }
+  - { from: k,  to: p, label: 从就绪队列挑下一个上来, kind: reply, note: 4 }
+```
+
+==进程自己没动，是硬件替操作系统开了一个口子。== 这个口子每 20ms 出现一次，调度器就在这个口子里做决定。
 
 ```callout
 tone: violet
