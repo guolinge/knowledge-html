@@ -94,6 +94,34 @@ setTimeout(function () {
     });
   });
 
+  /* ④ 控件自己拼的几块，上下之间有没有留白。
+     踩过：validate-lab 把 pick / flow / out / legend 直接 append 到
+     [data-mount] 上，而 gap 定义在一个**没被用上**的 .vl-wrap 上 ——
+     结果按钮行和流程条之间 0px，挤在一起。
+     ==「没套那层 wrapper」是静默的：渲染出来有东西，只是挤。==
+     只查 [data-mount]：panes 形态的 .demo 没有它，不会被误报。 */
+  document.querySelectorAll('[data-mount]').forEach(function (mount) {
+    var kids = Array.prototype.filter.call(mount.children, function (k) {
+      var r = k.getBoundingClientRect();
+      return r.width && r.height;
+    });
+    for (var k = 1; k < kids.length; k++) {
+      var a = kids[k - 1].getBoundingClientRect();
+      var b = kids[k].getBoundingClientRect();
+      if (b.left >= a.right - TOL) continue;   // 并排的不算
+      var gap = Math.round(b.top - a.bottom);
+      if (gap < 8) {
+        var w = mount.closest('[data-widget]');
+        problems.push(
+          '控件 ' + (w ? w.getAttribute('data-widget') : '?') +
+          '：第 ' + k + ' 块（' + (kids[k-1].className || kids[k-1].tagName) + '）' +
+          ' 和第 ' + (k + 1) + ' 块之间只有 ' + gap + 'px' +
+          ' —— 多半是没套那层带 gap 的 wrapper',
+        );
+      }
+    }
+  });
+
   // ③ 区域框之间有没有重叠 / 有没有盖住非成员节点
   document.querySelectorAll('[data-flow]').forEach(function (root, i) {
     var boxes = Array.from(root.querySelectorAll('[data-group-box]')).filter(function (b) { return !b.hidden; });
