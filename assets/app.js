@@ -3387,6 +3387,393 @@
     draw();
   };
 
+  /* ============================================================
+     控件：调度算法对比
+     ------------------------------------------------------------
+     同一组作业，换一种调度算法，执行顺序和三个指标全变。
+     静态图只能画一种算法的结果，说不出「换一种就全变了」。
+
+     算法在页面里现算（不预先烤好），所以改作业只需改 config。
+
+     config:
+       jobs:     [{ id, arrive, burst, priority }]
+       quantum:  2          RR 的时间片
+       mlfq:     [1,2,4]    多级反馈队列三级的时间片
+       algos:    [{ id, name, note }]   可选，覆盖内置说明
+  ============================================================ */
+
+  /* —— 模拟内核：逐时间单位推进，六种算法共用 ——
+     pick     从就绪队列里挑一个（必须从数组里摘掉）
+     quantum  (level) => 时间片
+     levels   有几级（多级反馈队列用）
+     preempt  (正在跑的, 就绪队列) => 要不要换下来 */
+  const simulate = (jobs, opt) => {
+    const js = jobs.slice()
+      .sort((a, b) => a.arrive - b.arrive || String(a.id).localeCompare(String(b.id)))
+      .map((j) => ({ ...j, left: j.burst, end: null, level: 0, used: 0, resp: null }));
+    const segs = [];
+    const ready = [];
+    let t = 0, nextIdx = 0, cur = null, requeue = null, guard = 0;
+
+    while ((nextIdx < js.length || ready.length || cur || requeue) && guard++ < 4000) {
+      while (nextIdx < js.length && js[nextIdx].arrive <= t) ready.push(js[nextIdx++]);
+      /* 上一轮用完时间片的排到队尾 —— 要在新到的之后，否则 RR 会让刚跑过的又插队 */
+      if (requeue) { ready.push(requeue); requeue = null; }
+
+      if (cur && opt.preempt && opt.preempt(cur, ready)) { ready.push(cur); cur = null; }
+      if (!cur) {
+        if (!ready.length) { t++; continue; }
+        cur = opt.pick(ready, t);
+        if (cur.resp === null) cur.resp = t;
+        cur.used = 0;
+      }
+
+      cur.left -= 1; cur.used += 1; t += 1;
+      const last = segs[segs.length - 1];
+      if (last && last.id === cur.id && last.end === t - 1 && last.level === cur.level) last.end = t;
+      else segs.push({ id: cur.id, start: t - 1, end: t, level: cur.level });
+
+      if (cur.left === 0) { cur.end = t; cur = null; continue; }
+      if (opt.quantum && cur.used >= opt.quantum(cur.level)) {
+        if (opt.levels) cur.level = Math.min(cur.level + 1, opt.levels - 1);
+        requeue = cur; cur = null;
+      }
+    }
+    for (const j of js) { j.turn = j.end - j.arrive; j.wait = j.turn - j.burst; }
+    return { jobs: js, segs, total: t };
+  };
+
+  const takeMin = (arr, key) => {
+    let b = 0;
+    for (let i = 1; i < arr.length; i++) if (key(arr[i]) < key(arr[b])) b = i;
+    return arr.splice(b, 1)[0];
+  };
+
+  const SCHED_ALGOS = (jobs, quantum, mlfq) => [
+    {
+      id: 'FCFS', name: '先来先服务',
+      note: '谁先到谁先跑，跑完才换人。长作业排在前面时，后面的人一起倒霉。',
+      run: () => simulate(jobs, { pick: (r) => r.shift() }),
+    },
+    {
+      id: 'SJF', name: '最短作业优先',
+      note: '每次挑运行时间最短的。平均周转能压到最低，代价是长作业一直被往后推。',
+      run: () => simulate(jobs, { pick: (r) => takeMin(r, (j) => j.left) }),
+    },
+    {
+      id: 'HRRN', name: '高响应比优先',
+      note: '每次算 (等待时间 + 要求服务时间) / 要求服务时间，谁高谁上。等得越久响应比越高。',
+      run: () => simulate(jobs, {
+        pick: (r, t) => {
+          let b = 0, bv = -1;
+          for (let i = 0; i < r.length; i++) {
+            const v = (t - r[i].arrive + r[i].burst) / r[i].burst;
+            if (v > bv) { bv = v; b = i; }
+          }
+          return r.splice(b, 1)[0];
+        },
+      }),
+    },
+    {
+      id: 'RR', name: '时间片轮转 · q=' + quantum,
+      note: '每人只跑一个时间片，跑不完就回队尾。响应通常最快，但切换次数最多、周转通常不好。',
+      run: () => simulate(jobs, { pick: (r) => r.shift(), quantum: () => quantum }),
+    },
+    {
+      id: 'HPF', name: '最高优先级优先 · 抢占式',
+      note: '优先级数字越小越优先。一旦就绪队列里出现更高优先级的，立刻换人。低优先级的会被饿着。',
+      run: () => simulate(jobs, {
+        pick: (r) => takeMin(r, (j) => j.priority),
+        preempt: (c, r) => r.some((j) => j.priority < c.priority),
+      }),
+    },
+    {
+      id: 'MLFQ', name: '多级反馈队列 · ' + mlfq.join('/'),
+      note: '新作业进第一级（时间片最短），没跑完就降到下一级（时间片变长）。短作业快速通过，长作业在后面慢慢跑。',
+      run: () => simulate(jobs, {
+        pick: (r) => takeMin(r, (j) => j.level),
+        quantum: (lv) => mlfq[lv],
+        levels: mlfq.length,
+        preempt: (c, r) => r.some((j) => j.level < c.level),
+      }),
+    },
+  ];
+
+  const JOB_TONES = ['blue', 'violet', 'green', 'amber', 'red', 'muted'];
+
+  WIDGETS['sched-lab'] = (root) => {
+    const cfg = cfgOf(root);
+    const jobs = cfg.jobs || [];
+    if (!jobs.length) return;
+    const box = mountOf(root);
+    const statusEl = root.querySelector('[data-status]');
+    const quantum = cfg.quantum || 2;
+    const mlfq = cfg.mlfq || [1, 2, 4];
+    const algos = SCHED_ALGOS(jobs, quantum, mlfq);
+    const toneOf = new Map(jobs.map((j, i) => [j.id, JOB_TONES[i % JOB_TONES.length]]));
+
+    const results = algos.map((a) => ({ a, r: a.run() }));
+    const total = Math.max(...results.map((x) => x.r.total));
+    const fmt = (n) => (Math.round(n * 100) / 100).toFixed(2);
+
+    /* —— 算法按钮 —— */
+    const bar = el('div', 'sl-algos');
+    const note = el('p', 'sl-note');
+    const gantt = el('div', 'sl-gantt');
+    const cards = el('div', 'sl-cards');
+    const rank = el('div', 'sl-rank');
+
+    /* —— 甘特图：时间轴 + 每个作业一行 + 一条 CPU 占用行 —— */
+    const fmtSeg = (s) => s.id + ' ' + s.start + '→' + s.end;
+    const drawGantt = (res) => {
+      gantt.textContent = '';
+      const grid = el('div', 'sl-plot');
+      grid.style.setProperty('--sl-ticks', String(total));
+
+      /* 刻度：密了反而看不清，所以按 total 挑一个步长，首尾两个一定标出来 */
+      const axis = el('div', 'sl-axis');
+      const step = Math.max(1, Math.ceil(total / 10));
+      const marks = [];
+      for (let i = 0; i <= total; i += step) marks.push(i);
+      if (marks[marks.length - 1] !== total) {
+        /* 末尾那个刻度如果离 total 太近，两个数字会糊在一起 —— 直接把它换成 total */
+        if (total - marks[marks.length - 1] < step * 0.6) marks[marks.length - 1] = total;
+        else marks.push(total);
+      }
+      marks.forEach((i) => {
+        const tick = el('span', 'sl-tick', String(i));
+        tick.style.left = (i / total) * 100 + '%';
+        /* 两端的字不能被裁掉一半，所以 0 靠左、total 靠右 */
+        if (i === 0) tick.style.transform = 'none';
+        else if (i === total) tick.style.transform = 'translateX(-100%)';
+        axis.append(tick);
+      });
+      grid.append(axis);
+
+      const rowFor = (label, segs, tone, sub) => {
+        const row = el('div', 'sl-row');
+        const name = el('div', 'sl-name');
+        name.append(el('b', '', label));
+        if (sub) name.append(el('span', 'sl-sub', sub));
+        const track = el('div', 'sl-track');
+        segs.forEach((s) => {
+          const b = el('div', 'sl-block' + (s.level ? ' lv' + s.level : ''), String(s.start) + '–' + s.end);
+          b.style.left = (s.start / total) * 100 + '%';
+          b.style.width = ((s.end - s.start) / total) * 100 + '%';
+          b.style.setProperty('--sl-tone', 'var(--' + tone + ')');
+          b.style.setProperty('--sl-soft', 'var(--' + tone + '-soft)');
+          b.title = fmtSeg(s);
+          track.append(b);
+        });
+        row.append(name, track);
+        grid.append(row);
+      };
+
+      /* 每个作业一行：只画它自己占 CPU 的那几段 */
+      jobs.forEach((j) => {
+        const mine = res.segs.filter((s) => s.id === j.id);
+        rowFor(j.id, mine, toneOf.get(j.id), '到达 ' + j.arrive + ' · 需要 ' + j.burst);
+      });
+
+      /* CPU 占用行：把所有人拼成一条时间轴，看谁在哪个时刻占着 CPU。
+         这一行只写作业名 —— 时间已经由位置表达了，再写一遍反而看不清。 */
+      const cpuSegs = res.segs.slice().sort((a, b) => a.start - b.start);
+      const cpuTrack = el('div', 'sl-track sl-cpu-track');
+      cpuSegs.forEach((s) => {
+        const b = el('div', 'sl-block sl-cpu', s.id);
+        b.style.left = (s.start / total) * 100 + '%';
+        b.style.width = ((s.end - s.start) / total) * 100 + '%';
+        b.style.setProperty('--sl-tone', 'var(--' + toneOf.get(s.id) + ')');
+        b.style.setProperty('--sl-soft', 'var(--' + toneOf.get(s.id) + '-soft)');
+        cpuTrack.append(b);
+      });
+      const cpuRow = el('div', 'sl-row sl-cpu-row');
+      const cpuName = el('div', 'sl-name');
+      cpuName.append(el('b', '', 'CPU'));
+      cpuName.append(el('span', 'sl-sub', '谁在跑'));
+      cpuRow.append(cpuName, cpuTrack);
+      grid.append(cpuRow);
+
+      gantt.append(grid);
+    };
+
+    /* —— 三个指标卡 + 六种算法横向对比 —— */
+    const avg = (r, f) => r.jobs.reduce((s, j) => s + f(j), 0) / r.jobs.length;
+
+    const drawStats = (res) => {
+      cards.textContent = '';
+      [
+        { k: '平均周转时间', v: avg(res, (j) => j.turn), d: '从到达完成用了多久 = 等待 + 运行' },
+        { k: '平均等待时间', v: avg(res, (j) => j.wait), d: '在就绪队列里干等了多久' },
+        { k: '平均响应时间', v: avg(res, (j) => j.resp - j.arrive), d: '从到达第一次拿到 CPU 用了多久' },
+      ].forEach((m) => {
+        const c = el('div', 'sl-card');
+        c.append(el('small', '', m.k));
+        c.append(el('b', 'sl-num', fmt(m.v)));
+        c.append(el('span', 'sl-desc', m.d));
+        cards.append(c);
+      });
+
+      rank.textContent = '';
+      const sorted = results.slice().sort((a, b) => avg(a.r, (j) => j.turn) - avg(b.r, (j) => j.turn));
+      const worst = Math.max(...results.map((x) => avg(x.r, (j) => j.turn)));
+      rank.append(el('div', 'sl-rank-head', '六种算法的平均周转时间（越短越好）'));
+      sorted.forEach(({ a, r }) => {
+        const v = avg(r, (j) => j.turn);
+        const line = el('div', 'sl-rank-row' + (a.id === cur.id ? ' on' : ''));
+        line.append(el('span', 'sl-rank-name', a.id));
+        const track = el('div', 'sl-rank-track');
+        const fill = el('i');
+        fill.style.width = (v / worst) * 100 + '%';
+        track.append(fill);
+        line.append(track, el('span', 'sl-rank-val', fmt(v)));
+        line.addEventListener('click', () => pick(a.id));
+        rank.append(line);
+      });
+    };
+
+    /* —— 算法按钮 ——
+       按钮上永远只写缩写，选中时把全名放进下面的说明行。
+       否则选中态会把按钮撑宽，每点一下整排都跳一下。 */
+    let cur = results[0].a;
+    const btns = algos.map((a) => {
+      const b = el('button', 'sl-btn', a.id);
+      b.title = a.name;
+      b.addEventListener('click', () => pick(a.id));
+      bar.append(b);
+      return { b, a };
+    });
+    const noteName = el('b', 'sl-name-inline');
+    const noteText = el('span');
+    note.append(noteName, noteText);
+
+    function pick(id) {
+      const hit = results.find((x) => x.a.id === id);
+      if (!hit) return;
+      cur = hit.a;
+      btns.forEach(({ b, a }) => b.className = 'sl-btn' + (a.id === id ? ' on' : ''));
+      noteName.textContent = cur.name + ' —— ';
+      noteText.textContent = cur.note;
+      drawGantt(hit.r);
+      drawStats(hit.r);
+      if (statusEl) statusEl.textContent = cur.name + ' · 平均周转 ' + fmt(avg(hit.r, (j) => j.turn));
+    }
+
+    box.append(bar, note, gantt, cards, rank);
+    pick(cfg.default && results.some((x) => x.a.id === cfg.default) ? cfg.default : results[0].a.id);
+  };
+
+  /* ============================================================
+     控件：切换开销对照（同进程内切线程 vs 跨进程切）
+     ------------------------------------------------------------
+     一步一条地走，看哪些动作两边都要做、哪一步开始分叉。
+     分叉点只有一个：换不换页表。后面所有代价都从它衍生。
+
+     config:
+       steps: [{ title, detail, thread: 'yes'|'no', proc: 'yes'|'no',
+                 threadWhy, procWhy, branch }]
+       tail:  一句话，放在最后一步下面
+  ============================================================ */
+  WIDGETS['switch-cost'] = (root) => {
+    const cfg = cfgOf(root);
+    const steps = cfg.steps || [];
+    if (!steps.length) return;
+    const box = mountOf(root);
+    const statusEl = root.querySelector('[data-status]');
+
+    const bar = el('div', 'sc-bar');
+    const prev = el('button', 'sc-btn', '‹ 上一步');
+    const next = el('button', 'sc-btn sc-primary', '下一步 ›');
+    const counter = el('span', 'sc-count');
+    bar.append(prev, next, counter);
+
+    const head = el('div', 'sc-head');
+    const blurb = el('div', 'sc-blurb');
+    const table = el('div', 'sc-table');
+    const meter = el('div', 'sc-meter');
+    box.append(head, blurb, bar, table, meter);
+    if (cfg.tail) box.append(el('p', 'sc-tail', cfg.tail));
+
+    /* 表头 */
+    const hdr = el('div', 'sc-hrow sc-hdr');
+    hdr.append(el('div', 'sc-hcell', '这一步要做什么'));
+    hdr.append(el('div', 'sc-hcell', '同进程内切线程'));
+    hdr.append(el('div', 'sc-hcell', '跨进程切换'));
+    table.append(hdr);
+
+    /* 三个格子的列标签在宽屏上由表头提供；
+       窄屏表头会被藏掉，所以每个格子自带一个只能在窄屏看见的标签。 */
+    const rows = steps.map((s, i) => {
+      const row = el('div', 'sc-row' + (s.branch ? ' is-branch' : ''));
+      const t = el('div', 'sc-cell sc-what');
+      t.append(el('span', 'sc-idx', String(i + 1)), el('span', '', s.title));
+      const mk = (colLabel) => {
+        const c = el('div', 'sc-cell sc-do');
+        const tag = el('span', 'sc-coltag', colLabel);
+        const markEl = el('span', 'sc-mark');
+        const whyEl = el('span', 'sc-why');
+        c.append(tag, markEl, whyEl);
+        return { c, markEl, whyEl };
+      };
+      const a = mk('同进程内切线程');
+      const b = mk('跨进程切换');
+      row.append(t, a.c, b.c);
+      table.append(row);
+      return { row, a, b, s };
+    });
+
+    /* 两条进度条共用 proc 那个分母 —— 同一把尺子才看得出「谁做的动作多」 */
+    const total = steps.filter((s) => s.proc === 'yes').length;
+    const meters = {};
+    meter.append(el('div', 'sc-meter-cap', '切换要做的动作，累计到这一步做了几样'));
+    [['thread', '同进程内切线程', 'blue'], ['proc', '跨进程切换', 'amber']].forEach(([key, label, tone]) => {
+      const w = el('div', 'sc-meter-row');
+      w.append(el('span', 'sc-meter-label', label));
+      const track = el('div', 'sc-meter-track');
+      const fill = el('i');
+      fill.style.setProperty('--sl-tone', 'var(--' + tone + ')');
+      track.append(fill);
+      const num = el('span', 'sc-meter-num');
+      w.append(track, num);
+      meter.append(w);
+      meters[key] = { fill, num };
+    });
+
+    let i = 0;
+    function go(k) {
+      i = Math.max(0, Math.min(steps.length - 1, k));
+      const s = steps[i];
+      head.textContent = '第 ' + (i + 1) + ' / ' + steps.length + ' 步 · ' + s.title;
+      blurb.textContent = s.detail || '';
+
+      const mark = (cell, v, why) => {
+        cell.c.className = 'sc-cell sc-do ' + (v === 'yes' ? 'ok' : 'skip');
+        cell.markEl.textContent = v === 'yes' ? '要做' : '不用做';
+        cell.whyEl.textContent = why || '';
+      };
+
+      rows.forEach(({ row, a, b, s: st }, n) => {
+        mark(a, st.thread, st.threadWhy);
+        mark(b, st.proc, st.procWhy);
+        row.classList.toggle('on', n === i);
+        row.classList.toggle('done', n < i);
+      });
+
+      /* 累计到当前步为止已经做了几样 */
+      const upTo = (key) => steps.slice(0, i + 1).filter((x) => x[key] === 'yes').length;
+      const tDone = upTo('thread'), pDone = upTo('proc');
+      meters.thread.fill.style.width = (tDone / total) * 100 + '%';
+      meters.proc.fill.style.width = (pDone / total) * 100 + '%';
+      meters.thread.num.textContent = tDone + ' / ' + total;
+      meters.proc.num.textContent = pDone + ' / ' + total;
+      if (statusEl) statusEl.textContent = '第 ' + (i + 1) + ' 步：' + (s.branch ? '这里开始分叉' : s.title);
+    }
+
+    prev.addEventListener('click', () => go(i - 1));
+    next.addEventListener('click', () => go(i + 1));
+    go(0);
+  };
+
   /* ---------- 挂载 ---------- */
   document.querySelectorAll('[data-widget]').forEach((root) => {
     var name = root.getAttribute('data-widget');

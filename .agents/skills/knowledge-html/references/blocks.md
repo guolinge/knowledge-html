@@ -774,6 +774,68 @@ config:
       + db.query(sql, [city]);
 ```
 
+#### `sched-lab` —— 甘特图对比器
+
+**讲「同一个输入，换个规则结果全变」**：一行一条时间轴，切换方案看它们重排。
+配三个指标卡 + 一排横向对比条，谁好谁坏一眼看出来。
+
+```demo
+widget: sched-lab
+title: 四个作业，六种算法
+actions: false
+config:
+  default: FCFS
+  quantum: 2
+  mlfq: [1, 2, 4]
+  jobs:
+    - { id: P1, arrive: 0, burst: 3, priority: 3 }
+    - { id: P2, arrive: 2, burst: 6, priority: 1 }
+```
+
+`config.jobs[]`：`id` / `arrive`（到达时刻）/ `burst`（需要运行多久）/ `priority`（1 最高）。
+控件**现算**，不预先烤结果 —— 换作业集只改这几行。
+
+内置六种算法，`id` 是固定的：`FCFS` `SJF` `HRRN` `RR`（用 `quantum`）
+`HPF`（抢占式）`MLFQ`（用 `mlfq` 三级时间片）。
+`default` 只是决定初始选中谁。
+
+> 它的形状是「一行 = 一个作业、横轴 = 时间」，所以**换个领域也能用**：
+> 把 `jobs` 想成「作业」就行 —— 交给谁、什么时候开始、要多久。
+> 但它是**离散槽位**、不是连续时间轴，别拿它画真实的耗时曲线。
+
+#### `switch-cost` —— 双栏逐步对照
+
+**讲「A 和 B 差在哪一步」**：左栏列动作，右边两列并排回答「这次要不要做」，
+一步步走，走到分叉处自己会看出来。底部两条进度条是「累计做了几样动作」。
+
+```demo
+widget: switch-cost
+title: 同进程内切线程 vs 跨进程切换
+actions: false
+config:
+  tail: 分叉只在第 4 步 —— 而这一步一旦发生，代价摊在之后。
+  steps:
+    - title: 保存寄存器和 PC
+      detail: 寄存器里是这个线程执行到哪。
+      thread: "yes"
+      proc: "yes"
+      threadWhy: 每个线程一份
+      procWhy: 一样
+    - title: 换掉页表基址寄存器
+      detail: 决定 CPU 接下来用哪一张页表翻译地址。
+      thread: "no"
+      proc: "yes"
+      threadWhy: 两个线程共用同一张页表
+      procWhy: 新进程有一整套自己的地址空间
+      branch: true
+```
+
+`steps[].thread` / `steps[].proc` 取 `"yes"` 或 `"no"`；`branch: true` 的那一行
+会带一条琥珀色左边条，把「分叉点」钉出来。
+
+> `tail` 用一句话收尾。==别让分叉点超过两个，也别在 `no` 的那一栏写长句==
+> —— 那一栏本来就窄。
+
 ### 数据驱动的写法（`config`）
 
 上面三个控件都用 `config`，作者**只写 YAML，不写 HTML**：

@@ -1,0 +1,621 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-has-toc="1">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>线程 · 共享什么、独享什么、切换便宜在哪</title>
+<meta name="description" content="同一个进程里切出多条执行流：线程和进程各管一段（一个是调度单位、一个是资源单位），三种映射模型决定了「一个线程阻塞会不会拖垮整个进程」。" />
+<link rel="stylesheet" href="../../assets/theme.css" />
+  <link rel="stylesheet" href="../../assets/blocks.css" />
+  <link rel="stylesheet" href="../../assets/archify-embed.css" />
+</head>
+<body>
+<div id="progress"></div>
+<div id="tocScrim"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
+    <a class="brand" href="../../index.html"><span class="dot"></span>知识笔记</a>
+    
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="toc" id="toc">
+      <p class="toc-title">目录</p>
+      <a href="../../index.html" class="sub">← 全部笔记</a>
+      <a href="#为什么需要线程">为什么需要线程</a>
+      <a href="#单进程卡在哪" class="sub">单进程卡在哪</a>
+      <a href="#多进程为什么还不够" class="sub">多进程为什么还不够</a>
+      <a href="#需要一个新东西" class="sub">需要一个新东西</a>
+      <a href="#线程共享什么独享什么">线程共享什么、独享什么</a>
+      <a href="#页表为什么它决定了切换的开销" class="sub">页表：为什么它决定了切换的开销</a>
+      <a href="#栈每个线程一个" class="sub">栈：每个线程一个</a>
+      <a href="#共享带来的代价" class="sub">共享带来的代价</a>
+      <a href="#线程和进程各管一段">线程和进程各管一段</a>
+      <a href="#线程比进程省在哪" class="sub">线程比进程省在哪</a>
+      <a href="#线程的上下文切换差在哪">线程的上下文切换差在哪</a>
+      <a href="#把切换要做的动作逐步拆开" class="sub">把切换要做的动作逐步拆开</a>
+      <a href="#分叉点只有一步" class="sub">分叉点只有一步</a>
+      <a href="#线程的三种实现">线程的三种实现</a>
+      <a href="#两边的优缺点" class="sub">两边的优缺点</a>
+      <a href="#用户线程和内核线程怎么对应" class="sub">用户线程和内核线程怎么对应</a>
+      <a href="#共享带来的矛盾以及怎么写代码" class="sub">共享带来的矛盾，以及怎么写代码</a>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow">● 操作系统 · 进程管理 ②</span>
+      <h1>线程 · 共享什么、独享什么、切换便宜在哪</h1>
+      <p class="lede">同一个进程里切出多条执行流：线程和进程各管一段（一个是调度单位、一个是资源单位），三种映射模型决定了「一个线程阻塞会不会拖垮整个进程」。</p>
+    </div>
+
+    <div class="draft-banner">
+    <span>⚠</span>
+    <span>本页状态为 <b>draft</b>：内容尚未人工核对，引用前请自行验证。</span>
+  </div>
+<aside class="needs">
+      <p class="needs-title">读这篇之前，你需要先知道</p>
+      <a class="need" href="../os-process/">← <b>1. 进程</b><span>七种状态怎么变、PCB 记了什么、上下文切换切的是哪两样东西</span></a>
+    </aside>
+    <div class="provenance"><span><b>来源</b> 飞书文档《进程、线程基础知识全家桶，30 张图一套带走》 https://futu.feishu.cn/docx/UeikdVr3VoNIM5xSFu4cULbNnXb @ revision 105</span><span><b>生成</b> 2026-10-01</span><span><b>模型</b> claude-opus-4-5</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">操作系统</span> <span class="tag tone-muted">线程</span> <span class="tag tone-muted">用户线程</span> <span class="tag tone-muted">LWP</span></span></div>
+
+<h2 id="为什么需要线程"><span class="num">01</span>为什么需要线程</h2>
+<p>假设你要写一个视频播放器。核心功能就三个：</p>
+<ul>
+<li>从视频文件里读数据</li>
+<li>把读到的数据解压缩</li>
+<li>把解压后的画面和声音放出来</li>
+</ul>
+<p>用单进程写，最自然的写法是三个函数依次调用：</p>
+<div class="pipe"><div class="lane tone-red">
+        <div class="lane-meta">
+          <span class="ln">方案一</span>
+          <b>单进程</b>
+          <small>三个功能串在一条执行流上</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>Read</b>
+        <small>从硬盘读一帧</small>
+        <span class="tag tone-red">卡在这</span>
+      </div><div class="pnode">
+        <b>Decompress</b>
+        <small>解压这一帧</small>
+        <span class="tag tone-red">等 Read</span>
+      </div><div class="pnode">
+        <b>Play</b>
+        <small>播出这一帧</small>
+        <span class="tag tone-red">等解压</span>
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">拆成三个进程<span class="note">能并发了，但资源各一份</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-amber">
+        <div class="lane-meta">
+          <span class="ln">方案二</span>
+          <b>多进程</b>
+          <small>三个进程各跑各的</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>读进程</b>
+        <small>自己的地址空间</small>
+        
+      </div><div class="pnode">
+        <b>解压进程</b>
+        <small>自己的地址空间</small>
+        
+      </div><div class="pnode">
+        <b>播放进程</b>
+        <small>自己的地址空间</small>
+        
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">多进程的两个新问题<span class="note">怎么通信，怎么摊开销</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-green">
+        <div class="lane-meta">
+          <span class="ln">方案三</span>
+          <b>多线程</b>
+          <small>三条执行流，共用同一个地址空间</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>读线程</b>
+        <small>共享代码段和数据段</small>
+        
+      </div><div class="pnode">
+        <b>解压线程</b>
+        <small>各自独立的寄存器和栈</small>
+        
+      </div><div class="pnode">
+        <b>播放线程</b>
+        <small>共享打开的文件</small>
+        
+      </div></div>
+      </div></div><h3 id="单进程卡在哪">单进程卡在哪</h3>
+<p><code>Read</code> 要等硬盘。硬盘返回之前，整条执行流都停在那一行上。后面的解压和播放，全做不了。</p>
+<p>结果是播放出来的画面和声音一顿一顿的。</p>
+<p>看着像「性能不够」，真实原因是三个模块没办法同时推进：一个在等 I/O，另外两个明明可以干活，却被同一条执行流绑住了。</p>
+<h3 id="多进程为什么还不够">多进程为什么还不够</h3>
+<p>拆成三个进程确实能并发了。但新问题跟着来：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>问题</th><th>具体表现</th><th>有多贵</th></tr></thead><tbody><tr><th>进程之间怎么通信</th><td data-label="具体表现">地址空间互不相通，要传数据得走管道 / 共享内存 / socket</td><td data-label="有多贵">都要经过内核，一次拷贝起步</td></tr><tr><th>创建和终止的开销</th><td data-label="具体表现">要分配资源、建 PCB；终止要回收、撤销 PCB</td><td data-label="有多贵">比建一个线程贵一个量级</td></tr><tr><th>切换的开销</th><td data-label="具体表现">两个进程的地址空间不一样，切的时候要换页表</td><td data-label="有多贵">页表一换，TLB 就作废了</td></tr></tbody></table></div><p>这三个进程明明在给同一个播放器干活，却被迫各自维护一整套地址空间、文件表、内存映射。它们需要共享的东西太多了，而进程在设计上是最小共享单位。</p>
+<h3 id="需要一个新东西">需要一个新东西</h3>
+<p>理一下需求，它要同时满足两条：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code>① 能并发执行        解决「Read 卡住，别的干不了」
+② 共享同一个地址空间  解决「通信和开销」
+</code></pre></div>
+<p>线程就是这个东西。</p>
+<div class="callout tone-violet">
+      <span class="ic">🧵</span>
+      <div><p><strong>线程是进程当中的一条执行流程。</strong></p>
+<p>同一个进程里的多个线程共享代码段、数据段、打开的文件，
+<mark class="mk-blue">但每个线程有自己独立的一套寄存器和栈</mark>。</p>
+<p>后面这句才是关键：共享的东西决定切换有多便宜，独享的东西决定切换要保存什么。</p>
+</div>
+    </div><hr>
+<h2 id="线程共享什么独享什么"><span class="num">02</span>线程共享什么、独享什么</h2>
+<p>把「一个进程」拆开看，它的资源分成两类：</p>
+<div class="tree" data-tree><ul class="tlist"><li class="has-kids">
+            <div class="tnode tone-violet" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>一个进程</b>
+              
+              <span class="tnote">进程是资源分配的单位，它拥有这些东西</span>
+            </div>
+            <ul class="tlist"><li class="has-kids">
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>共享的部分</b>
+              
+              <span class="tnote">所有线程看到的是同一份</span>
+            </div>
+            <ul class="tlist"><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>代码段</b>
+              
+              <span class="tnote">编译出来的指令，只读</span>
+            </div>
+            
+          </li><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>数据段 / 堆</b>
+              
+              <span class="tnote">全局变量、malloc / new 出来的内存</span>
+            </div>
+            
+          </li><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>打开的文件</b>
+              
+              <span class="tnote">所有线程共用同一张文件描述符表</span>
+            </div>
+            
+          </li><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>页表 / 地址空间</b>
+              
+              <span class="tnote">同一份虚拟地址映射，线程切换便宜的根本原因</span>
+            </div>
+            
+          </li></ul>
+          </li><li class="has-kids">
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>独享的部分</b>
+              
+              <span class="tnote">每个线程各有一份，切换时才有东西要保存</span>
+            </div>
+            <ul class="tlist"><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>寄存器</b>
+              
+              <span class="tnote">含 PC，记录这个线程执行到哪一条指令</span>
+            </div>
+            
+          </li><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>栈</b>
+              
+              <span class="tnote">函数调用链、局部变量，互不干扰</span>
+            </div>
+            
+          </li></ul>
+          </li></ul>
+          </li></ul></div><h3 id="页表为什么它决定了切换的开销">页表：为什么它决定了切换的开销</h3>
+<p>每个进程有一张<strong>页表</strong>，记录「虚拟地址的哪一页对应物理内存的哪一页」。</p>
+<p>查一次页表要多访问一次内存，太慢了。所以 CPU 里有一个<strong>快表</strong>（TLB），缓存最近用过的那些映射：</p>
+<div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-green">①</span>
+            <span class="name">查快表</span>
+            <span class="spacer"></span>
+            <span class="tag tone-green">命中</span>
+          </div>
+          <div class="rec"><div class="ok">
+            <b>虚拟页号</b><span>0x4</span><em>就在表里</em></div><div class="">
+            <b>物理页号</b><span>0xC</span><em>直接拿到</em></div></div>
+          
+          <p class="jnote">表在 CPU 内部，几个周期就有结果</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">没命中<span class="note">只能老实去内存里查页表</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-amber">②</span>
+            <span class="name">查页表</span>
+            <span class="spacer"></span>
+            <span class="tag tone-amber">没命中</span>
+          </div>
+          <div class="rec"><div class="">
+            <b>虚拟页号</b><span>0x4</span></div><div class="ok">
+            <b>物理页号</b><span>0xC</span><em>顺手填进快表</em></div></div>
+          
+          <p class="jnote">这一次多访问了一次内存，但同样的地址下一次就快了</p>
+        </div><p>关键在这一句：</p>
+<blockquote>
+<p><mark class="mk-blue">快表里缓存的映射，只对当前这个地址空间成立。</mark></p>
+</blockquote>
+<p>因为「虚拟地址 0x4000」这个数本身不带任何信息，同一串地址在两个进程里可以指向完全不同的物理页：</p>
+<div class="flowd has-grid has-groups" data-flow data-edges="[{&quot;from&quot;:&quot;ava&quot;,&quot;to&quot;:&quot;aph&quot;,&quot;label&quot;:&quot;查 A 的页表&quot;},{&quot;from&quot;:&quot;bva&quot;,&quot;to&quot;:&quot;bph&quot;,&quot;label&quot;:&quot;查 B 的页表&quot;}]">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"><div class="fgroup tone-blue" data-group-box="mem">
+          <span class="fgroup-label">同一串虚拟地址，落到完全不同的物理页上</span>
+        </div></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-blue" data-id="ava" data-group="mem">
+              
+              
+              <b>进程 A 的程序里</b>
+              <small>虚拟地址 0x4000</small>
+            </div><div class="fnode tone-amber" data-id="bva" data-group="mem">
+              
+              
+              <b>进程 B 的程序里</b>
+              <small>同一个 0x4000</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-blue" data-id="aph" data-group="mem">
+              
+              
+              <b>物理页 12</b>
+              <small>A 的数据</small>
+            </div><div class="fnode tone-amber" data-id="bph" data-group="mem">
+              
+              
+              <b>物理页 87</b>
+              <small>B 的数据</small>
+            </div></div></div>
+      
+    </div><p><mark class="mk-blue">同一串虚拟地址，靠页表才落到不同的物理页上。</mark> 所以「换不换页表」直接决定了快表里那些缓存还能不能用。这一点在第 04 节成了一个分水岭。</p>
+<h3 id="栈每个线程一个">栈：每个线程一个</h3>
+<p>栈不是一块被动分配的内存，它是运行时的函数调用链。</p>
+<p>线程 A 正在 <code>play()</code> → <code>decode()</code> → <code>read_frame()</code> 这样一层层往下调，这条链就码在线程 A 的栈上。线程 B 可能在完全不同的位置（比如 <code>main()</code> → <code>loop()</code>）。</p>
+<p><mark class="mk-amber">!两个线程不可能共用一个栈。</mark> 共用的话，A 调用的返回地址会被 B 覆盖掉，两个人都回不去。</p>
+<p>所以：</p>
+<table>
+<thead>
+<tr>
+<th>独享的是</th>
+<th>大小</th>
+<th>装什么</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>寄存器</td>
+<td>几百字节</td>
+<td>当前这条指令的临时状态，含 PC</td>
+</tr>
+<tr>
+<td>栈</td>
+<td>通常几 MB</td>
+<td>调用链、局部变量、返回地址</td>
+</tr>
+</tbody>
+</table>
+<p>这两个加起来就是「切换时要保存和恢复的东西」，也就是第 04 节要算的账。</p>
+<h3 id="共享带来的代价">共享带来的代价</h3>
+<p>共享省钱，但也省出了麻烦：</p>
+<ul class="check cross"><li>一个线程崩溃（比如空指针、栈溢出），整个进程一起崩，它们共用同一个地址空间</li><li>共享数据被两个线程同时改，结果取决于谁先动手，这叫竞态</li><li>出错的现场是共享的，很难判断是哪个线程写坏的</li></ul><p>游戏里的用户状态就很容易踩第一个坑：如果用多线程实现，一个玩家线程挂掉会带走同一进程里所有玩家。</p>
+<hr>
+<h2 id="线程和进程各管一段"><span class="num">03</span>线程和进程各管一段</h2>
+<p>一句话把两者的分工说清楚：</p>
+<blockquote>
+<p><strong>进程是资源分配的单位，线程是 CPU 调度的单位。</strong></p>
+</blockquote>
+<p>操作系统实际调度的是线程，不是进程。进程做的事情是给线程提供资源：虚拟内存、全局变量、打开的文件。</p>
+<p>所以「进程切换」这个词稍微有点歧义。准确地说，是把 CPU 从一个线程还给另一个线程，只是有时候这两个线程属于不同进程。</p>
+<h3 id="线程比进程省在哪">线程比进程省在哪</h3>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>操作</th><th>进程</th><th>同进程内的线程</th><th>差在哪</th></tr></thead><tbody><tr><th>创建</th><td data-label="进程"><span class="tag tone-red">慢</span></td><td data-label="同进程内的线程"><span class="tag tone-green">快</span></td><td data-label="差在哪">进程还要准备内存管理信息、文件管理信息，线程直接共用现成的</td></tr><tr><th>终止</th><td data-label="进程"><span class="tag tone-red">慢</span></td><td data-label="同进程内的线程"><span class="tag tone-green">快</span></td><td data-label="差在哪">线程要还的资源少很多</td></tr><tr><th>切换</th><td data-label="进程"><span class="tag tone-red">慢</span></td><td data-label="同进程内的线程"><span class="tag tone-green">快</span></td><td data-label="差在哪">同进程的线程共用一张页表，切的时候不用换</td></tr><tr><th>数据传递</th><td data-label="进程"><span class="tag tone-red">慢</span></td><td data-label="同进程内的线程"><span class="tag tone-green">快</span></td><td data-label="差在哪">共享内存和文件，线程之间传数据不用过内核</td></tr></tbody></table></div><p>四个里最有意思的是切换，因为它的差别不是「快一点」，是「要不要动一整套地址空间」。</p>
+<hr>
+<h2 id="线程的上下文切换差在哪"><span class="num">04</span>线程的上下文切换差在哪</h2>
+<p>时钟走一格，是把 CPU 从一个线程交给另一个线程。这两个线程可能有两种关系：</p>
+<ul>
+<li><strong>同一个进程内的两个线程</strong>：地址空间是同一套</li>
+<li><strong>不同进程的两个线程</strong>：各自一套地址空间，这时它就等于一次进程切换</li>
+</ul>
+<h3 id="把切换要做的动作逐步拆开">把切换要做的动作逐步拆开</h3>
+<p>这个动作可以一步步拆开看：</p>
+<div class="demo" data-widget="switch-cost" data-config="{&quot;tail&quot;:&quot;前 3 步和后 1 步两边完全一样。分叉只在第 4、5 步。而这两步一旦发生，新线程接下来每次访存都要重新填 TLB，这笔账是切换之后才付的。&quot;,&quot;steps&quot;:[{&quot;title&quot;:&quot;保存当前线程的寄存器和 PC&quot;,&quot;detail&quot;:&quot;寄存器里是这个线程执行到哪、算到了哪。存进它自己的内核栈或 TCB 里。&quot;,&quot;thread&quot;:&quot;yes&quot;,&quot;proc&quot;:&quot;yes&quot;,&quot;threadWhy&quot;:&quot;每个线程一份&quot;,&quot;procWhy&quot;:&quot;一样&quot;},{&quot;title&quot;:&quot;切换内核栈和栈指针&quot;,&quot;detail&quot;:&quot;每个线程在内核里也有一套栈，系统调用执行到哪就码在它上面。不进内核就切不了。&quot;,&quot;thread&quot;:&quot;yes&quot;,&quot;proc&quot;:&quot;yes&quot;,&quot;threadWhy&quot;:&quot;内核栈也是独享的&quot;,&quot;procWhy&quot;:&quot;一样&quot;},{&quot;title&quot;:&quot;把新线程标成「运行中」&quot;,&quot;detail&quot;:&quot;更新两个线程的状态字段，就绪队列里也跟着调整。&quot;,&quot;thread&quot;:&quot;yes&quot;,&quot;proc&quot;:&quot;yes&quot;,&quot;threadWhy&quot;:&quot;和地址空间无关&quot;,&quot;procWhy&quot;:&quot;一样&quot;},{&quot;title&quot;:&quot;换掉页表基址寄存器&quot;,&quot;detail&quot;:&quot;这一步决定了 CPU 接下来用哪一张页表翻译地址。x86-64 上就是写 CR3 这个寄存器。&quot;,&quot;thread&quot;:&quot;no&quot;,&quot;proc&quot;:&quot;yes&quot;,&quot;threadWhy&quot;:&quot;两个线程共用同一张页表，寄存器里的值本来就不用改&quot;,&quot;procWhy&quot;:&quot;新进程有一整套自己的地址空间，得换掉&quot;,&quot;branch&quot;:true},{&quot;title&quot;:&quot;处理快表 TLB&quot;,&quot;detail&quot;:&quot;TLB 缓存的是「虚拟页 → 物理页」的映射，而这些映射只对一个地址空间成立。&quot;,&quot;thread&quot;:&quot;no&quot;,&quot;proc&quot;:&quot;yes&quot;,&quot;threadWhy&quot;:&quot;地址空间没变，缓存里的项还能继续用&quot;,&quot;procWhy&quot;:&quot;换了地址空间，旧项全部作废，接下来要一项项重新填&quot;,&quot;branch&quot;:true},{&quot;title&quot;:&quot;恢复新线程的寄存器和 PC，跳过去&quot;,&quot;detail&quot;:&quot;从新线程存下来的那份现场恢复，CPU 接着它上次停下的地方继续跑。&quot;,&quot;thread&quot;:&quot;yes&quot;,&quot;proc&quot;:&quot;yes&quot;,&quot;threadWhy&quot;:&quot;存了什么就恢复什么&quot;,&quot;procWhy&quot;:&quot;一样&quot;}]}">
+      <div class="demo-head">
+        <span class="title">同进程内切线程 vs 跨进程切换</span>
+        <span class="status" data-status>一步步走</span>
+        <span class="spacer"></span>
+        
+      </div>
+      <div class="demo-body custom" data-mount></div>
+    </div><h3 id="分叉点只有一步">分叉点只有一步</h3>
+<p><mark class="mk-blue">分叉只有一处：换不换页表。</mark> 第 5 步是它的连锁反应，不是独立的一笔开销。</p>
+<div class="cards" data-cols="2"><div class="ccard tone-green">
+          
+          <h4>同进程内切线程</h4>
+          <p>页表不动，TLB 不作废</p>
+          <div class="cbody"><p>切换完之后，新线程接着用同一批 TLB 项和 CPU 缓存。</p>
+<p>它要访问的内存，很可能刚刚就被前一个线程访问过，全是热的。</p>
+<p><mark class="mk-green">这就是线程切换便宜的真正原因，不是「保存的东西少了几行代码」。</mark></p>
+</div>
+          
+        </div><div class="ccard tone-amber">
+          
+          <h4>跨进程切换</h4>
+          <p>换页表，TLB 作废</p>
+          <div class="cbody"><p>切换本身只是写一个寄存器，很快。</p>
+<p>贵的是<strong>切换之后</strong>：新进程要用的映射一条都不在 TLB 里，
+接下来每次访存都要走一遍「查页表 → 填 TLB」。
+CPU 的缓存也是冷的。</p>
+<p><mark class="mk-blue">这笔账不会出现在切换的耗时里，而是摊在后面几十微秒的运行中。</mark></p>
+</div>
+          
+        </div></div><div class="callout tone-amber">
+      <span class="ic">🔧</span>
+      <div><p><strong>硬件后来打了一个补丁。</strong></p>
+<p>既然「地址空间没换就别刷 TLB」，那换个更细的问法：
+「换了地址空间，但新地址空间也有自己的条目，能不能别全刷？」</p>
+<p>可以。给每个地址空间发一个编号，TLB 项上带着这个编号：
+ARM 叫 <strong>ASID</strong>，x86 叫 <strong>PCID</strong>。</p>
+<p>打上这个补丁之后，跨进程切换时 TLB 里属于旧进程的项可以留着不清，
+只会命中不到而已。<mark class="mk-blue">代价是 TLB 能用到的条目变少了。</mark></p>
+</div>
+    </div><p>另外，跨进程的两个线程之间切换，和进程切换是同一件事。它们没有共享地址空间，该做的第 4、5 步一步都不会少。</p>
+<hr>
+<h2 id="线程的三种实现"><span class="num">05</span>线程的三种实现</h2>
+<p>线程这个概念，可以放在用户态实现，也可以放在内核里实现。这是两套完全不同的东西。</p>
+<div class="cards" data-cols="3"><div class="ccard tone-blue">
+          <span class="tag tone-blue">User Thread</span>
+          <h4>用户线程</h4>
+          <p>在用户态用线程库实现，内核不知道它的存在</p>
+          <div class="cbody"><p>线程控制块（TCB）放在用户态线程库里。
+创建、终止、同步、调度，<strong>全由库函数完成</strong>，操作系统不参与。</p>
+<p>内核看到的只是「一个进程」。</p>
+</div>
+          
+        </div><div class="ccard tone-violet">
+          <span class="tag tone-violet">Kernel Thread</span>
+          <h4>内核线程</h4>
+          <p>由内核直接管理的线程</p>
+          <div class="cbody"><p>TCB 在内核里，创建、终止、调度都要通过系统调用。</p>
+<p>内核对每个线程一视同仁，能单独调度它。</p>
+</div>
+          
+        </div><div class="ccard tone-amber">
+          <span class="tag tone-amber">LWP</span>
+          <h4>轻量级进程</h4>
+          <p>内核支持的用户线程</p>
+          <div class="cbody"><p>一个进程可以有一个或多个 LWP。
+每个 LWP 和内核线程一对一映射，由内核管理和调度。</p>
+<p>它是「用户线程」和「内核线程」之间的桥。</p>
+</div>
+          
+        </div></div><h3 id="两边的优缺点">两边的优缺点</h3>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>维度</th><th>用户线程</th><th>内核线程</th></tr></thead><tbody><tr><th>谁在管</th><td data-label="用户线程">用户态的线程库</td><td data-label="内核线程">操作系统内核</td></tr><tr><th>切换</th><td data-label="用户线程"><span class="tag tone-green">不用进内核，非常快</span></td><td data-label="内核线程"><span class="tag tone-amber">要走系统调用，慢一些</span></td></tr><tr><th>一个线程阻塞了</th><td data-label="用户线程"><span class="tag tone-red">整个进程都跑不了</span></td><td data-label="内核线程"><span class="tag tone-green">其他线程照常跑</span></td></tr><tr><th>一个线程霸占 CPU</th><td data-label="用户线程"><span class="tag tone-red">除非它主动让出，否则同进程其他线程没机会</span></td><td data-label="内核线程">内核可以抢，按时间片轮转</td></tr><tr><th>时间片算给谁</th><td data-label="用户线程">给进程，所以进程内的线程分到的时间片更少</td><td data-label="内核线程">直接给线程，多线程的进程能拿到更多 CPU 时间</td></tr><tr><th>能不能用多核</th><td data-label="用户线程">不能，内核只看到一个执行流</td><td data-label="内核线程">能，多个内核线程可以分到不同的核上</td></tr></tbody></table></div><p><mark class="mk-amber">用户线程最致命的缺陷是第一条。</mark></p>
+<p>一个用户线程发起了系统调用被阻塞，<strong>内核只看到「这个进程阻塞了」</strong>，于是把整个进程挂起。同进程里其他用户线程明明可以干活，也一起停了。原因很直接：内核根本不知道它们的存在。</p>
+<h3 id="用户线程和内核线程怎么对应">用户线程和内核线程怎么对应</h3>
+<div class="flowd has-grid has-groups" data-flow data-edges="[{&quot;from&quot;:&quot;u1&quot;,&quot;to&quot;:&quot;k1&quot;,&quot;dashed&quot;:true},{&quot;from&quot;:&quot;u2&quot;,&quot;to&quot;:&quot;k1&quot;,&quot;dashed&quot;:true},{&quot;from&quot;:&quot;u3&quot;,&quot;to&quot;:&quot;k1&quot;,&quot;dashed&quot;:true}]">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"><div class="fgroup tone-blue" data-group-box="u">
+          <span class="fgroup-label">用户态</span>
+        </div><div class="fgroup tone-violet" data-group-box="k">
+          <span class="fgroup-label">内核态</span>
+        </div></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-blue" data-id="u1" data-group="u">
+              
+              
+              <b>U1</b>
+              <small>用户线程</small>
+            </div><div class="fnode tone-blue" data-id="u2" data-group="u">
+              
+              
+              <b>U2</b>
+              <small>用户线程</small>
+            </div><div class="fnode tone-blue" data-id="u3" data-group="u">
+              
+              
+              <b>U3</b>
+              <small>用户线程</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="k1" data-group="k">
+              
+              
+              <b>K1</b>
+              <small>内核线程</small>
+            </div></div></div>
+      
+    </div><p><strong>多对一。</strong> 实现最简单，不用改内核。代价是上面那条：一个线程阻塞、整个进程停摆，而且用不上多核。</p>
+<div class="flowd has-grid has-groups" data-flow data-edges="[{&quot;from&quot;:&quot;u1&quot;,&quot;to&quot;:&quot;k1&quot;},{&quot;from&quot;:&quot;u2&quot;,&quot;to&quot;:&quot;k2&quot;}]">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"><div class="fgroup tone-blue" data-group-box="u">
+          <span class="fgroup-label">用户态</span>
+        </div><div class="fgroup tone-violet" data-group-box="k">
+          <span class="fgroup-label">内核态</span>
+        </div></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-blue" data-id="u1" data-group="u">
+              
+              
+              <b>U1</b>
+              <small>用户线程</small>
+            </div><div class="fnode tone-blue" data-id="u2" data-group="u">
+              
+              
+              <b>U2</b>
+              <small>用户线程</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="k1" data-group="k">
+              
+              
+              <b>K1</b>
+              <small>内核线程</small>
+            </div><div class="fnode tone-violet" data-id="k2" data-group="k">
+              
+              
+              <b>K2</b>
+              <small>内核线程</small>
+            </div></div></div>
+      
+    </div><p><strong>一对一。</strong> 一个线程阻塞不影响别人，多核也能用上。代价是每个用户线程都要在内核里建一个对应的线程。创建和切换都得进内核。</p>
+<div class="flowd has-grid has-groups" data-flow data-edges="[{&quot;from&quot;:&quot;u1&quot;,&quot;to&quot;:&quot;k1&quot;},{&quot;from&quot;:&quot;u2&quot;,&quot;to&quot;:&quot;k1&quot;,&quot;dashed&quot;:true},{&quot;from&quot;:&quot;u3&quot;,&quot;to&quot;:&quot;k2&quot;,&quot;dashed&quot;:true}]">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"><div class="fgroup tone-blue" data-group-box="u">
+          <span class="fgroup-label">用户态</span>
+        </div><div class="fgroup tone-violet" data-group-box="k">
+          <span class="fgroup-label">内核态</span>
+        </div></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-blue" data-id="u1" data-group="u">
+              
+              
+              <b>U1</b>
+              <small>用户线程</small>
+            </div><div class="fnode tone-blue" data-id="u2" data-group="u">
+              
+              
+              <b>U2</b>
+              <small>用户线程</small>
+            </div><div class="fnode tone-blue" data-id="u3" data-group="u">
+              
+              
+              <b>U3</b>
+              <small>用户线程</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="k1" data-group="k">
+              
+              
+              <b>K1</b>
+              <small>内核线程</small>
+            </div><div class="fnode tone-violet" data-id="k2" data-group="k">
+              
+              
+              <b>K2</b>
+              <small>内核线程</small>
+            </div></div></div>
+      
+    </div><p><strong>多对多。</strong> 多个用户线程映射到多个内核线程，中间隔着 LWP。绝大部分线程调度发生在用户态（便宜），同时又能利用多核。</p>
+<table>
+<thead>
+<tr>
+<th>模型</th>
+<th>一个线程阻塞</th>
+<th>用多核</th>
+<th>谁在调度</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>多对一（用户线程）</td>
+<td>整个进程停</td>
+<td>不能</td>
+<td>用户态线程库</td>
+</tr>
+<tr>
+<td>一对一（内核线程）</td>
+<td>其他线程照跑</td>
+<td>能</td>
+<td>内核</td>
+</tr>
+<tr>
+<td>多对多（LWP）</td>
+<td>其他线程照跑</td>
+<td>能</td>
+<td>两级：库 + 内核</td>
+</tr>
+</tbody>
+</table>
+<h3 id="共享带来的矛盾以及怎么写代码">共享带来的矛盾，以及怎么写代码</h3>
+<p>到这里可以回答一个更实际的问题：既然线程共享数据，两个线程同时改同一份数据会怎样？</p>
+<div class="callout tone-red">
+      <span class="ic">⚠</span>
+      <div><p><strong><code>count++</code> 不是一个原子操作。</strong></p>
+<p>它在机器层面是三步：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code>① 从内存读 count 到寄存器
+② 寄存器里的值加一
+③ 把寄存器写回内存
+</code></pre></div>
+<p>两个线程各跑一遍，如果交错成「A 读 → B 读 → A 写 → B 写」，
+<mark class="mk-blue">最终结果是加了一次，不是两次。</mark></p>
+<p>这就是竞态。它不会报错，只会在某个概率下算错。</p>
+</div>
+    </div><p>开发者手上的工具，按「共享得越少越安全」排：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>做法</th><th>怎么用</th><th>代价</th></tr></thead><tbody><tr><th>不共享</th><td data-label="怎么用">每个线程只用自己栈上的数据，线程之间不传可变状态</td><td data-label="代价"><span class="tag tone-green">最安全，但很多场景做不到</span></td></tr><tr><th>加锁</th><td data-label="怎么用">临界区外面套一把互斥锁，同一时刻只让一个线程进去</td><td data-label="代价">锁竞争会让并发退化成串行，用不好还会死锁</td></tr><tr><th>用现成的原子操作 / 无锁结构</th><td data-label="怎么用">用 CPU 提供的原子指令，或语言标准库里的并发容器</td><td data-label="代价">难写，出错时更难查</td></tr><tr><th>把共享的边界划清</th><td data-label="怎么用">谁拥有哪块数据写清楚，跨线程只传副本或消息</td><td data-label="代价"><span class="tag tone-green">需要设计，但换来的是可维护性</span></td></tr></tbody></table></div><p><mark class="mk-amber">真正的坑不在于「忘了加锁」，而在于「哪些数据是共享的」没想清楚。</mark> 一旦没想清楚，就会在某个线程里悄悄改了一个别人也在读的变量。</p>
+<hr>
+<div class="quiz"><details>
+        <summary>为什么同一个进程内切换线程，比跨进程切换便宜？</summary>
+        <div class="a"><p>因为两个线程共用同一张页表。切换时不用写页表基址寄存器，TLB 里的映射也继续有效，
+CPU 缓存还是热的。跨进程切换要换页表，TLB 跟着作废，
+之后每次访存都得重新填。这笔开销摊在切换之后的运行中。</p>
+</div>
+      </details><details>
+        <summary>用户线程最大的问题是什么？</summary>
+        <div class="a"><p>内核看不见它。所以一个用户线程发起系统调用被阻塞时，内核认为「这个进程阻塞了」，
+会把整个进程挂起。同进程里其他用户线程明明能跑，也一起停了。
+另外内核只按进程给时间片、也只看到一个执行流，所以用户线程用不上多核。</p>
+</div>
+      </details><details>
+        <summary>每个线程为什么必须有自己的栈？</summary>
+        <div class="a"><p>栈是函数调用链的载体。线程 A 正停在 read_frame() 里，返回地址和局部变量都码在栈上；
+线程 B 可能在完全不同的调用深度。共用一个栈的话，B 的调用会覆盖 A 的返回地址，
+两边都回不去。</p>
+</div>
+      </details></div>
+
+    <footer>
+      <span>线程 · 共享什么、独享什么、切换便宜在哪</span>
+      <span>最后更新 2026-10-01 · 单文件可离线打开</span>
+    </footer>
+  </main>
+</div>
+
+<script src="../../assets/app.js"></script>
+</body>
+</html>

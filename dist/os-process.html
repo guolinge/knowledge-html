@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>sql_builder_v2 的时间表达式</title>
-<meta name="description" content="「最近 7 天」在代码里有多少种说法、为什么一个日期要分三条实现路径、两个「包含今天」的参数各自管什么，以及为什么 `&lt;` 必须补一个 `&gt; 0`。" />
+<title>进程 · 状态、PCB 与上下文切换</title>
+<meta name="description" content="一个 CPU 怎么让人觉得它在同时跑很多程序：进程的七种状态怎么迁移、操作系统靠什么记住一个进程、进程切换时到底切走了哪两样东西。" />
 <style>
 /* ============================================================
    theme.css — 设计 token 与页面骨架
@@ -3734,173 +3734,165 @@ svg[data-preset="blueprint"] .c-security-group,
   <aside class="toc" id="toc">
       <p class="toc-title">目录</p>
       <a href="../../index.html" class="sub">← 全部笔记</a>
-      <a href="#概念一个最近-n-天有多少种说法">概念：一个「最近 N 天」有多少种说法</a>
-      <a href="#描述一个时间条件的-9-个字段" class="sub">描述一个时间条件的 9 个字段</a>
-      <a href="#组织273-行分四块">组织：273 行分四块</a>
-      <a href="#两个生成器" class="sub">两个生成器</a>
-      <a href="#架构gettimerules-分派到三条路">架构：getTimeRules 分派到三条路</a>
-      <a href="#谁在调它" class="sub">谁在调它</a>
-      <a href="#细节三条路各生成什么">细节：三条路各生成什么</a>
-      <a href="#①-timestamp-毫秒时间戳只给事件用" class="sub">① Timestamp —— 毫秒时间戳（只给事件用）</a>
-      <a href="#②-unixtimestamp-秒时间戳画像" class="sub">② UnixTimestamp —— 秒时间戳（画像）</a>
-      <a href="#③-date-yyyymmdd" class="sub">③ Date —— YYYYMMDD</a>
-      <a href="#细节三个容易踩的地方">细节：三个容易踩的地方</a>
-      <a href="#①-两个包含今天的参数管的不是一回事" class="sub">① 两个「包含今天」的参数，管的不是一回事</a>
-      <a href="#②-有些组合被校验挡掉" class="sub">② 有些组合被校验挡掉</a>
-      <a href="#③-为什么-lt-必须补一个-gt-0" class="sub">③ 为什么 &amp;lt; 必须补一个 &amp;gt; 0</a>
-      <a href="#自测">自测</a>
+      <a href="#一行代码要跑起来中间隔了什么">一行代码要跑起来，中间隔了什么</a>
+      <a href="#cpu-为什么不能干等" class="sub">CPU 为什么不能干等</a>
+      <a href="#并发的错觉" class="sub">并发的错觉</a>
+      <a href="#进程的七种状态">进程的七种状态</a>
+      <a href="#先看内存里的五个状态" class="sub">先看内存里的五个状态</a>
+      <a href="#再加两个创建和结束" class="sub">再加两个：创建和结束</a>
+      <a href="#再加两个挂起" class="sub">再加两个：挂起</a>
+      <a href="#所有迁移收在一张表里" class="sub">所有迁移收在一张表里</a>
+      <a href="#操作系统靠什么记住一个进程">操作系统靠什么记住一个进程</a>
+      <a href="#pcb-里记了什么" class="sub">PCB 里记了什么</a>
+      <a href="#队列把-pcb-串起来" class="sub">队列：把 PCB 串起来</a>
+      <a href="#进程的四件事创建终止阻塞唤醒">进程的四件事：创建、终止、阻塞、唤醒</a>
+      <a href="#创建进程" class="sub">创建进程</a>
+      <a href="#终止进程" class="sub">终止进程</a>
+      <a href="#阻塞进程" class="sub">阻塞进程</a>
+      <a href="#唤醒进程" class="sub">唤醒进程</a>
+      <a href="#上下文切换切走的到底是哪两样东西">上下文切换：切走的到底是哪两样东西</a>
+      <a href="#先看-cpu-上下文" class="sub">先看 CPU 上下文</a>
+      <a href="#进程上下文比-cpu-上下文多什么" class="sub">进程上下文比 CPU 上下文多什么</a>
+      <a href="#什么时候会触发切换" class="sub">什么时候会触发切换</a>
   </aside>
 
   <main>
     <div class="hero">
-      <span class="eyebrow">● 从零理解 · 模块</span>
-      <h1>sql_builder_v2 的时间表达式</h1>
-      <p class="lede">「最近 7 天」在代码里有多少种说法、为什么一个日期要分三条实现路径、两个「包含今天」的参数各自管什么，以及为什么 `&lt;` 必须补一个 `&gt; 0`。</p>
+      <span class="eyebrow">● 操作系统 · 进程管理 ①</span>
+      <h1>进程 · 状态、PCB 与上下文切换</h1>
+      <p class="lede">一个 CPU 怎么让人觉得它在同时跑很多程序：进程的七种状态怎么迁移、操作系统靠什么记住一个进程、进程切换时到底切走了哪两样东西。</p>
     </div>
 
     <div class="draft-banner">
     <span>⚠</span>
     <span>本页状态为 <b>draft</b>：内容尚未人工核对，引用前请自行验证。</span>
   </div>
-<aside class="needs">
-      <p class="needs-title">读这篇之前，你需要先知道</p>
-      <a class="need" href="../sql-builder-v2-core/">← <b>4. core 篇</b><span>通用层：递归六层讲一遍</span></a>
-    </aside>
-    <div class="provenance"><span><b>来源</b> sources/gitlab/sql_builder_v2 @ 2c500b2</span><span><b>生成</b> 2026-09-26</span><span><b>模型</b> deepseek-v4.1-flash</span></div>
-    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">架构</span> <span class="tag tone-muted">SQL</span> <span class="tag tone-muted">TypeScript</span> <span class="tag tone-muted">圈人</span></span></div>
 
-<div class="callout tone-blue">
-      <span class="ic">🧭</span>
-      <div><p>前置是 <a href="../sql-builder-v2-core/">④ core 篇</a>。</p>
-<p>core 篇说 <code>utils.ts</code> 675 行是个杂物抽屉，时间表达式是里面最大的一块（<strong>273 行</strong>）。
-这篇把它拆开。</p>
-<p>读完你应该能说出：「<mark class="mk-blue">一个「最近 7 天」，代码里有三种完全不同的 SQL 形态。</mark>」</p>
-</div>
-    </div><h2 id="概念一个最近-n-天有多少种说法"><span class="num">01</span>概念：一个「最近 N 天」有多少种说法</h2>
-<p>业务侧说「最近 7 天」，一句话。但它落到 SQL 上要回答<strong>三个问题</strong>：</p>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>问题</th><th>有几种答案</th><th>为什么要分</th></tr></thead><tbody><tr><th>是绝对时间还是相对时间</th><td data-label="有几种答案">2 种</td><td data-label="为什么要分">绝对时间就是一个值，相对时间要算</td></tr><tr><th>底层存的是什么格式</th><td data-label="有几种答案"><strong>3 种</strong></td><td data-label="为什么要分">毫秒时间戳 / 秒时间戳 / <code>YYYYMMDD</code></td></tr><tr><th>要不要包含今天</th><td data-label="有几种答案">2 种</td><td data-label="为什么要分">不包含就是「到今天 0 点」，包含就是「到此刻」</td></tr></tbody></table></div><p><strong>三个问题相乘，就是 12 种组合。</strong> 这就是为什么这个模块有 273 行。</p>
-<h3 id="描述一个时间条件的-9-个字段">描述一个时间条件的 9 个字段</h3>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">export type TimeExpr = {
-    op: Op;                                  // &gt; &gt;= &lt; &lt;=
-    name: string;                            // 列名
-    value: number;                           // N（天数 / 小时数）
-    dateType: DateType;                      // absolute | relative
-    dateFormat: DateFormat;                  // timestamp | unixTimestamp | date
-    includeToday: 0 | 1;                     // Tag 场景：包含当天吗
-    latestIncludeToday: 0 | 1 | undefined;   // Crowd 场景：最近 N 天包含当天吗
-    relativeDateType?: RelativeDateType;     // fromToday | singleDay
-    dateUnit: DateUnit;                      // day | hour
-};
-</code></pre></div>
-<div class="callout tone-amber">
-      <span class="ic">⚠</span>
-      <div><p><mark class="mk-blue"><strong>注意中间那两个「包含今天」的参数。</strong></mark></p>
-<p><code>includeToday</code> 和 <code>latestIncludeToday</code> —— 名字很像，但<strong>管的是不同场景</strong>，
-而且各有各的生效条件（下一节细说）。</p>
-<p><mark class="mk-blue">参数多到需要注释说明「这个字段只在某几个场景生效」，
-是这类模块的典型特征。</mark></p>
-</div>
-    </div><h2 id="组织273-行分四块"><span class="num">02</span>组织：273 行分四块</h2>
-<div class="pipe"><div class="lane tone-muted">
-        <div class="lane-meta">
-          
-          <b>四个枚举</b>
-          <small>定义「有哪几种可能」</small>
-        </div>
-        <div class="lane-body"><div class="pnode">
-        <b>DateType</b>
-        <small>absolute / relative</small>
-        
-      </div><div class="pnode">
-        <b>RelativeDateType</b>
-        <small>fromToday / singleDay</small>
-        
-      </div><div class="pnode">
-        <b>DateFormat</b>
-        <small>timestamp / unixTimestamp / date</small>
-        
-      </div><div class="pnode">
-        <b>DateUnit</b>
-        <small>day / hour</small>
-        
-      </div></div>
-      </div><div class="lane tone-green">
-        <div class="lane-meta">
-          
-          <b>两个生成器</b>
-          <small>拼出最终的条件数组</small>
-        </div>
-        <div class="lane-body"><div class="pnode">
-        <b>generateLatestDaysRules</b>
-        <small>「最近 N 天」→ 两个条件</small>
-        
-      </div><div class="pnode">
-        <b>generatePrevDaysRules</b>
-        <small>「N 天前」→ 一个条件</small>
-        
-      </div></div>
-      </div><div class="lane tone-violet">
-        <div class="lane-meta">
-          
-          <b>三个实现</b>
-          <small>按底层格式分</small>
-        </div>
-        <div class="lane-body"><div class="pnode">
-        <b>getTimestampRules</b>
-        <small>毫秒时间戳（只给事件用）</small>
-        
-      </div><div class="pnode">
-        <b>getUnixTimestampRules</b>
-        <small>秒时间戳（画像）</small>
-        
-      </div><div class="pnode">
-        <b>getDateRules</b>
-        <small>YYYYMMDD（画像）</small>
-        
-      </div></div>
-      </div><div class="lane tone-blue">
-        <div class="lane-meta">
-          
-          <b>一个入口</b>
-          <small>分派 + 校验</small>
-        </div>
-        <div class="lane-body"><div class="pnode">
-        <b>getTimeRules</b>
-        <small>按 dateFormat 分到三条路</small>
-        
-      </div><div class="pnode">
-        <b>timeExprValidate</b>
-        <small>校验非法组合</small>
-        
-      </div></div>
-      </div></div><div class="callout tone-violet">
-      <span class="ic">💡</span>
-      <div><p><strong>这个结构很清晰：四个枚举定义可能性，两个生成器负责拼装，
-三个实现各管一种格式，一个入口做分派。</strong></p>
-<p><mark class="mk-blue">三个实现都调同一个生成器 —— 差异只在「起止时间怎么算出来」。</mark></p>
-</div>
-    </div><h3 id="两个生成器">两个生成器</h3>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">// 「最近 N 天」→ 两个条件
-export function generateLatestDaysRules(column, startRaw, endRaw, includeEnd = false) {
-    return [
-        { column, op: Op.Gte, rawValue: startRaw },
-        { column, op: includeEnd ? Op.Lte : Op.Lt, rawValue: endRaw }
-    ];
-}
+    <div class="provenance"><span><b>来源</b> 飞书文档《进程、线程基础知识全家桶，30 张图一套带走》 https://futu.feishu.cn/docx/UeikdVr3VoNIM5xSFu4cULbNnXb @ revision 105</span><span><b>生成</b> 2026-10-01</span><span><b>模型</b> claude-opus-4-5</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">操作系统</span> <span class="tag tone-muted">进程</span> <span class="tag tone-muted">PCB</span> <span class="tag tone-muted">上下文切换</span></span></div>
 
-// 「N 天前」→ 一个条件
-function generatePrevDaysRules(column, rawValue) {
-    return [{ column, op: Op.Lt, rawValue }];
-}
+<h2 id="一行代码要跑起来中间隔了什么"><span class="num">01</span>一行代码要跑起来，中间隔了什么</h2>
+<p>先看一个具体的东西。你在终端敲下：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code>$ python train.py --epochs 30
 </code></pre></div>
-<div class="callout tone-amber">
-      <span class="ic">⚠</span>
-      <div><p><strong><code>includeEnd</code> 决定上界是 <code>&lt;</code> 还是 <code>&lt;=</code>。</strong></p>
-<p>这个布尔值一路从 <code>getUnixTimestampRules</code> 传进来（那里的 <code>exact</code> 变量）。</p>
-<p><mark class="mk-blue">「到此刻」和「到 0 点」的区别，最终就落在这一个符号上。</mark></p>
+<p>回车之后，它开始吃 1.2 GB 内存、打开 3 个数据文件、占满一个 CPU 核。这时候你在另一个窗口敲 <code>ps</code>，会看到它：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code>  PID TTY      TIME CMD
+ 8412 pts/3  00:12:37 python
+</code></pre></div>
+<p>这一行就是一个<strong>进程</strong>：一个正在运行的程序。</p>
+<p>程序本身只是个文件。它躺在硬盘上，不占 CPU、不占内存、也不会自己变。只有当操作系统把它装载进内存、CPU 开始执行里面的指令，它才成为一个进程。</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>程序</th>
+<th>进程</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>存在形态</td>
+<td>硬盘上的可执行文件</td>
+<td>内存里正在跑的一份执行</td>
+</tr>
+<tr>
+<td>有几份</td>
+<td>一份文件</td>
+<td>同一个程序可以同时跑出好几个进程</td>
+</tr>
+<tr>
+<td>会自己变吗</td>
+<td>不会</td>
+<td>每时每刻都在变：跑到哪了、占了多少内存、打开了哪些文件</td>
+</tr>
+</tbody>
+</table>
+<p>用做饭打个比方：菜谱是程序，食材是数据，照着菜谱把菜做出来这件事，才是进程。同一份菜谱，三个人可以同时各做一份、互不干扰，那是三个进程。</p>
+<h3 id="cpu-为什么不能干等">CPU 为什么不能干等</h3>
+<p>假设有一段代码要「从硬盘读一个 500 MB 的文件」。硬盘读完要几百毫秒，而 CPU 执行一条指令是纳秒级，这两件事差了<strong>八个数量级</strong>。</p>
+<p>CPU 在这几百毫秒里干等着，那它 99.99% 的时间都在发呆。</p>
+<p>所以操作系统不让它等：进程 A 发出读盘请求后，CPU 立刻转去执行进程 B；硬盘把数据准备好了，发一个<strong>中断</strong>告诉 CPU，CPU 再回到 A 继续往下跑。</p>
+<p>烧水的类比很贴切。你不会站在水壶前面盯着它烧开，而是先去干别的，听到「嘀」的一声再回来倒水。那声「嘀」就是中断。</p>
+<div class="callout tone-violet">
+      <span class="ic">📜</span>
+      <div><p><strong>「别等，让事件来敲门」不是一开始就有的。</strong></p>
+<p>早期机器用<strong>轮询</strong>：CPU 反复去读设备的状态寄存器，问「好了没」。浪费 CPU，但实现简单。</p>
+<p>转向中断驱动是 1950 年代中后期到 1960 年代慢慢完成的，<strong>没有一个确切的日期</strong>：</p>
+<table>
+<thead>
+<tr>
+<th>时间</th>
+<th>发生了什么</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1950s 中期</td>
+<td>中断机制出现。UNIVAC 1103 / 1103A 和 NBS 的 DYSEAC 都被算作早期实现，<mark class="mk-blue">「谁是第一台」至今有争议</mark></td>
+</tr>
+<tr>
+<td>1958</td>
+<td>IBM 709 用上 DMA：数据在设备和内存之间直接搬，CPU 连「搬」这个动作都不参与了</td>
+</tr>
+<tr>
+<td>1964</td>
+<td>CDC 6600，当时最快的机器之一，对 I/O <strong>仍然用轮询</strong></td>
+</tr>
+</tbody>
+</table>
+<p>最后一行才是重点：中断不是一夜之间取代轮询的，两套办法长期并存。</p>
 </div>
-    </div><h2 id="架构gettimerules-分派到三条路"><span class="num">03</span>架构：<code>getTimeRules</code> 分派到三条路</h2>
-<div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;in&quot;,&quot;to&quot;:&quot;q0&quot;},{&quot;from&quot;:&quot;q0&quot;,&quot;to&quot;:&quot;abs&quot;,&quot;label&quot;:&quot;否（绝对时间）&quot;,&quot;dashed&quot;:true},{&quot;from&quot;:&quot;q0&quot;,&quot;to&quot;:&quot;v&quot;,&quot;label&quot;:&quot;是&quot;},{&quot;from&quot;:&quot;v&quot;,&quot;to&quot;:&quot;q&quot;},{&quot;from&quot;:&quot;q&quot;,&quot;to&quot;:&quot;ts&quot;,&quot;label&quot;:&quot;timestamp&quot;},{&quot;from&quot;:&quot;q&quot;,&quot;to&quot;:&quot;unix&quot;,&quot;label&quot;:&quot;unixTimestamp&quot;},{&quot;from&quot;:&quot;q&quot;,&quot;to&quot;:&quot;date&quot;,&quot;label&quot;:&quot;date&quot;},{&quot;from&quot;:&quot;q&quot;,&quot;to&quot;:&quot;bad&quot;,&quot;label&quot;:&quot;其它&quot;,&quot;dashed&quot;:true},{&quot;from&quot;:&quot;ts&quot;,&quot;to&quot;:&quot;out&quot;},{&quot;from&quot;:&quot;unix&quot;,&quot;to&quot;:&quot;out&quot;},{&quot;from&quot;:&quot;date&quot;,&quot;to&quot;:&quot;out&quot;}]">
+    </div><h3 id="并发的错觉">并发的错觉</h3>
+<p>单核 CPU 在某一瞬间只能执行一个进程。但在 1 秒钟里它可能切换几十次，每个进程跑几十到几百毫秒。</p>
+<p>于是在人眼看来，音乐在放、浏览器在渲染、下载在下，好像是同时在跑。</p>
+<p><mark class="mk-blue">这叫并发：宏观上同时，微观上轮流。</mark></p>
+<p>真并行是另一回事，它需要多个 CPU 核：</p>
+<div class="pipe"><div class="lane tone-blue">
+        <div class="lane-meta">
+          <span class="ln">单核</span>
+          <b>并发</b>
+          <small>同一瞬间只有一个人真的在跑</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>0 → 20ms</b>
+        <small>进程 A 占着 CPU</small>
+        <span class="tag tone-blue">A</span>
+      </div><div class="pnode">
+        <b>20 → 40ms</b>
+        <small>换成进程 B</small>
+        <span class="tag tone-blue">B</span>
+      </div><div class="pnode">
+        <b>40 → 60ms</b>
+        <small>又换回 A</small>
+        <span class="tag tone-blue">A</span>
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">再加一个核<span class="note">这才叫并行</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-green">
+        <div class="lane-meta">
+          <span class="ln">双核</span>
+          <b>并行</b>
+          <small>同一瞬间两个都在跑</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>核 1</b>
+        <small>A 从头跑到尾，没被换下去</small>
+        <span class="tag tone-green">一直跑</span>
+      </div><div class="pnode">
+        <b>核 2</b>
+        <small>B 也从头跑到尾</small>
+        <span class="tag tone-green">一直跑</span>
+      </div></div>
+      </div></div><p>看两排的区别：并发那排的格子是<strong>串成一串</strong>的，同一列只有一个格子；
+并行那排的格子是<strong>并排</strong>的。</p>
+<hr>
+<h2 id="进程的七种状态"><span class="num">02</span>进程的七种状态</h2>
+<p>进程不是从头跑到尾的。它更像「运行 → 暂停 → 运行」这样断断续续地往前走：跑一会儿被换下去，等某个条件满足了再被换上来。</p>
+<p>它停下来的原因只有两类，这决定了它停在哪个状态。</p>
+<h3 id="先看内存里的五个状态">先看内存里的五个状态</h3>
+<div class="flowd has-grid has-groups" data-flow data-edges="[{&quot;from&quot;:&quot;new&quot;,&quot;to&quot;:&quot;ready&quot;,&quot;label&quot;:&quot;创建完成&quot;},{&quot;from&quot;:&quot;ready&quot;,&quot;to&quot;:&quot;run&quot;,&quot;label&quot;:&quot;拿到 CPU&quot;},{&quot;from&quot;:&quot;run&quot;,&quot;to&quot;:&quot;ready&quot;,&quot;label&quot;:&quot;时间片用完&quot;,&quot;dashed&quot;:true},{&quot;from&quot;:&quot;run&quot;,&quot;to&quot;:&quot;exit&quot;,&quot;label&quot;:&quot;退出 / 出错&quot;},{&quot;from&quot;:&quot;run&quot;,&quot;to&quot;:&quot;block&quot;,&quot;label&quot;:&quot;请求 I/O&quot;},{&quot;from&quot;:&quot;block&quot;,&quot;to&quot;:&quot;ready&quot;,&quot;label&quot;:&quot;事件到了&quot;}]">
       <svg class="flowd-svg" aria-hidden="true">
         <defs>
           <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
@@ -3909,324 +3901,490 @@ function generatePrevDaysRules(column, rawValue) {
           </marker>
         </defs>
       </svg>
-      <div class="flowd-groups"></div>
-      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-green" data-id="in">
-              
-              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5L3 8l3 4.5M10 3.5L13 8l-3 4.5"/></svg>
-              <b>getTimeRules(rule, isTag)</b>
-              <small>一个 TimeExpr</small>
-            </div></div><div class="flowd-row"><div class="fnode tone-amber shape-note" data-id="q0">
+      <div class="flowd-groups"><div class="fgroup tone-muted" data-group-box="five">
+          <span class="fgroup-label">内存里的五个基本状态</span>
+        </div></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-muted shape-pill" data-id="new" data-group="five">
               
               
-              <b>dateType 是 relative？</b>
-              
-            </div></div><div class="flowd-row"><div class="fnode tone-muted" data-id="abs">
-              
-              
-              <b>直接一个条件</b>
-              <small>{ op, column, value }</small>
-            </div><div class="fnode tone-amber" data-id="v">
+              <b>创建</b>
+              <small>刚分配 PCB</small>
+            </div><div class="fnode tone-blue shape-pill" data-id="ready" data-group="five">
               
               
-              <b>timeExprValidate</b>
-              <small>校验非法组合</small>
-            </div></div><div class="flowd-row"><div class="fnode tone-violet shape-note" data-id="q">
+              <b>就绪</b>
+              <small>就差 CPU</small>
+            </div><div class="fnode tone-green shape-pill" data-id="run" data-group="five">
               
               
-              <b>switch (dateFormat)</b>
-              
-            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="ts">
-              
-              
-              <b>getTimestampRules</b>
-              <small>毫秒时间戳</small>
-            </div><div class="fnode tone-green" data-id="unix">
+              <b>运行</b>
+              <small>正占着 CPU</small>
+            </div><div class="fnode tone-red shape-pill" data-id="exit" data-group="five">
               
               
-              <b>getUnixTimestampRules</b>
-              <small>秒时间戳</small>
-            </div><div class="fnode tone-blue" data-id="date">
+              <b>结束</b>
+              <small>资源被回收</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-amber shape-pill" data-id="block" data-group="five">
               
               
-              <b>getDateRules</b>
-              <small>YYYYMMDD</small>
-            </div><div class="fnode tone-red" data-id="bad">
-              
-              
-              <b>throw</b>
-              <small>非法 dateFormat</small>
-            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="out">
-              
-              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="8" cy="4.2" rx="5" ry="1.9"/><path d="M3 4.2v7.6c0 1.05 2.24 1.9 5 1.9s5-.85 5-1.9V4.2"/></svg>
-              <b>Expression[]</b>
-              <small>一个或多个条件</small>
+              <b>阻塞</b>
+              <small>等 I/O 返回</small>
             </div></div></div>
       
-    </div><div class="callout tone-green">
-      <span class="ic">✅</span>
-      <div><p><mark class="mk-blue"><strong>注意最上面那个分支：绝对时间不展开。</strong></mark></p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">if (dateType !== DateType.Relative) {
-    return [{ op, column: name, value }];
-}
-</code></pre></div>
-<p>「2026-03-01 那天」就是一个值，不需要算。
-<mark class="mk-blue">只有相对时间才需要「展开成多个条件」。</mark></p>
-</div>
-    </div><h3 id="谁在调它">谁在调它</h3>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">getTimeRules 被三个文件调用：
-  crowd/src/entrepots/portrait.ts    ← 画像条件
-  crowd/src/entrepots/event.ts       ← 事件条件
-  crowd/src/entrepots/relation.ts    ← 关系条件
-</code></pre></div>
-<div class="callout tone-amber">
-      <span class="ic">⚠</span>
-      <div><p><mark class="mk-blue"><strong>改这个函数要同时考虑三条调用路径。</strong></mark></p>
-<p>而且 <code>isTag</code> 这个参数就是从调用方传进来的
-（<code>this._type === Modules.Tag</code>）—— 意味着<strong>同一个时间条件在「标签」和「分群」
-两个场景下行为不一样</strong>。</p>
-<p><mark class="mk-blue">这是它参数多的根本原因：它要服务三个调用方 × 两个场景。</mark></p>
-</div>
-    </div><h2 id="细节三条路各生成什么"><span class="num">04</span>细节：三条路各生成什么</h2>
-<h3 id="①-timestamp-毫秒时间戳只给事件用">① <code>Timestamp</code> —— 毫秒时间戳（只给事件用）</h3>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">// 注释写得很明确：
-// 目前仅有 事件使用 ms 时间戳形式，而事件仅支持 最近N 天的相对时间
-if (!isLatestDays(op)) {
-    throw new Error(`相对时间操作符错误，timestamp 当前仅支持 &gt; 和 &gt;=`);
-}
-</code></pre></div>
-<p><strong>生成的东西</strong>（<code>gap = 7</code>）：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-sql">`event_time` &gt;= UNIX_TIMESTAMP(DS_DATETIME_ADD('day', -7, FROM_UNIXTIME(UNIX_TIMESTAMP(), '%Y-%m-%d 00:00:00'))) * 1000
-`event_time` &lt;  UNIX_TIMESTAMP(FROM_UNIXTIME(UNIX_TIMESTAMP(), '%Y-%m-%d 00:00:00')) * 1000
-</code></pre></div>
-<div class="callout tone-violet">
-      <span class="ic">💡</span>
-      <div><p><mark class="mk-blue"><strong>注意最外层那个 <code>* 1000</code>。</strong></mark></p>
-<p>因为 <code>event_time</code> 存的是<strong>毫秒</strong>时间戳，
-而 <code>UNIX_TIMESTAMP()</code> 返回的是<strong>秒</strong>。</p>
-<p>这就是为什么 <a href="../sql-builder-v2-core-dialect/">⑥ 方言篇</a> 里
-Doris 要自己实现一遍 —— Doris 的 <code>event_time</code> 是 <code>DATETIME</code>，
-不能套这层包装。</p>
-</div>
-    </div><h3 id="②-unixtimestamp-秒时间戳画像">② <code>UnixTimestamp</code> —— 秒时间戳（画像）</h3>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">const isLastestDayExactFlag = dateUnit === DateUnit.Day &amp;&amp; isLatestDays(op) &amp;&amp; latestIncludeToday;
-// 是否记录精确值
-const exact = isTag || dateUnit !== DateUnit.Day || isLastestDayExactFlag;
-
-const border = exact ? 'NOW()' : `FROM_UNIXTIME(UNIX_TIMESTAMP(), '${pattern}')`;
-</code></pre></div>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>exact</th><th>起点怎么算</th><th>终点怎么算</th></tr></thead><tbody><tr><th>true</th><td data-label="起点怎么算"><span class="tag tone-blue"><code>NOW()</code> —— 精确到此刻</span></td><td data-label="终点怎么算"><code>UNIX_TIMESTAMP()</code> —— 此刻</td></tr><tr><th>false</th><td data-label="起点怎么算"><span class="tag tone-green"><code>FROM_UNIXTIME(UNIX_TIMESTAMP(), '%Y-%m-%d 00:00:00')</code> —— 今天 0 点</span></td><td data-label="终点怎么算">今天 0 点</td></tr></tbody></table></div><div class="callout tone-violet">
-      <span class="ic">💡</span>
-      <div><p><strong><code>exact</code> 由三件事决定：</strong></p>
+    </div><p>三条基本状态的区别，只有一句话：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>状态</th><th>占着 CPU 吗</th><th>能跑吗</th><th>什么时候进这个状态</th></tr></thead><tbody><tr><th>运行</th><td data-label="占着 CPU 吗"><span class="tag tone-green">占着</span></td><td data-label="能跑吗">正在跑</td><td data-label="什么时候进这个状态">被调度器选中之后</td></tr><tr><th>就绪</th><td data-label="占着 CPU 吗">没占着</td><td data-label="能跑吗">能跑，在排队</td><td data-label="什么时候进这个状态">创建完成、时间片用完、或等的事件来了</td></tr><tr><th>阻塞</th><td data-label="占着 CPU 吗">没占着</td><td data-label="能跑吗"><span class="tag tone-amber">跑不了</span></td><td data-label="什么时候进这个状态">自己开口要一个还没来的事件，比如读盘</td></tr></tbody></table></div><p><mark class="mk-blue">就绪和阻塞都「没在跑」，区别在于给不给它 CPU。</mark></p>
+<p>给就绪的进程一个 CPU，它立刻能跑。给阻塞的进程一个 CPU 也没用，它在等的那件事还没发生。</p>
+<p><mark class="mk-amber">阻塞是进程<strong>自己</strong>要求的（发起 I/O、申请锁），所以也只能<strong>由别人</strong>叫醒它。一个阻塞中的进程没法叫醒自己。</mark></p>
+<h3 id="再加两个创建和结束">再加两个：创建和结束</h3>
 <ul>
-<li><code>isTag</code> —— 标签场景要精确</li>
-<li><code>dateUnit !== Day</code> —— 小时粒度必须精确</li>
-<li><code>latestIncludeToday</code> —— 明确要求包含当天</li>
+<li>创建：PCB 申请好了、资源分好了，但还没进就绪队列。这个状态极短。</li>
+<li>结束：进程跑完了或者出错了，等操作系统回收资源。也极短。</li>
 </ul>
-<p><mark class="mk-blue">三个条件里任意一个成立，就从「今天 0 点」变成「此刻」。</mark></p>
-</div>
-    </div><h3 id="③-date-yyyymmdd">③ <code>Date</code> —— <code>YYYYMMDD</code></h3>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">const startGap = isTag &amp;&amp; includeToday ? gap - 1 : gap;
-const endGap   = isTag &amp;&amp; includeToday ? 0 : 1;
-
-return generateLatestDaysRules(
-    column,
-    `DS_DATE_ADD(NOW(), ${-startGap})`,
-    `DS_DATE_ADD(NOW(), ${-endGap})`,
-    true
-);
-</code></pre></div>
-<div class="callout tone-amber">
-      <span class="ic">⚠</span>
-      <div><p><strong><code>YYYYMMDD</code> 是日期字符串，所以加减要按「天」算 ——
-用 <code>DS_DATE_ADD</code> 而不是 <code>DS_DATETIME_ADD</code>。</strong></p>
-<p><mark class="mk-blue">三条路用的函数完全不同：</mark></p>
+<h3 id="再加两个挂起">再加两个：挂起</h3>
+<p>到这里是五个状态。但还有一个现实问题：</p>
+<blockquote>
+<p>如果一个进程被阻塞了，它占的物理内存还留着吗？</p>
+</blockquote>
+<p>物理内存就那么点，让一堆啥也干不了的进程占着，是纯浪费。虚拟内存管理会把阻塞进程的物理内存换出到硬盘，等要跑了再换回来。</p>
+<p>于是多出一个独立的维度：<strong>进程在不在物理内存里</strong>。把「在不在内存」和「就绪 / 阻塞」交叉一下，就从三个状态变出五个：</p>
 <table>
 <thead>
 <tr>
-<th>格式</th>
-<th>加减函数</th>
+<th></th>
+<th>在内存里</th>
+<th>被换到硬盘上</th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td>毫秒时间戳</td>
-<td><code>DS_DATETIME_ADD('day', ...)</code></td>
+<td>就绪</td>
+<td>就绪</td>
+<td>就绪挂起</td>
 </tr>
 <tr>
-<td>秒时间戳</td>
-<td><code>DS_DATETIME_ADD('${dateUnit}', ...)</code></td>
-</tr>
-<tr>
-<td><code>YYYYMMDD</code></td>
-<td><code>DS_DATE_ADD(NOW(), ...)</code></td>
+<td>阻塞</td>
+<td>阻塞</td>
+<td>阻塞挂起</td>
 </tr>
 </tbody>
 </table>
+<p><mark class="mk-blue">「挂起」说的就是右边这一列：进程不占物理内存。</mark> 它和「就绪还是阻塞」是两件互不相干的事。</p>
+<div class="flowd has-grid has-groups" data-flow data-edges="[{&quot;from&quot;:&quot;ready&quot;,&quot;to&quot;:&quot;rsusp&quot;,&quot;label&quot;:&quot;换出&quot;,&quot;dashed&quot;:true},{&quot;from&quot;:&quot;rsusp&quot;,&quot;to&quot;:&quot;ready&quot;,&quot;label&quot;:&quot;换入&quot;},{&quot;from&quot;:&quot;block&quot;,&quot;to&quot;:&quot;bsusp&quot;,&quot;label&quot;:&quot;换出&quot;,&quot;dashed&quot;:true},{&quot;from&quot;:&quot;bsusp&quot;,&quot;to&quot;:&quot;block&quot;,&quot;label&quot;:&quot;换入&quot;},{&quot;from&quot;:&quot;bsusp&quot;,&quot;to&quot;:&quot;rsusp&quot;,&quot;label&quot;:&quot;等的事发生了&quot;}]">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"><div class="fgroup tone-muted" data-group-box="mem">
+          <span class="fgroup-label">内存里（上排） ↔ 硬盘上（下排）</span>
+        </div></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-blue shape-pill" data-id="ready" data-group="mem">
+              
+              
+              <b>就绪</b>
+              <small>在内存，就差 CPU</small>
+            </div><div class="fnode tone-amber shape-pill" data-id="block" data-group="mem">
+              
+              
+              <b>阻塞</b>
+              <small>在内存，在等事件</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-blue shape-pill" data-id="rsusp" data-group="mem">
+              
+              
+              <b>就绪挂起</b>
+              <small>在硬盘，进内存就能跑</small>
+            </div><div class="fnode tone-amber shape-pill" data-id="bsusp" data-group="mem">
+              
+              
+              <b>阻塞挂起</b>
+              <small>在硬盘，也还在等</small>
+            </div></div></div>
+      
+    </div><p><mark class="mk-amber">「阻塞挂起」是两件事叠在一起，不是第三种等待。</mark></p>
+<p>进程可以既阻塞又挂起：它在等一个事件（阻塞），同时它不占物理内存（挂起）。这两个条件互相独立，前面那张表的四个格子就是全部组合。</p>
+<p>触发挂起的原因不止内存不够：</p>
+<div class="cards" data-cols="2"><div class="ccard tone-blue">
+          <span class="tag tone-blue">系统决定</span>
+          <h4>内存不够，被换出去</h4>
+          <p>最常见的一种。阻塞的进程先让位</p>
+          
+          
+        </div><div class="ccard tone-violet">
+          <span class="tag tone-violet">进程自选</span>
+          <h4>自己 sleep 一会儿</h4>
+          <p>设个定时器，到点了唤醒自己。原理就是「阻塞 + 定时中断」</p>
+          
+          
+        </div><div class="ccard tone-amber">
+          <span class="tag tone-amber">用户操作</span>
+          <h4>用户手动挂起</h4>
+          <p>Linux 里 <code>Ctrl+Z</code> 把一个前台进程挂到后台，它就不占 CPU 了</p>
+          
+          
+        </div><div class="ccard tone-muted">
+          <span class="tag tone-muted">外部干预</span>
+          <h4>调试器 / 作业控制</h4>
+          <p>进程被停下来，等人下一条指令</p>
+          
+          
+        </div></div><h3 id="所有迁移收在一张表里">所有迁移收在一张表里</h3>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>从</th><th>到</th><th>触发条件</th><th>谁决定的</th></tr></thead><tbody><tr><th>无 → 创建</th><td data-label="到">一个新进程被建立</td><td data-label="触发条件">操作系统</td></tr><tr><th>创建</th><td data-label="到">就绪</td><td data-label="触发条件">PCB 初始化完成，可以进队了</td><td data-label="谁决定的">操作系统</td></tr><tr><th>就绪</th><td data-label="到">运行</td><td data-label="触发条件">被调度器选中，拿到 CPU</td><td data-label="谁决定的">调度器</td></tr><tr><th>运行</th><td data-label="到">就绪</td><td data-label="触发条件">时间片用完，被换下来</td><td data-label="谁决定的">调度器</td></tr><tr><th>运行</th><td data-label="到">阻塞</td><td data-label="触发条件">请求 I/O、申请锁，要等</td><td data-label="谁决定的">进程自己</td></tr><tr><th>运行</th><td data-label="到">结束</td><td data-label="触发条件">跑完或出错</td><td data-label="谁决定的">进程自己 / 操作系统</td></tr><tr><th>阻塞</th><td data-label="到">就绪</td><td data-label="触发条件">等待的事件发生了</td><td data-label="谁决定的"><span class="tag tone-violet">别的进程 / 中断</span></td></tr><tr><th>就绪</th><td data-label="到">就绪挂起</td><td data-label="触发条件">物理内存不够，被换出</td><td data-label="谁决定的">操作系统</td></tr><tr><th>阻塞</th><td data-label="到">阻塞挂起</td><td data-label="触发条件">物理内存不够，被换出</td><td data-label="谁决定的">操作系统</td></tr><tr><th>就绪挂起</th><td data-label="到">就绪</td><td data-label="触发条件">被换回内存</td><td data-label="谁决定的">操作系统</td></tr><tr><th>阻塞挂起</th><td data-label="到">阻塞</td><td data-label="触发条件">被换回内存，但事件还没来</td><td data-label="谁决定的">操作系统</td></tr><tr><th>阻塞挂起</th><td data-label="到">就绪挂起</td><td data-label="触发条件">在外存上等到了那个事件</td><td data-label="谁决定的"><span class="tag tone-violet">别的进程 / 中断</span></td></tr></tbody></table></div><p><mark class="mk-amber">最后一行容易看漏：在外存上等的事件也会到。</mark>这时候进程已经准备好跑了，但还是不在内存里，所以进的是「就绪挂起」。</p>
+<p><mark class="mk-blue">从阻塞出来，只能先到就绪，不可能直接跳到运行。</mark> 谁来跑，由调度器说了算。</p>
+<hr>
+<h2 id="操作系统靠什么记住一个进程"><span class="num">03</span>操作系统靠什么记住一个进程</h2>
+<p>进程在运行过程中要停下来、换下去、过一会儿再换回来。换回来的时候它得接着上次继续跑，所以操作系统得把它的一切都记下来。</p>
+<p>记在一张表里，这张表叫<strong>进程控制块</strong>（Process Control Block，PCB）。</p>
+<p><strong>PCB 是进程存在的唯一凭证</strong>：有进程就一定有 PCB，进程没了 PCB 也跟着没。你 <code>ps</code> 看到的每一行，背后都对应着一个活着的 PCB。</p>
+<h3 id="pcb-里记了什么">PCB 里记了什么</h3>
+<p>分四类：</p>
+<div class="spec tone-violet">
+      <div class="spec-head"><b>PCB</b><span>进程的档案袋</span></div>
+      <div class="spec-body"><div class="srow">
+          <div class="sk">我是谁</div>
+          <div class="sv"><p><strong>进程标识符</strong>（pid）：每个进程一个，唯一。
+你在 <code>ps</code> 里看到的 <code>8412</code> 就是它。</p>
+<p><strong>用户标识符</strong>（uid）：这个进程归谁。权限检查靠它。</p>
 </div>
-    </div><h2 id="细节三个容易踩的地方"><span class="num">05</span>细节：三个容易踩的地方</h2>
-<h3 id="①-两个包含今天的参数管的不是一回事">① 两个「包含今天」的参数，管的不是一回事</h3>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">includeToday: 0 | 1;
-// &quot;Tag 下 日期类 是否包含当天&quot;；Module Tag + dateFormat = 'date' 专用，其它场景会被忽略
+        </div><div class="srow">
+          <div class="sk">我现在怎么样</div>
+          <div class="sv"><p><strong>当前状态</strong>：就绪 / 运行 / 阻塞 …… 决定它在哪个队列里排队。</p>
+<p><strong>优先级</strong>：抢 CPU 时谁先上。</p>
+</div>
+        </div><div class="srow">
+          <div class="sk">我占用了什么</div>
+          <div class="sv"><p>内存地址空间的信息（代码段、数据段、堆、栈各在哪、多大）。
+打开的文件列表、正在用的 I/O 设备。</p>
+</div>
+        </div><div class="srow">
+          <div class="sk">我跑到哪了</div>
+          <div class="sv"><p><strong>CPU 里各个寄存器的值</strong>。</p>
+<p>这一项是关键：进程被换下去的时候，CPU 里那一堆寄存器的值会存进 PCB；
+下次换回来再从 PCB 恢复进寄存器。<mark class="mk-blue">没有这一项，进程就没法「接着上次」继续跑。</mark></p>
+</div>
+        </div></div>
+    </div><h3 id="队列把-pcb-串起来">队列：把 PCB 串起来</h3>
+<p>一个进程的 PCB 单独放着没意义，操作系统真正要回答的是「下一个该跑谁」。</p>
+<p>所以 PCB 按状态串成队列：</p>
+<div class="tree" data-tree><ul class="tlist"><li class="has-kids">
+            <div class="tnode tone-violet" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>PCB 的三种去处</b>
+              
+              <span class="tnote">操作系统按状态把 PCB 串成不同的队列</span>
+            </div>
+            <ul class="tlist"><li class="has-kids">
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>就绪队列</b>
+              
+              <span class="tnote">所有就绪的串成一条链表，调度器从头取一个</span>
+            </div>
+            <ul class="tlist"><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>PCB(A) → PCB(C) → PCB(D)</b>
+              
+              <span class="tnote">都就绪，在排队等 CPU</span>
+            </div>
+            
+          </li></ul>
+          </li><li class="has-kids">
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>阻塞队列 · 等磁盘</b>
+              
+              <span class="tnote">每个事件各有一条，不是一条大队列</span>
+            </div>
+            <ul class="tlist"><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>PCB(B)</b>
+              
+              <span class="tnote">在等一次 read 返回</span>
+            </div>
+            
+          </li></ul>
+          </li><li class="has-kids">
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>阻塞队列 · 等锁</b>
+              
+              <span class="tnote">事件不同，叫醒的时机就不同</span>
+            </div>
+            <ul class="tlist"><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>PCB(E)</b>
+              
+              <span class="tnote">在等一把互斥锁</span>
+            </div>
+            
+          </li></ul>
+          </li><li class="has-kids">
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>运行队列</b>
+              
+              <span class="tnote">单核 CPU 上只可能有一个在跑，它退化成「一个指针」</span>
+            </div>
+            <ul class="tlist"><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>pointer → PCB(F)</b>
+              
+              <span class="tnote">正在 CPU 上的那一个</span>
+            </div>
+            
+          </li></ul>
+          </li></ul>
+          </li></ul></div><p>队列本身是<strong>链表</strong>：</p>
+<ul>
+<li>就绪队列：所有就绪的 PCB 串在一起，调度器从头取一个。</li>
+<li>阻塞队列：不是一条，而是每个事件一条。等磁盘的有等磁盘的队列，等锁的有等锁的队列。事件类型不同，叫醒的时机就不同。</li>
+<li>运行队列：单核 CPU 上只可能有一个正在跑的进程，所以它退化成「一个指针」。</li>
+</ul>
+<p>为什么用链表而不是数组？因为进程会频繁地被创建、终止、阻塞、唤醒，PCB 要不停地在队列之间搬家。链表的插入删除是 O(1)，不用搬数据。</p>
+<p>另一种组织方式是索引：状态相同的 PCB 放进一张索引表，表项指向 PCB。查起来快，但插入删除时要维护表。实际系统多用链表。</p>
+<hr>
+<h2 id="进程的四件事创建终止阻塞唤醒"><span class="num">04</span>进程的四件事：创建、终止、阻塞、唤醒</h2>
+<p>这四件事合起来叫「进程控制」，都是操作系统在管。</p>
+<div class="cards" data-cols="2"><div class="ccard tone-blue">
+          <span class="tag tone-blue">操作 01</span>
+          <h4>创建</h4>
+          <p>分 pid → 分资源 → 初始化 PCB → 插进就绪队列</p>
+          
+          
+        </div><div class="ccard tone-red">
+          <span class="tag tone-red">操作 02</span>
+          <h4>终止</h4>
+          <p>停下来 → 子进程一起处理 → 资源还回去 → 删 PCB</p>
+          
+          
+        </div><div class="ccard tone-amber">
+          <span class="tag tone-amber">操作 03</span>
+          <h4>阻塞</h4>
+          <p>跑不下去了，保护现场，把自己挂到等待队列上</p>
+          
+          
+        </div><div class="ccard tone-green">
+          <span class="tag tone-green">操作 04</span>
+          <h4>唤醒</h4>
+          <p>等的事到了，把 PCB 从等待队列挪回就绪队列</p>
+          
+          
+        </div></div><p>后两个总是成对出现，而且<mark class="mk-blue">执行它们的往往不是同一个进程</mark>：</p>
+<div class="seqd has-grid" data-seq data-n="3">
+      <svg class="seqd-svg" aria-hidden="true">
+        <defs>
+          <marker id="s-fill" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+          <marker id="s-open" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10" fill="none" stroke="currentColor" stroke-width="1.4"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="seqd-head"><div class="scell"><div class="spart tone-green" data-id="a">
+          <b>进程 A</b><small>要读盘的那个</small>
+        </div></div><div class="scell"><div class="spart tone-violet" data-id="k">
+          <b>内核</b><small>调度器 + 中断处理</small>
+        </div></div><div class="scell"><div class="spart tone-blue" data-id="b">
+          <b>进程 B</b><small>就绪队列里的另一个</small>
+        </div></div></div>
+      <div class="seqd-body"><div class="smsg" data-from="a" data-to="k" data-kind="sync" data-i="1" data-note="1"><span class="snote">1</span><span class="slabel">read(fd, buf, 500MB)</span></div><div class="smsg is-self" data-from="k" data-to="k" data-kind="self" data-i="2" data-note="2"><span class="snote">2</span><span class="slabel">保护现场，A 转阻塞，PCB 挂进磁盘等待队列</span></div><div class="smsg" data-from="k" data-to="b" data-kind="sync" data-i="3" data-note="3" style="margin-top:34px"><span class="snote">3</span><span class="slabel">调度器选中 B，B 开始跑</span></div><div class="smsg is-self" data-from="k" data-to="k" data-kind="self" data-i="4" data-note="4"><span class="snote">4</span><span class="slabel">磁盘中断到了：把 A 的 PCB 挪回就绪队列</span></div><div class="smsg" data-from="k" data-to="a" data-kind="reply" data-i="5" data-note="5"><span class="snote">5</span><span class="slabel">A 被唤醒，但还得排队等调度</span></div></div>
+    </div><p>图的读法：第 2 步是 A 自己把自己挂上去，第 4 步<strong>是中断处理把 A 摘下来</strong>。
+A 从头到尾都动不了，只能等。
+<mark class="mk-blue">唤醒不等于立刻运行，它只是重新有了排队的资格。</mark></p>
+<h3 id="创建进程">创建进程</h3>
+<p>四步：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code>① 分配一个唯一的 pid，申请一个空白的 PCB
+② 给进程分配资源（内存、文件等）。资源不够就先等着
+③ 初始化 PCB 里的各项
+④ 如果调度队列装得下，把 PCB 插进就绪队列，等被调度
+</code></pre></div>
+<p><mark class="mk-amber">PCB 是有限的。申请不到 PCB，创建就直接失败，不是「排队等一个 PCB」。</mark></p>
+<div class="callout tone-violet">
+      <span class="ic">🌱</span>
+      <div><p><strong>父进程创建子进程之后，代码是怎么执行的？</strong></p>
+<p>以 Linux 的 <code>fork()</code> 为例。父进程调用它之后，<mark class="mk-blue">父子两个进程都从 <code>fork()</code> 的下一行继续往下执行</mark>，
+代码是同一份，只是靠返回值区分身份：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-c">pid_t pid = fork();
 
-latestIncludeToday: 0 | 1 | undefined;
-// &quot;Crowd 下时间类 最近 X 天 是否包含当天&quot;；
-// Module Crowd + DateType === 'relative' + dateUnit === DateUnit.Day 专用，其它场景会被忽略
-</code></pre></div>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>参数</th><th>生效条件</th><th>影响谁</th></tr></thead><tbody><tr><th><code>includeToday</code></th><td data-label="生效条件"><code>Module Tag</code> + <code>dateFormat = 'date'</code></td><td data-label="影响谁"><code>getDateRules</code></td></tr><tr><th><code>latestIncludeToday</code></th><td data-label="生效条件"><code>Module Crowd</code> + <code>relative</code> + <code>dateUnit = Day</code></td><td data-label="影响谁"><code>getUnixTimestampRules</code> 的 <code>exact</code></td></tr></tbody></table></div><div class="callout tone-red">
-      <span class="ic">⚠</span>
-      <div><p><mark class="mk-blue"><strong>两个参数的注释里都写着「其它场景会被忽略」。</strong></mark></p>
-<p>也就是说：<strong>传了不一定生效</strong>。传错场景等于没传。</p>
-<p>这种设计很难说是好的 —— 但它反映了真实情况：
-<mark class="mk-blue">「包含当天」在不同场景下语义不同，硬合成一个参数会更糟。</mark></p>
-</div>
-    </div><h3 id="②-有些组合被校验挡掉">② 有些组合被校验挡掉</h3>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">function timeExprValidate(expr) {
-    if (expr.dateUnit === DateUnit.Hour &amp;&amp; expr.dateFormat !== DateFormat.UnixTimestamp) {
-        throw new Error(`只有 ${DateFormat.UnixTimestamp} 支持&quot;小时&quot;粒度...`);
-    }
-
-    if (expr.relativeDateType === RelativeDateType.SingleDay
-        &amp;&amp; expr.dateFormat !== DateFormat.Timestamp) {
-        throw new Error(`【距今 X 天】，目前仅支持 ${DateFormat.Timestamp}...`);
-    }
+if (pid == 0) {
+    // 子进程走这里。fork 在子进程里返回 0
+    do_child_work();
+} else if (pid &gt; 0) {
+    // 父进程走这里。fork 在父进程里返回子进程的 pid
+    wait_for_child(pid);
 }
+// 两个进程都会走到这里
 </code></pre></div>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>组合</th><th>合法吗</th><th>为什么</th></tr></thead><tbody><tr><th>小时 + 毫秒时间戳</th><td data-label="合法吗"><span class="tag tone-red">❌</span></td><td data-label="为什么">只有画像支持小时粒度</td></tr><tr><th>小时 + YYYYMMDD</th><td data-label="合法吗"><span class="tag tone-red">❌</span></td><td data-label="为什么">日期字符串没有小时</td></tr><tr><th>单天 + 非时间戳</th><td data-label="合法吗"><span class="tag tone-red">❌</span></td><td data-label="为什么">「距今 X 天」是事件专有的说法</td></tr><tr><th>单天 + 毫秒时间戳</th><td data-label="合法吗"><span class="tag tone-green">✅</span></td><td data-label="为什么">合法</td></tr></tbody></table></div><div class="callout tone-green">
-      <span class="ic">✅</span>
-      <div><p><strong>校验放在展开之前（<code>getTimeRules</code> 里调），不是各个实现里。</strong></p>
-<p>好处是<strong>错误信息统一、早失败</strong>。
-<mark class="mk-blue">而不是等进了 <code>getTimestampRules</code> 才发现「这个组合不该进来」。</mark></p>
+<p>内存不是真的复制一份。Linux 用<strong>写时复制</strong>（copy-on-write）：
+父子暂时指向同一批物理页，谁要写哪一页，才把那一页复制出来。</p>
+<p>子进程可以 <code>exec()</code> 换成另一个程序，那就彻底变成别的进程了。</p>
+<p>父进程如果先退出，Linux 会把它的子进程交给 <strong>1 号进程</strong>（<code>systemd</code>）接管，
+而不是让它们变成孤儿。</p>
 </div>
-    </div><h3 id="③-为什么-lt-必须补一个-gt-0">③ 为什么 <code>&lt;</code> 必须补一个 <code>&gt; 0</code></h3>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">// crowd/src/entrepots/portrait.ts
-function addHackRules(columnName: string, op: Op, rules: Expression[]): Expression[] {
-    // 对于 &lt; 和 &lt;= 的时间范围，需要加上 `&gt; 0` 的限制条件
-    // 否则会筛选出值为 0 的数据
-    if ([Op.Lt, Op.Lte].includes(op)) {
-        return rules.concat({ op: Op.Gt, column: columnName, value: 0 });
-    }
-    return rules;
-}
+    </div><h3 id="终止进程">终止进程</h3>
+<p>三种终止方式：正常结束、异常结束、被外界 <code>kill</code> 掉。</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code>① 找到要终止的进程的 PCB
+② 如果它正在运行，立刻停掉，把 CPU 让出去
+③ 如果它有子进程，把这些子进程也处理掉
+④ 把它占的资源全部还给父进程或操作系统
+⑤ 从它所在的队列里摘掉 PCB
 </code></pre></div>
+<h3 id="阻塞进程">阻塞进程</h3>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code>① 找到自己的 PCB
+② 保护现场（寄存器等存进 PCB），状态改成阻塞，停止运行
+③ 把 PCB 插进对应事件的阻塞队列
+</code></pre></div>
+<h3 id="唤醒进程">唤醒进程</h3>
+<p>阻塞和唤醒是成对出现的：有进程调了阻塞语句，就一定有一个唤醒语句等着它。</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code>① 在那个事件的阻塞队列里找到目标 PCB
+② 把它从阻塞队列里摘出来，状态改成就绪
+③ 插进就绪队列，重新排队等调度
+</code></pre></div>
+<p><mark class="mk-amber">唤醒不是「让它立刻跑」。它只是从「跑不了」变成「能跑了，去排队」。</mark></p>
+<hr>
+<h2 id="上下文切换切走的到底是哪两样东西"><span class="num">05</span>上下文切换：切走的到底是哪两样东西</h2>
+<p>进程之间共享 CPU。什么时候让谁上，由操作系统决定。</p>
+<p>「把一个进程换下去、把另一个换上来」这件事，叫<strong>进程的上下文切换</strong>。</p>
+<h3 id="先看-cpu-上下文">先看 CPU 上下文</h3>
+<p>CPU 执行指令时，靠两样东西知道自己在干什么：</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>是什么</th>
+<th>类比</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>CPU 寄存器</strong></td>
+<td>CPU 内部容量极小、速度极快的一块存储</td>
+<td>口袋：随手就能拿到</td>
+</tr>
+<tr>
+<td><strong>程序计数器</strong>（PC）</td>
+<td>存着正在执行的指令位置、或下一条指令的位置</td>
+<td>你夹在书里的书签</td>
+</tr>
+</tbody>
+</table>
+<p>桌面上的东西放口袋，比从书包里掏快得多。寄存器相对内存就是这样：寄存器纳秒级，内存几十纳秒，硬盘毫秒级。</p>
+<p>这两样合起来叫 <strong>CPU 上下文</strong>：CPU 运行任何任务前都要依赖的环境。</p>
+<p>于是 <strong>CPU 上下文切换</strong>就是三步：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code>① 把上一个任务的 CPU 上下文（寄存器的值、PC 的值）存到某处
+② 把新任务的上下文加载进这些寄存器和 PC
+③ 跳到 PC 指向的新位置，开始跑新任务
+</code></pre></div>
+<h3 id="进程上下文比-cpu-上下文多什么">进程上下文比 CPU 上下文多什么</h3>
+<p>「任务」有三种：进程、线程、中断。所以 CPU 上下文切换也分三类。</p>
+<p>进程这块要复杂一些，因为进程是由内核管理和调度的，<mark class="mk-blue">切换只能发生在内核态</mark>。</p>
+<p>它要多搬两样东西：</p>
 <div class="jcard">
           <div class="jcard-head">
-            <span class="tag tone-muted">场景</span>
-            <span class="name">业务说</span>
+            <span class="tag tone-blue">用户空间</span>
+            <span class="name">也要存</span>
             <span class="spacer"></span>
-            
+            <span class="tag tone-blue">用户态资源</span>
           </div>
+          <div class="rec"><div class="">
+            <b>虚拟内存</b><span>页表、地址空间映射</span></div><div class="">
+            <b>栈</b><span>用户栈的指针和内容，函数调用链在上面</span></div><div class="">
+            <b>全局变量</b><span>数据段里的那些</span></div></div>
           
-          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>「开户时间在 7 天前之前」（op = '&lt;'）
-</pre></div>
-          <p class="jnote">意思是「老用户」。</p>
+          <p class="jnote">这些是进程私有的，换了进程就不一样了</p>
         </div><div class="conn">
       <span class="stem"></span>
-      <span class="pill">展开<span class="note">生成一个条件</span></span>
+      <span class="pill">进入内核<span class="note">切换动作全部发生在内核态</span></span>
       <span class="stem"></span><span class="head"></span>
     </div><div class="jcard">
           <div class="jcard-head">
-            <span class="tag tone-violet">展开后</span>
-            <span class="name">一个条件</span>
+            <span class="tag tone-violet">内核空间</span>
+            <span class="name">也要存</span>
             <span class="spacer"></span>
-            
+            <span class="tag tone-violet">内核管理</span>
           </div>
+          <div class="rec"><div class="">
+            <b>内核栈</b><span>系统调用执行到哪了</span></div><div class="">
+            <b>寄存器</b><span>含 PC、栈指针</span></div></div>
           
-          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>`opened_time` &lt; 开始时间
-</pre></div>
-          <p class="jnote">看起来没问题。</p>
-        </div><div class="conn">
-      <span class="stem"></span>
-      <span class="pill">但<span class="note">库里有一批值是 0</span></span>
-      <span class="stem"></span><span class="head"></span>
-    </div><div class="jcard">
-          <div class="jcard-head">
-            <span class="tag tone-red">问题</span>
-            <span class="name">值为 0 的行也被选中</span>
-            <span class="spacer"></span>
-            
-          </div>
-          
-          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>`opened_time` = 0  &lt;  开始时间   → true
-</pre></div>
-          <p class="jnote"><mark class="mk-blue">在时间戳语义里，<code>0</code> 代表「从没发生过」。</mark>
-
-这个人从来没开过户，但 <code>0 &lt; 开始时间</code> 成立 ——
-<strong>他被当成了「很久以前开过户的老用户」。</strong></p>
-        </div><div class="conn">
-      <span class="stem"></span>
-      <span class="pill">补丁<span class="note">加一个下限</span></span>
-      <span class="stem"></span><span class="head"></span>
-    </div><div class="jcard">
-          <div class="jcard-head">
-            <span class="tag tone-green">修复</span>
-            <span class="name">加一个 `&gt; 0`</span>
-            <span class="spacer"></span>
-            
-          </div>
-          
-          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>`opened_time` &lt; 开始时间
-AND `opened_time` &gt; 0
-</pre></div>
-          <p class="jnote">把「从没发生过」的人排除掉。<mark class="mk-blue">语义就对了。</mark></p>
-        </div><div class="callout tone-amber">
-      <span class="ic">⚠</span>
-      <div><p><strong>这个补丁叫 <code>addHackRules</code> —— 名字里的 <code>Hack</code> 是诚实的。</strong></p>
-<p>它不是设计的一部分，是<strong>修补一个语义漏洞</strong>：
-「0 代表没发生过」这个约定没有在数据模型里表达出来，
-只能在查询时手工排除。</p>
-<p><mark class="mk-blue">而它在 <code>portrait.ts</code> 和 <code>relation.ts</code> 里各有一份，逐字节相同。</mark>
-（⑧ crowd 篇讲过这个重复。）</p>
+          <p class="jnote">存完之后，这些信息都落在 <mark class="mk-blue">进程自己的 PCB</mark> 里</p>
+        </div><p>所以完整的定义是：</p>
+<blockquote>
+<p><strong>进程上下文切换 = 换掉用户空间的资源（虚拟内存、栈、全局变量）+ 换掉内核空间的资源（内核栈、寄存器）。</strong></p>
+</blockquote>
+<p>换下去时存进 PCB，换上来时从 PCB 恢复。整个过程对进程自己是透明的，它只觉得自己被暂停过一下。</p>
+<div class="callout tone-amber">
+      <span class="ic">💰</span>
+      <div><p><strong>这次切换是有成本的，而且成本不小。</strong></p>
+<p>切换本身要执行内核代码、要读写内存、还会把 CPU 的缓存和 TLB 弄脏。
+这段时间 CPU 没在跑你的程序，也没在跑别人的程序，纯在搬东西。</p>
+<p>所以调度策略有一个隐含目标：<mark class="mk-blue">让每次切换尽量值回票价</mark>。
+时间片太短 → 切换太频繁 → 全在搬东西；
+时间片太长 → 交互式操作卡顿。这就是下一节要权衡的事。</p>
 </div>
-    </div><h2 id="自测"><span class="num">06</span>自测</h2>
+    </div><h3 id="什么时候会触发切换">什么时候会触发切换</h3>
+<div class="cards" data-cols="2"><div class="ccard tone-blue">
+          <span class="tag tone-blue">最常见</span>
+          <h4>时间片用完</h4>
+          <p>运行 → 就绪。调度器从就绪队列挑下一个</p>
+          
+          
+        </div><div class="ccard tone-amber">
+          <span class="tag tone-amber">系统压力</span>
+          <h4>资源不够被挂起</h4>
+          <p>比如内存不足，等资源满足了才能继续</p>
+          
+          
+        </div><div class="ccard tone-violet">
+          <span class="tag tone-violet">进程自选</span>
+          <h4>自己 sleep</h4>
+          <p>进程主动挂起自己，让出 CPU 去睡一会儿</p>
+          
+          
+        </div><div class="ccard tone-red">
+          <span class="tag tone-red">抢占</span>
+          <h4>来了更高优先级的进程</h4>
+          <p>当前进程被挂起，让高优先级的先跑</p>
+          
+          
+        </div><div class="ccard tone-muted">
+          <span class="tag tone-muted">被动</span>
+          <h4>硬件中断</h4>
+          <p>CPU 上的进程被中断挂起，转而执行内核里的中断服务程序</p>
+          
+          
+        </div></div><p>前三种是进程自己在某个时刻「跑不下去了」，后两种是外界插进来的。</p>
+<hr>
 <div class="quiz"><details>
-        <summary>一个「最近 7 天」在代码里有几种 SQL 形态？为什么？</summary>
-        <div class="a"><p><strong>三种</strong>，按底层存的格式分：</p>
-<ul>
-<li><code>Timestamp</code>（毫秒时间戳）—— 只给事件用，且只支持 <code>&gt;</code> / <code>&gt;=</code></li>
-<li><code>UnixTimestamp</code>（秒时间戳）—— 画像</li>
-<li><code>Date</code>（<code>YYYYMMDD</code>）—— 画像
-三条路用的加减函数都不同（<code>DS_DATETIME_ADD</code> vs <code>DS_DATE_ADD</code>），
-起止时间算法也不同。</li>
-</ul>
+        <summary>就绪和阻塞都「没在跑」，为什么它们是两个状态？</summary>
+        <div class="a"><p>因为能不能跑不一样。就绪=万事俱备只差 CPU，给它 CPU 立刻能跑；
+阻塞=还在等一个事件，给它 CPU 也没用。这个区别决定了它排在哪个队列里。</p>
 </div>
       </details><details>
-        <summary>为什么毫秒时间戳那条路要 <code>* 1000</code>？</summary>
-        <div class="a"><p>因为 <code>event_time</code> 存的是<strong>毫秒</strong>时间戳，而 <code>UNIX_TIMESTAMP()</code> 返回<strong>秒</strong>。
-这也是 <a href="../sql-builder-v2-core-dialect/">⑥ 方言篇</a> 里 Doris 要自己实现一遍的原因 ——
-Doris 的 <code>event_time</code> 是 <code>DATETIME</code>，不能套这层包装。</p>
+        <summary>「阻塞挂起」是阻塞之外的第三种等待吗？</summary>
+        <div class="a"><p>不是，是两个独立条件的叠加：既在等一个事件（阻塞），又不占物理内存（挂起）。
+等的事件到了，它变「就绪挂起」：能跑了，但还得先换回内存。</p>
 </div>
       </details><details>
-        <summary><code>includeToday</code> 和 <code>latestIncludeToday</code> 是同一回事吗？</summary>
-        <div class="a"><p><strong>不是。</strong> <code>includeToday</code> 是 <code>Module Tag</code> + <code>dateFormat = 'date'</code> 专用；
-<code>latestIncludeToday</code> 是 <code>Module Crowd</code> + <code>relative</code> + <code>dateUnit = Day</code> 专用。
-两个参数的注释里都写着「其它场景会被忽略」——
-<mark class="mk-blue">也就是说传了不一定生效。</mark></p>
-</div>
-      </details><details>
-        <summary><code>getTimeRules</code> 处理绝对时间时会展开吗？</summary>
-        <div class="a"><p><strong>不会。</strong> 它直接返回一个条件：<code>[{ op, column: name, value }]</code>。
-因为「2026-03-01 那天」就是一个值，不需要算。
-<mark class="mk-blue">只有相对时间才需要展开成多个条件。</mark></p>
-</div>
-      </details><details>
-        <summary>为什么 <code>&lt;</code> 的时间条件要额外补一个 <code>&gt; 0</code>？</summary>
-        <div class="a"><p>因为时间戳语义里 <code>0</code> 代表「<strong>从没发生过</strong>」。
-比如「开户时间在 7 天前之前」意思是「老用户」，
-但一个从没开过户的人 <code>opened_time = 0</code>，<code>0 &lt; 开始时间</code> 成立 ——
-<mark class="mk-blue">他被当成了老用户</mark>。补一个 <code>&gt; 0</code> 把这些人排除掉。</p>
-</div>
-      </details><details>
-        <summary>改 <code>getTimeRules</code> 时要注意什么？</summary>
-        <div class="a"><p>它被<strong>三个文件</strong>调用：<code>portrait.ts</code> / <code>event.ts</code> / <code>relation.ts</code>。
-而且 <code>isTag</code> 参数是从调用方传进来的（<code>this._type === Modules.Tag</code>）——
-<mark class="mk-blue">同一个时间条件在「标签」和「分群」两个场景下行为不一样。</mark>
-这就是它参数多的根本原因：服务三个调用方 × 两个场景。</p>
+        <summary>进程上下文切换，为什么要连虚拟内存和栈一起换，光存寄存器不够吗？</summary>
+        <div class="a"><p>寄存器只记录「执行到哪了」。进程还拥有一整套私有的地址空间和用户栈，
+换了进程之后，同样的虚拟地址指向的是完全不同的物理内存。
+不换页表，新进程读到的就是别人的内存。</p>
 </div>
       </details></div>
 
     <footer>
-      <span>sql_builder_v2 的时间表达式</span>
-      <span>最后更新 2026-09-26 · 单文件可离线打开</span>
+      <span>进程 · 状态、PCB 与上下文切换</span>
+      <span>最后更新 2026-10-01 · 单文件可离线打开</span>
     </footer>
   </main>
 </div>

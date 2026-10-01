@@ -1189,11 +1189,11 @@ text: |
 | `summary` | 小结 |
 | `raw` | 直接写 HTML |
 
-**交互控件 20 个**（在 `assets/app.js` 的 `WIDGETS` 里，供 `demo` 积木引用）：
+**交互控件 22 个**（在 `assets/app.js` 的 `WIDGETS` 里，供 `demo` 积木引用）：
 `polling-vs-cdc` `combination-count` `join-lab` `on-vs-where` `knex-chain`
 `stepper` `tuner` `diff` `stream-modes` `operator-lab` `hashring` `partition-prune`
 `dsl-lab` `null-lab` `config-to-ui` `field-lineage` `count-dedup-lab`
-`row-to-catalog` `sql-inject-lab` `validate-lab`
+`row-to-catalog` `sql-inject-lab` `validate-lab` `sched-lab` `switch-cost`
 
 **已知缺口**（按优先级）：
 
@@ -1207,7 +1207,21 @@ text: |
 
 1. **`flow` 的能力边界要记住**：它是「测量 + 直连」，没有边路由。
    稠密图会翻车 —— 翻车就拆图、改用 `compare` 列表格、或换 `arch`。
-2. **响应式目前按视口宽度写（`@media`）**。如果积木可能被放进窄容器
+2. **`flow` 横向边上的标签，宽度上限是 30px。**
+   行内间隙默认 `.flowd-row { gap: 30px }`，而 `.flowd.has-groups .flowd-row`
+   才是 72px —— 也就是说：**写了 `groups`（哪怕只有一个）才有地方放横向标签。**
+
+   所以「创建 → 就绪 → 运行」这种横排链，标签一超过 3 个汉字就会被两边的框压住。
+   两条出路：
+
+   - **给这个 flow 加一个 `groups`**（一个框住全部节点也行）—— 顺便拿到「这几个是一伙的」这层信息
+   - **把横排改竖排** —— `.flowd-grid { gap: 58px }`，竖向标签有 58px
+
+   ==这次画「进程五态」时，横排四个状态 + 六条标签，前两版全被压住；加了 `groups` 才一次过。==
+3. **`flow` 里单节点的 `groups` 会把标签挤没。**
+   框只包住一个窄节点时，`groups[].label` 会折成两三行、盖住下面的连线。
+   要么把 label 压到 3~4 个字，要么让这个组包住**整张图的所有节点**（框顶就跑到最上面去了）。
+4. **响应式目前按视口宽度写（`@media`）**。如果积木可能被放进窄容器
    （比如并排两栏），应该改用 **container queries**（Chrome 105 / FF 110 / Safari 16，
    已广泛可用）。当前所有积木都还没改。
 
@@ -1292,6 +1306,15 @@ archify 是一套完整的图渲染系统，能力**超出**我们自己的积�
   标签长了要么裁文案，要么给它加 `size`。
 - **边有几何下限**：微段短于 8px、两条边挤在同一条走廊里，都会判失败。
 - 产出是**静态 SVG**，不跟着容器宽度重排。
+- **`lifecycle` 的 lane 语义是写死的**，别拿它画通用状态机。
+  `render-lifecycle.mjs` 里写死了：`lane: main` → 上排「阶段带」（5 列，y=126）、
+  `lane: terminal` → 下排「结局带」（3 列，y=450）、**其它所有 lane 全挤在中间那条
+  「事件带」**（只有 3 列，y=278，靠 `yOffset` 上下分开）。
+  几何常量也是死的（`phaseXs: [94,248,402,556,710]`、`eventXs: [402,556,710]`）。
+
+  ==拿「进程七态」试过：四个状态要横排、还要跨三行画挂起，label 碰撞报了二十几条。==
+  **状态机用 `flow` + `shape: pill`，别用 `lifecycle`。**
+  `lifecycle` 留给「一条主路径 + 几个中断 + 几个结局」那种形状。
 
 #### 怎么调（已封装好）
 
@@ -1834,6 +1857,35 @@ ln -s ~/works/codes/knowledge-html/node_modules node_modules
 | `node_modules` 不跟着 worktree 来 | 软链过去（上面那条），或各自 `npm install` |
 | 软链显示成 `?? node_modules` | `.gitignore` 里写的是 `node_modules/`（带斜杠 = 目录），**匹配不上软链** —— 改成 `node_modules` |
 | skill 的符号链接固定在主目录 | worktree 里改 skill **不生效**。skill 只有一份，这是好事 |
+
+````callout
+tone: amber
+icon: 🪢
+text: |
+  **但「worktree 里改 skill 不生效」这句话会误导人走错一步。**
+
+  真实布局是这样：
+
+  ```
+  ~/.agents/skills/knowledge-html  ──软链──→  <主仓库>/.agents/skills/knowledge-html
+                                              <worktree>/.agents/skills/knowledge-html   ← 独立副本
+  ```
+
+  `.agents/skills/**` 是**进仓库的跟踪文件**，所以每个 worktree 各有一份。
+  你按直觉去改 `~/.agents/skills/knowledge-html/SKILL.md`，==改的其实是**主仓库的工作区**==，
+  而 `npm run check` 读的是 **worktree 里那份** —— 于是：
+
+  | 你看到的 | 实际发生的 |
+  |---|---|
+  | 文件确实改了，内容也对 | 主仓库工作区脏了（别的会话会看到） |
+  | `npm run check` 还是报「SKILL.md 说 20 个控件」 | worktree 那份没动 |
+
+  ++正确做法：在 **worktree 里**改 `.agents/skills/knowledge-html/SKILL.md`。++
+  主仓库那份等分支合并时自然更新。
+
+  ==这次先改错了地方，`check` 报的却是「代码 22 个 vs 文档 20 个」，
+  完全看不出是「改的是另一个副本」。==
+````
 
 **合并时冲突面比想象的小**。量过：==全仓库只有 `index.html` 一个文件是全量的==
 （`dist/<slug>.html` 和 `notes/<slug>/index.html` 都是**每篇一个文件**，只有作者会动）：
