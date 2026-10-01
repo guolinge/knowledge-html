@@ -348,7 +348,7 @@ edges:
 | 干净的状态机（每个状态只连相邻的） | 稠密的状态机（任意两个状态都可能连） |
 | 3~5 行 | 10 行以上，连线会穿过中间的节点 |
 
-#### 三条**可判定**的规则（不是抽象提醒）
+#### 四条**可判定**的规则（不是抽象提醒）
 
 下面的形状 **`npm run visual-check` 会直接报出来**，不用等看截图：
 
@@ -808,13 +808,13 @@ archify 是一套完整的图渲染系统。它的能力**超出**我们自己�
 
 由 spec 里的 `diagram_type` 决定（`tools/archify.mjs` 会自动读，不用在命令里传）：
 
-| diagram_type | 画什么 | 结构数组 |
-|---|---|---|
-| `architecture` | 系统组成、部署拓扑、依赖关系 | `components` · `boundaries` · `connections` |
-| `workflow` | 跨角色的流程 | `lanes` · `phases` · `mainPath` · `nodes` · `edges` |
-| `sequence` | 调用链、握手、时序 | `participants` · `messages` · `activations` |
-| `dataflow` | 数据流水线 | `stages` · `nodes` · `flows` |
-| `lifecycle` | 状态机、生命周期 | `lanes` · `states` · `transitions` |
+| diagram_type | 画什么 | 适合的知识点 | spec 里的主数组 |
+|---|---|---|---|
+| `architecture` | 系统组成、部署拓扑、依赖关系 | 「这个系统由什么组成」 | `components` · `boundaries` · `connections` |
+| `sequence` | 调用链、握手、时序 | 「一次请求经过了谁」 | `participants` · `messages` · `activations` |
+| `workflow` | 跨角色的流程、审批 | 「这件事怎么一步步走完」 | `lanes` · `phases` · `mainPath` · `nodes` · `edges` |
+| `dataflow` | 流水线、ETL、血缘 | 「数据从哪来到哪去」 | `stages` · `nodes` · `flows` |
+| `lifecycle` | 状态机、生命周期、重试 | 「这个东西有哪几种状态」 | `lanes` · `states` · `transitions` |
 
 写法参考 `~/.agents/skills/archify/examples/*.<type>.json`。
 
@@ -855,7 +855,7 @@ caption: packages/core 的组成与数据流
 node tools/archify.mjs archify/<名字>.json <名字>
 ```
 
-#### 它自带「聚焦 + 关系追踪」
+### 它自带「聚焦 + 关系追踪」
 
 ````callout
 tone: green
@@ -887,21 +887,10 @@ text: |
   真需要那些能力时，直接跑 archify 生成独立 HTML，别走这个积木。
 ```
 
-#### 它能画 5 种图
+### 实现要点
 
-由 spec 里的 `diagram_type` 决定，工具会自动读：
-
-| diagram_type | 画什么 | 适合的知识点 |
-|---|---|---|
-| `architecture` | 系统组成、部署拓扑、依赖关系 | 「这个系统由什么组成」 |
-| `sequence` | 调用链、握手、时序 | 「一次请求经过了谁」 |
-| `workflow` | 跨角色的流程、审批 | 「这件事怎么一步步走完」 |
-| `dataflow` | 流水线、ETL、血缘 | 「数据从哪来到哪去」 |
-| `lifecycle` | 状态机、生命周期、重试 | 「这个东西有哪几种状态」 |
-
-==五种都验证过能走我们的管线==（`node tools/archify.mjs` 直接吃它们的 spec）。
-
-**要点**：
+==五种图都验证过能走我们的管线==（`node tools/archify.mjs` 直接吃它们的 spec）。
+下面这些是「管线怎么搭的」，不是「怎么写 spec」：
 
 - **SVG 是预先抠好提交进仓库的**，构建时不调 archify ——
   否则别人 clone 后没有 archify 就构建不了。
