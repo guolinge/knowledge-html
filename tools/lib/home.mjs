@@ -41,15 +41,24 @@ function card(e) {
   </a>`;
 }
 
-/** 把一棵 plan 渲染成树 */
-function tree(plan, entryBySlug) {
+/** '2026-09-28' → '09-28' —— 首页不需要年份，省掉两个字符就能少抬一列宽度 */
+const mmdd = (d) => String(d || '').slice(5);
+
+/** 把一棵 plan 渲染成树。
+    section 上挂 data-title / data-date / data-order ——
+    排序是在前端换 DOM 顺序做的，所以数据得先落到属性上（同 card 那套）。 */
+function tree(plan, entryBySlug, order) {
   const total = plan.nodes.length;
-  const done = plan.nodes.filter((n) => n.artifact && entryBySlug.has(n.artifact)).length;
+  const dates = [];
+  let done = 0;
 
   const rows = plan.nodes
     .map((n) => {
       const e = n.artifact ? entryBySlug.get(n.artifact) : null;
-      const state = e ? 'done' : 'planned';
+      if (e) done++;
+      // 日期取笔记的生成日；「待产出」的节点没有日期
+      const date = e ? e.generated || e.updated || '' : '';
+      if (date) dates.push(date);
       const tags = e ? (e.tags || []).join(',') : '';
       const searchText = [n.title, n.blurb, e?.title, e?.summary].filter(Boolean).join(' ');
       const inner = `
@@ -57,26 +66,43 @@ function tree(plan, entryBySlug) {
       <span class="tnode-title">${esc(n.title)}</span>
       <span class="tnode-layer">${esc(n.layer || '')}</span>
       <span class="tnode-blurb">${esc(n.blurb || '')}</span>
+      <span class="tnode-date">${esc(mmdd(date))}</span>
       <span class="tnode-state">${e ? '已产出' : '待产出'}</span>`;
+
+      const attrs = `data-depth="${n.depth}" data-num="${n.num}" data-date="${esc(date)}"
+          data-title="${esc(n.title)}" data-tags="${esc(tags)}"
+          data-text="${esc(searchText.toLowerCase())}"`;
 
       // 已产出的做成链接；待产出的只展示（不做死链接）
       return e
-        ? `<a class="tnode is-done" data-depth="${n.depth}" data-slug="${esc(n.artifact)}"
-             data-tags="${esc(tags)}" data-text="${esc(searchText.toLowerCase())}"
-             href="notes/${esc(n.artifact)}/">${inner}</a>`
-        : `<div class="tnode is-planned" data-depth="${n.depth}"
-             data-text="${esc(searchText.toLowerCase())}">${inner}</div>`;
+        ? `<a class="tnode is-done" ${attrs} data-slug="${esc(n.artifact)}" href="notes/${esc(n.artifact)}/">${inner}</a>`
+        : `<div class="tnode is-planned" ${attrs}>${inner}</div>`;
     })
     .join('\n');
 
-  return `<section class="plan" data-plan="${esc(plan.topic)}">
-    <div class="plan-head">
-      <h2>${esc(plan.title)}</h2>
-      <span class="plan-progress${done === total ? ' is-full' : ''}">${done} / ${total} 篇</span>
-      ${plan.summary ? `<p class="plan-summary">${esc(plan.summary)}</p>` : ''}
+  const sorted = dates.slice().sort();
+  const span = sorted.length
+    ? sorted[0] === sorted[sorted.length - 1]
+      ? mmdd(sorted[0])
+      : `${mmdd(sorted[0])} → ${mmdd(sorted[sorted.length - 1])}`
+    : '';
+
+  return `<section class="plan" data-plan="${esc(plan.topic)}" data-order="${order}"
+      data-title="${esc(plan.title)}" data-date="${esc(sorted[sorted.length - 1] || '')}">
+    <h2 class="plan-h">
+      <button class="plan-toggle" type="button" aria-expanded="false"
+          aria-controls="pb-${esc(plan.topic)}">
+        <span class="plan-caret" aria-hidden="true"></span>
+        <span class="plan-t">${esc(plan.title)}</span>
+        <span class="plan-progress${done === total ? ' is-full' : ''}">${done} / ${total} 篇</span>
+        ${span ? `<span class="plan-dates">${esc(span)}</span>` : ''}
+        ${plan.summary ? `<span class="plan-summary">${esc(plan.summary)}</span>` : ''}
+      </button>
+    </h2>
+    <div class="plan-body" id="pb-${esc(plan.topic)}" hidden>
       ${plan.source ? `<p class="plan-source">源码：${esc(plan.source)}</p>` : ''}
+      <div class="plan-nodes">${rows}</div>
     </div>
-    <div class="plan-body">${rows}</div>
   </section>`;
 }
 
@@ -92,24 +118,35 @@ export function renderHome(entries, { site, assetPrefix = '', plans = [] }) {
   }
   const orphans = entries.filter((e) => !inTree.has(e.slug));
 
-  const trees = plans.map((p) => tree(p, entryBySlug)).join('\n');
+  const trees = plans.map((p, i) => tree(p, entryBySlug, i)).join('\n');
 
   /* 「工具与规范」不来自 notes/ —— 它是 .agents/skills/ 下的 skill 文档，
-     由 tools/skill-view.mjs 渲染到 skill/。单独一块，别混进笔记列表。 */
-  const tools = `<section class="plan" data-plan="__tools">
-    <div class="plan-head">
-      <h2>工具与规范</h2>
-      <span class="plan-progress is-full">1 份</span>
-      <p class="plan-summary">不是笔记 —— 是「怎么写这些笔记」的流程规范。给 agent 读，人也能读。</p>
-    </div>
-    <div class="plan-body">
-      <a class="tnode is-done" data-depth="0" href="skill/index.html">
-        <span class="tnode-num">🛠</span>
-        <span class="tnode-title">knowledge-html skill</span>
-        <span class="tnode-layer">规范</span>
-        <span class="tnode-blurb">原则 · 工作流 · 积木 DSL · 多会话协作 · 硬约束</span>
-        <span class="tnode-state">已产出</span>
-      </a>
+     由 tools/skill-view.mjs 渲染到 skill/。单独一块，别混进笔记列表。
+     结构跟树保持一致（可折叠、一行头），否则最上面一块会是另一种长相。 */
+  const tools = `<section class="plan" data-plan="__tools" data-order="-1"
+      data-title="工具与规范" data-date="">
+    <h2 class="plan-h">
+      <button class="plan-toggle" type="button" aria-expanded="false"
+          aria-controls="pb-__tools">
+        <span class="plan-caret" aria-hidden="true"></span>
+        <span class="plan-t">工具与规范</span>
+        <span class="plan-progress is-full">1 份</span>
+        <span class="plan-summary">不是笔记 —— 是「怎么写这些笔记」的流程规范。给 agent 读，人也能读。</span>
+      </button>
+    </h2>
+    <div class="plan-body" id="pb-__tools" hidden>
+      <div class="plan-nodes">
+        <a class="tnode is-done" data-depth="0" data-num="0" data-date=""
+             data-title="knowledge-html skill" data-tags="" data-text="skill 规范 工作流"
+             href="skill/index.html">
+          <span class="tnode-num">🛠</span>
+          <span class="tnode-title">knowledge-html skill</span>
+          <span class="tnode-layer">规范</span>
+          <span class="tnode-blurb">原则 · 工作流 · 积木 DSL · 多会话协作 · 硬约束</span>
+          <span class="tnode-date"></span>
+          <span class="tnode-state">已产出</span>
+        </a>
+      </div>
     </div>
   </section>`;
   const cards = orphans.map(card).join('\n');
@@ -160,45 +197,79 @@ export function renderHome(entries, { site, assetPrefix = '', plans = [] }) {
 .chip.on { background: var(--blue-soft); border-color: var(--blue); color: var(--blue); }
 .chip .n { font-family: var(--mono); font-size: 10.5px; opacity: .6; }
 
-/* ── 产物树 ─────────────────────────────────────────── */
-.plan { margin-bottom: 46px; }
-.plan-head { margin-bottom: 18px; }
-.plan-head h2 { font-size: 22px; letter-spacing: -.02em; margin: 0 0 6px; }
-.plan-progress {
-  display: inline-block; font: 550 12px/1 var(--mono); color: var(--text-2);
-  background: var(--surface); border: 1px solid var(--border);
-  border-radius: 100px; padding: 5px 10px; margin-bottom: 10px;
+/* ── 产物树 ───────────────────────────────────────────
+   树的默认形态是**收起来的**：一行一棵，标题 + 进度 + 日期范围 + 摘要。
+   六个主题一眼扫完，想深入再点开。（用户当时原话：「占面积太大」） */
+.plan { margin-bottom: 4px; }
+.plan-h { margin: 0; font-size: inherit; font-weight: inherit; }
+.plan-toggle {
+  display: flex; align-items: baseline; gap: 11px; width: 100%;
+  background: none; border: 0; border-radius: 10px; cursor: pointer;
+  padding: 11px 14px 11px 6px; text-align: left;
+  font: inherit; color: inherit; transition: background .15s;
 }
-.plan-progress.is-full { color: var(--green); border-color: var(--green); }
-.plan-summary { margin: 0 0 4px; font-size: 14px; color: var(--text-2); line-height: 1.65; }
-.plan-source { margin: 0; font: 400 12px/1.5 var(--mono); color: var(--muted); }
-.plan-body { display: flex; flex-direction: column; gap: 2px; }
+.plan-toggle:hover { background: var(--surface); }
+.plan-caret {
+  /* 用边框画三角，不用 ▸ 字符 —— 这套字体（PingFang/系统回退）里
+     U+25B8 会退化成一个点，看上去像「没渲染出来」 */
+  flex: none; width: 0; height: 0;
+  border-left: 5px solid var(--muted);
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  align-self: center; transition: transform .18s;
+}
+.plan-toggle[aria-expanded="true"] .plan-caret { transform: rotate(90deg); }
+.plan-t { flex: none; font-size: 17px; font-weight: 650; letter-spacing: -.02em; }
+.plan-progress {
+  flex: none; font: 550 11.5px/1 var(--mono); color: var(--text-2);
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 100px; padding: 4px 9px;
+}
+.plan-toggle:hover .plan-progress { border-color: var(--border-strong); }
+.plan-progress.is-full { color: var(--green); border-color: color-mix(in srgb, var(--green) 45%, var(--border)); }
+.plan-dates { flex: none; font: 400 11.5px/1 var(--mono); color: var(--muted); }
+/* 摘要吃掉剩下的宽度，不够就用省略号 —— 它是一句提示，不是正文 */
+.plan-summary {
+  flex: 1; min-width: 0; font-size: 13px; color: var(--muted);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.plan-body { padding: 2px 0 14px 23px; }
+.plan-source { margin: 0 0 8px; font: 400 12px/1.5 var(--mono); color: var(--muted); }
+.plan-nodes { display: flex; flex-direction: column; gap: 1px; }
 
 .tnode {
-  display: grid; grid-template-columns: 30px auto 62px 1fr auto;
+  display: grid; grid-template-columns: 26px auto 62px 1fr auto auto;
   align-items: baseline; gap: 12px; text-decoration: none; color: inherit;
-  border-radius: 9px; padding: 11px 14px 11px 0;
+  border-radius: 8px; padding: 7px 13px 7px 0;
   border-left: 2px solid var(--border);
   transition: background .15s, border-color .15s;
 }
-.tnode[data-depth="1"] { padding-left: 16px; }
-.tnode[data-depth="2"] { margin-left: 30px; }
-.tnode[data-depth="3"] { margin-left: 60px; }
+.tnode[data-depth="1"] { padding-left: 13px; }
+.tnode[data-depth="2"] { margin-left: 26px; }
+.tnode[data-depth="3"] { margin-left: 52px; }
 .tnode.is-done { cursor: pointer; }
 .tnode.is-done:hover { background: var(--surface); border-left-color: var(--blue); }
 .tnode.is-done:hover .tnode-title { color: var(--blue); }
 .tnode.is-planned { opacity: .5; border-left-style: dashed; }
 .tnode-num { font-family: var(--mono); font-size: 12px; color: var(--muted); text-align: right; }
-.tnode-title { font-weight: 600; font-size: 15px; letter-spacing: -.01em; }
-.tnode.is-done .tnode-title { color: var(--text); }
+.tnode-title { font-weight: 600; font-size: 14.5px; letter-spacing: -.01em; white-space: nowrap; }
 .tnode-layer {
-  font: 500 11px/1 var(--sans); color: var(--muted);
+  font: 500 10.5px/1 var(--sans); color: var(--muted);
   background: var(--surface-2, var(--surface)); border: 1px solid var(--border);
-  border-radius: 100px; padding: 4px 8px; text-align: center;
+  border-radius: 100px; padding: 3px 8px; text-align: center;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.tnode-blurb { font-size: 13px; color: var(--muted); line-height: 1.5; }
-.tnode-state { font: 500 11.5px/1 var(--sans); color: var(--muted); white-space: nowrap; }
+.tnode-blurb {
+  font-size: 12.5px; color: var(--muted); line-height: 1.5;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.tnode-date { font: 400 11.5px/1 var(--mono); color: var(--muted); white-space: nowrap; }
+.tnode-state { font: 500 11px/1 var(--sans); color: var(--muted); white-space: nowrap; }
 .tnode.is-done .tnode-state { color: var(--green); }
+
+/* 按时间/标题排过之后，①②③ 的阅读顺序已经不成立了 ——
+   留着会误导。用 visibility 而不是 display，免得整行塌位。 */
+.plan-nodes[data-sorted="true"] .tnode-num { visibility: hidden; }
 
 /* ── 未归类 ─────────────────────────────────────────── */
 .orphan-head { margin: 0 0 16px; }
@@ -245,10 +316,12 @@ export function renderHome(entries, { site, assetPrefix = '', plans = [] }) {
 .empty { color: var(--muted); font-size: 14.5px; padding: 40px 0; text-align: center; }
 
 @media (max-width: 720px) {
-  .tnode { grid-template-columns: 24px 1fr auto; gap: 8px; padding-left: 10px; }
-  .tnode-layer, .tnode-blurb { display: none; }
-  .tnode[data-depth="2"] { margin-left: 16px; }
-  .tnode[data-depth="3"] { margin-left: 32px; }
+  .tnode { grid-template-columns: 22px 1fr auto; gap: 8px; padding-left: 10px; }
+  .tnode-layer, .tnode-blurb, .tnode-date { display: none; }
+  .tnode[data-depth="2"] { margin-left: 14px; }
+  .tnode[data-depth="3"] { margin-left: 28px; }
+  .plan-summary { display: none; }
+  .plan-body { padding-left: 14px; }
 }
 </style>
 </head>
@@ -266,6 +339,25 @@ export function renderHome(entries, { site, assetPrefix = '', plans = [] }) {
   </div>
   <div class="chips" id="chips">${chips}</div>
 
+  <div class="obar" id="obar">
+    <span class="seg" data-ctrl="sort" data-label="排序">
+      <button data-v="tree" class="on">按树序</button>
+      <button data-v="new">最新在前</button>
+      <button data-v="old">最早在前</button>
+      <button data-v="title">按标题</button>
+    </span>
+    <span class="seg" data-ctrl="fold" data-label="折叠">
+      <button data-v="open">全部展开</button>
+      <button data-v="close">全部折叠</button>
+    </span>
+    ${orphans.length
+      ? `<span class="seg" data-ctrl="group" data-label="未归类">
+      <button data-v="topic" class="on">按主题</button>
+      <button data-v="none">不分组</button>
+    </span>`
+      : ''}
+  </div>
+
   <div id="trees">${tools}
 ${trees}</div>
   ${
@@ -273,17 +365,6 @@ ${trees}</div>
       ? `<div class="orphan-head">
     <h2>未归类</h2>
     <p>还没挂到任何一棵产物树上的笔记。按「主题」分组看，或切回平铺按时间扫。</p>
-  </div>
-  <div class="obar">
-    <span class="seg" data-ctrl="sort" data-label="排序">
-      <button data-v="new" class="on">最新在前</button>
-      <button data-v="old">最早在前</button>
-      <button data-v="title">按标题</button>
-    </span>
-    <span class="seg" data-ctrl="group" data-label="分组">
-      <button data-v="topic" class="on">按主题</button>
-      <button data-v="none">不分组</button>
-    </span>
   </div>
   <div id="grid" class="ngrid">${cards}</div>`
       : ''
@@ -304,7 +385,47 @@ ${trees}</div>
   var q = document.getElementById('q');
   var empty = document.getElementById('empty');
   var count = document.getElementById('count');
-  var trees = [].slice.call(document.querySelectorAll('.plan'));
+  var treesWrap = document.getElementById('trees');
+  var plans = [].slice.call(treesWrap.querySelectorAll('.plan'));
+  var trees = plans;   // apply() 里还按旧名字叫
+
+  /* ── 折叠 ────────────────────────────────────────────
+     默认**收起**。首页要先用「一行一棵」的密度把几个主题扫完，
+     想深入再点开；点开的选择记在 localStorage，下次直接恢复。 */
+  var FOLD_KEY = 'kh-fold-v1';
+  var fold = {};
+  try { fold = JSON.parse(localStorage.getItem(FOLD_KEY) || '{}') || {}; } catch (e) { fold = {}; }
+
+  function foldOf(plan) { return fold[plan.getAttribute('data-plan')] === true; }
+
+  function setOpen(plan, v, persist) {
+    var btn = plan.querySelector('.plan-toggle');
+    var body = plan.querySelector('.plan-body');
+    if (!btn || !body) return;
+    btn.setAttribute('aria-expanded', v ? 'true' : 'false');
+    body.hidden = !v;
+    if (persist) fold[plan.getAttribute('data-plan')] = v;
+  }
+
+  function saveFold() {
+    try { localStorage.setItem(FOLD_KEY, JSON.stringify(fold)); } catch (e) {}
+  }
+
+  /* 排序模式。声明在这一层而不是 arrange() 里面 ——
+     折叠和排序是两套状态，但读写它的地方（工具栏、重建）分在两处，
+     放进内层会变成跨作用域引用。（我第一版就把它跟着旧函数一起删掉了，
+     表现是点了排序按钮毫无反应，而 node --check 只看语法，昂得很。） */
+  var mode = { sort: 'tree', group: 'topic' };
+
+  plans.forEach(function (p) { setOpen(p, foldOf(p), false); });
+
+  treesWrap.addEventListener('click', function (e) {
+    var btn = e.target.closest('.plan-toggle');
+    if (!btn) return;
+    var plan = btn.closest('.plan');
+    setOpen(plan, btn.getAttribute('aria-expanded') !== 'true', true);
+    saveFold();
+  });
   var cards = [].slice.call(document.querySelectorAll('.ncard'));
   var activeTags = new Set();
 
@@ -327,6 +448,8 @@ ${trees}</div>
         if (show) { any = true; if (n.classList.contains('is-done')) shown++; }
       });
       plan.hidden = !any;
+      // 搜到的结果如果藏在一棵收起来的树里，等于没搜到 —— 有搜索词时先展开
+      setOpen(plan, term ? any : foldOf(plan), false);
     });
 
     cards.forEach(function (c) {
@@ -346,9 +469,7 @@ ${trees}</div>
 
     var anyCard = cards.some(function (c) { return !c.hidden; });
     var head = document.querySelector('.orphan-head');
-    var bar = document.querySelector('.obar');
     if (head) head.hidden = !anyCard;
-    if (bar) bar.hidden = !anyCard;
     if (document.getElementById('grid')) document.getElementById('grid').hidden = !anyCard;
 
     count.textContent = shown;
@@ -373,28 +494,71 @@ ${trees}</div>
     try { localStorage.setItem('kh-theme', next); } catch (e) {}
   });
 
-  /* ── 未分类区：排序 + 分组 ────────────────────────────
-     节点是**移动**而不是重建 —— 卡片本身已经由服务端转义好了，
-     重建 HTML 反而要担一次转义责任。 */
+  /* ── 排序 ────────────────────────────────────────────
+     节点是**移动 DOM** 而不是重建 —— 行本身已经由服务端转义好了，
+     重建 HTML 反而要担一次转义责任。
+     排序对「树内节点」和「树与树之间」同时生效，否则「最新在前」
+     会变得没意义（最新的那篇埋在第四棵树里）。 */
   (function arrange() {
     var grid = document.getElementById('grid');
-    if (!grid) return;
-    var pool = [].slice.call(grid.querySelectorAll('.ncard'));
-    if (!pool.length) return;
 
-    var mode = { sort: 'new', group: 'topic' };
-    var byCmp = function (a, b) {
-      var da = a.getAttribute('data-date') || '', db = b.getAttribute('data-date') || '';
-      var ta = a.getAttribute('data-title') || '', tb = b.getAttribute('data-title') || '';
-      if (mode.sort === 'title') return ta.localeCompare(tb, 'zh');
-      // 同一天的按标题定序 —— 否则顺序取决于文件系统，每次构建都可能变
-      var byDate = da < db ? -1 : da > db ? 1 : 0;
-      return (mode.sort === 'new' ? -byDate : byDate) || ta.localeCompare(tb, 'zh');
-    };
+    var num = function (n) { return parseInt(n.getAttribute('data-num') || '0', 10); };
+    var ord = function (p) { return parseInt(p.getAttribute('data-order') || '0', 10); };
+    var attr = function (n, a) { return n.getAttribute(a) || ''; };
 
-    function build() {
-      var list = pool.slice().sort(byCmp);
+    // 没有日期的（待产出 / 还没写的树）一律沉底，且不参与方向
+    function byDate(a, b, dir) {
+      var da = attr(a, 'data-date'), db = attr(b, 'data-date');
+      if (!da && !db) return 0;
+      if (!da) return 1;
+      if (!db) return -1;
+      return (da < db ? -1 : da > db ? 1 : 0) * dir;
+    }
+    var cmpTitle = function (a, b) { return attr(a, 'data-title').localeCompare(attr(b, 'data-title'), 'zh'); };
+    var dir = function () { return mode.sort === 'new' ? -1 : 1; };
+
+    function sortNodes() {
+      plans.forEach(function (plan) {
+        var wrap = plan.querySelector('.plan-nodes');
+        if (!wrap) return;
+        var nodes = [].slice.call(wrap.querySelectorAll('.tnode'));
+        if (!nodes.length) return;
+        var s = nodes.slice();
+        if (mode.sort === 'title') s.sort(cmpTitle);
+        else if (mode.sort === 'tree') s.sort(function (a, b) { return num(a) - num(b); });
+        else s.sort(function (a, b) { return byDate(a, b, dir()) || num(a) - num(b); });
+        s.forEach(function (n) { wrap.appendChild(n); });
+        // ①②③ 只在「按树序」时才是真的，排过之后就隐掉（用 visibility，不塌位）
+        wrap.setAttribute('data-sorted', mode.sort === 'tree' ? 'false' : 'true');
+      });
+    }
+
+    function sortPlans() {
+      // 工具区永远钉在最前 —— 它不属于任何一棵知识树
+      var tools = plans.filter(function (p) { return p.getAttribute('data-plan') === '__tools'; });
+      var rest = plans.filter(function (p) { return p.getAttribute('data-plan') !== '__tools'; });
+      // 稳定：同值时回落到盘点顺序，否则小改动会让树跳来跳去
+      if (mode.sort === 'title') rest.sort(function (a, b) { return cmpTitle(a, b) || ord(a) - ord(b); });
+      else if (mode.sort === 'tree') rest.sort(function (a, b) { return ord(a) - ord(b); });
+      else rest.sort(function (a, b) { return byDate(a, b, dir()) || ord(a) - ord(b); });
+
       var frag = document.createDocumentFragment();
+      tools.concat(rest).forEach(function (p) { frag.appendChild(p); });
+      treesWrap.appendChild(frag);
+    }
+
+    function sortCards() {
+      if (!grid) return;
+      var pool = [].slice.call(grid.querySelectorAll('.ncard'));
+      if (!pool.length) return;
+
+      var list = pool.slice();
+      // 「按树序」对未归类没意义（它们不属于任何一棵树）—— 保持原样，
+      // 免得用户在看树的时候未分类区凭空重排一次
+      if (mode.sort === 'title') list.sort(cmpTitle);
+      else if (mode.sort !== 'tree')
+        // 同一天的按标题定序 —— 否则顺序取决于文件系统，每次构建都可能变
+        list.sort(function (a, b) { return byDate(a, b, dir()) || cmpTitle(a, b); });
 
       function gridOf(items) {
         var g = document.createElement('div');
@@ -403,6 +567,7 @@ ${trees}</div>
         return g;
       }
 
+      var frag = document.createDocumentFragment();
       if (mode.group === 'none') {
         frag.appendChild(gridOf(list));
       } else {
@@ -437,22 +602,37 @@ ${trees}</div>
       while (grid.firstChild) grid.removeChild(grid.firstChild);
       grid.className = '';
       grid.appendChild(frag);
-      apply();   // 重排后要把当前的搜索/标签筛选重新盖上去
     }
 
-    document.querySelector('.obar').addEventListener('click', function (e) {
+    function rebuild() {
+      sortPlans();
+      sortNodes();
+      sortCards();
+      apply();   // 重排/折叠后要把当前的搜索和标签筛选重新盖上去
+    }
+
+    document.getElementById('obar').addEventListener('click', function (e) {
       var b = e.target.closest('button');
       if (!b) return;
       var seg = b.closest('.seg');
       var ctrl = seg.getAttribute('data-ctrl');
+
+      // 「全部展开 / 全部折叠」是一次性动作，不是互斥状态 —— 不挂 .on
+      if (ctrl === 'fold') {
+        var v = b.getAttribute('data-v') === 'open';
+        plans.forEach(function (p) { setOpen(p, v, true); });
+        saveFold();
+        return;
+      }
+
       mode[ctrl] = b.getAttribute('data-v');
       [].slice.call(seg.querySelectorAll('button')).forEach(function (o) {
         o.classList.toggle('on', o === b);
       });
-      build();
+      rebuild();
     });
 
-    build();
+    rebuild();
   })();
 
   // 复用页面级的主题偏好

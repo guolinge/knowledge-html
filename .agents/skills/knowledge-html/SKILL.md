@@ -2797,6 +2797,55 @@ pre-push 会重建 + 量图。**它拦下来通常不是你的问题。**
 - [ ] 改了 skill 的话，**`skill/*.html` 要一起提交** —— 它是进仓库的产物，
       不提交的话线上那一份会停在你改之前的版本
 
+### 改了「站点外壳」要多做一步
+
+外壳 = `tools/lib/home.mjs`（首页）、`assets/theme.css` / `blocks.css`。
+下面两个坑 **`npm run check` 一个都报不出来**，而且都是**静默**的：属性设上了、JS 里读也是对的，只有屏幕上不对。
+
+````callout
+tone: red
+icon: ⚠
+text: |
+  **一、内联在模板字符串里的浏览器 JS，语法检查查不出 `ReferenceError`。**
+
+  首页那段 `<script>` 是拼在 JS 模板字符串里的，`node --check` 看不到它。
+  我重构时把旧函数整个换掉，**连同里面声明的 `var mode` 一起删了** ——
+  语法完全合法，表现是「排序按钮点下去毫无反应」。
+
+  → 在真实页面里跑一遍，并把 `window.onerror` 收上来（否则连报错都看不到）。
+
+  ```bash
+  # ==探针文件必须写在仓库根目录==，再让 python 把 <script> 注入进去。
+  # 放 /tmp 跑的话，相对路径引的 assets/*.css 全断了 ——
+  # 你会测出「样式没生效」的假象，然后去修一个根本不存在的 CSS 问题。（真踩过）
+  cp index.html .probe.html   # 注入探针
+  chrome --headless=new --virtual-time-budget=6000 \
+    --dump-dom "file://$PWD/.probe.html" | grep -o 'class="PROBE">[^<]*'
+  ```
+````
+
+````callout
+tone: red
+icon: ⚠
+text: |
+  **二、`el.hidden = true` 会被作者样式里的 `display` 盖掉。**
+
+  浏览器自带的 `[hidden] { display: none }` 在 **UA 样式表**里，
+  而 **作者样式表里任何一条 `display` 都会盖掉它** —— 跟优先级无关。
+
+  所以 `.tnode { display: grid }` 一写，`n.hidden = true` 就完全失效：
+  属性在、`el.hidden` 读出来是 `true`、屏幕上还画着。
+  首页的**搜索和标签筛选因此哑了很久**（实测：32 个节点全被标了 `hidden`，32 个全在显示）。
+
+  `theme.css` 里已经加了兜底，==站内新写的组件不用再操心==：
+
+  ```css
+  [hidden] { display: none !important; }
+  ```
+
+  但要是哪天自己写页面 / 导出 HTML，记得补上这条。
+````
+
 ## 参考
 
 ### 命令
