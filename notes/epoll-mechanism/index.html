@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-has-toc="1">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>epoll 到底做了什么</title>
+<meta name="description" content="三条需求对上三样东西。内核里它就是两张表：登记表一直记着你关心谁，就绪表只装这一刻真有事的那几个。分水岭是「谁把 fd 放进就绪表」—— 从「我去查」变成「你来告诉我」。" />
+<link rel="stylesheet" href="../../assets/theme.css" />
+  <link rel="stylesheet" href="../../assets/blocks.css" />
+  <link rel="stylesheet" href="../../assets/archify-embed.css" />
+</head>
+<body>
+<div id="progress"></div>
+<div id="tocScrim"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
+    <a class="brand" href="../../index.html"><span class="dot"></span>知识笔记</a>
+    
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="toc" id="toc">
+      <p class="toc-title">目录</p>
+      <a href="../../index.html" class="sub">← 全部笔记</a>
+      <a href="#三条需求三样东西">三条需求，三样东西</a>
+      <a href="#内核里它就是两张表">内核里它就是两张表</a>
+      <a href="#分水岭谁把-fd-放进就绪表">分水岭：谁把 fd 放进就绪表</a>
+      <a href="#复杂度要怎么说才诚实">复杂度要怎么说才诚实</a>
+      <a href="#三个调用分别管什么">三个调用分别管什么</a>
+      <a href="#到这里还剩一个词没交代">到这里，还剩一个词没交代</a>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow">● I/O 多路复用 · 第二步</span>
+      <h1>epoll 到底做了什么</h1>
+      <p class="lede">三条需求对上三样东西。内核里它就是两张表：登记表一直记着你关心谁，就绪表只装这一刻真有事的那几个。分水岭是「谁把 fd 放进就绪表」—— 从「我去查」变成「你来告诉我」。</p>
+    </div>
+
+    <div class="draft-banner">
+    <span>⚠</span>
+    <span>本页状态为 <b>draft</b>：内容尚未人工核对，引用前请自行验证。</span>
+  </div>
+<aside class="needs">
+      <p class="needs-title">读这篇之前，你需要先知道</p>
+      <a class="need" href="../polling-and-its-cost/">← <b>3. 轮询解决了什么，又欠下什么</b><span>别等了去问，一个线程能招呼多个连接；但白问太多，而且名单每次都要重交一遍</span></a>
+    </aside>
+    <div class="provenance"><span><b>来源</b> man7 · epoll(7) https://man7.org/linux/man-pages/man7/epoll.7.html · man7 · epoll_ctl(2) https://man7.org/linux/man-pages/man2/epoll_ctl.2.html · Linux 内核 eventpoll 实现分析（eventpoll 的 rbr 红黑树 / rdllist 就绪链表 / wq 等待队列；ep_ptable_queue_proc 挂 ep_poll_callback 回调）</span><span><b>生成</b> 2026-10-06</span><span><b>模型</b> claude-opus-4-5</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">epoll</span> <span class="tag tone-muted">I/O 多路复用</span> <span class="tag tone-muted">Linux 内核</span> <span class="tag tone-muted">事件驱动</span> <span class="tag tone-muted">select</span></span></div>
+
+<h2 id="三条需求三样东西"><span class="num">01</span>三条需求，三样东西</h2>
+<p>上一篇的结尾列了三条。现在让它们一一对上：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>需求</th><th>谁去满足它</th><th>它做到了什么</th></tr></thead><tbody><tr><th>① 内核得记住我关心哪些 fd</th><td data-label="谁去满足它"><code>epoll_create</code> + <code>epoll_ctl</code></td><td data-label="它做到了什么">在内核里<strong>建一个对象</strong>，把 fd 登记进去。登记一次，长期有效</td></tr><tr><th>② 内核得只把就绪的还给我</th><td data-label="谁去满足它"><code>epoll_wait</code></td><td data-label="它做到了什么">它返回的是<strong>就绪的那几个本身</strong>，不是「整份名单 + 几个标记位」</td></tr><tr><th>③ 等待不能再占用执行资源</th><td data-label="谁去满足它">①② 合起来</td><td data-label="它做到了什么">名单存在内核里、谁就绪内核自己知道，线程才能真的睡到有事为止</td></tr></tbody></table></div><p><mark class="mk-blue">第三条是目的，前两条是手段。</mark> 这个顺序别搞反，反过来就会把 epoll 记成三个 API。</p>
+<hr>
+<h2 id="内核里它就是两张表"><span class="num">02</span>内核里它就是两张表</h2>
+<p>这是 epoll 的全部。左边的表登记，右边的表就绪：</p>
+<div class="demo" data-widget="epoll-tables" data-config="{&quot;conn&quot;:{&quot;min&quot;:8,&quot;max&quot;:40,&quot;step&quot;:4,&quot;def&quot;:24}}">
+      <div class="demo-head">
+        <span class="title">epoll 的全部就是这两张表</span>
+        <span class="status" data-status>未开始</span>
+        <span class="spacer"></span>
+        <button class="btn" data-run>▶ 开始模拟</button><button class="btn ghost" data-reset>重置</button>
+      </div>
+      <div class="demo-body custom" data-mount></div>
+    </div><p>三个要点，都能从上面点出来：</p>
+<div class="cards" data-cols="1"><div class="ccard tone-blue">
+          
+          <h4>登记表（interest list）：<code>epoll_ctl</code> 往里加，一直在</h4>
+          
+          <div class="cbody"><p>它对应上一篇的第一条需求。<mark class="mk-blue">因为<strong>内核那头一直记着</strong>，
+所以调用一次之后你不需要再交代一遍</mark>，这正是 <code>select</code> / <code>poll</code> 做不到的事。</p>
+</div>
+          
+        </div><div class="ccard tone-green">
+          
+          <h4>就绪表（ready list）：谁有数据了，谁自己挂进来</h4>
+          
+          <div class="cbody"><p>它不是内核遍历找出来的，是<strong>回调放进去的</strong>。这一条是下一篇的主线，
+这里先记住：<mark class="mk-blue">放进去这个动作发生在「数据到的那一刻」，不是「你问的那一刻」。</mark></p>
+</div>
+          
+        </div><div class="ccard tone-violet">
+          
+          <h4><code>epoll_wait</code> 只是把就绪表拿走</h4>
+          
+          <div class="cbody"><p>它不清空登记表，上面点完 <code>epoll_wait</code> 之后格子会回到左边，
+因为<strong>登记还在，只是不再&quot;就绪&quot;了</strong>。这两张表的职责完全不同，别混。</p>
+</div>
+          
+        </div></div><p><mark class="mk-amber">注意右边那张表永远是短的。</mark> 不是「短一点」，是<strong>量级上的不同</strong>，它只装这一刻真有事的那几个。</p>
+<hr>
+<h2 id="分水岭谁把-fd-放进就绪表"><span class="num">03</span>分水岭：谁把 fd 放进就绪表</h2>
+<p>前面所有差别到这里收束成一件事。</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>谁主动</th><th>什么时候干活</th><th>成本跟什么成正比</th><th>一句话</th></tr></thead><tbody><tr><th><code>select</code> / <code>poll</code> · 拉</th><td data-label="什么时候干活"><strong>你调用</strong>的那一刻，内核才挨个去查</td><td data-label="成本跟什么成正比"><span class="tag tone-red">你登记了多少条</span></td><td data-label="一句话">问了才知道</td></tr><tr><th>epoll · 推</th><td data-label="什么时候干活"><strong>数据到</strong>的那一刻，内核顺手把它挂进就绪表</td><td data-label="成本跟什么成正比"><span class="tag tone-green">这一刻真有几个就绪</span></td><td data-label="一句话">谁好了谁来排队</td></tr></tbody></table></div><p><mark class="mk-blue">这是整棵树上最该记住的一句：<strong>从「我去查」变成「你来告诉我」。</strong></mark></p>
+<p>一旦换过来，两件事同时变好：</p>
+<ul>
+<li>你不用每轮重交名单了（内核记着）</li>
+<li>内核不用每轮遍历全部了（只有真就绪的才发生那次「挂进链表」）</li>
+</ul>
+<p>上一版那个「白问」也没了：<strong>没人再问，就没人白问。</strong></p>
+<div class="callout tone-violet">
+      <span class="ic">🔁</span>
+      <div><p>「推」是怎么实现的，一句话：</p>
+<p>每个 socket 上本来就挂着一个<strong>等待队列</strong>。<code>epoll_ctl</code> 登记的时候，
+把 <code>ep_poll_callback</code> 这个函数挂到那个等待队列上；
+数据一来，内核唤醒等待队列，这个回调就被调用 ——
+它把对应的 epitem 放进就绪表，并叫醒正在 <code>epoll_wait</code> 的线程。</p>
+<p>所以「挂进就绪表」不是 epoll 主动做的，是<strong>事件经过时顺手做的</strong>。
+epoll 只是提供了那张表和那个回调。</p>
+</div>
+    </div><hr>
+<h2 id="复杂度要怎么说才诚实"><span class="num">04</span>复杂度要怎么说才诚实</h2>
+<p>几乎每篇讲 epoll 的文章都会写「O(1)」。这句话的方向对，但<strong>说满了</strong>。</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>说法</th><th>对不对</th><th>该怎么讲</th></tr></thead><tbody><tr><th>epoll 是 O(1)</th><td data-label="对不对"><span class="tag tone-red">不严谨</span></td><td data-label="该怎么讲">登记要走红黑树、回调要加锁、事件要拷贝到用户态，这些都有成本</td></tr><tr><th>epoll 不随监听的 fd 总数变差</th><td data-label="对不对"><span class="tag tone-green">准</span></td><td data-label="该怎么讲"><mark class="mk-blue">这才是它和 select/poll 的真正分野</mark>，那两位的成本必然和登记数成正比</td></tr></tbody></table></div><p>对比着看就很清楚：</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>成本跟什么走</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>select</code> / <code>poll</code></td>
+<td><strong>登记了多少条</strong>，每次都全拷、全遍历</td>
+</tr>
+<tr>
+<td><code>epoll</code></td>
+<td><strong>这一刻真有几个就绪</strong>，返回量只跟这个走</td>
+</tr>
+</tbody>
+</table>
+<p><mark class="mk-blue">记住的是这个<strong>函数关系</strong>，不是那个「1」。</mark> 面试答「不随 fd 总数增长」比答「O(1)」准确，而且显得你真读过实现。</p>
+<hr>
+<h2 id="三个调用分别管什么"><span class="num">05</span>三个调用分别管什么</h2>
+<div class="cards" data-cols="1"><div class="ccard tone-blue">
+          
+          <h4><code>epoll_create()</code>，建那个内核对象</h4>
+          
+          <div class="cbody"><p>它返回的<strong>也是一个 fd</strong>。epoll 实例本身就是一个文件描述符，
+所以能进 <code>select</code>、能被子进程继承、能被 <code>close</code>。
+常见误解：以为 epoll 是个「全局的机制」—— 它是<strong>你建出来的一个对象</strong>，一个进程可以有好几个。</p>
+</div>
+          
+        </div><div class="ccard tone-violet">
+          
+          <h4><code>epoll_ctl()</code>，改登记表</h4>
+          
+          <div class="cbody"><p>三个动作：<code>ADD</code> 加一条、<code>MOD</code> 改关注的事件、<code>DEL</code> 删一条。
+<mark class="mk-blue">它就是上一篇那三条需求里第一条的落地</mark>：名单交一次就够了，
+以后要改，改的也是内核里那份，不是重新交一份。</p>
+</div>
+          
+        </div><div class="ccard tone-green">
+          
+          <h4><code>epoll_wait()</code>，把就绪表拿走</h4>
+          
+          <div class="cbody"><p>它一次返回<strong>一批</strong>就绪事件（一个数组），不是一个。
+常见误解：以为它像 <code>read</code> 一样「取走」就绪状态。
+实际上<strong>取走之后那个 fd 还在登记表里</strong>，而且下一篇会看到：
+LT 模式下它可能马上又被挂回就绪表。</p>
+</div>
+          
+        </div></div><hr>
+<h2 id="到这里还剩一个词没交代"><span class="num">06</span>到这里，还剩一个词没交代</h2>
+<p>上面每一句都用了「<strong>就绪</strong>」：就绪表、就绪事件、这个 fd 就绪了。</p>
+<p>但你有没有想过：<mark class="mk-blue">epoll 说「可读」的时候，<strong>数据已经在你手里了吗</strong>？</mark></p>
+<p>没有。那是下一篇要抠开的那个词，而 <code>epoll</code> 最有名的两个触发模式（LT / ET），争的也正是这件事。</p>
+<hr>
+<div class="quiz"><details>
+        <summary>epoll 的三个系统调用分别对应上一篇的哪条需求？</summary>
+        <div class="a"><p>epoll_create + epoll_ctl 对应「内核得记住我关心哪些 fd」——
+在内核里建一个对象，把 fd 登记进去，登记一次长期有效。
+epoll_wait 对应「内核得只把就绪的还给我」——返回的是就绪的那几个本身。
+第三条「等待不该占用执行资源」是目的，前两条是手段。</p>
+</div>
+      </details><details>
+        <summary>「拉」和「推」的区别，一句话怎么说？</summary>
+        <div class="a"><p>select/poll 是拉：你调用的那一刻内核才挨个去查，成本跟「登记了多少条」成正比。
+epoll 是推：数据到的那一刻内核顺手把它挂进就绪表，
+成本跟「这一刻真有几个就绪」成正比。
+从「我去查」变成「你来告诉我」——白问也没了，因为没人再问。</p>
+</div>
+      </details><details>
+        <summary>「挂进就绪表」这个动作是谁做的？</summary>
+        <div class="a"><p>不是 epoll 主动遍历找出来的，是事件经过时顺手做的。
+每个 socket 上本来就挂着等待队列；epoll_ctl 登记时把 ep_poll_callback
+挂到那个队列上；数据一来内核唤醒队列，回调就把 epitem 放进就绪表
+并叫醒正在 epoll_wait 的线程。</p>
+</div>
+      </details><details>
+        <summary>为什么说「epoll 是 O(1)」不够严谨？该怎么讲？</summary>
+        <div class="a"><p>因为登记要走红黑树、回调要加锁、事件要拷贝到用户态，这些都有成本。
+准确的说法是：epoll 的成本<strong>不随监听的 fd 总数变差</strong>，
+而 select/poll 的成本必然和登记数成正比。
+记住这个函数关系，而不是那个「1」。</p>
+</div>
+      </details><details>
+        <summary>epoll 实例是什么？一个进程能有几个？</summary>
+        <div class="a"><p>它本身就是一个文件描述符（epoll_create 返回一个 fd），
+所以能进 select、能被子进程继承、能被 close。
+它是你<strong>建出来的一个对象</strong>，不是全局机制，一个进程可以有好几个。</p>
+</div>
+      </details></div>
+
+    <footer>
+      <span>epoll 到底做了什么</span>
+      <span>最后更新 2026-10-06 · 单文件可离线打开</span>
+    </footer>
+  </main>
+</div>
+
+<script src="../../assets/app.js"></script>
+</body>
+</html>

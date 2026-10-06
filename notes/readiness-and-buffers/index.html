@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-has-toc="1">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>「就绪」是什么意思</title>
+<meta name="description" content="epoll 说「可读」的时候，数据还在内核的接收缓冲区里 —— 就绪说的是状态不是数据。LT 和 ET 争的就是缓冲区里那点残留：从就绪表摘下来之后，要不要放回去。搞清这一句，ET 必须配非阻塞就能自己推出来。" />
+<link rel="stylesheet" href="../../assets/theme.css" />
+  <link rel="stylesheet" href="../../assets/blocks.css" />
+  <link rel="stylesheet" href="../../assets/archify-embed.css" />
+</head>
+<body>
+<div id="progress"></div>
+<div id="tocScrim"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
+    <a class="brand" href="../../index.html"><span class="dot"></span>知识笔记</a>
+    
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="toc" id="toc">
+      <p class="toc-title">目录</p>
+      <a href="../../index.html" class="sub">← 全部笔记</a>
+      <a href="#一个被跳过去的问题">一个被跳过去的问题</a>
+      <a href="#数据是内核先收下来的">数据是内核先收下来的</a>
+      <a href="#就绪说的是状态不是数据">「就绪」说的是状态，不是数据</a>
+      <a href="#lt-和-et-争的是一件事">LT 和 ET 争的是一件事</a>
+      <a href="#所以-et-必须配非阻塞">所以 ET 必须配非阻塞</a>
+      <a href="#内核里其实就是摘下来之后要不要放回去">内核里其实就是「摘下来之后要不要放回去」</a>
+      <a href="#一个反例把就绪说透">一个反例，把「就绪」说透</a>
+      <a href="#于是它仍然是同步-io">于是它仍然是同步 I/O</a>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow">● I/O 多路复用 · 第三步</span>
+      <h1>「就绪」是什么意思</h1>
+      <p class="lede">epoll 说「可读」的时候，数据还在内核的接收缓冲区里 —— 就绪说的是状态不是数据。LT 和 ET 争的就是缓冲区里那点残留：从就绪表摘下来之后，要不要放回去。搞清这一句，ET 必须配非阻塞就能自己推出来。</p>
+    </div>
+
+    <div class="draft-banner">
+    <span>⚠</span>
+    <span>本页状态为 <b>draft</b>：内容尚未人工核对，引用前请自行验证。</span>
+  </div>
+<aside class="needs">
+      <p class="needs-title">读这篇之前，你需要先知道</p>
+      <a class="need" href="../epoll-mechanism/">← <b>4. epoll 到底做了什么</b><span>先列三条需求，再看它怎么给 —— 内核里两张表，通知靠回调不靠遍历</span></a>
+    </aside>
+    <div class="provenance"><span><b>来源</b> man7 · epoll(7) https://man7.org/linux/man-pages/man7/epoll.7.html（LT 默认、ET 需 EPOLLET、必须配 O_NONBLOCK） · man7 · epoll_ctl(2) https://man7.org/linux/man-pages/man2/epoll_ctl.2.html（普通文件返回 EPERM） · Linux 内核 epoll 实现分析：ep_send_events_proc / ep_scan_ready_list 里「从就绪队列摘除 → 拷贝到用户态 → LT 重新加回、ET 不回加」</span><span><b>生成</b> 2026-10-06</span><span><b>模型</b> claude-opus-4-5</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">epoll</span> <span class="tag tone-muted">I/O 多路复用</span> <span class="tag tone-muted">缓冲区</span> <span class="tag tone-muted">边缘触发</span> <span class="tag tone-muted">Linux 内核</span></span></div>
+
+<h2 id="一个被跳过去的问题"><span class="num">01</span>一个被跳过去的问题</h2>
+<p>前面每一段都在用「<strong>就绪</strong>」这个词：就绪表、就绪事件、这个 fd 就绪了。</p>
+<p>那它到底在说什么？换个问法：</p>
+<blockquote>
+<p><strong>epoll 告诉你「这个 fd 可读」的时候，数据已经在你手里了吗？</strong></p>
+</blockquote>
+<p>没有。<mark class="mk-blue">而「就绪」这个词的全部含义，就藏在「没有」这两个字里。</mark></p>
+<hr>
+<h2 id="数据是内核先收下来的"><span class="num">02</span>数据是内核先收下来的</h2>
+<p>网卡收到包，不会直接塞进你的 <code>read</code> 返回值里。中间隔着一段<strong>内核的缓冲区</strong>。</p>
+<div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;nic&quot;,&quot;to&quot;:&quot;stack&quot;,&quot;label&quot;:&quot;&quot;},{&quot;from&quot;:&quot;stack&quot;,&quot;to&quot;:&quot;q&quot;,&quot;label&quot;:&quot;放进去&quot;},{&quot;from&quot;:&quot;q&quot;,&quot;to&quot;:&quot;you&quot;,&quot;label&quot;:&quot;你来取&quot;}]">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-blue" data-id="nic">
+              
+              
+              <b>网卡收到包</b>
+              <small>中断把包交给内核协议栈</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="stack">
+              
+              
+              <b>协议栈处理</b>
+              <small>拆包、校验、按连接找到对应的 socket</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-amber" data-id="q">
+              
+              
+              <b>socket 的接收队列</b>
+              <small><mark class="mk-blue">数据停在这里，这是内核的内存</mark></small>
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="you">
+              
+              
+              <b>你的 read 把它拷过来</b>
+              <small>这时数据才归你</small>
+            </div></div></div>
+      
+    </div><p>所以有两件完全不同的事：</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>什么时候发生</th>
+<th>谁在管</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>数据到了</strong></td>
+<td>包到达的那一刻</td>
+<td>内核（你完全不知道）</td>
+</tr>
+<tr>
+<td><strong>数据归你</strong></td>
+<td>你调 <code>read</code> 的那一刻</td>
+<td>你</td>
+</tr>
+</tbody>
+</table>
+<p><mark class="mk-blue">epoll 夹在中间。它只负责通知第一件事，不负责第二件。</mark></p>
+<hr>
+<h2 id="就绪说的是状态不是数据"><span class="num">03</span>「就绪」说的是状态，不是数据</h2>
+<p>把它翻译成一句人话：</p>
+<blockquote>
+<p><strong>就绪 = 现在去读，不会让你等。</strong></p>
+</blockquote>
+<p>它承诺的是<strong>「读这个动作立刻能有结果」</strong>，不是「数据已经给了你」。这个区别看着小，但 <code>epoll</code> 最有名的两个触发模式争的就是它。</p>
+<hr>
+<h2 id="lt-和-et-争的是一件事"><span class="num">04</span>LT 和 ET 争的是一件事</h2>
+<div class="demo" data-widget="lt-vs-et" data-config="{&quot;total&quot;:128,&quot;chunk&quot;:64}">
+      <div class="demo-head">
+        <span class="title">缓冲区还有数据，但你不知道</span>
+        <span class="status" data-status>先选 LT 走一遍，再切 ET 重走一遍，重点看「read 一次」之后</span>
+        <span class="spacer"></span>
+        <button class="btn" data-run>▶ 开始模拟</button><button class="btn ghost" data-reset>重置</button>
+      </div>
+      <div class="demo-body custom" data-mount></div>
+    </div><p><strong>建议按这个顺序点</strong>（切模式后会自动重置日志）：</p>
+<div class="cards" data-cols="1"><div class="ccard tone-blue">
+          
+          <h4>LT 下：点「网卡来数据了」→「epoll_wait()」→「read 一次」→ 再点「epoll_wait()」</h4>
+          
+          <div class="cbody"><p><mark class="mk-blue">第二次 <code>epoll_wait</code> 还是会返回这个 fd</mark>，因为缓冲区里还剩一半，
+内核在把 fd 从就绪表摘下来之后，一看还有数据，又把它挂了回去。
+所以 LT 下<strong>你一次只读一点也没关系</strong>，剩下的下次再说。</p>
+</div>
+          
+        </div><div class="ccard tone-red">
+          
+          <h4>ET 下：同样四步</h4>
+          
+          <div class="cbody"><p><mark class="mk-blue">第二次 <code>epoll_wait</code> 返回 0</mark>，而缓冲区里明明白白还剩 64 字节。
+看那条红色的日志和底下那行警告：<strong>你的线程在 epoll_wait 上睡得很安稳，那份数据没人管。</strong>
+这就是 ET 下最经典的 bug，而且它不会报错，只会「卡住」。</p>
+</div>
+          
+        </div><div class="ccard tone-green">
+          
+          <h4>怎么避免：ET 必须读到 EAGAIN</h4>
+          
+          <div class="cbody"><p>ET 只在「从空变成非空」那一刻通知一次。既然不会有第二次通知，
+你就得<strong>一次把它读干净</strong>，循环 <code>read</code> 直到返回 <code>EAGAIN</code>。
+点「read 到空」再点 <code>epoll_wait</code>，两种模式的表现就一样了。</p>
+</div>
+          
+        </div></div><hr>
+<h2 id="所以-et-必须配非阻塞"><span class="num">05</span>所以 ET 必须配非阻塞</h2>
+<p>这里有个连环：</p>
+<div class="flowd has-grid has-groups" data-flow data-edges="[{&quot;from&quot;:&quot;a&quot;,&quot;to&quot;:&quot;b&quot;,&quot;label&quot;:&quot;&quot;},{&quot;from&quot;:&quot;b&quot;,&quot;to&quot;:&quot;c&quot;,&quot;label&quot;:&quot;&quot;},{&quot;from&quot;:&quot;c&quot;,&quot;to&quot;:&quot;d&quot;,&quot;label&quot;:&quot;&quot;}]">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"><div class="fgroup tone-red" data-group-box="chain">
+          <span class="fgroup-label">ET 的三步连环，缺一环就出事</span>
+        </div></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-amber" data-id="a" data-group="chain">
+              
+              
+              <b>ET 不重复通知</b>
+              <small>只在状态变化那一刻叫你一次</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-amber" data-id="b" data-group="chain">
+              
+              
+              <b>所以你得读到 EAGAIN</b>
+              <small>一直读，读到「这会儿真没有了」为止</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-red" data-id="c" data-group="chain">
+              
+              
+              <b>那次 read 必须能立刻返回</b>
+              <small><mark class="mk-blue">如果 fd 是阻塞的，它就会卡在那次 read 上</mark></small>
+            </div></div><div class="flowd-row"><div class="fnode tone-red" data-id="d" data-group="chain">
+              
+              
+              <b>于是永远回不到 epoll_wait</b>
+              <small>整个事件循环停了，一个连接把所有人拖死</small>
+            </div></div></div>
+      
+    </div><p><mark class="mk-amber">这就是「ET 必须配 <code>O_NONBLOCK</code>」的完整理由。</mark> 它不是一条编码规约，是这条链上推出来的必然结果。</p>
+<div class="callout tone-amber">
+      <span class="ic">⚖</span>
+      <div><p><strong>反过来不成立</strong>：LT 下非阻塞不是严格必需的。</p>
+<p>因为 LT 每次都会告诉你「还有数据」，你一次读一点、读不完就下次再说，
+不会出现「必须读到 EAGAIN」这个要求。所以 LT + 阻塞 fd 也能跑 ——
+前提是所有 I/O 都听 <code>epoll_wait</code> 的指示，别自己乱读。</p>
+<p><mark class="mk-blue">很多文章把「必须非阻塞」说成对 LT/ET 都成立，那是记错了。</mark></p>
+</div>
+    </div><hr>
+<h2 id="内核里其实就是摘下来之后要不要放回去"><span class="num">06</span>内核里其实就是「摘下来之后要不要放回去」</h2>
+<p>LT 和 ET 这两个名字（水平 / 边缘）听着很玄，但内核实现里只有一句判断。</p>
+<p><code>epoll_wait</code> 返回事件的时候，做的是这么几件事：</p>
+<div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;pop&quot;,&quot;to&quot;:&quot;copy&quot;,&quot;label&quot;:&quot;&quot;},{&quot;from&quot;:&quot;copy&quot;,&quot;to&quot;:&quot;chk&quot;,&quot;label&quot;:&quot;&quot;},{&quot;from&quot;:&quot;chk&quot;,&quot;to&quot;:&quot;lt&quot;,&quot;label&quot;:&quot;水平触发&quot;},{&quot;from&quot;:&quot;chk&quot;,&quot;to&quot;:&quot;et&quot;,&quot;label&quot;:&quot;边缘触发&quot;}]">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-blue" data-id="pop">
+              
+              
+              <b>① 把 fd 从就绪表摘下来</b>
+              <small>这时候它已经不在表里了</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-blue" data-id="copy">
+              
+              
+              <b>② 把事件拷到用户态</b>
+              <small>这一步 LT 和 ET 一模一样</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="chk">
+              
+              
+              <b>③ 看一眼模式，再看一眼缓冲区</b>
+              <small><mark class="mk-blue">全部差别就在这一步</mark></small>
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="lt">
+              
+              
+              <b>LT：还有数据？挂回去</b>
+              <small>所以下次还会通知你</small>
+            </div><div class="fnode tone-red" data-id="et">
+              
+              
+              <b>ET：不挂</b>
+              <small>除非有新事件来把回调再触发一次</small>
+            </div></div></div>
+      
+    </div><p><mark class="mk-amber">所以：<strong>「水平/边缘」这两个名字描述的是「什么时候触发」，但实现上真正发生的事是「摘下来之后要不要放回去」。</strong></mark></p>
+<p>记住后半句，这两个模式就再也不需要背了，你能自己推出来：</p>
+<ul>
+<li>放回去 → 只要还有数据就一直叫你 → <strong>水平触发</strong></li>
+<li>不放 → 只有状态变化时才叫你 → <strong>边缘触发</strong></li>
+</ul>
+<hr>
+<h2 id="一个反例把就绪说透"><span class="num">07</span>一个反例，把「就绪」说透</h2>
+<p><code>epoll_ctl</code> 想登记一个<strong>普通文件</strong>，会直接失败，返回 <code>EPERM</code>。</p>
+<p>为什么？<mark class="mk-blue">因为普通文件<strong>永远都是&quot;就绪&quot;的</strong>。</mark></p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>fd 类型</th><th>它会不会「等」</th><th>epoll 拿它怎么办</th></tr></thead><tbody><tr><th>socket / 管道</th><td data-label="它会不会「等」">会。数据什么时候来不由你定</td><td data-label="epoll 拿它怎么办">这正是 epoll 存在的意义：<mark class="mk-blue">替你等</mark>、等到了叫你</td></tr><tr><th>普通文件</th><td data-label="它会不会「等」"><span class="tag tone-red">不会。磁盘上的数据就在那，随时可读</span></td><td data-label="epoll 拿它怎么办">「就绪」这个概念对它没有意义，所以内核直接拒绝</td></tr></tbody></table></div><p>所以 epoll 的能力边界，反过来正好定义了「就绪」：</p>
+<blockquote>
+<p><strong>就绪 = 这个操作有可能要等，而现在不用等了。</strong></p>
+</blockquote>
+<p>普通文件永远不会等，所以它从不「就绪」，也就不需要谁去通知你。这也是为什么 epoll 解决不了磁盘 I/O：<strong>它管的是「等」，不是「慢」。</strong></p>
+<hr>
+<h2 id="于是它仍然是同步-io"><span class="num">08</span>于是它仍然是同步 I/O</h2>
+<p>回到开头那个问题：数据在你手里吗？<strong>没有。</strong></p>
+<p>epoll 只做到「告诉你现在读不会卡」，<mark class="mk-blue">而<strong>把数据从内核缓冲区拷到你自己的内存</strong>这件事，还是你的线程亲自做的</mark>。第二步的等待（拷贝那一段）一点没省掉。</p>
+<p>这就是 <code>fs-io-models</code> 里那句话的机制版本：</p>
+<blockquote>
+<p>同步 / 异步的分界线，是<strong>「拷贝那一段要不要你等」</strong>。epoll 属于前者。</p>
+</blockquote>
+<p>想要连拷贝都不等，得换一个模型，那是这个系列最后一篇的事。</p>
+<hr>
+<div class="quiz"><details>
+        <summary>epoll 说「这个 fd 可读」的时候，数据在哪里？</summary>
+        <div class="a"><p>在<strong>内核的接收缓冲区</strong>里（socket 的接收队列），还没到你的手上。
+「就绪」说的是状态，不是数据，它承诺的是「现在去读不会让你等」，
+而不是「数据已经给你了」。数据归你，是在你调 read 那一刻才发生的。</p>
+</div>
+      </details><details>
+        <summary>LT 和 ET 的差别，用一句实现层面的话怎么说？</summary>
+        <div class="a"><p>epoll_wait 返回事件时，会把 fd 从就绪表里<strong>摘下来</strong>，把事件拷到用户态，
+然后看一眼模式：
+LT 如果发现缓冲区还有数据，就<strong>把它挂回就绪表</strong>，下次还会通知你；
+ET 不挂，除非有新事件把回调再触发一次。
+所以「水平/边缘」这两个名字描述的是触发时机，
+真正的机制是「摘下来之后要不要放回去」。</p>
+</div>
+      </details><details>
+        <summary>ET 为什么必须配非阻塞 fd？</summary>
+        <div class="a"><p>因为 ET 不会重复通知，所以你必须一次读到 EAGAIN；
+而读到 EAGAIN 意味着最后一次 read 会走「没有数据」这条路径 ——
+如果 fd 是阻塞的，那次 read 会<strong>卡住</strong>，线程永远回不到 epoll_wait，
+整个事件循环就被一个连接拖死了。
+反过来 LT 下非阻塞不是严格必需的，因为它每次都还会再通知你。</p>
+</div>
+      </details><details>
+        <summary>为什么 epoll 不能用来监视普通文件？</summary>
+        <div class="a"><p>因为普通文件永远都是「就绪」的，它不会等，数据就在那随时可读。
+epoll_ctl 登记普通文件会直接返回 EPERM。
+这反过来正好定义了「就绪」：这个操作有可能要等，而现在不用等了。
+普通文件从不「就绪」，也就不需要谁去通知你。</p>
+</div>
+      </details><details>
+        <summary>既然有 epoll，为什么说它仍然是同步 I/O？</summary>
+        <div class="a"><p>因为 epoll 只负责通知「现在读不会卡」，
+把数据从内核缓冲区拷到你自己的内存，还是你的线程亲自做的。
+拷贝那一段的等待一点没省掉。同步/异步的分界线就是
+「拷贝那一段要不要你等」——epoll 属于要等的那一边。</p>
+</div>
+      </details></div>
+
+    <footer>
+      <span>「就绪」是什么意思</span>
+      <span>最后更新 2026-10-06 · 单文件可离线打开</span>
+    </footer>
+  </main>
+</div>
+
+<script src="../../assets/app.js"></script>
+</body>
+</html>

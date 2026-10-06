@@ -5131,6 +5131,431 @@
     reset();
   };
 
+  /* ============================================================
+     控件：epoll-tables —— epoll 的全部就是这两张表
+     ------------------------------------------------------------
+     左边是登记表（interest list），`epoll_ctl` 登记一次，长期有效。
+     右边是就绪表（ready list），谁有数据了**谁自己挂进来**（内核里的回调干的）。
+
+     点左边的格子 = 这个 fd 来数据了 → 它跳到右边。
+     点 epoll_wait = 把右边清空并计数，格子回左边（登记还在，只是不再"就绪"）。
+     底部两行把差别算出来：select/poll 每轮都要看**全部**，epoll 只看右边有几个。
+
+     config: conn { min, max, step, def } —— 登记多少个 fd
+  ============================================================ */
+  WIDGETS['epoll-tables'] = (root) => {
+    const cfg = cfgOf(root);
+    const box = mountOf(root);
+    const statusEl = root.querySelector('[data-status]');
+    const runBtn = root.querySelector('[data-run]');
+    const resetBtn = root.querySelector('[data-reset]');
+    const C = cfg.conn || { min: 8, max: 40, step: 4, def: 24 };
+
+    // Node.append() 返回 undefined —— 建节点 → 填富文本 → 返回节点，别写成链式
+    const richIn = (tag, cls, text) => {
+      const node = el(tag, cls);
+      richText(node, text);
+      return node;
+    };
+
+    const sl = el('div', 'et-sl');
+    sl.append(el('span', 'et-sl-lab', '登记进来的连接数'));
+    const rng = el('input', 'et-range');
+    rng.type = 'range';
+    rng.min = String(C.min); rng.max = String(C.max);
+    rng.step = String(C.step); rng.value = String(C.def);
+    const val = el('b', 'et-sl-val');
+    sl.append(rng, val);
+
+    const panes = el('div', 'et-panes');
+    const mkPane = (title, sub) => {
+      const w = el('div', 'et-pane');
+      const h = el('div', 'et-pane-head');
+      h.append(el('span', 'et-pane-ttl', title));
+      const n = el('span', 'et-pane-n');
+      h.append(n);
+      w.append(h, el('div', 'et-pane-sub', sub));
+      const body = el('div', 'et-pane-body');
+      w.append(body);
+      return { w, n, body };
+    };
+    const L = mkPane('登记表 interest list', 'epoll_ctl 登记进来的。登记一次，一直在');
+    const R = mkPane('就绪表 ready list', '谁有数据了谁把自己挂进来');
+    panes.append(L.w, R.w);
+
+    const btns = el('div', 'et-btns');
+    const bWait = el('button', 'et-btn on', 'epoll_wait() 取一次');
+    const bRand = el('button', 'et-btn', '随机来一批数据');
+    btns.append(bWait, bRand);
+
+    const line = el('div', 'et-line');
+    const cmp  = el('div', 'et-cmp');
+    box.append(sl, panes, btns, line, cmp);
+
+    let n = 0, ready = new Set(), syscalls = 0, scanned = 0, hits = 0;
+
+    function reset() {
+      n = Number(rng.value);
+      ready = new Set();
+      syscalls = 0; scanned = 0; hits = 0;
+      render();
+    }
+
+    function render() {
+      val.textContent = n + ' 条';
+      L.n.textContent = n + ' 个';
+      R.n.textContent = ready.size + ' 个';
+      R.n.className = 'et-pane-n' + (ready.size ? ' is-hot' : '');
+
+      L.body.textContent = '';
+      for (let i = 0; i < n; i++) {
+        const c = el('button', 'et-chip', 'fd ' + (i * 3 + 3));
+        if (ready.has(i)) { c.classList.add('is-out'); c.disabled = true; }
+        else c.addEventListener('click', () => { ready.add(i); render(); });
+        L.body.append(c);
+      }
+      R.body.textContent = '';
+      if (!ready.size) {
+        R.body.append(el('span', 'et-empty', '（空）'));
+      } else {
+        [...ready].sort((a, b) => a - b).forEach((i) => {
+          R.body.append(el('span', 'et-chip is-ready', 'fd ' + (i * 3 + 3)));
+        });
+      }
+
+      line.textContent = '';
+      if (!syscalls) {
+        richText(line, '点左边任意一个格子 = ==这个 fd 来数据了==，它会自己跳到右边。');
+      } else {
+        richText(line, '已经 `epoll_wait` 了 **' + syscalls + '** 次，取回 **' + hits + '** 个就绪事件。');
+      }
+
+      cmp.textContent = '';
+      const row = (name, tone, per, total, note) => {
+        const r = el('div', 'et-cmp-row');
+        r.style.setProperty('--et-tone', 'var(--' + tone + ')');
+        r.append(el('span', 'et-cmp-name', name));
+        r.append(richIn('span', 'et-cmp-mid', per));
+        r.append(el('b', 'et-cmp-total', total));
+        r.append(richIn('span', 'et-cmp-note', note));
+        return r;
+      };
+      const rounds = syscalls || 1;
+      const spTotal = rounds * n;                       // 每轮都要看全部
+      // 还没 wait 过就显示「现在 wait 会拿回几个」，这样两行是同一个口径：
+      // select/poll 是「跑一轮要碰多少个」，epoll 是「跑一轮会拿回多少个」
+      const epTotal = syscalls ? hits : ready.size;
+      cmp.append(row('select / poll', 'red',
+        '每轮都要挨个检查 **' + n + '** 个（协议没变：名单每次重交）',
+        spTotal.toLocaleString() + ' 次',
+        '和登记了多少条无关地，永远看全部'));
+      cmp.append(row('epoll', 'green',
+        '只看就绪表上挂了几个',
+        epTotal.toLocaleString() + ' 次',
+        '==登记表只用来登记，等待时根本不看它=='));
+
+      if (statusEl) statusEl.textContent = n + ' 条登记 · ' + ready.size + ' 条就绪 · wait ' + syscalls + ' 次';
+    }
+
+    bWait.addEventListener('click', () => {
+      syscalls++;
+      hits += ready.size;
+      scanned += ready.size;
+      ready = new Set();
+      render();
+    });
+    bRand.addEventListener('click', () => {
+      // 随机让几条来数据 —— 这里是**演示**，真到内核里是网卡中断把它们挂上去的
+      const k = Math.max(1, Math.round(n * 0.15));
+      for (let t = 0; t < k; t++) {
+        const i = Math.floor(Math.random() * n);
+        if (i < n) ready.add(i);
+      }
+      render();
+    });
+    rng.addEventListener('input', reset);
+    if (runBtn) runBtn.style.display = 'none';
+    if (resetBtn) resetBtn.addEventListener('click', reset);
+    reset();
+  };
+
+  /* ============================================================
+     控件：lt-vs-et —— 「就绪」说的是状态，不是数据
+     ------------------------------------------------------------
+     缓冲区里还有数据、但没人再来通知你 —— 那就是 ET 最经典的坑。
+     LT 和 ET 的差别只有一句话：**从就绪表上摘下来之后，要不要放回去。**
+
+     config: total（一次来多少字节）, chunk（一次 read 多少）
+  ============================================================ */
+  WIDGETS['lt-vs-et'] = (root) => {
+    const cfg = cfgOf(root);
+    const box = mountOf(root);
+    const statusEl = root.querySelector('[data-status]');
+    const resetBtn = root.querySelector('[data-reset]');
+    const runBtn = root.querySelector('[data-run]');
+    const TOTAL = cfg.total || 128;
+    const CHUNK = cfg.chunk || 64;
+
+    const richIn = (tag, cls, text) => {
+      const node = el(tag, cls);
+      richText(node, text);
+      return node;
+    };
+
+    const modes = el('div', 'le-modes');
+    const bLt = el('button', 'le-mode on', '水平触发 LT');
+    const bEt = el('button', 'le-mode', '边缘触发 ET');
+    modes.append(bLt, bEt);
+
+    const bars = el('div', 'le-bars');
+    const mkBar = (name, sub) => {
+      const w2 = el('div', 'le-bar');
+      const h = el('div', 'le-bar-head');
+      h.append(el('span', 'le-bar-ttl', name));
+      const v = el('b', 'le-bar-val');
+      h.append(v);
+      const track = el('div', 'le-bar-track');
+      const fill = el('div', 'le-bar-fill');
+      track.append(fill);
+      w2.append(h, el('div', 'le-bar-sub', sub), track);
+      return { w: w2, v, fill };
+    };
+    const B1 = mkBar('内核的接收缓冲区', '这是内核的内存，不是你的');
+    const B2 = mkBar('你的应用缓冲区', 'read 把数据拷过来，才归你');
+    bars.append(B1.w, B2.w);
+
+    const btns = el('div', 'le-btns');
+    const bArrive = el('button', 'le-btn on', '网卡来数据了');
+    const bWait   = el('button', 'le-btn', 'epoll_wait()');
+    const bRead   = el('button', 'le-btn', 'read 一次（' + CHUNK + ' 字节）');
+    const bDrain  = el('button', 'le-btn', 'read 到空');
+    btns.append(bArrive, bWait, bRead, bDrain);
+
+    const logs = el('div', 'le-logs');
+    const verdict = el('div', 'le-verdict');
+    box.append(modes, bars, btns, logs, verdict);
+
+    let mode = 'lt', buf = 0, mine = 0, pending = false, lines = [];
+
+    const say = (tone, html) => {
+      lines.push({ tone, html });
+      if (lines.length > 40) lines.shift();
+    };
+
+    function reset() {
+      buf = 0; mine = 0; pending = false; lines = [];
+      say('muted', '缓冲区是空的。点「网卡来数据了」开始。');
+      render();
+    }
+
+    function arrive() {
+      buf = TOTAL;
+      pending = true;
+      say('blue', '数据到了，进内核的接收缓冲区（' + TOTAL + ' 字节）→ ==回调把 fd 挂进就绪表==');
+      render();
+    }
+
+    function wait() {
+      if (!pending) {
+        say('red', '`epoll_wait` 返回 0：就绪表是空的' + (buf > 0 ? '。**但缓冲区里还有 ' + buf + ' 字节没人读**' : ''));
+        render(); return;
+      }
+      say('green', '`epoll_wait` 返回：这个 fd 可读');
+      pending = false;
+      if (buf > 0 && mode === 'lt') {
+        pending = true;
+        say('amber', 'LT：摘下来一看**缓冲区还有 ' + buf + ' 字节** → 重新挂回就绪表，下次还会通知你');
+      } else if (buf > 0 && mode === 'et') {
+        say('red', 'ET：==摘下来就不挂回去了==，缓冲区还剩 ' + buf + ' 字节也当没看见');
+      }
+      render();
+    }
+
+    function doRead(k) {
+      const got = Math.min(k, buf);
+      if (!got) { say('muted', '`read` 没东西可读，返回 `EAGAIN`'); render(); return; }
+      buf -= got; mine += got;
+      say('violet', '`read` 拿走 ' + got + ' 字节，内核缓冲区还剩 **' + buf + '** 字节');
+      render();
+    }
+
+    function setMode(m) {
+      if (m === mode) return;
+      mode = m;
+      bLt.classList.toggle('on', m === 'lt');
+      bEt.classList.toggle('on', m === 'et');
+      // 换模式 = 换一个连接重来。缓冲区要清空，否则「你的应用缓冲区」会
+      // 把两次实验的读入量加在一起（128 字节），看着像同一条连接。
+      // 日志**故意留着** —— 对照两种模式的表现正是这个控件的用途。
+      buf = 0; mine = 0; pending = false;
+      say('muted', '—— 切到 ' + (m === 'lt' ? '水平触发 LT' : '边缘触发 ET') + '，缓冲区清空，重来一遍 ——');
+      render();
+    }
+
+    function render() {
+      B1.v.textContent = buf + ' 字节';
+      B2.v.textContent = mine + ' 字节';
+      B1.fill.style.width = Math.round((buf / TOTAL) * 100) + '%';
+      B1.fill.className = 'le-bar-fill' + (buf > 0 && !pending ? ' is-strand' : '');
+      B2.fill.style.width = Math.round((mine / TOTAL) * 100) + '%';
+
+      logs.textContent = '';
+      lines.forEach((l) => {
+        const row = el('div', 'le-log tone-' + l.tone);
+        richText(row, l.html);
+        logs.append(row);
+      });
+      logs.scrollTop = logs.scrollHeight;
+
+      const stranded = buf > 0 && !pending;
+      verdict.className = 'le-verdict' + (stranded ? ' is-warn' : '');
+      verdict.textContent = '';
+      if (stranded) {
+        richText(verdict,
+          '⚠ 缓冲区里还有 **' + buf + '** 字节，但就绪表上没有这个 fd —— ' +
+          '==你的线程在 `epoll_wait` 上睡得很安稳，那份数据没人管。== ' +
+          (mode === 'et' ? '这是 ET 下最常见的 bug。' : ''));
+      } else {
+        richText(verdict,
+          mode === 'lt'
+            ? 'LT：只要缓冲区还有数据，每次 `epoll_wait` 都会告诉你。**可以一次只读一点。**'
+            : 'ET：只在「从空变成非空」的那一刻通知一次。==所以你必须一次读到 `EAGAIN`==，不能读一半就走。');
+      }
+
+      if (statusEl) {
+        statusEl.textContent = (mode === 'lt' ? 'LT' : 'ET') + ' · 缓冲区 ' + buf + ' 字节 · 就绪表 ' + (pending ? '有它' : '没它');
+      }
+    }
+
+    bLt.addEventListener('click', () => setMode('lt'));
+    bEt.addEventListener('click', () => setMode('et'));
+    bArrive.addEventListener('click', arrive);
+    bWait.addEventListener('click', wait);
+    bRead.addEventListener('click', () => doRead(CHUNK));
+    bDrain.addEventListener('click', () => doRead(buf));
+    if (runBtn) runBtn.style.display = 'none';
+    if (resetBtn) resetBtn.addEventListener('click', reset);
+    reset();
+  };
+
+  /* ============================================================
+     控件：thread-audit —— 一连接一线程，亏的到底是什么
+     ------------------------------------------------------------
+     这个控件存在的唯一理由，是拆掉那个被到处引用的错误论据：
+     「一万个线程 × 8MB 栈 = 80GB」。
+
+     8MB 是**虚拟地址空间预留**，页按需分配。真实每线程开销是
+     内核栈（约 8KB）+ task_struct（约 8KB）+ 实际用到的用户栈。
+     所以内存栏爬得很温和 —— 难看的是「调度器名单上有多少个实体，
+     其中多少个什么也没干」那一栏。
+
+     config: conn { min, max, step, def }
+  ============================================================ */
+  WIDGETS['thread-audit'] = (root) => {
+    const cfg = cfgOf(root);
+    const box = mountOf(root);
+    const statusEl = root.querySelector('[data-status]');
+    const runBtn = root.querySelector('[data-run]');
+    const resetBtn = root.querySelector('[data-reset]');
+    const C = cfg.conn || { min: 100, max: 50000, step: 100, def: 10000 };
+
+    const richIn = (tag, cls, text) => {
+      const node = el(tag, cls);
+      richText(node, text);
+      return node;
+    };
+
+    const sl = el('div', 'ta-sl');
+    sl.append(el('span', 'ta-sl-lab', '同时在线的连接数'));
+    const rng = el('input', 'ta-range');
+    rng.type = 'range';
+    rng.min = String(C.min); rng.max = String(C.max);
+    rng.step = String(C.step); rng.value = String(C.def);
+    const val = el('b', 'ta-sl-val');
+    sl.append(rng, val);
+
+    const barWrap = el('div', 'ta-barwrap');
+    const bar = el('div', 'ta-bar');
+    const segRun = el('div', 'ta-seg is-run');
+    const segWait = el('div', 'ta-seg is-wait');
+    bar.append(segRun, segWait);
+    const legend = el('div', 'ta-legend');
+    barWrap.append(bar, legend);
+
+    const tbl = el('div', 'ta-tbl');
+    const verdict = el('div', 'ta-verdict');
+    box.append(sl, barWrap, tbl, verdict);
+
+    // 每线程的**实际**开销（不是那个 8MB 虚拟预留）
+    const KSTACK = 8 * 1024;      // 内核栈，通常一页
+    const TASK   = 8 * 1024;      // task_struct，依内核配置
+    const USTACK = 16 * 1024;     // 实际触碰到的用户栈，通常几十 KB 量级
+    const PER = KSTACK + TASK + USTACK;
+
+    const fmtBytes = (b) => b >= 1024 ** 3 ? (b / 1024 ** 3).toFixed(1) + ' GB'
+      : b >= 1024 ** 2 ? Math.round(b / 1024 ** 2) + ' MB'
+      : Math.round(b / 1024) + ' KB';
+    const fmtN = (n) => n.toLocaleString();
+
+    function render() {
+      const n = Number(rng.value);
+      const busy = Math.max(1, Math.round(n * 0.01));   // 假设任意时刻约 1% 真在跑
+      const idle = n - busy;
+
+      val.textContent = fmtN(n) + ' 条';
+      segRun.style.flex = '0 0 ' + Math.max(0.4, (busy / n) * 100) + '%';
+      segWait.style.flex = '1 1 auto';
+
+      legend.textContent = '';
+      legend.append(
+        el('span', 'ta-lg is-run', '真在跑 ' + fmtN(busy)),
+        el('span', 'ta-lg is-wait', '在等 ' + fmtN(idle)),
+      );
+
+      tbl.textContent = '';
+      const row = (label, a, b, tone) => {
+        const r = el('div', 'ta-row');
+        if (tone) r.style.setProperty('--ta-tone', 'var(--' + tone + ')');
+        r.append(el('span', 'ta-row-lab', label));
+        r.append(richIn('span', 'ta-row-a', a));
+        r.append(richIn('span', 'ta-row-b', b));
+        return r;
+      };
+      const head = el('div', 'ta-row is-head');
+      head.append(el('span', 'ta-row-lab', ''));
+      head.append(el('span', 'ta-row-a', '一连接一线程'));
+      head.append(el('span', 'ta-row-b', '事件驱动'));
+      tbl.append(head);
+      tbl.append(row('线程数（执行单位）', '**' + fmtN(n) + '** 个', '**1** 个'));
+      tbl.append(row('其中真在跑', fmtN(busy) + ' 个', '1 个'));
+      tbl.append(row('其中在等', '==' + fmtN(idle) + ' 个==', '0 个', 'red'));
+      tbl.append(row('线程栈等开销（按实算）',
+        fmtBytes(n * PER) + '（≈ ' + Math.round(PER / 1024) + ' KB/线程）', '几十 KB', 'green'));
+      tbl.append(row('调度器要管的实体', fmtN(n) + ' 个', '1 个', 'red'));
+
+      // 那个错误论据：虚拟预留
+      const myth = n * 8 * 1024 * 1024;
+
+      verdict.textContent = '';
+      verdict.className = 'ta-verdict';
+      richText(verdict,
+        '**内存没爆。** ' + fmtN(n) + ' 个线程按实算才 **' + fmtBytes(n * PER) +
+        '**。（网上常说的「× 8MB 栈 = ' + fmtBytes(myth) +
+        '」是错的 —— 8MB 是==虚拟地址空间预留==，页按需分配，不是真占内存。）\n' +
+        '难看的不是内存，是**调度器名单上有 ' + fmtN(n) + ' 个实体，其中 ' + fmtN(idle) +
+        ' 个什么也没干**。');
+
+      if (statusEl) {
+        statusEl.textContent = fmtN(n) + ' 条连接 · ' + fmtN(idle) + ' 个线程在等 · 实占约 ' + fmtBytes(n * PER);
+      }
+    }
+
+    rng.addEventListener('input', render);
+    if (runBtn) runBtn.style.display = 'none';
+    if (resetBtn) resetBtn.addEventListener('click', () => { rng.value = String(C.def); render(); });
+    render();
+  };
+
   /* ---------- 挂载 ---------- */
   document.querySelectorAll('[data-widget]').forEach((root) => {
     var name = root.getAttribute('data-widget');

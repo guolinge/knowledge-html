@@ -1444,6 +1444,60 @@ finally { pool.release(conn); }
 <p>换个领域照样能用：只要那个东西是「同一批对象，在不同作用域下看到的不一样」——
 多租户的视野、权限过滤后的列表、feature flag 开关前后的界面。</p>
 </blockquote>
+<h4><code>epoll-tables</code> —— 两张表就是 epoll 的全部</h4>
+<p><strong>讲「登记」和「就绪」是两件事</strong>：左边的格子点一下 = 这个 fd 来数据了，它自己跳到右边。
+<mark class="mk-blue">那个「跳」就是内核回调干的事，不是遍历找出来的。</mark></p>
+<div class="demo" data-widget="epoll-tables" data-config="{&quot;conn&quot;:{&quot;min&quot;:8,&quot;max&quot;:40,&quot;step&quot;:4,&quot;def&quot;:24}}">
+      <div class="demo-head">
+        <span class="title">epoll 的全部就是这两张表</span>
+        <span class="status" data-status>未开始</span>
+        <span class="spacer"></span>
+        <button class="btn" data-run>▶ 开始模拟</button><button class="btn ghost" data-reset>重置</button>
+      </div>
+      <div class="demo-body custom" data-mount></div>
+    </div><p>左边是<strong>登记表<strong>（<code>epoll_ctl</code> 登记一次，一直在），右边是</strong>就绪表</strong>（谁有数据谁挂进来）。
+点「<code>epoll_wait()</code>」把右边清空并计数 —— 格子回左边，因为<strong>登记还在，只是不再就绪</strong>。</p>
+<p>底部两行是重点：<code>select / poll</code> 每轮都要碰<strong>全部</strong> N 个，<code>epoll</code> 只看右边挂了几个。
+拖连接数，两行的差距越拉越开。</p>
+<blockquote>
+<p>换领域照样能用：任何「<strong>一次登记、长期有效<strong>」vs「</strong>每次都要重交</strong>」的对照 ——
+订阅制 vs 轮询、watch vs poll、推送 vs 拉取。</p>
+</blockquote>
+<h4><code>lt-vs-et</code> —— 缓冲区还有数据，但你不知道</h4>
+<p><strong>讲「就绪 ≠ 数据到手」</strong>：跑一遍 LT，再切 ET 跑一遍，看第二轮的差别。</p>
+<div class="demo" data-widget="lt-vs-et" data-config="{&quot;total&quot;:128,&quot;chunk&quot;:64}">
+      <div class="demo-head">
+        <span class="title">缓冲区还有数据，但你不知道</span>
+        <span class="status" data-status>未开始</span>
+        <span class="spacer"></span>
+        <button class="btn" data-run>▶ 开始模拟</button><button class="btn ghost" data-reset>重置</button>
+      </div>
+      <div class="demo-body custom" data-mount></div>
+    </div><p>推荐路径：<strong>数据到达 → <code>epoll_wait</code> → <code>read</code> 一次 → 再 <code>epoll_wait</code></strong>。</p>
+<ul>
+<li><strong>LT</strong>：第二次还会返回这个 fd（缓冲区还剩一半，内核把 fd 挂回了就绪表）</li>
+<li><strong>ET</strong>：第二次返回 0，而缓冲区里明明白白还剩 64 字节 ——
+<mark class="mk-blue">那条红色警告「你的线程在 epoll_wait 上睡得很安稳，那份数据没人管」就是 ET 最经典的 bug</mark></li>
+</ul>
+<p>切模式时会<strong>清空缓冲区但保留日志</strong> —— 缓冲清空是为了让两次实验可比
+（否则「你的应用缓冲区」会把两次的读入量加起来），日志留着正是为了对照。</p>
+<h4><code>thread-audit</code> —— 拆掉「一万线程 × 8MB = 80GB」</h4>
+<p><strong>讲「亏的不是内存」</strong>：拖连接数，盯住「内存」和「调度器要管的实体」两行的差别。</p>
+<div class="demo" data-widget="thread-audit" data-config="{&quot;conn&quot;:{&quot;min&quot;:100,&quot;max&quot;:50000,&quot;step&quot;:100,&quot;def&quot;:10000}}">
+      <div class="demo-head">
+        <span class="title">一连接一线程，亏的到底是什么</span>
+        <span class="status" data-status>未开始</span>
+        <span class="spacer"></span>
+        <button class="btn" data-run>▶ 开始模拟</button><button class="btn ghost" data-reset>重置</button>
+      </div>
+      <div class="demo-body custom" data-mount></div>
+    </div><p>按 32 KB/线程实算：一万个线程才 <strong>313 MB</strong>，一点都不吓人。
+<mark class="mk-blue">难看的是「调度器名单上有 10000 个实体，其中 9900 个什么也没干」。</mark></p>
+<blockquote>
+<p><strong>这个控件有一半的功能是「纠正」而不是「展示」</strong>：内存那一行给绿色，
+「在等」和「调度实体」两行给红色。颜色本身就在表态。
+做这类控件时值得照搬 —— 屏幕上的红绿比正文里的一句「其实不是这样」有说服力得多。</p>
+</blockquote>
 <h4><code>poll-lab</code> —— 一个滑块，让两个病一起恶化</h4>
 <p><strong>讲「一个线程挨个问过去」<strong>：格子默认全是灰的 —— 因为在问之前，</strong>线程并不知道谁有数据</strong>，
 这正是它必须一个个问过去的原因。跑完一轮再看那片格子，一片灰里几个绿点。</p>
