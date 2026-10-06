@@ -1,0 +1,628 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-has-toc="1">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>镜像层叠起来就是一个 rootfs · 什么才是「叠」</title>
+<meta name="description" content="「层叠成 rootfs」不是复制合并，是一条查找规则：从最上层往下问，谁先有算谁的。它顺带解释了目录为什么会合并、改文件为什么贵、删文件为什么不释放空间。" />
+<link rel="stylesheet" href="../../assets/theme.css" />
+  <link rel="stylesheet" href="../../assets/blocks.css" />
+  <link rel="stylesheet" href="../../assets/archify-embed.css" />
+</head>
+<body>
+<div id="progress"></div>
+<div id="tocScrim"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
+    <a class="brand" href="../../index.html"><span class="dot"></span>知识笔记</a>
+    
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="toc" id="toc">
+      <p class="toc-title">目录</p>
+      <a href="../../index.html" class="sub">← 全部笔记</a>
+      <a href="#一句话的答案">一句话的答案</a>
+      <a href="#磁盘上真实的样子">磁盘上真实的样子</a>
+      <a href="#叠到底怎么叠一条查找规则">「叠」到底怎么叠：一条查找规则</a>
+      <a href="#三种情况只有一种是真的覆盖">三种情况，只有一种是真的「覆盖」</a>
+      <a href="#情况一只有一个层有它" class="sub">情况一：只有一个层有它</a>
+      <a href="#情况二同名文件-上层赢下层被挡住" class="sub">情况二：同名文件 → 上层赢，下层被挡住</a>
+      <a href="#情况三同名目录-两层的内容合并" class="sub">情况三：同名目录 → 两层的内容合并</a>
+      <a href="#改一个文件copy-up">改一个文件：copy-up</a>
+      <a href="#删一个文件whiteout">删一个文件：whiteout</a>
+      <a href="#三个容器一套只读层">三个容器，一套只读层</a>
+      <a href="#rootfs-里没有内核">rootfs 里没有内核</a>
+      <a href="#四个常被说错的点">四个常被说错的点</a>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow">● 容器 · 镜像与文件系统</span>
+      <h1>镜像层叠起来就是一个 rootfs · 什么才是「叠」</h1>
+      <p class="lede">「层叠成 rootfs」不是复制合并，是一条查找规则：从最上层往下问，谁先有算谁的。它顺带解释了目录为什么会合并、改文件为什么贵、删文件为什么不释放空间。</p>
+    </div>
+
+    <div class="draft-banner">
+    <span>⚠</span>
+    <span>本页状态为 <b>draft</b>：内容尚未人工核对，引用前请自行验证。</span>
+  </div>
+
+    <div class="provenance"><span><b>来源</b> Overlay Filesystem — https://docs.kernel.org/filesystems/overlayfs.html · OverlayFS storage driver (Docker) — https://docs.docker.com/engine/storage/drivers/overlayfs-driver/ · moby issue #26380（overlay2 层数上限）— https://github.com/moby/moby/issues/26380 · Ramfs, rootfs and initramfs — https://kernel.org/doc/html/latest/filesystems/ramfs-rootfs-initramfs.html</span><span><b>生成</b> 2026-10-06</span><span><b>模型</b> claude-opus-4-5</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">容器</span> <span class="tag tone-muted">Docker</span> <span class="tag tone-muted">OverlayFS</span> <span class="tag tone-muted">rootfs</span></span></div>
+
+<h2 id="一句话的答案"><span class="num">01</span>一句话的答案</h2>
+<blockquote>
+<p>镜像层叠起来就是一个 rootfs。</p>
+</blockquote>
+<p>这句话经常被理解成「把几层的文件复制合并成一个新目录」。<strong>不是。</strong></p>
+<p>准确的版本是：</p>
+<blockquote>
+<p>运行时把几层按顺序挂在一起，然后<mark class="mk-blue">定了一条查找规则：从最上层往下问，谁先有算谁的。</mark>
+这条规则跑出来的结果，就是容器进程看到的 <code>/</code>。</p>
+</blockquote>
+<p>所以「叠」是个<strong>动作<strong>，不是一个</strong>结果</strong>。它发生在每一次 <code>open</code> 的时候，
+而不是在容器启动的时候。</p>
+<div class="cards" data-cols="3"><div class="ccard tone-violet">
+          <span class="tag tone-violet">磁盘上</span>
+          <h4>层是真的存在的</h4>
+          <p>每一层是宿主机磁盘上的一个目录</p>
+          <div class="cbody"><p><code>FROM debian:12</code> 是一层，<code>apt install openjdk-17</code> 是另一层，
+<code>COPY app.jar /app/</code> 又是一层。</p>
+<p>它们是<strong>分开存的</strong>，谁也不包含谁。</p>
+</div>
+          
+        </div><div class="ccard tone-blue">
+          <span class="tag tone-blue">运行时才有</span>
+          <h4>rootfs 不是磁盘上的东西</h4>
+          <p>它是「合并出来的视图」，不是一个实体目录</p>
+          <div class="cbody"><p>磁盘上找不到「这个容器的 rootfs」这样一个文件夹。</p>
+<p>它是<strong>挂载</strong>出来的：内核按规则把几层组合着看，
+组合出来的样子就叫 rootfs。</p>
+<p><mark class="mk-blue">所以它是视图，不是副本。</mark></p>
+</div>
+          
+        </div><div class="ccard tone-green">
+          <span class="tag tone-green">运行时创建</span>
+          <h4>可写层是每个容器独有的</h4>
+          <p>只读层全镜像共享，可写层一人一份</p>
+          <div class="cbody"><p>容器一起来，运行时在镜像层<strong>上面</strong>再盖一层空的。</p>
+<p>你写的、改的、删的，全部落在这一层里。</p>
+<p><mark class="mk-blue">镜像层一个字节都不会变。</mark></p>
+</div>
+          
+        </div></div><hr>
+<h2 id="磁盘上真实的样子"><span class="num">02</span>磁盘上真实的样子</h2>
+<figure class="archfig" data-arch>
+      <svg viewBox="0 0 938 626" role="img" aria-labelledby="archify-diagram-title archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
+        <title id="archify-diagram-title">磁盘上的层，和容器进程看到的 /，是两套东西</title>
+        <desc id="archify-diagram-description">「叠」不是复制合并，是一条查找规则：从最上层往下问，谁先有算谁的</desc>
+        <!-- Definitions -->
+        <defs>
+          <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-default" />
+          </marker>
+          <marker id="arrowhead-emphasis" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-emphasis" />
+          </marker>
+          <marker id="arrowhead-security" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-security" />
+          </marker>
+          <marker id="arrowhead-dashed" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-dashed" />
+          </marker>
+          <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+            <path d="M 40 0 L 0 0 0 40" class="c-grid" stroke-width="0.5"/>
+          </pattern>
+        </defs>
+
+        <!-- Background Grid -->
+        <rect width="100%" height="100%" fill="url(#grid)" />
+
+        <!-- Boundaries (behind everything) -->
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="0" x="26" y="88" width="180" height="470" rx="12" class="c-region" stroke-width="1"/>
+        <text x="34" y="106" class="t-cloud" font-size="9" font-weight="600">宿主机磁盘 —— 只读层全镜像共享，可写层每个容器一份</text>
+
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="1" x="718" y="88" width="180" height="470" rx="12" class="c-region" stroke-width="1"/>
+        <text x="726" y="106" class="t-cloud" font-size="9" font-weight="600">容器里那个 Java 进程看到的 / —— 这就是 rootfs</text>
+
+        <!-- Connection paths (before components for correct z-order) -->
+        <path data-edge-from="rw" data-edge-to="root" data-edge-label="刚启动时它还是空的，你写的第一个文件才会出现在这" data-edge-key="0" data-edge-id="e0" data-composition-points="176,148;748,148" d="M 176 148 L 748 148" class="a-dashed" stroke-width="1.5" marker-end="url(#arrowhead-dashed)"/>
+        <path data-edge-from="l3" data-edge-to="jar" data-edge-label="只有它能提供这个路径" data-edge-key="1" data-edge-id="e1" data-composition-points="176,268;748,268" d="M 176 268 L 748 268" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
+        <path data-edge-from="l2" data-edge-to="osr" data-edge-label="层 1 也有同名文件，被这一份盖住" data-edge-key="2" data-edge-id="e2" data-composition-points="176,388;748,388" d="M 176 388 L 748 388" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
+        <path data-edge-from="l1" data-edge-to="base" data-edge-label="整棵树由它打底" data-edge-key="3" data-edge-id="e3" data-composition-points="176,508;748,508" d="M 176 508 L 748 508" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+
+        <!-- Components -->
+        <g id="node-rw" data-node-id="rw" data-node-label="可写层" tabindex="0" role="button" aria-label="Focus 可写层, 刚启动时是空的, 宿主机磁盘 —— 只读层全镜像共享，可写层每个容器一份" aria-pressed="false" data-node-kind="backend" data-node-sublabel="刚启动时是空的" data-node-context="宿主机磁盘 —— 只读层全镜像共享，可写层每个容器一份">
+          <title>可写层 · 刚启动时是空的 · 宿主机磁盘 —— 只读层全镜像共享，可写层每个容器一份</title>
+          <rect x="56" y="118" width="120" height="60" rx="6" class="c-mask"/>
+          <rect x="56" y="118" width="120" height="60" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(62 124) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text data-detail-anchor x="116" y="146" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">可写层</text>
+        <text data-detail="context" x="116" y="162" class="t-muted" font-size="9" text-anchor="middle">刚启动时是空的</text>
+        </g>
+
+        <g id="node-l3" data-node-id="l3" data-node-label="层 3 · 应用" tabindex="0" role="button" aria-label="Focus 层 3 · 应用, COPY app.jar /app/, 宿主机磁盘 —— 只读层全镜像共享，可写层每个容器一份" aria-pressed="false" data-node-kind="database" data-node-sublabel="COPY app.jar /app/" data-node-context="宿主机磁盘 —— 只读层全镜像共享，可写层每个容器一份">
+          <title>层 3 · 应用 · COPY app.jar /app/ · 宿主机磁盘 —— 只读层全镜像共享，可写层每个容器一份</title>
+          <rect x="56" y="238" width="120" height="60" rx="6" class="c-mask"/>
+          <rect x="56" y="238" width="120" height="60" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(62 244) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <text data-detail-anchor x="116" y="266" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">层 3 · 应用</text>
+        <text data-detail="context" x="116" y="282" class="t-muted" font-size="9" text-anchor="middle">COPY app.jar /app/</text>
+        </g>
+
+        <g id="node-l2" data-node-id="l2" data-node-label="层 2 · JDK" tabindex="0" role="button" aria-label="Focus 层 2 · JDK, apt install openjdk-17, 宿主机磁盘 —— 只读层全镜像共享，可写层每个容器一份" aria-pressed="false" data-node-kind="database" data-node-sublabel="apt install openjdk-17" data-node-context="宿主机磁盘 —— 只读层全镜像共享，可写层每个容器一份">
+          <title>层 2 · JDK · apt install openjdk-17 · 宿主机磁盘 —— 只读层全镜像共享，可写层每个容器一份</title>
+          <rect x="56" y="358" width="120" height="60" rx="6" class="c-mask"/>
+          <rect x="56" y="358" width="120" height="60" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(62 364) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <text data-detail-anchor x="116" y="386" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">层 2 · JDK</text>
+        <text data-detail="context" x="116" y="402" class="t-muted" font-size="8.4" text-anchor="middle">apt install openjdk-17</text>
+        </g>
+
+        <g id="node-l1" data-node-id="l1" data-node-label="层 1 · 基础系统" tabindex="0" role="button" aria-label="Focus 层 1 · 基础系统, FROM debian:12, 宿主机磁盘 —— 只读层全镜像共享，可写层每个容器一份" aria-pressed="false" data-node-kind="database" data-node-sublabel="FROM debian:12" data-node-context="宿主机磁盘 —— 只读层全镜像共享，可写层每个容器一份">
+          <title>层 1 · 基础系统 · FROM debian:12 · 宿主机磁盘 —— 只读层全镜像共享，可写层每个容器一份</title>
+          <rect x="56" y="478" width="120" height="60" rx="6" class="c-mask"/>
+          <rect x="56" y="478" width="120" height="60" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(62 484) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <text data-detail-anchor x="116" y="506" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">层 1 · 基础系统</text>
+        <text data-detail="context" x="116" y="522" class="t-muted" font-size="9" text-anchor="middle">FROM debian:12</text>
+        </g>
+
+        <g id="node-jar" data-node-id="jar" data-node-label="/app/app.jar" tabindex="0" role="button" aria-label="Focus /app/app.jar, 只有层 3 有, 容器里那个 Java 进程看到的 / —— 这就是 rootfs" aria-pressed="false" data-node-kind="external" data-node-sublabel="只有层 3 有" data-node-context="容器里那个 Java 进程看到的 / —— 这就是 rootfs">
+          <title>/app/app.jar · 只有层 3 有 · 容器里那个 Java 进程看到的 / —— 这就是 rootfs</title>
+          <rect x="748" y="238" width="120" height="60" rx="6" class="c-mask"/>
+          <rect x="748" y="238" width="120" height="60" rx="6" class="c-external" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="external" class="semantic-sigil s-external" transform="translate(754 244) scale(0.6875)">
+            <rect x="2.5" y="5" width="8.5" height="8" rx="1.5"/>
+            <path d="M8 2.5h5.5V8M13.5 2.5 7.5 8.5"/>
+          </g>
+          <text data-detail-anchor x="808" y="266" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">/app/app.jar</text>
+        <text data-detail="context" x="808" y="282" class="t-muted" font-size="9" text-anchor="middle">只有层 3 有</text>
+        </g>
+
+        <g id="node-osr" data-node-id="osr" data-node-label="/etc/os-release" tabindex="0" role="button" aria-label="Focus /etc/os-release, 读到的是层 2 那份, 容器里那个 Java 进程看到的 / —— 这就是 rootfs" aria-pressed="false" data-node-kind="external" data-node-sublabel="读到的是层 2 那份" data-node-context="容器里那个 Java 进程看到的 / —— 这就是 rootfs">
+          <title>/etc/os-release · 读到的是层 2 那份 · 容器里那个 Java 进程看到的 / —— 这就是 rootfs</title>
+          <rect x="748" y="358" width="120" height="60" rx="6" class="c-mask"/>
+          <rect x="748" y="358" width="120" height="60" rx="6" class="c-external" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="external" class="semantic-sigil s-external" transform="translate(754 364) scale(0.6875)">
+            <rect x="2.5" y="5" width="8.5" height="8" rx="1.5"/>
+            <path d="M8 2.5h5.5V8M13.5 2.5 7.5 8.5"/>
+          </g>
+          <text data-detail-anchor x="808" y="386" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">/etc/os-release</text>
+        <text data-detail="context" x="808" y="402" class="t-muted" font-size="9" text-anchor="middle">读到的是层 2 那份</text>
+        </g>
+
+        <g id="node-base" data-node-id="base" data-node-label="/etc · /bin · /usr" tabindex="0" role="button" aria-label="Focus /etc · /bin · /usr, 层 1 打底，层 2 加了东西, 容器里那个 Java 进程看到的 / —— 这就是 rootfs" aria-pressed="false" data-node-kind="external" data-node-sublabel="层 1 打底，层 2 加了东西" data-node-context="容器里那个 Java 进程看到的 / —— 这就是 rootfs">
+          <title>/etc · /bin · /usr · 层 1 打底，层 2 加了东西 · 容器里那个 Java 进程看到的 / —— 这就是 rootfs</title>
+          <rect x="748" y="478" width="120" height="60" rx="6" class="c-mask"/>
+          <rect x="748" y="478" width="120" height="60" rx="6" class="c-external" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="external" class="semantic-sigil s-external" transform="translate(754 484) scale(0.6875)">
+            <rect x="2.5" y="5" width="8.5" height="8" rx="1.5"/>
+            <path d="M8 2.5h5.5V8M13.5 2.5 7.5 8.5"/>
+          </g>
+          <text data-detail-anchor x="808" y="506" class="t-primary" font-size="10.3" font-weight="600" text-anchor="middle">/etc · /bin · /usr</text>
+        <text data-detail="context" x="808" y="522" class="t-muted" font-size="7.7" text-anchor="middle">层 1 打底，层 2 加了东西</text>
+        </g>
+
+        <g id="node-root" data-node-id="root" data-node-label="/" tabindex="0" role="button" aria-label="Focus /, 合并出来的根, 容器里那个 Java 进程看到的 / —— 这就是 rootfs" aria-pressed="false" data-node-kind="external" data-node-sublabel="合并出来的根" data-node-context="容器里那个 Java 进程看到的 / —— 这就是 rootfs">
+          <title>/ · 合并出来的根 · 容器里那个 Java 进程看到的 / —— 这就是 rootfs</title>
+          <rect x="748" y="118" width="120" height="60" rx="6" class="c-mask"/>
+          <rect x="748" y="118" width="120" height="60" rx="6" class="c-external" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="external" class="semantic-sigil s-external" transform="translate(754 124) scale(0.6875)">
+            <rect x="2.5" y="5" width="8.5" height="8" rx="1.5"/>
+            <path d="M8 2.5h5.5V8M13.5 2.5 7.5 8.5"/>
+          </g>
+          <text data-detail-anchor x="808" y="146" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">/</text>
+        <text data-detail="context" x="808" y="162" class="t-muted" font-size="9" text-anchor="middle">合并出来的根</text>
+        </g>
+
+        <!-- Connection labels -->
+        <g data-detail="context" data-edge-from="rw" data-edge-to="root" data-edge-label="刚启动时它还是空的，你写的第一个文件才会出现在这" data-edge-key="0" data-edge-id="e0">
+          <rect x="341.8" y="162" width="240.39999999999998" height="14" rx="3" class="c-mask"/>
+          <text x="462" y="172" class="t-messagebus" font-size="8" text-anchor="middle">刚启动时它还是空的，你写的第一个文件才会出现在这</text>
+        </g>
+        <g data-detail="context" data-edge-from="l3" data-edge-to="jar" data-edge-label="只有它能提供这个路径" data-edge-key="1" data-edge-id="e1">
+          <rect x="409" y="248" width="106" height="14" rx="3" class="c-mask"/>
+          <text x="462" y="258" class="t-backend" font-size="8" text-anchor="middle">只有它能提供这个路径</text>
+        </g>
+        <g data-detail="context" data-edge-from="l2" data-edge-to="osr" data-edge-label="层 1 也有同名文件，被这一份盖住" data-edge-key="2" data-edge-id="e2">
+          <rect x="382.6" y="368" width="158.79999999999998" height="14" rx="3" class="c-mask"/>
+          <text x="462" y="378" class="t-backend" font-size="8" text-anchor="middle">层 1 也有同名文件，被这一份盖住</text>
+        </g>
+        <g data-detail="context" data-edge-from="l1" data-edge-to="base" data-edge-label="整棵树由它打底" data-edge-key="3" data-edge-id="e3">
+          <rect x="423.4" y="488" width="77.2" height="14" rx="3" class="c-mask"/>
+          <text x="462" y="498" class="t-muted" font-size="8" text-anchor="middle">整棵树由它打底</text>
+        </g>
+
+        <!-- Legend -->
+        <g data-legend data-legend-bridge>
+          <text x="40" y="590" class="t-primary" font-size="12" font-weight="650">Legend</text>
+          <g data-legend-semantic-kind="backend" data-legend-kind="backend" data-legend-label="Backend" data-legend-x="40" data-legend-baseline="610" data-legend-width="78">
+            <rect x="40" y="601" width="16" height="10" rx="2.5" class="c-backend" stroke-width="1"/>
+            <text x="62" y="610" class="t-muted" font-size="10" font-weight="500">Backend</text>
+          </g>
+          <g data-legend-semantic-kind="database" data-legend-kind="database" data-legend-label="Database" data-legend-x="140" data-legend-baseline="610" data-legend-width="83">
+            <rect x="140" y="601" width="16" height="10" rx="2.5" class="c-database" stroke-width="1"/>
+            <text x="162" y="610" class="t-muted" font-size="10" font-weight="500">Database</text>
+          </g>
+          <g data-legend-semantic-kind="external" data-legend-kind="external" data-legend-label="External" data-legend-x="245" data-legend-baseline="610" data-legend-width="83">
+            <rect x="245" y="601" width="16" height="10" rx="2.5" class="c-external" stroke-width="1"/>
+            <text x="267" y="610" class="t-muted" font-size="10" font-weight="500">External</text>
+          </g>
+        </g>
+      </svg>
+      <figcaption>左边是宿主机磁盘（层分开存），右边是容器进程看到的 /。中间那三条线，就是这个容器里几个真实路径的来历。</figcaption>
+      <p class="arch-hint">
+        <span class="idle">点头上的任意一个框，只看它和它连出去的关系</span>
+        <span class="focused">再点一次空白处取消</span>
+      </p>
+    </figure><p>看这张图，有几件事是一眼能看出来的：</p>
+<ul>
+<li><strong>只读层在磁盘上是一层一层排的</strong>，可写层在最上面，起来的时候是空的</li>
+<li><strong>一个路径可能只来自某一层</strong>（<code>/app/app.jar</code> 只来自层 3）</li>
+<li><strong>一个路径可能好几层都有，但只有一个能被看见</strong>（<code>/etc/os-release</code> 层 1 和层 2 都有，读到的是层 2 的）</li>
+<li><strong>一个目录可能是好几层拼起来的</strong>（<code>/etc</code>）</li>
+</ul>
+<p>最后两条是这篇文章的重点，下面分开讲。</p>
+<hr>
+<h2 id="叠到底怎么叠一条查找规则"><span class="num">03</span>「叠」到底怎么叠：一条查找规则</h2>
+<p>拿 <code>/etc/os-release</code> 举例。容器里读这个路径时，内核不是「打开某个合并后的文件」，
+而是<strong>从最上层往下问</strong>：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>第几步</th><th>问谁</th><th>它的回答</th><th>然后</th></tr></thead><tbody><tr><th>①</th><td data-label="问谁">可写层</td><td data-label="它的回答"><span class="tag tone-muted">没有这个路径</span></td><td data-label="然后">继续往下问</td></tr><tr><th>②</th><td data-label="问谁">层 3 · 应用</td><td data-label="它的回答"><span class="tag tone-muted">没有</span></td><td data-label="然后">继续</td></tr><tr><th>③</th><td data-label="问谁">层 2 · JDK</td><td data-label="它的回答"><span class="tag tone-green">有</span></td><td data-label="然后"><span class="tag tone-green">就是它了，停止查找</span></td></tr><tr><th>④</th><td data-label="问谁">层 1 · 基础系统</td><td data-label="它的回答"><span class="tag tone-amber">也有，但没人来问了</span></td><td data-label="然后">——</td></tr></tbody></table></div><p><mark class="mk-blue">「叠」的全部内容就是这张表。</mark> 第一个回答「有」的层赢，
+下面的层哪怕也有，也不会被看。</p>
+<p>这条规则还解释了另外两件常见的事：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>现象</th><th>用这条规则解释</th></tr></thead><tbody><tr><th>为什么改配置那么慢</th><td data-label="用这条规则解释">第一次改某一层的文件时，要先把它整份复制到可写层（copy-up），见第 05 节</td></tr><tr><th>为什么删了文件磁盘没释放</th><td data-label="用这条规则解释">删除只是在可写层放了个「此处没有」的标记，下层那份还在，见第 06 节</td></tr></tbody></table></div><hr>
+<h2 id="三种情况只有一种是真的覆盖"><span class="num">04</span>三种情况，只有一种是真的「覆盖」</h2>
+<p>「上层盖住下层」这句话对<strong>文件</strong>成立，对<strong>目录不成立</strong> —— 这是最容易搞错的一条。</p>
+<h3 id="情况一只有一个层有它">情况一：只有一个层有它</h3>
+<p>最简单。直接露出来，不用做任何事。</p>
+<h3 id="情况二同名文件-上层赢下层被挡住">情况二：同名<strong>文件</strong> → 上层赢，下层被挡住</h3>
+<div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;u&quot;,&quot;to&quot;:&quot;r&quot;,&quot;label&quot;:&quot;上层赢&quot;,&quot;labelDx&quot;:-54},{&quot;from&quot;:&quot;l&quot;,&quot;to&quot;:&quot;r&quot;,&quot;label&quot;:&quot;下层那份还在磁盘上，只是看不见了&quot;,&quot;dashed&quot;:true,&quot;labelDx&quot;:40}]">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-green" data-id="u">
+              
+              
+              <b>层 2 里的 /etc/os-release</b>
+              <small>装 JDK 时被改过</small>
+            </div><div class="fnode tone-muted" data-id="l">
+              
+              
+              <b>层 1 里的 /etc/os-release</b>
+              <small>debian 自带的那个</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-blue" data-id="r">
+              
+              
+              <b>容器里 open() 到的</b>
+              <small>结果是层 2 那一份</small>
+            </div></div></div>
+      
+    </div><p>注意底下那条虚线。<mark class="mk-blue">层 1 的那份并没有被删除，也没有被覆盖 —— 它只是被挡住了。</mark>
+镜像层是只读的，谁也改不了它。</p>
+<h3 id="情况三同名目录-两层的内容合并">情况三：同名<strong>目录</strong> → 两层的内容合并</h3>
+<div class="flowd has-grid has-groups" data-flow data-edges="[{&quot;from&quot;:&quot;u&quot;,&quot;to&quot;:&quot;r&quot;,&quot;label&quot;:&quot;并集，不是二选一&quot;},{&quot;from&quot;:&quot;l&quot;,&quot;to&quot;:&quot;r&quot;}]">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"><div class="fgroup tone-green" data-group-box="m">
+          <span class="fgroup-label">两层的 /etc 合并成一个 /etc</span>
+        </div></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-green" data-id="u" data-group="m">
+              
+              
+              <b>层 2 的 /etc/</b>
+              <small>装 JDK 时加了 java 配置</small>
+            </div><div class="fnode tone-muted" data-id="l" data-group="m">
+              
+              
+              <b>层 1 的 /etc/</b>
+              <small>debian 自带的一整套</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-blue" data-id="r" data-group="m">
+              
+              
+              <b>容器里 ls /etc</b>
+              <small>两边的文件都在</small>
+            </div></div></div>
+      
+    </div><p><mark class="mk-amber">目录是<strong>合并</strong>的，不是覆盖的。</mark></p>
+<p>如果按「上层赢」理解，<code>ls /etc</code> 就只能看到层 2 的那几个文件，
+debian 自带的那一整套 <code>passwd</code>、<code>hosts</code>、<code>apt/</code> 全都不见了 —— 但它们是存在的。</p>
+<div class="callout tone-violet">
+      <span class="ic">🔑</span>
+      <div><p><strong>一条能记住的判据：</strong></p>
+<table>
+<thead>
+<tr>
+<th>撞上的东西是</th>
+<th>结果</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>同名<strong>目录</strong></td>
+<td><mark class="mk-blue">两边的孩子并在一起</mark></td>
+</tr>
+<tr>
+<td>同名<strong>非目录</strong>（文件、符号链接、设备）</td>
+<td>上层赢，下层被挡住</td>
+</tr>
+</tbody>
+</table>
+<p>内核文档里的原话是非目录（non-directory）：「如果这个名字在任何一层里是
+<strong>非目录</strong>，那么下层的对象就被隐藏」。<mark class="mk-green">也就是说 <code>目录 vs 文件</code> 这种撞法，
+上层赢 —— 你不会得到一个「又是文件又是目录」的东西。</mark></p>
+</div>
+    </div><hr>
+<h2 id="改一个文件copy-up"><span class="num">05</span>改一个文件：copy-up</h2>
+<p>读写层下面的东西是只读的，那「在容器里改 <code>/etc/os-release</code>」是怎么做到的？</p>
+<div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-muted">改之前</span>
+            <span class="name">/etc/os-release</span>
+            <span class="spacer"></span>
+            <span class="tag tone-muted">只在层 2</span>
+          </div>
+          <div class="rec"><div class="">
+            <b>可写层</b><span>没有这个路径</span></div><div class="">
+            <b>层 2</b><span>os-release · 只读</span></div><div class="">
+            <b>读它的时候</b><span>直接读层 2 那份，不做任何复制</span></div></div>
+          
+          <p class="jnote">只有读的话，一直是零成本的</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">容器里执行 echo 一句话 &gt;&gt; /etc/os-release<span class="note">层 2 改不了</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-amber">触发 copy-up</span>
+            <span class="name">先把整份复制到可写层</span>
+            <span class="spacer"></span>
+            <span class="tag tone-amber">复制一整份</span>
+          </div>
+          <div class="rec"><div class="warn">
+            <b>可写层</b><span>os-release · 完整副本</span><em>刚被创建</em></div><div class="">
+            <b>层 2</b><span>原封不动</span></div><div class="">
+            <b>复制多少</b><span>整个文件，不是只复制要改的那几个字节</span></div></div>
+          
+          <p class="jnote bad">一个 2GB 的文件，改一个字节也要先复制 2GB —— 这是真实开销</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">在副本上改<span class="note">之后的读都走可写层这份</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-green">改完之后</span>
+            <span class="name">磁盘上现在有两份</span>
+            <span class="spacer"></span>
+            <span class="tag tone-green">占了两份空间</span>
+          </div>
+          <div class="rec"><div class="ok">
+            <b>可写层</b><span>改过的版本</span><em>以后都读它</em></div><div class="">
+            <b>层 2</b><span>旧版本 · 还占着空间</span></div></div>
+          
+          <p class="jnote">层 2 那份永远不会被回收，因为它属于镜像，别的容器可能也在用</p>
+        </div><p><mark class="mk-blue">所以「容器里改文件」在磁盘上是「多占一份」，不是「改掉了原来那份」。</mark></p>
+<p><mark class="mk-amber">这也是为什么「别在容器里改大文件」是一条真建议 —— 改一次就多一份。</mark></p>
+<hr>
+<h2 id="删一个文件whiteout"><span class="num">06</span>删一个文件：whiteout</h2>
+<p>删除比修改更微妙：文件在只读层里，你删不掉它，但你得让容器<strong>看不见</strong>它。</p>
+<div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-muted">删之前</span>
+            <span class="name">/etc/os-release</span>
+            <span class="spacer"></span>
+            <span class="tag tone-muted">能看见</span>
+          </div>
+          <div class="rec"><div class="">
+            <b>可写层</b><span>没有这个路径</span></div><div class="">
+            <b>层 2</b><span>os-release</span></div><div class="">
+            <b>open 它</b><span>成功，读到层 2 那份</span></div></div>
+          
+          
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">容器里执行 rm /etc/os-release<span class="note">层 2 删不掉，只能想别的办法</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-red">rm 的那一刻</span>
+            <span class="name">在可写层做一个「墓碑」</span>
+            <span class="spacer"></span>
+            <span class="tag tone-red">whiteout</span>
+          </div>
+          <div class="rec"><div class="warn">
+            <b>可写层</b><span>出现一个 /etc/os-release</span><em>它是个特殊标记</em></div><div class="">
+            <b>它长什么样</b><span>字符设备，主次设备号都是 0（0/0）</span><em>老内核里是符号链接；现代内核也可能用零长度文件 + `trusted.overlay.whiteout` 这个 xattr</em></div><div class="">
+            <b>层 2</b><span>原封不动，一个字节没动</span></div></div>
+          
+          
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">再 open 这个路径<span class="note">从上往下问一遍</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-green">删之后</span>
+            <span class="name">查不到了</span>
+            <span class="spacer"></span>
+            <span class="tag tone-green">空间没释放</span>
+          </div>
+          <div class="rec"><div class="">
+            <b>可写层</b><span>先命中那个墓碑</span></div><div class="">
+            <b>查到什么</b><span>「此处没有」—— 停止，不往下找</span></div><div class="">
+            <b>层 2</b><span>文件还在，占着原来的空间</span></div></div>
+          
+          <p class="jnote bad">这就是「容器里删了大文件，宿主机磁盘没变」的原因</p>
+        </div><div class="callout tone-amber">
+      <span class="ic">🪦</span>
+      <div><p><strong>「墓碑」这个比喻在这里是字面意义上的。</strong></p>
+<p>它是一个<strong>内核层面的特殊文件</strong>，作用是告诉 OverlayFS：
+「这个路径在下层有，但在我这里被删了，查到这里就停下，别再往下看了」。</p>
+<p>它占的空间极小（一个字符设备节点），但<mark class="mk-blue">它挡住的可能是下面几个 GB</mark>。</p>
+<p><mark class="mk-green">同一个机制还有一个变体叫 <strong>opaque directory</strong>：标记「这个目录整个以我为准，
+别往下合并了」。它也是用 xattr 实现的。</mark></p>
+</div>
+    </div><hr>
+<h2 id="三个容器一套只读层"><span class="num">07</span>三个容器，一套只读层</h2>
+<p>可写层是一人一份的，只读层是全镜像共享的。所以在同一台机器上跑三个同一个镜像的容器：</p>
+<div class="flowd has-grid has-groups" data-flow data-edges="[{&quot;from&quot;:&quot;c1&quot;,&quot;to&quot;:&quot;w1&quot;},{&quot;from&quot;:&quot;c2&quot;,&quot;to&quot;:&quot;w2&quot;},{&quot;from&quot;:&quot;c3&quot;,&quot;to&quot;:&quot;w3&quot;},{&quot;from&quot;:&quot;w1&quot;,&quot;to&quot;:&quot;img&quot;,&quot;label&quot;:&quot;大家底下都是同一份&quot;},{&quot;from&quot;:&quot;w2&quot;,&quot;to&quot;:&quot;img&quot;},{&quot;from&quot;:&quot;w3&quot;,&quot;to&quot;:&quot;img&quot;}]">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"><div class="fgroup tone-green" data-group-box="own">
+          <span class="fgroup-label">可写层：每个容器各一份</span>
+        </div></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-green" data-id="c1">
+              
+              
+              <b>容器 1</b>
+              <small>Java 进程</small>
+            </div><div class="fnode tone-green" data-id="c2">
+              
+              
+              <b>容器 2</b>
+              <small>也是 Java 进程</small>
+            </div><div class="fnode tone-green" data-id="c3">
+              
+              
+              <b>容器 3</b>
+              <small>同一个镜像起的</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="w1" data-group="own">
+              
+              
+              <b>可写层 1</b>
+              <small>改过的 os-release</small>
+            </div><div class="fnode tone-green" data-id="w2" data-group="own">
+              
+              
+              <b>可写层 2</b>
+              <small>还是空的</small>
+            </div><div class="fnode tone-green" data-id="w3" data-group="own">
+              
+              
+              <b>可写层 3</b>
+              <small>只改了一个配置文件</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="img">
+              
+              
+              <b>镜像层 · 层 1 / 层 2 / 层 3</b>
+              <small>只读。三份容器共用同一批，磁盘上只有一份</small>
+            </div></div></div>
+      
+    </div><p><mark class="mk-blue">同一台机器上跑 50 个基于同一个镜像的容器，镜像层在磁盘上仍然只有一份。</mark>
+多出来的开销只是 50 个可写层里各自改过的那点东西。</p>
+<p>这也解释了「容器很轻」这句话的准确含义：轻的是<strong>运行时开销</strong>，
+不是镜像本身小 —— 镜像该多大还是多大，只是大家共用一份。</p>
+<hr>
+<h2 id="rootfs-里没有内核"><span class="num">08</span>rootfs 里没有内核</h2>
+<p>这一点经常被漏掉：<strong>rootfs 只包含用户空间的文件。</strong></p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>东西</th><th>在不在容器的 rootfs 里</th><th>说明</th></tr></thead><tbody><tr><th>内核（<code>/boot/vmlinuz</code>、内核模块）</th><td data-label="在不在容器的 rootfs 里"><span class="tag tone-red">不在</span></td><td data-label="说明">容器<strong>共用</strong>宿主机的内核，不自己带一个</td></tr><tr><th><code>/bin</code> <code>/usr</code> <code>/lib</code> 这些命令和库</th><td data-label="在不在容器的 rootfs 里"><span class="tag tone-green">在</span></td><td data-label="说明">来自镜像的基础层</td></tr><tr><th>你的应用和依赖</th><td data-label="在不在容器的 rootfs 里"><span class="tag tone-green">在</span></td><td data-label="说明">来自上面几层</td></tr><tr><th><code>/proc</code> <code>/sys</code> <code>/dev</code></th><td data-label="在不在容器的 rootfs 里"><span class="tag tone-amber">在，但是是运行时挂上去的</span></td><td data-label="说明">不是镜像层提供的，是内核暴露出来的视图</td></tr></tbody></table></div><p>所以「容器是一个完整的 Linux 系统」这个说法要打个折：
+它是一套完整的<strong>用户空间<strong>，加一个</strong>借来的内核</strong>。</p>
+<div class="callout tone-violet">
+      <span class="ic">📖</span>
+      <div><p><strong>顺带一个术语坑：<code>rootfs</code> 这个词有两个意思。</strong></p>
+<table>
+<thead>
+<tr>
+<th>场合</th>
+<th>指什么</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>容器语境（这篇）</td>
+<td>容器进程看到的那棵 <code>/</code> 目录树</td>
+</tr>
+<tr>
+<td>内核文档</td>
+<td>系统启动早期挂的一个 <strong>ramfs/tmpfs 实例</strong>，是给内核用的临时根</td>
+</tr>
+</tbody>
+</table>
+<p>内核文档里甚至明确说「所有 Linux 系统里都有一个 rootfs」——
+那个 rootfs 和你容器里的 rootfs 不是一回事。<mark class="mk-blue">读到这个词先看上下文。</mark></p>
+</div>
+    </div><hr>
+<h2 id="四个常被说错的点"><span class="num">09</span>四个常被说错的点</h2>
+<ul class="check cross"><li>「叠起来就是复制合并成一个新目录」—— 不复制。是挂载时的查找规则，每次 open 时现算</li><li>「上层盖住下层」—— 只对文件成立；目录是<strong>合并</strong></li><li>「容器删了文件，磁盘空间就释放了」—— 只是加了个墓碑，下层那份还在</li><li>「容器里改文件很方便，反正层是写时复制的」—— 改一个字节要先把整份复制上来，大文件很贵</li></ul><div class="callout tone-amber">
+      <span class="ic">📏</span>
+      <div><p><strong>一条工程上的现实：层数是有上限的。</strong></p>
+<p><code>overlay2</code> 驱动最多支持 <strong>128 层</strong> lower。而实际上更早就撞墙 ——
+有人实测 <code>docker build</code> 到 <strong>122 层</strong>左右就报 <code>max depth exceeded</code>，
+因为挂载参数的长度受<strong>内核页大小</strong>限制。</p>
+<p>这个数字各来源说法不完全一致（122 / 125 / 128），跟环境有关，
+<mark class="mk-blue">但方向是确定的：层越多越容易出问题。</mark></p>
+<p>所以 Dockerfile 里把 <code>RUN</code> 合并成一条，不只是「减少层数好看」——
+它真的在避开一个上限。</p>
+</div>
+    </div><hr>
+<div class="quiz"><details>
+        <summary>「镜像层叠起来就是一个 rootfs」里的「叠」，具体是什么动作？</summary>
+        <div class="a"><p>不是复制合并，是一条查找规则：从最上层往下问，谁先有这个路径就算谁的。
+它发生在每次 open 的时候，而不是容器启动的时候。
+磁盘上没有任何一个目录叫「这个容器的 rootfs」—— 它是挂载出来的视图。</p>
+</div>
+      </details><details>
+        <summary>上层和下层都有 /etc，容器里 ls 会看到什么？</summary>
+        <div class="a"><p>看到两边的<strong>并集</strong>。目录是合并的，不是覆盖的。
+「上层赢」只对非目录（文件、符号链接、设备）成立。
+如果按覆盖理解，debian 自带的那些配置文件就全都消失了 —— 但它们在。</p>
+</div>
+      </details><details>
+        <summary>容器里 rm 了一个 2GB 的文件，为什么宿主机磁盘没变？</summary>
+        <div class="a"><p>因为文件在只读的镜像层里，删不掉。rm 只是在可写层放了一个墓碑（whiteout，
+一个 0/0 的字符设备节点），让查找到这个路径时停下、不再往下看。
+镜像层里那份 2GB 还在，而且只要这个镜像还在被使用就不会被回收。</p>
+</div>
+      </details><details>
+        <summary>一句话说清 rootfs 和内核的关系。</summary>
+        <div class="a"><p>rootfs 只包含用户空间的文件（命令、库、应用），不含内核。
+容器共用宿主机的内核，靠 mount namespace 和 pivot_root 拿到自己的 /。
+所以「容器是一个完整的 Linux 系统」应该修正成「一套完整的用户空间 + 一个借来的内核」。</p>
+</div>
+      </details></div>
+
+    <footer>
+      <span>镜像层叠起来就是一个 rootfs · 什么才是「叠」</span>
+      <span>最后更新 2026-10-06 · 单文件可离线打开</span>
+    </footer>
+  </main>
+</div>
+
+<script src="../../assets/app.js"></script>
+</body>
+</html>
