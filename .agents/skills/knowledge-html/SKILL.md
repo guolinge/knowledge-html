@@ -1576,12 +1576,13 @@ text: |
 | `summary` | 小结 |
 | `raw` | 直接写 HTML |
 
-**交互控件 28 个**（在 `assets/app.js` 的 `WIDGETS` 里，供 `demo` 积木引用）：
+**交互控件 29 个**（在 `assets/app.js` 的 `WIDGETS` 里，供 `demo` 积木引用）：
 `polling-vs-cdc` `combination-count` `join-lab` `on-vs-where` `knex-chain`
 `stepper` `tuner` `diff` `stream-modes` `operator-lab` `hashring` `partition-prune`
 `dsl-lab` `null-lab` `config-to-ui` `field-lineage` `count-dedup-lab`
 `row-to-catalog` `sql-inject-lab` `validate-lab` `sched-lab` `switch-cost`
 `io-models` `inode-trace` `link-refcount` `gmp-lab` `handoff-lab` `ipc-flow-lab`
+`runtime-timeline`
 
 **已知缺口**（按优先级）：
 
@@ -1590,6 +1591,18 @@ text: |
 | 因果图（鱼骨） | 排障分析 | 看需要 |
 
 **不要加**：甘特图、饼图、雷达图、桑基图 —— 不是知识页的场景。
+
+### 控件里要写强调文字时，用 `richText`
+
+积木那边的 `==强调==` / `**重音**` / `` `代码` `` 是**构建期**由 `tools/lib/blocks.mjs`
+处理的，控件跑在浏览器里拿不到它 —— 所以 `app.js` 里有一份最小的 `richText(host, text)`。
+
+```js
+richText(el('p', 'my-note'), '这一步 ==很关键==，注意 `read()` 的返回值');
+```
+
+==不写它就直接 `textContent` 的话，页面上会字面显示 `==很关键==`。==
+它只认那三种标记，别往里加东西 —— 两边逻辑越像，越容易漂移。
 
 ### 加新积木时的两条硬要求
 

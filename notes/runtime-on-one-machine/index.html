@@ -1,0 +1,626 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-has-toc="1">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>一台机器上：Docker / K8s / 容器 / 镜像到底谁压着谁</title>
+<meta name="description" content="常见的分层图是错的 —— 它把「谁创建谁」「谁在内存里」「谁管谁」「谁依赖谁的代码」四种关系压成了一根竖轴。真相是两个平面加一个内核：管理平面和容器进程是兄弟，runc 只活一瞬间，而「容器」在内核里根本不是一个对象。" />
+<link rel="stylesheet" href="../../assets/theme.css" />
+  <link rel="stylesheet" href="../../assets/blocks.css" />
+  <link rel="stylesheet" href="../../assets/archify-embed.css" />
+</head>
+<body>
+<div id="progress"></div>
+<div id="tocScrim"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
+    <a class="brand" href="../../index.html"><span class="dot"></span>知识笔记</a>
+    
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="toc" id="toc">
+      <p class="toc-title">目录</p>
+      <a href="../../index.html" class="sub">← 全部笔记</a>
+      <a href="#那张分层图错在哪">那张「分层图」错在哪</a>
+      <a href="#真实的样子两个平面-一个内核">真实的样子：两个平面 + 一个内核</a>
+      <a href="#那容器到底是个什么东西">那「容器」到底是个什么东西</a>
+      <a href="#一台机器上的进程家族树">一台机器上的进程家族树</a>
+      <a href="#那镜像呢">那镜像呢</a>
+      <a href="#docker-单机-和-k8s-节点差在哪">Docker 单机 和 K8s 节点，差在哪</a>
+      <a href="#pod-多出来的那个东西">Pod 多出来的那个东西</a>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow">● 容器 · 运行时结构</span>
+      <h1>一台机器上：Docker / K8s / 容器 / 镜像到底谁压着谁</h1>
+      <p class="lede">常见的分层图是错的 —— 它把「谁创建谁」「谁在内存里」「谁管谁」「谁依赖谁的代码」四种关系压成了一根竖轴。真相是两个平面加一个内核：管理平面和容器进程是兄弟，runc 只活一瞬间，而「容器」在内核里根本不是一个对象。</p>
+    </div>
+
+    <div class="draft-banner">
+    <span>⚠</span>
+    <span>本页状态为 <b>draft</b>：内容尚未人工核对，引用前请自行验证。</span>
+  </div>
+
+    <div class="provenance"><span><b>来源</b> containerd Runtime v2 文档 https://containerd.io/docs/2.4/runtime-v2/ · Kubernetes Pods https://kubernetes.io/docs/concepts/workloads/pods/ · Ian Lewis · The Almighty Pause Container https://www.ianlewis.org/en/almighty-pause-container · Docker 官方文档 · containerd 存储 https://github.com/docker/docs/blob/main/content/manuals/engine/storage/containerd.md</span><span><b>生成</b> 2026-10-06</span><span><b>模型</b> claude-opus-4-5</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">容器</span> <span class="tag tone-muted">K8s</span> <span class="tag tone-muted">containerd</span> <span class="tag tone-muted">runc</span></span></div>
+
+<h2 id="那张分层图错在哪"><span class="num">01</span>那张「分层图」错在哪</h2>
+<p>你手上那份回答，把这几样东西叠成了一根竖轴：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code>Deployment → Pod → Container → Image → containerd + runc → Linux 内核 → 硬件
+</code></pre></div>
+<p><mark class="mk-blue">这张图里混了四种完全不同的关系，所以越看越糊：</mark></p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>关系</th><th>谁和谁</th><th>是长久的吗</th></tr></thead><tbody><tr><th>谁创建谁</th><td data-label="谁和谁">镜像 → 容器 → Pod → Deployment</td><td data-label="是长久的吗"><span class="tag tone-amber">创建完就结束了，不是持续关系</span></td></tr><tr><th>谁在内存里跑着</th><td data-label="谁和谁">dockerd / containerd / kubelet / 容器进程</td><td data-label="是长久的吗"><span class="tag tone-green">只有这个是「谁压着谁」</span></td></tr><tr><th>谁管谁</th><td data-label="谁和谁">Deployment 管 Pod，kubelet 管容器</td><td data-label="是长久的吗">常驻的命令关系，但<strong>双方不一定在同一台机器上</strong></td></tr><tr><th>谁依赖谁的代码</th><td data-label="谁和谁">containerd 调用 runc</td><td data-label="是长久的吗"><span class="tag tone-red"><strong>代码依赖</strong>，不是进程层级</span></td></tr></tbody></table></div><p>还有一个更根本的错：<mark class="mk-blue"><strong><code>runc</code> 根本不是一层。</strong></mark> 它只在「创建容器」那一瞬间存在，建完就退出了。</p>
+<div class="timeline"><div class="titem tone-blue">
+          <span class="when">t = 2</span>
+          <h4>containerd fork 出 runc</h4>
+          <p>它要干的是调 clone / unshare / setns，把进程建出来</p>
+        </div><div class="titem tone-red">
+          <span class="when">t = 3</span>
+          <h4>runc 就退出了</h4>
+          <p>活了一瞬间。它不是「容器进程运行的依赖」，只是「容器进程的接生婆」</p>
+        </div><div class="titem tone-green">
+          <span class="when">t = 3 之后</span>
+          <h4>真正留下来陪容器的是 containerd-shim</h4>
+          <p>它才是容器进程的父进程，一直活到容器被删</p>
+        </div></div><p>看这条时间轴，比看任何分层图都清楚：一起吃住的和只来一趟的，长度差得很远。</p>
+<div class="demo" data-widget="runtime-timeline" data-config="{&quot;tMax&quot;:8,&quot;procs&quot;:[{&quot;id&quot;:&quot;kubelet&quot;,&quot;name&quot;:&quot;kubelet&quot;,&quot;sub&quot;:&quot;K8s 在这台机器上的代表&quot;,&quot;note&quot;:&quot;systemd 拉起来的。它只管下命令，自己不碰容器&quot;,&quot;spans&quot;:[[0,8]]},{&quot;id&quot;:&quot;containerd&quot;,&quot;name&quot;:&quot;containerd&quot;,&quot;sub&quot;:&quot;拉镜像 · 备 rootfs&quot;,&quot;note&quot;:&quot;一个节点一个。==重启它，容器照跑==&quot;,&quot;spans&quot;:[[0,5],[6,8]]},{&quot;id&quot;:&quot;runc&quot;,&quot;name&quot;:&quot;runc&quot;,&quot;sub&quot;:&quot;根据 namespace / cgroup 建进程&quot;,&quot;note&quot;:&quot;一次性。建完就退出，不留下来&quot;,&quot;spans&quot;:[[2,3]]},{&quot;id&quot;:&quot;shim&quot;,&quot;name&quot;:&quot;containerd-shim&quot;,&quot;sub&quot;:&quot;容器进程的父进程&quot;,&quot;note&quot;:&quot;每个容器一个，常驻到容器被删&quot;,&quot;spans&quot;:[[3,7]]},{&quot;id&quot;:&quot;nginx&quot;,&quot;name&quot;:&quot;nginx（容器进程）&quot;,&quot;sub&quot;:&quot;容器里真正跑的东西&quot;,&quot;note&quot;:&quot;它的爹是 shim。它和 containerd 之间没有任何层级关系&quot;,&quot;spans&quot;:[[3,7]]}],&quot;steps&quot;:[{&quot;at&quot;:0,&quot;what&quot;:&quot;机器刚起来，只有管理平面。kubelet 和 containerd 由 systemd 拉起，跟容器没有任何关系。&quot;},{&quot;at&quot;:1,&quot;what&quot;:&quot;kubelet 从 apiserver 收到「要有一个 nginx Pod」，通过 CRI 接口告诉本机的 containerd。所以在这个视角里，控制面只是个消息来源，不在这一层里。&quot;},{&quot;at&quot;:2,&quot;what&quot;:&quot;containerd 动手，fork 出一个 runc。&quot;},{&quot;at&quot;:3,&quot;what&quot;:&quot;runc 调 clone / unshare / setns，把进程建出来、套上 namespace 和 cgroup，然后它自己就退出了。==它不是常驻的一层==。&quot;},{&quot;at&quot;:4,&quot;what&quot;:&quot;containerd fork 出 shim。这个 shim 才是容器进程的亲爹：它负责 waitpid 收尸、转发 stdio（所以 kubectl logs 能看到东西）、向 containerd 汇报退出码。&quot;},{&quot;at&quot;:5,&quot;what&quot;:&quot;nginx 跑起来了。==它和 containerd 之间没有父子关系==，它的爹是 shim，而它和 containerd 都只是内核上的普通进程。&quot;},{&quot;at&quot;:6,&quot;what&quot;:&quot;重启 containerd。==容器照跑，一点没受影响==，因为顶着的是 shim，不是 containerd。这就是 shim 存在的全部理由。&quot;},{&quot;at&quot;:7,&quot;what&quot;:&quot;删掉容器：nginx 和 shim 一起消失。管理平面上那两位不受影响。&quot;}]}">
+      <div class="demo-head">
+        <span class="title">创建、重启、删除：谁在，谁不在</span>
+        <span class="status" data-status>点「下一步」或「自动跑」</span>
+        <span class="spacer"></span>
+        
+      </div>
+      <div class="demo-body custom" data-mount></div>
+    </div><hr>
+<h2 id="真实的样子两个平面-一个内核"><span class="num">02</span>真实的样子：两个平面 + 一个内核</h2>
+<figure class="archfig" data-arch>
+      <svg viewBox="0 0 1146 814" role="img" aria-labelledby="archify-diagram-title archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
+        <title id="archify-diagram-title">一台 K8s 工作节点：内存里到底有什么</title>
+        <desc id="archify-diagram-description">管理平面和每个容器的 shim 是两拨人，容器进程直接站在内核上</desc>
+        <!-- Definitions -->
+        <defs>
+          <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-default" />
+          </marker>
+          <marker id="arrowhead-emphasis" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-emphasis" />
+          </marker>
+          <marker id="arrowhead-security" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-security" />
+          </marker>
+          <marker id="arrowhead-dashed" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-dashed" />
+          </marker>
+          <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+            <path d="M 40 0 L 0 0 0 40" class="c-grid" stroke-width="0.5"/>
+          </pattern>
+        </defs>
+
+        <!-- Background Grid -->
+        <rect width="100%" height="100%" fill="url(#grid)" />
+
+        <!-- Boundaries (behind everything) -->
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="0" x="300" y="78" width="280" height="108" rx="12" class="c-region" stroke-width="1"/>
+        <text x="308" y="96" class="t-cloud" font-size="9" font-weight="600">K8s 控制面 —— 别的机器上；这台机器只收到下发的期望状态</text>
+
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="1" x="30" y="218" width="806" height="112" rx="12" class="c-region" stroke-width="1"/>
+        <text x="38" y="236" class="t-cloud" font-size="9" font-weight="600">管理平面 —— 一个节点就这一套，开机就在</text>
+
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="2" x="30" y="358" width="806" height="250" rx="12" class="c-region" stroke-width="1"/>
+        <text x="38" y="376" class="t-cloud" font-size="9" font-weight="600">每个容器一套 —— shim 和它的孩子，跟 containerd 是两拨人</text>
+
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="3" x="30" y="638" width="806" height="108" rx="12" class="c-region" stroke-width="1"/>
+        <text x="38" y="656" class="t-cloud" font-size="9" font-weight="600">内核 —— 容器在这里的全部痕迹，就是这些标签和限额，没有「容器」这个对象</text>
+
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="4" x="840" y="358" width="266" height="108" rx="12" class="c-region" stroke-width="1"/>
+        <text x="848" y="376" class="t-cloud" font-size="9" font-weight="600">磁盘 —— 镜像睡在这里，不在内存里</text>
+
+        <!-- Connection paths (before components for correct z-order) -->
+        <path data-edge-from="api" data-edge-to="kubelet" data-edge-label="期望状态" data-edge-key="0" data-edge-id="e1" data-composition-points="440,166;440,207;158,207;158,248" d="M 440 166 L 440 199 Q 440 207 432 207 L 166 207 Q 158 207 158 215 L 158 248" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="kubelet" data-edge-to="containerd" data-edge-label="CRI" data-edge-key="1" data-edge-id="e2" data-composition-points="256,279;600,279" d="M 256 279 L 600 279" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
+        <path data-edge-from="containerd" data-edge-to="shim" data-edge-label="fork" data-edge-key="2" data-edge-id="e3" data-composition-points="703,310;703,349;163,349;163,388" d="M 703 310 L 703 341 Q 703 349 695 349 L 171 349 Q 163 349 163 357 L 163 388" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="shim" data-edge-to="nginx" data-edge-label="亲爹" data-edge-key="3" data-edge-id="e4" data-composition-points="163,450;163,474;179,474;179,504;158,504;158,528" d="M 163 450 L 163 466 Q 163 474 171 474 L 171 474 Q 179 474 179 482 L 179 496 Q 179 504 171 504 L 166 504 Q 158 504 158 512 L 158 528" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
+        <path data-edge-from="img" data-edge-to="java" data-edge-label="只读根目录" data-edge-key="4" data-edge-id="e5" data-composition-points="973,446;973,487;703,487;703,528" d="M 973 446 L 973 479 Q 973 487 965 487 L 711 487 Q 703 487 703 495 L 703 528" class="a-dashed" stroke-width="1.5" marker-end="url(#arrowhead-dashed)"/>
+
+        <!-- Components -->
+        <g id="node-api" data-node-id="api" data-node-label="kube-apiserver" tabindex="0" role="button" aria-label="Focus kube-apiserver, 你 kubectl 打交道的那个, K8s 控制面 —— 别的机器上；这台机器只收到下发的期望状态" aria-pressed="false" data-node-kind="cloud" data-node-sublabel="你 kubectl 打交道的那个" data-node-context="K8s 控制面 —— 别的机器上；这台机器只收到下发的期望状态">
+          <title>kube-apiserver · 你 kubectl 打交道的那个 · K8s 控制面 —— 别的机器上；这台机器只收到下发的期望状态</title>
+          <rect x="330" y="108" width="220" height="58" rx="6" class="c-mask"/>
+          <rect x="330" y="108" width="220" height="58" rx="6" class="c-cloud" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="cloud" class="semantic-sigil s-cloud" transform="translate(336 114) scale(0.6875)">
+            <path d="M4.3 12.5h7.3a2.4 2.4 0 0 0 .2-4.8 4 4 0 0 0-7.5-1.3A3.1 3.1 0 0 0 4.3 12.5Z"/>
+          </g>
+          <text data-detail-anchor x="440" y="135" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">kube-apiserver</text>
+        <text data-detail="context" x="440" y="151" class="t-muted" font-size="9" text-anchor="middle">你 kubectl 打交道的那个</text>
+        </g>
+
+        <g id="node-kubelet" data-node-id="kubelet" data-node-label="kubelet" tabindex="0" role="button" aria-label="Focus kubelet, 这台机器上唯一的 K8s 代表, 管理平面 —— 一个节点就这一套，开机就在" aria-pressed="false" data-node-kind="backend" data-node-sublabel="这台机器上唯一的 K8s 代表" data-node-tag="systemd 拉起来的" data-node-context="管理平面 —— 一个节点就这一套，开机就在">
+          <title>kubelet · 这台机器上唯一的 K8s 代表 · 管理平面 —— 一个节点就这一套，开机就在 · systemd 拉起来的</title>
+          <rect x="60" y="248" width="196" height="62" rx="6" class="c-mask"/>
+          <rect x="60" y="248" width="196" height="62" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(66 254) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text data-detail-anchor x="158" y="277" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">kubelet</text>
+        <text data-detail="context" x="158" y="293" class="t-muted" font-size="9" text-anchor="middle">这台机器上唯一的 K8s 代表</text>
+        <text data-detail="fine" x="158" y="302" class="t-backend" font-size="7" text-anchor="middle">systemd 拉起来的</text>
+        </g>
+
+        <g id="node-containerd" data-node-id="containerd" data-node-label="containerd" tabindex="0" role="button" aria-label="Focus containerd, 拉镜像 · 备 rootfs · 管生命周期, 管理平面 —— 一个节点就这一套，开机就在" aria-pressed="false" data-node-kind="backend" data-node-sublabel="拉镜像 · 备 rootfs · 管生命周期" data-node-tag="一个节点一个" data-node-context="管理平面 —— 一个节点就这一套，开机就在">
+          <title>containerd · 拉镜像 · 备 rootfs · 管生命周期 · 管理平面 —— 一个节点就这一套，开机就在 · 一个节点一个</title>
+          <rect x="600" y="248" width="206" height="62" rx="6" class="c-mask"/>
+          <rect x="600" y="248" width="206" height="62" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(606 254) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text data-detail-anchor x="703" y="277" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">containerd</text>
+        <text data-detail="context" x="703" y="293" class="t-muted" font-size="9" text-anchor="middle">拉镜像 · 备 rootfs · 管生命周期</text>
+        <text data-detail="fine" x="703" y="302" class="t-backend" font-size="7" text-anchor="middle">一个节点一个</text>
+        </g>
+
+        <g id="node-shim" data-node-id="shim" data-node-label="containerd-shim" tabindex="0" role="button" aria-label="Focus containerd-shim, 容器进程的父进程，常驻, 每个容器一套 —— shim 和它的孩子，跟 containerd 是两拨人" aria-pressed="false" data-node-kind="security" data-node-sublabel="容器进程的父进程，常驻" data-node-tag="每个容器一个" data-node-context="每个容器一套 —— shim 和它的孩子，跟 containerd 是两拨人">
+          <title>containerd-shim · 容器进程的父进程，常驻 · 每个容器一套 —— shim 和它的孩子，跟 containerd 是两拨人 · 每个容器一个</title>
+          <rect x="60" y="388" width="206" height="62" rx="6" class="c-mask"/>
+          <rect x="60" y="388" width="206" height="62" rx="6" class="c-security" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="security" class="semantic-sigil s-security" transform="translate(66 394) scale(0.6875)">
+            <path d="M8 2.2 13 4v3.5c0 3.1-1.8 5.4-5 6.5-3.2-1.1-5-3.4-5-6.5V4Z"/>
+            <path d="m5.8 8 1.5 1.5 3-3"/>
+          </g>
+          <text data-detail-anchor x="163" y="417" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">containerd-shim</text>
+        <text data-detail="context" x="163" y="433" class="t-muted" font-size="9" text-anchor="middle">容器进程的父进程，常驻</text>
+        <text data-detail="fine" x="163" y="442" class="t-security" font-size="7" text-anchor="middle">每个容器一个</text>
+        </g>
+
+        <g id="node-img" data-node-id="img" data-node-label="镜像层" tabindex="0" role="button" aria-label="Focus 镜像层, 只读，叠起来就是一个 rootfs, 磁盘 —— 镜像睡在这里，不在内存里" aria-pressed="false" data-node-kind="external" data-node-sublabel="只读，叠起来就是一个 rootfs" data-node-context="磁盘 —— 镜像睡在这里，不在内存里">
+          <title>镜像层 · 只读，叠起来就是一个 rootfs · 磁盘 —— 镜像睡在这里，不在内存里</title>
+          <rect x="870" y="388" width="206" height="58" rx="6" class="c-mask"/>
+          <rect x="870" y="388" width="206" height="58" rx="6" class="c-external" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="external" class="semantic-sigil s-external" transform="translate(876 394) scale(0.6875)">
+            <rect x="2.5" y="5" width="8.5" height="8" rx="1.5"/>
+            <path d="M8 2.5h5.5V8M13.5 2.5 7.5 8.5"/>
+          </g>
+          <text data-detail-anchor x="973" y="415" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">镜像层</text>
+        <text data-detail="context" x="973" y="431" class="t-muted" font-size="9" text-anchor="middle">只读，叠起来就是一个 rootfs</text>
+        </g>
+
+        <g id="node-nginx" data-node-id="nginx" data-node-label="nginx 进程" tabindex="0" role="button" aria-label="Focus nginx 进程, 容器里真正跑的东西, 每个容器一套 —— shim 和它的孩子，跟 containerd 是两拨人" aria-pressed="false" data-node-kind="frontend" data-node-sublabel="容器里真正跑的东西" data-node-context="每个容器一套 —— shim 和它的孩子，跟 containerd 是两拨人">
+          <title>nginx 进程 · 容器里真正跑的东西 · 每个容器一套 —— shim 和它的孩子，跟 containerd 是两拨人</title>
+          <rect x="60" y="528" width="196" height="60" rx="6" class="c-mask"/>
+          <rect x="60" y="528" width="196" height="60" rx="6" class="c-frontend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="frontend" class="semantic-sigil s-frontend" transform="translate(66 534) scale(0.6875)">
+            <rect x="2" y="3" width="12" height="10" rx="2"/>
+            <path d="M2 6.5h12"/>
+            <circle cx="4.1" cy="4.8" r=".7" class="sigil-fill"/>
+            <circle cx="6.3" cy="4.8" r=".7" class="sigil-fill"/>
+          </g>
+          <text data-detail-anchor x="158" y="556" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">nginx 进程</text>
+        <text data-detail="context" x="158" y="572" class="t-muted" font-size="9" text-anchor="middle">容器里真正跑的东西</text>
+        </g>
+
+        <g id="node-java" data-node-id="java" data-node-label="java 进程" tabindex="0" role="button" aria-label="Focus java 进程, 另一个容器，另配一个 shim, 每个容器一套 —— shim 和它的孩子，跟 containerd 是两拨人" aria-pressed="false" data-node-kind="frontend" data-node-sublabel="另一个容器，另配一个 shim" data-node-context="每个容器一套 —— shim 和它的孩子，跟 containerd 是两拨人">
+          <title>java 进程 · 另一个容器，另配一个 shim · 每个容器一套 —— shim 和它的孩子，跟 containerd 是两拨人</title>
+          <rect x="600" y="528" width="206" height="60" rx="6" class="c-mask"/>
+          <rect x="600" y="528" width="206" height="60" rx="6" class="c-frontend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="frontend" class="semantic-sigil s-frontend" transform="translate(606 534) scale(0.6875)">
+            <rect x="2" y="3" width="12" height="10" rx="2"/>
+            <path d="M2 6.5h12"/>
+            <circle cx="4.1" cy="4.8" r=".7" class="sigil-fill"/>
+            <circle cx="6.3" cy="4.8" r=".7" class="sigil-fill"/>
+          </g>
+          <text data-detail-anchor x="703" y="556" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">java 进程</text>
+        <text data-detail="context" x="703" y="572" class="t-muted" font-size="9" text-anchor="middle">另一个容器，另配一个 shim</text>
+        </g>
+
+        <g id="node-ns" data-node-id="ns" data-node-label="namespace" tabindex="0" role="button" aria-label="Focus namespace, PID / NET / MNT / UTS …, 内核 —— 容器在这里的全部痕迹，就是这些标签和限额，没有「容器」这个对象" aria-pressed="false" data-node-kind="database" data-node-sublabel="PID / NET / MNT / UTS …" data-node-context="内核 —— 容器在这里的全部痕迹，就是这些标签和限额，没有「容器」这个对象">
+          <title>namespace · PID / NET / MNT / UTS … · 内核 —— 容器在这里的全部痕迹，就是这些标签和限额，没有「容器」这个对象</title>
+          <rect x="60" y="668" width="196" height="58" rx="6" class="c-mask"/>
+          <rect x="60" y="668" width="196" height="58" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(66 674) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <text data-detail-anchor x="158" y="695" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">namespace</text>
+        <text data-detail="context" x="158" y="711" class="t-muted" font-size="9" text-anchor="middle">PID / NET / MNT / UTS …</text>
+        </g>
+
+        <g id="node-cg" data-node-id="cg" data-node-label="cgroup" tabindex="0" role="button" aria-label="Focus cgroup, 能用多少 CPU / 内存, 内核 —— 容器在这里的全部痕迹，就是这些标签和限额，没有「容器」这个对象" aria-pressed="false" data-node-kind="database" data-node-sublabel="能用多少 CPU / 内存" data-node-context="内核 —— 容器在这里的全部痕迹，就是这些标签和限额，没有「容器」这个对象">
+          <title>cgroup · 能用多少 CPU / 内存 · 内核 —— 容器在这里的全部痕迹，就是这些标签和限额，没有「容器」这个对象</title>
+          <rect x="330" y="668" width="180" height="58" rx="6" class="c-mask"/>
+          <rect x="330" y="668" width="180" height="58" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(336 674) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <text data-detail-anchor x="420" y="695" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">cgroup</text>
+        <text data-detail="context" x="420" y="711" class="t-muted" font-size="9" text-anchor="middle">能用多少 CPU / 内存</text>
+        </g>
+
+        <g id="node-net" data-node-id="net" data-node-label="网络栈" tabindex="0" role="button" aria-label="Focus 网络栈, veth 网卡 · iptables 规则, 内核 —— 容器在这里的全部痕迹，就是这些标签和限额，没有「容器」这个对象" aria-pressed="false" data-node-kind="database" data-node-sublabel="veth 网卡 · iptables 规则" data-node-context="内核 —— 容器在这里的全部痕迹，就是这些标签和限额，没有「容器」这个对象">
+          <title>网络栈 · veth 网卡 · iptables 规则 · 内核 —— 容器在这里的全部痕迹，就是这些标签和限额，没有「容器」这个对象</title>
+          <rect x="600" y="668" width="206" height="58" rx="6" class="c-mask"/>
+          <rect x="600" y="668" width="206" height="58" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(606 674) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <text data-detail-anchor x="703" y="695" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">网络栈</text>
+        <text data-detail="context" x="703" y="711" class="t-muted" font-size="9" text-anchor="middle">veth 网卡 · iptables 规则</text>
+        </g>
+
+        <!-- Connection labels -->
+        <g data-detail="context" data-edge-from="api" data-edge-to="kubelet" data-edge-label="期望状态" data-edge-key="0" data-edge-id="e1">
+          <rect x="274.8" y="217" width="48.4" height="14" rx="3" class="c-mask"/>
+          <text x="299" y="227" class="t-muted" font-size="8" text-anchor="middle">期望状态</text>
+        </g>
+        <g data-detail="context" data-edge-from="kubelet" data-edge-to="containerd" data-edge-label="CRI" data-edge-key="1" data-edge-id="e2">
+          <rect x="413" y="259" width="30" height="14" rx="3" class="c-mask"/>
+          <text x="428" y="269" class="t-backend" font-size="8" text-anchor="middle">CRI</text>
+        </g>
+        <g data-detail="context" data-edge-from="containerd" data-edge-to="shim" data-edge-label="fork" data-edge-key="2" data-edge-id="e3">
+          <rect x="418" y="329" width="30" height="14" rx="3" class="c-mask"/>
+          <text x="433" y="339" class="t-muted" font-size="8" text-anchor="middle">fork</text>
+        </g>
+        <g data-detail="context" data-edge-from="shim" data-edge-to="nginx" data-edge-label="亲爹" data-edge-key="3" data-edge-id="e4">
+          <rect x="156" y="454" width="30" height="14" rx="3" class="c-mask"/>
+          <text x="171" y="464" class="t-backend" font-size="8" text-anchor="middle">亲爹</text>
+        </g>
+        <g data-detail="context" data-edge-from="img" data-edge-to="java" data-edge-label="只读根目录" data-edge-key="4" data-edge-id="e5">
+          <rect x="809" y="497" width="58" height="14" rx="3" class="c-mask"/>
+          <text x="838" y="507" class="t-messagebus" font-size="8" text-anchor="middle">只读根目录</text>
+        </g>
+
+        <!-- Legend -->
+        <g data-legend data-legend-bridge>
+          <text x="40" y="778" class="t-primary" font-size="12" font-weight="650">Legend</text>
+          <g data-legend-semantic-kind="frontend" data-legend-kind="frontend" data-legend-label="Frontend" data-legend-x="40" data-legend-baseline="798" data-legend-width="83">
+            <rect x="40" y="789" width="16" height="10" rx="2.5" class="c-frontend" stroke-width="1"/>
+            <text x="62" y="798" class="t-muted" font-size="10" font-weight="500">Frontend</text>
+          </g>
+          <g data-legend-semantic-kind="backend" data-legend-kind="backend" data-legend-label="Backend" data-legend-x="145" data-legend-baseline="798" data-legend-width="78">
+            <rect x="145" y="789" width="16" height="10" rx="2.5" class="c-backend" stroke-width="1"/>
+            <text x="167" y="798" class="t-muted" font-size="10" font-weight="500">Backend</text>
+          </g>
+          <g data-legend-semantic-kind="database" data-legend-kind="database" data-legend-label="Database" data-legend-x="245" data-legend-baseline="798" data-legend-width="83">
+            <rect x="245" y="789" width="16" height="10" rx="2.5" class="c-database" stroke-width="1"/>
+            <text x="267" y="798" class="t-muted" font-size="10" font-weight="500">Database</text>
+          </g>
+          <g data-legend-semantic-kind="cloud" data-legend-kind="cloud" data-legend-label="Cloud" data-legend-x="350" data-legend-baseline="798" data-legend-width="68">
+            <rect x="350" y="789" width="16" height="10" rx="2.5" class="c-cloud" stroke-width="1"/>
+            <text x="372" y="798" class="t-muted" font-size="10" font-weight="500">Cloud</text>
+          </g>
+          <g data-legend-semantic-kind="security" data-legend-kind="security" data-legend-label="Security" data-legend-x="440" data-legend-baseline="798" data-legend-width="83">
+            <rect x="440" y="789" width="16" height="10" rx="2.5" class="c-security" stroke-width="1"/>
+            <text x="462" y="798" class="t-muted" font-size="10" font-weight="500">Security</text>
+          </g>
+          <g data-legend-semantic-kind="external" data-legend-kind="external" data-legend-label="External" data-legend-x="545" data-legend-baseline="798" data-legend-width="83">
+            <rect x="545" y="789" width="16" height="10" rx="2.5" class="c-external" stroke-width="1"/>
+            <text x="567" y="798" class="t-muted" font-size="10" font-weight="500">External</text>
+          </g>
+        </g>
+      </svg>
+      <figcaption>管理平面（一个节点一套）和每个容器的 shim 是两拨人。<mark class="mk-blue">容器进程不经过它们，直接站在内核上。</mark></figcaption>
+      <p class="arch-hint">
+        <span class="idle">点头上的任意一个框，只看它和它连出去的关系</span>
+        <span class="focused">再点一次空白处取消</span>
+      </p>
+    </figure><p>这张图上有三处值得盯着看：</p>
+<ul class="check warn"><li>containerd 和容器进程之间没有箭头：它们不是父子，是两个各自的进程</li><li>shim 的箭头是实线加粗的，那才是唯一的父子关系</li><li>内核那一段标着 namespace / cgroup / 网络栈，这就是「容器」在系统里的全部痕迹</li></ul><hr>
+<h2 id="那容器到底是个什么东西"><span class="num">03</span>那「容器」到底是个什么东西</h2>
+<p>直说：<mark class="mk-blue"><strong>内核里没有「容器」这个对象。</strong></mark></p>
+<p>它是一个纯约定俗成的说法，指代的是这么一组东西：</p>
+<div class="flowd has-grid has-groups" data-flow data-edges="[{&quot;from&quot;:&quot;proc&quot;,&quot;to&quot;:&quot;ns&quot;,&quot;label&quot;:&quot;把标签挂到这个进程上&quot;},{&quot;from&quot;:&quot;ns&quot;,&quot;to&quot;:&quot;cg&quot;,&quot;label&quot;:&quot;同上&quot;},{&quot;from&quot;:&quot;cg&quot;,&quot;to&quot;:&quot;root&quot;,&quot;label&quot;:&quot;同上&quot;}]">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"><div class="fgroup tone-blue" data-group-box="notobj">
+          <span class="fgroup-label">你在 docker ps 里看到的那一行，在内存里对应的就是这些</span>
+        </div></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-blue" data-id="proc" data-group="notobj">
+              
+              
+              <b>一个（组）普通进程</b>
+              <small>nginx、java，跟你在本机直接跑的一模一样</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="ns" data-group="notobj">
+              
+              
+              <b>一组 namespace 标签</b>
+              <small>决定它能看见哪些别的进程、哪块网卡</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="cg" data-group="notobj">
+              
+              
+              <b>一个 cgroup</b>
+              <small>决定它最多能用多少 CPU、内存、IO</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="root" data-group="notobj">
+              
+              
+              <b>一个 rootfs</b>
+              <small>镜像叠出来的只读根目录，加上一层可写层</small>
+            </div></div></div>
+      
+    </div><p><code>docker run nginx</code> 在你眼里是「启动了一个容器」，在系统眼里是「<strong>fork 一个进程，然后给这个进程挂上几样属性</strong>」。</p>
+<p>这也解释了一件让你困惑的事：<strong>为什么 <code>docker ps</code> 看到的容器、<code>ps aux</code> 看到的 nginx 进程、<code>kubectl get pods</code> 看到的 Pod，是同一件事的三个说法。</strong></p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>视角</th><th>看到的是什么</th><th>同一个东西的不同包装</th></tr></thead><tbody><tr><th>docker ps</th><td data-label="看到的是什么">容器 ID + 名字 + 镜像</td><td data-label="同一个东西的不同包装">给「那个进程」起了个人类友好的名字</td></tr><tr><th>ps aux</th><td data-label="看到的是什么">nginx: master process</td><td data-label="同一个东西的不同包装"><span class="tag tone-green"><mark class="mk-blue">这才是真实存在的东西</mark>：一个进程</span></td></tr><tr><th>lsns / systemd-cgls</th><td data-label="看到的是什么">namespace 列表 / cgroup 树</td><td data-label="同一个东西的不同包装">那个进程身上挂的属性</td></tr><tr><th>kubectl get pods</th><td data-label="看到的是什么">Pod 名字 + 状态</td><td data-label="同一个东西的不同包装">K8s 给一组共享标签的进程打的另一个名字</td></tr></tbody></table></div><hr>
+<h2 id="一台机器上的进程家族树"><span class="num">04</span>一台机器上的进程家族树</h2>
+<p>按「谁 fork 了谁」画，比按「谁调用谁」画清楚得多：</p>
+<div class="tree" data-tree><ul class="tlist"><li class="has-kids">
+            <div class="tnode tone-violet" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>systemd (PID 1)</b>
+              
+              <span class="tnote">机器上所有进程的根</span>
+            </div>
+            <ul class="tlist"><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>kubelet</b>
+              <code>由 systemd 拉起</code>
+              <span class="tnote">它不 fork 容器，只跟 containerd 说话</span>
+            </div>
+            
+          </li><li class="has-kids">
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>containerd</b>
+              <code>由 systemd 拉起</code>
+              <span class="tnote">管理平面。它 fork 的是 shim，不是容器进程</span>
+            </div>
+            <ul class="tlist"><li class="has-kids">
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>containerd-shim</b>
+              
+              <span class="tnote">每个运行中的容器一个。它是容器进程真正的父进程</span>
+            </div>
+            <ul class="tlist"><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>nginx</b>
+              
+              <span class="tnote"><mark class="mk-blue">容器进程在这里</mark>。</span>
+            </div>
+            
+          </li></ul>
+          </li><li class="has-kids">
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>containerd-shim</b>
+              
+              <span class="tnote">另一个容器的</span>
+            </div>
+            <ul class="tlist"><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>java</b>
+              
+              <span class="tnote">它也是别人的孩子，不是你想象的那个层级</span>
+            </div>
+            
+          </li></ul>
+          </li></ul>
+          </li></ul>
+          </li></ul></div><p><code>runc</code> 不在这棵树里，<mark class="mk-blue">因为它活不到你能 <code>ps</code> 到它的时候。</mark> 它在 shim 被创建的那一刻出现，建完进程就走。</p>
+<div class="callout tone-violet">
+      <span class="ic">🧬</span>
+      <div><p><strong>「容器」和「Pod」都不在这棵树上，因为它们都不是进程。</strong></p>
+<p>它们是<strong>标签的集合</strong>：</p>
+<ul>
+<li><mark class="mk-blue">容器</mark> = 一个进程 + 那四样属性（namespace / cgroup / rootfs / 自己的 shim）</li>
+<li><mark class="mk-blue">Pod</mark> = 几个共享 Network / IPC / UTS namespace 的容器，再加一个 <code>pause</code> 容器当它们的共享骨架</li>
+</ul>
+<p>所以「Pod 里有哪些容器」这个问题问得通，
+而「Pod 进程的 PID 是多少」问不通：<strong>它自己没有 PID。</strong></p>
+</div>
+    </div><hr>
+<h2 id="那镜像呢"><span class="num">05</span>那镜像呢</h2>
+<p>镜像<strong>不在内存里</strong>。它在磁盘上睡大觉：</p>
+<div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-muted">第 1 站</span>
+            <span class="name">镜像仓库（别的机器）</span>
+            <span class="spacer"></span>
+            <span class="tag tone-muted">躺着</span>
+          </div>
+          <div class="rec"><div class="">
+            <b>长什么样</b><span>registry.example.com/backend:v1</span></div><div class="">
+            <b>在哪</b><span>Harbor / Docker Hub / 云厂商的仓库</span></div></div>
+          
+          <p class="jnote">这一步只在「拉取」时发生，拉完就跟它没关系了</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">containerd 把它拉下来<span class="note">落到这台机器的磁盘上</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-blue">第 2 站</span>
+            <span class="name">节点磁盘</span>
+            <span class="spacer"></span>
+            <span class="tag tone-blue">==睡在这里，不在内存里==</span>
+          </div>
+          <div class="rec"><div class="">
+            <b>解压后的层</b><span>/var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/</span></div><div class="">
+            <b>原始压缩包</b><span>/var/lib/containerd/io.containerd.content.v1.content/</span></div><div class="warn">
+            <b>用 Docker 的话</b><span>/var/lib/docker/overlay2/</span><em>另一套目录</em></div></div>
+          
+          <p class="jnote bad">镜像层是只读的，所有容器共用同一份</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">创建容器时<span class="note">叠成一个文件系统给进程看</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-green">第 3 站</span>
+            <span class="name">容器进程眼里的根目录</span>
+            <span class="spacer"></span>
+            <span class="tag tone-green">只是挂载视图</span>
+          </div>
+          <div class="rec"><div class="">
+            <b>看到的是</b><span>一个完整的根目录 /</span></div><div class="ok">
+            <b>实际是</b><span>几个只读层叠起来 + 一层可写层</span><em>写时才复制</em></div></div>
+          
+          <p class="jnote">这一站才和内存有关系。但进内存的是「被读到的那些块」，不是整个镜像</p>
+        </div><p><mark class="mk-blue">所以「镜像跑起来需要容器吗」这个问题，答案要分两半：</mark></p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>说法</th><th>对不对</th><th>准确的问法</th></tr></thead><tbody><tr><th>镜像运行起来需要容器</th><td data-label="对不对"><span class="tag tone-amber">大致对，但不准确</span></td><td data-label="准确的问法">镜像自己永远不会运行。真正运行的是<strong>进程</strong>，容器只是这个进程的包装说法</td></tr><tr><th>一个镜像可以有多个容器</th><td data-label="对不对"><span class="tag tone-green">对</span></td><td data-label="准确的问法">准确说：同一份只读镜像，可以给多个进程当根目录。100 个副本 = 一份镜像 + 100 个进程</td></tr><tr><th>容器是镜像的实例</th><td data-label="对不对"><span class="tag tone-amber">对，但别当成面向对象</span></td><td data-label="准确的问法">没有「类」和「对象」那种实体；就是同一批只读层被挂到不同的进程上</td></tr></tbody></table></div><hr>
+<h2 id="docker-单机-和-k8s-节点差在哪"><span class="num">06</span>Docker 单机 和 K8s 节点，差在哪</h2>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>有什么</th><th>只管 Docker 的机器</th><th>K8s 工作节点</th></tr></thead><tbody><tr><th>容器进程</th><td data-label="只管 Docker 的机器"><span class="tag tone-green">有</span></td><td data-label="K8s 工作节点"><span class="tag tone-green">有，一模一样</span></td></tr><tr><th>containerd</th><td data-label="只管 Docker 的机器"><span class="tag tone-green">有</span></td><td data-label="K8s 工作节点"><span class="tag tone-green">有</span></td></tr><tr><th>containerd-shim</th><td data-label="只管 Docker 的机器"><span class="tag tone-green">有</span></td><td data-label="K8s 工作节点"><span class="tag tone-green">有，一模一样</span></td></tr><tr><th>runc</th><td data-label="只管 Docker 的机器"><span class="tag tone-green">有，一样是一次性的</span></td><td data-label="K8s 工作节点"><span class="tag tone-green">有，一样是一次性的</span></td></tr><tr><th>dockerd</th><td data-label="只管 Docker 的机器"><span class="tag tone-amber">有</span></td><td data-label="K8s 工作节点"><span class="tag tone-red"><mark class="mk-blue">没有</mark> —— K8s 不需要它</span></td></tr><tr><th>docker CLI</th><td data-label="只管 Docker 的机器"><span class="tag tone-amber">有</span></td><td data-label="K8s 工作节点"><span class="tag tone-red">没有</span></td></tr><tr><th>kubelet</th><td data-label="只管 Docker 的机器"><span class="tag tone-red">没有</span></td><td data-label="K8s 工作节点"><span class="tag tone-green">有</span></td></tr><tr><th>pause 容器</th><td data-label="只管 Docker 的机器"><span class="tag tone-red">没有</span></td><td data-label="K8s 工作节点"><span class="tag tone-green">每个 Pod 一个</span></td></tr></tbody></table></div><p><mark class="mk-blue">底下三层完全一样。</mark> K8s 不是「在 Docker 之上加了一层」，而是<strong>换掉了最上面那层用户界面</strong>：</p>
+<div class="flowd has-grid has-groups" data-flow data-edges="[{&quot;from&quot;:&quot;cli&quot;,&quot;to&quot;:&quot;dockerd&quot;,&quot;label&quot;:&quot;&quot;},{&quot;from&quot;:&quot;api&quot;,&quot;to&quot;:&quot;kube&quot;,&quot;label&quot;:&quot;&quot;},{&quot;from&quot;:&quot;dockerd&quot;,&quot;to&quot;:&quot;cd&quot;,&quot;label&quot;:&quot;gRPC&quot;},{&quot;from&quot;:&quot;kube&quot;,&quot;to&quot;:&quot;cd&quot;,&quot;label&quot;:&quot;CRI&quot;,&quot;labelDx&quot;:46},{&quot;from&quot;:&quot;cd&quot;,&quot;to&quot;:&quot;shim&quot;,&quot;label&quot;:&quot;fork&quot;},{&quot;from&quot;:&quot;shim&quot;,&quot;to&quot;:&quot;ctn&quot;,&quot;label&quot;:&quot;亲爹&quot;}]">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"><div class="fgroup tone-blue" data-group-box="dk">
+          <span class="fgroup-label">Docker 单机的入口</span>
+        </div><div class="fgroup tone-green" data-group-box="k8">
+          <span class="fgroup-label">K8s 节点的入口</span>
+        </div><div class="fgroup tone-muted" data-group-box="same">
+          <span class="fgroup-label">这两边一样</span>
+        </div></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-blue" data-id="cli" data-group="dk">
+              
+              
+              <b>docker CLI</b>
+              <small>你说 docker run</small>
+            </div><div class="fnode tone-green" data-id="api" data-group="k8">
+              
+              
+              <b>kubectl</b>
+              <small>你说 kubectl apply</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-blue" data-id="dockerd" data-group="dk">
+              
+              
+              <b>dockerd</b>
+              <small>把命令翻译一下，再往下交</small>
+            </div><div class="fnode tone-green" data-id="kube" data-group="k8">
+              
+              
+              <b>kubelet</b>
+              <small>盯着期望状态，有差距就去补</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="cd" data-group="same">
+              
+              
+              <b>containerd</b>
+              <small>一个节点一个</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="shim" data-group="same">
+              
+              
+              <b>containerd-shim</b>
+              <small>每个容器一个</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="ctn" data-group="same">
+              
+              
+              <b>容器进程</b>
+              <small>nginx / java</small>
+            </div></div></div>
+      
+    </div><hr>
+<h2 id="pod-多出来的那个东西"><span class="num">07</span>Pod 多出来的那个东西</h2>
+<p>K8s 比 Docker 多出来的核心概念是 <strong>Pod</strong>，而 Pod 在内存里的实现，靠的是一个几乎什么都不干的容器：</p>
+<div class="flowd has-grid has-groups" data-flow data-edges="[{&quot;from&quot;:&quot;pause&quot;,&quot;to&quot;:&quot;a&quot;,&quot;label&quot;:&quot;把 NET 这个 namespace 借给它&quot;},{&quot;from&quot;:&quot;pause&quot;,&quot;to&quot;:&quot;b&quot;,&quot;label&quot;:&quot;同一个&quot;},{&quot;from&quot;:&quot;b&quot;,&quot;to&quot;:&quot;why&quot;,&quot;label&quot;:&quot;&quot;}]">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"><div class="fgroup tone-green" data-group-box="pod">
+          <span class="fgroup-label">一个 Pod 在内存里 = 一个 pause 容器 + 若干业务容器</span>
+        </div></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-violet" data-id="pause" data-group="pod">
+              
+              
+              <b>pause 容器</b>
+              <small>镜像只有几百 KB，跑起来就干一件事：sleep</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="a" data-group="pod">
+              
+              
+              <b>nginx 容器</b>
+              <small>共享 pause 的 Network namespace</small>
+            </div><div class="fnode tone-green" data-id="b" data-group="pod">
+              
+              
+              <b>sidecar 容器</b>
+              <small>共享同一个 Network namespace</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-amber" data-id="why" data-group="pod">
+              
+              
+              <b>为什么要有它</b>
+              <small>它持有那组共享的 namespace。业务容器崩了重建，Pod 的网络身份不变</small>
+            </div></div></div>
+      
+    </div><p>所以同一个 Pod 里的两个容器，<code>localhost</code> 能互相访问，<mark class="mk-blue">因为它们共用同一张网卡，不是因为它们之间有网络。</mark></p>
+<div class="callout tone-violet">
+      <span class="ic">📦</span>
+      <div><p><strong>从这里就能看出 Pod 的定位：它不是「更大的容器」，是「共享命名空间的一小组容器」。</strong></p>
+<p>它带来的实际约束是：</p>
+<ul>
+<li>同一 Pod 里的容器<strong>必须被调度到同一台机器上</strong>（因为要共享 namespace）</li>
+<li>它们<strong>一起生、一起死</strong>（生命周期绑在一起）</li>
+<li>端口是按 Pod 分的：<mark class="mk-blue">同一个 Pod 里两个容器不能都监听 80</mark></li>
+</ul>
+<p>这三条都不是人为规定，是「共享 namespace」这个实现方式的直接推论。</p>
+</div>
+    </div><hr>
+<div class="quiz"><details>
+        <summary>containerd 和容器进程是什么关系？</summary>
+        <div class="a"><p>不是父子，也不是上下级。containerd 是节点级的管理进程，它 fork 出的是 shim；
+shim 才是容器进程的父进程（负责 waitpid 收尸、转发 stdio、汇报退出码）。
+containerd 直接和容器进程之间没有任何层级关系，它们都只是内核上的普通进程。
+这也是为什么重启 containerd 不会影响正在运行的容器：顶着的是 shim。</p>
+</div>
+      </details><details>
+        <summary>runc 在系统里长期存在吗？</summary>
+        <div class="a"><p>不存在。它是「一次性」的：containerd 在创建容器时 fork 出它，
+它调 clone / unshare / setns 把进程建出来、套上 namespace 和 cgroup，
+然后就退出了。它更像接生婆而不是保姆，所以任何把它画成「一层」的图都是错的。</p>
+</div>
+      </details><details>
+        <summary>「容器」在 Linux 里对应哪个内核对象？</summary>
+        <div class="a"><p>没有这样一个对象。内核里没有 container 这个东西，
+「容器」是一个约定俗成的说法，指代「一个（组）普通进程 + 一组 namespace 标签</p>
+<ul>
+<li>一个 cgroup 限额 + 一个 rootfs」这一整包。
+所以 docker ps 看到的条目、ps 看到的 nginx 进程、kubectl get pods 看到的 Pod，
+是同一个东西的三种不同命名方式。</li>
+</ul>
+</div>
+      </details><details>
+        <summary>我一个镜像起了 3 个副本，磁盘上会存 3 份镜像吗？</summary>
+        <div class="a"><p>不会。镜像层是只读的，3 个副本共用同一份。
+它们各自的差别只在那一层「可写层」，而且写时才复制。
+所以磁盘占用是「一份镜像 + 三份改动」，不是三份镜像。</p>
+</div>
+      </details><details>
+        <summary>cd 进一个容器里改的东西，会在别的副本里出现吗？</summary>
+        <div class="a"><p>不会。你改的落在那个容器自己的可写层上，只对该容器可见。
+镜像的那些层始终是只读的，这是容器能秒级启动、能复用的前提。
+要持久化得挂 volume，要固化成新镜像得 commit / build。</p>
+</div>
+      </details></div>
+
+    <footer>
+      <span>一台机器上：Docker / K8s / 容器 / 镜像到底谁压着谁</span>
+      <span>最后更新 2026-10-06 · 单文件可离线打开</span>
+    </footer>
+  </main>
+</div>
+
+<script src="../../assets/app.js"></script>
+</body>
+</html>

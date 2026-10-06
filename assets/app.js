@@ -1226,6 +1226,25 @@
   };
   const mountOf = (root) => root.querySelector('[data-mount]') || root;
 
+  /* 行内轻量标记 —— 控件这边拼出来的文字要用到和积木一样的强调写法。
+     积木那边是构建期的 tools/lib/blocks.mjs 在做，控件跑在浏览器里拿不到它，
+     所以这里实现一份**最小**的：==强调== / **重音** / `代码`。
+     只处理这三种，别往里加东西 —— 两边逻辑越像，越容易漂移。 */
+  const richText = (host, text) => {
+    const src = String(text == null ? '' : text);
+    const re = /==([^=]+)==|\*\*([^*]+)\*\*|`([^`]+)`/g;
+    let last = 0, m;
+    while ((m = re.exec(src))) {
+      if (m.index > last) host.append(document.createTextNode(src.slice(last, m.index)));
+      if (m[1] !== undefined) host.append(el('span', 'hl-tag', m[1]));
+      else if (m[2] !== undefined) host.append(el('strong', '', m[2]));
+      else host.append(el('code', '', m[3]));
+      last = m.index + m[0].length;
+    }
+    if (last < src.length) host.append(document.createTextNode(src.slice(last)));
+    return host;
+  };
+
   /* —— 控件：逐步执行器 ——
      点下一步，看代码/状态逐行走。适合讲算法、协议、状态机。
      config:
@@ -4635,6 +4654,137 @@
         if (step >= 3) return stop();
         step++; draw();
       }, cfg.interval || 900);
+    });
+    draw();
+  };
+
+  /* ============================================================
+     控件：运行时进程的生命周期
+     ------------------------------------------------------------
+     一行一个进程，横轴是时间。推着时间往前走，看谁常驻、谁只是
+     一闪而过、谁跟谁根本没有父子关系。
+
+     要弄死的一个误会：
+       「containerd 上面是 shim，shim 上面是容器」——
+       实际上 runc 建完就退，shim 是容器进程的爹，
+       而 containerd 重启根本不影响容器。
+
+     config:
+       procs: [{ id, name, sub, tone, spans: [[起点, 终点]], note }]
+       steps: [{ at, what }]
+       tMax:  8
+  ============================================================ */
+  WIDGETS['runtime-timeline'] = (root) => {
+    const cfg = cfgOf(root);
+    const procs = cfg.procs || [];
+    const steps = cfg.steps || [];
+    if (!procs.length || !steps.length) return;
+    const box = mountOf(root);
+    const statusEl = root.querySelector('[data-status]');
+    const T = cfg.tMax || 8;
+
+    /* —— 控制条 —— */
+    const bar = el('div', 'rt-bar');
+    const bNext = el('button', 'rt-btn rt-primary', '下一步');
+    const bPlay = el('button', 'rt-btn', '▶ 自动跑');
+    const bReset = el('button', 'rt-btn rt-ghost', '重置');
+    const clock = el('span', 'rt-clock', 't = 0');
+    bar.append(bNext, bPlay, bReset, clock);
+
+    /* —— 时间轴 + 每个进程一行 —— */
+    const grid = el('div', 'rt-grid');
+    const axis = el('div', 'rt-axis');
+    for (let i = 0; i <= T; i++) {
+      const tk = el('span', 'rt-tick', String(i));
+      tk.style.left = (i / T) * 100 + '%';
+      axis.append(tk);
+    }
+    grid.append(axis);
+
+    const rows = procs.map((p) => {
+      const row = el('div', 'rt-row');
+      const name = el('div', 'rt-name');
+      name.append(el('b', '', p.name));
+      if (p.sub) name.append(el('span', 'rt-sub', p.sub));
+      const track = el('div', 'rt-track');
+      const bars = (p.spans || []).map(([a, b]) => {
+        const seg = el('div', 'rt-span', '');
+        seg.style.left = (a / T) * 100 + '%';
+        seg.style.width = ((b - a) / T) * 100 + '%';
+        track.append(seg);
+        return seg;
+      });
+      /* 一次性的那些，在条上标个「就一下」 */
+      const oneShot = (p.spans || []).every(([a, b]) => b - a <= 1);
+      if (oneShot) {
+        const tag = el('span', 'rt-shot', '只存在一瞬间');
+        tag.style.left = (p.spans[0][0] / T) * 100 + '%';
+        track.append(tag);
+      }
+      const cursor = el('div', 'rt-cursor');
+      track.append(cursor);
+      row.append(name, track);
+      grid.append(row);
+      return { p, row, bars, cursor, oneShot };
+    });
+
+    /* —— 这一刻发生了什么 —— */
+    const now = el('div', 'rt-now');
+    box.append(bar, grid, now);
+
+    let i = 0;
+    let timer = null;
+
+    function draw() {
+      const st = steps[i];
+      const t = st.at;
+      clock.textContent = `t = ${t}`;
+      bNext.disabled = i >= steps.length - 1;
+      rows.forEach(({ p, bars, cursor, oneShot, row }) => {
+        /* 已经消失的进程整体变灰 —— “它已经不在了” */
+        const alive = (p.spans || []).some(([a, b]) => t >= a && t < b);
+        row.classList.toggle('is-gone', !alive && (p.spans || []).some(([a]) => t >= a));
+        row.classList.toggle('is-future', !(p.spans || []).some(([a]) => t >= a));
+        cursor.style.left = (t / T) * 100 + '%';
+        bars.forEach((b, k) => {
+          const [a, e] = p.spans[k];
+          b.classList.toggle('on', t >= a && t < e);
+          b.classList.toggle('past', t >= e);
+        });
+      });
+
+      now.textContent = '';
+      now.append(el('div', 'rt-now-head', `t = ${t}　·　第 ${i + 1} / ${steps.length} 步`));
+      now.append(richText(el('div', 'rt-now-text'), st.what));
+      /* 点一个进程看它到底是个什么角色 */
+      const alive = rows.filter(({ p }) => (p.spans || []).some(([a, b]) => t >= a && t < b));
+      if (alive.length) {
+        const list = el('div', 'rt-notes');
+        alive.forEach(({ p }) => {
+          const n = el('div', 'rt-note');
+          n.append(el('b', '', p.name));
+          const txt = el('span', '');
+          richText(txt, p.note || '');   /* append() 不返回节点，所以要先把 span 拿出来 */
+          n.append(txt);
+          list.append(n);
+        });
+        now.append(list);
+      }
+      if (statusEl) statusEl.textContent = `t = ${t}`;
+    }
+
+    function stop() { if (timer) { clearInterval(timer); timer = null; bPlay.textContent = '▶ 自动跑'; } }
+    bNext.addEventListener('click', () => { stop(); if (i < steps.length - 1) { i++; draw(); } });
+    bReset.addEventListener('click', () => { stop(); i = 0; draw(); });
+    bPlay.addEventListener('click', () => {
+      if (timer) return stop();
+      if (i >= steps.length - 1) i = 0;
+      bPlay.textContent = '⏸ 暂停';
+      draw();
+      timer = setInterval(() => {
+        if (i >= steps.length - 1) return stop();
+        i++; draw();
+      }, cfg.interval || 1400);
     });
     draw();
   };

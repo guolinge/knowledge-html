@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Flink 的 Source / Transformation / Sink：一条数据加工流水线</title>
-<meta name="description" content="九个算子不是平铺的，它们只分五类；keyBy 是唯一一个「不产出数据」的算子；而 Operator / Subtask / Task / TaskManager / Slot 这五个词各有各的位置。用同一批订单过一遍，看清每一层到底在做什么。" />
+<title>一台机器上：Docker / K8s / 容器 / 镜像到底谁压着谁</title>
+<meta name="description" content="常见的分层图是错的 —— 它把「谁创建谁」「谁在内存里」「谁管谁」「谁依赖谁的代码」四种关系压成了一根竖轴。真相是两个平面加一个内核：管理平面和容器进程是兄弟，runc 只活一瞬间，而「容器」在内核里根本不是一个对象。" />
 <style>
 /* ============================================================
    theme.css — 设计 token 与页面骨架
@@ -4342,43 +4342,20 @@ svg[data-preset="blueprint"] .c-security-group,
   <aside class="toc" id="toc">
       <p class="toc-title">目录</p>
       <a href="../../index.html" class="sub">← 全部笔记</a>
-      <a href="#一条流水线三段">一条流水线，三段</a>
-      <a href="#source五种入口">Source：五种入口</a>
-      <a href="#算子写在代码里的一张流程图">算子：写在代码里的一张流程图</a>
-      <a href="#运行时从算子到集群">运行时：从算子到集群</a>
-      <a href="#operator逻辑上的处理步骤" class="sub">Operator：逻辑上的处理步骤</a>
-      <a href="#subtask一个算子的并行副本" class="sub">Subtask：一个算子的并行副本</a>
-      <a href="#task真正被调度的执行单元" class="sub">Task：真正被调度的执行单元</a>
-      <a href="#taskmanager-和-slot" class="sub">TaskManager 和 Slot</a>
-      <a href="#把它们串起来" class="sub">把它们串起来</a>
-      <a href="#九个算子其实是五类">九个算子，其实是五类</a>
-      <a href="#亲手跑一遍同一批订单过不同算子">亲手跑一遍：同一批订单，过不同算子</a>
-      <a href="#keyby唯一一个不产出数据的算子">keyBy：唯一一个不产出数据的算子</a>
-      <a href="#为什么没有-keyby-就会算错" class="sub">为什么没有 keyBy 就会算错</a>
-      <a href="#keyby-怎么决定去哪一个哈希函数" class="sub">keyBy 怎么决定「去哪」：一个哈希函数</a>
-      <a href="#同一个-key-到同一个-task这句话不够准确" class="sub">「同一个 Key 到同一个 Task」这句话不够准确</a>
-      <a href="#并行度-2-时整条链路长什么样" class="sub">并行度 = 2 时，整条链路长什么样</a>
-      <a href="#reduce-和-aggregate-差在哪" class="sub">reduce 和 aggregate 差在哪</a>
-      <a href="#两个真正难的地方">两个真正难的地方</a>
-      <a href="#流式-join两条数据不一定同时到" class="sub">流式 join：两条数据不一定同时到</a>
-      <a href="#process需要等一会儿再检查时" class="sub">process：需要「等一会儿再检查」时</a>
-      <a href="#sink结果写到哪">Sink：结果写到哪</a>
-      <a href="#为什么要设计这么多算子">为什么要设计这么多算子</a>
-      <a href="#原因一把大函数拆成可组合的小步骤" class="sub">原因一：把大函数拆成可组合的小步骤</a>
-      <a href="#原因二让-flink-知道该怎么并行" class="sub">原因二：让 Flink 知道该怎么并行</a>
-      <a href="#原因三让状态可管理可恢复" class="sub">原因三：让状态可管理、可恢复</a>
-      <a href="#原因四让-flink-有机会做性能优化" class="sub">原因四：让 Flink 有机会做性能优化</a>
-      <a href="#原因五一套模型同时处理批和流" class="sub">原因五：一套模型同时处理批和流</a>
-      <a href="#连起来一个电商实时大盘">连起来：一个电商实时大盘</a>
-      <a href="#一句话总结" class="sub">一句话总结</a>
-      <a href="#自测">自测</a>
+      <a href="#那张分层图错在哪">那张「分层图」错在哪</a>
+      <a href="#真实的样子两个平面-一个内核">真实的样子：两个平面 + 一个内核</a>
+      <a href="#那容器到底是个什么东西">那「容器」到底是个什么东西</a>
+      <a href="#一台机器上的进程家族树">一台机器上的进程家族树</a>
+      <a href="#那镜像呢">那镜像呢</a>
+      <a href="#docker-单机-和-k8s-节点差在哪">Docker 单机 和 K8s 节点，差在哪</a>
+      <a href="#pod-多出来的那个东西">Pod 多出来的那个东西</a>
   </aside>
 
   <main>
     <div class="hero">
-      <span class="eyebrow">● 流处理 · Flink 作业结构</span>
-      <h1>Flink 的 Source / Transformation / Sink：一条数据加工流水线</h1>
-      <p class="lede">九个算子不是平铺的，它们只分五类；keyBy 是唯一一个「不产出数据」的算子；而 Operator / Subtask / Task / TaskManager / Slot 这五个词各有各的位置。用同一批订单过一遍，看清每一层到底在做什么。</p>
+      <span class="eyebrow">● 容器 · 运行时结构</span>
+      <h1>一台机器上：Docker / K8s / 容器 / 镜像到底谁压着谁</h1>
+      <p class="lede">常见的分层图是错的 —— 它把「谁创建谁」「谁在内存里」「谁管谁」「谁依赖谁的代码」四种关系压成了一根竖轴。真相是两个平面加一个内核：管理平面和容器进程是兄弟，runc 只活一瞬间，而「容器」在内核里根本不是一个对象。</p>
     </div>
 
     <div class="draft-banner">
@@ -4386,574 +4363,274 @@ svg[data-preset="blueprint"] .c-security-group,
     <span>本页状态为 <b>draft</b>：内容尚未人工核对，引用前请自行验证。</span>
   </div>
 
-    <div class="provenance"><span><b>来源</b> 用户粘贴的《Flink Source / Transformation / Sink》讲解原文（AI 中台问答） · 用户粘贴的《Flink 分布式 / Task / Slot》讲解原文（AI 中台问答）</span><span><b>生成</b> 2026-09-26</span><span><b>模型</b> deepseek-v4.1-flash</span></div>
-    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">Flink</span> <span class="tag tone-muted">Source</span> <span class="tag tone-muted">Transformation</span> <span class="tag tone-muted">Sink</span> <span class="tag tone-muted">算子</span> <span class="tag tone-muted">并行度</span></span></div>
+    <div class="provenance"><span><b>来源</b> containerd Runtime v2 文档 https://containerd.io/docs/2.4/runtime-v2/ · Kubernetes Pods https://kubernetes.io/docs/concepts/workloads/pods/ · Ian Lewis · The Almighty Pause Container https://www.ianlewis.org/en/almighty-pause-container · Docker 官方文档 · containerd 存储 https://github.com/docker/docs/blob/main/content/manuals/engine/storage/containerd.md</span><span><b>生成</b> 2026-10-06</span><span><b>模型</b> claude-opus-4-5</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">容器</span> <span class="tag tone-muted">K8s</span> <span class="tag tone-muted">containerd</span> <span class="tag tone-muted">runc</span></span></div>
 
-<blockquote>
-<p>九个 Transformation 算子看起来是平铺的，其实只分五类；而 <mark class="mk-blue"><code>keyBy</code> 根本不产出数据</mark> —— 它只决定后续计算「以什么为单位」。
-再往上走一层，<code>Operator / Subtask / Task / TaskManager / Slot</code> 这五个词也各有各的位置。这几条想通了，整条流水线就顺了。</p>
-</blockquote>
-<h2 id="一条流水线三段"><span class="num">01</span>一条流水线，三段</h2>
-<p>Flink 作业的形状很像一座工厂：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">原料进厂  →  加工、质检、组装  →  成品送到仓库或商店
+<h2 id="那张分层图错在哪"><span class="num">01</span>那张「分层图」错在哪</h2>
+<p>你手上那份回答，把这几样东西叠成了一根竖轴：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code>Deployment → Pod → Container → Image → containerd + runc → Linux 内核 → 硬件
 </code></pre></div>
-<p>换成 Flink 的词就是：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">Source  →  Transformation  →  Sink
-读进来      怎么加工           写出去
-</code></pre></div>
-<div class="pipe"><div class="lane tone-blue">
-        <div class="lane-meta">
-          <span class="ln">第一段</span>
-          <b>Source</b>
-          <small>数据从哪来</small>
-        </div>
-        <div class="lane-body"><div class="pnode">
-        <b>Kafka</b>
-        <small>order_topic</small>
-        <span class="tag tone-blue">消息队列</span>
-      </div><div class="pnode">
-        <b>MySQL CDC</b>
-        <small>binlog 变更流</small>
-        <span class="tag tone-blue">数据库</span>
-      </div><div class="pnode">
-        <b>文件</b>
-        <small>OSS / S3 / HDFS</small>
-        <span class="tag tone-blue">有界</span>
-      </div></div>
-      </div><div class="conn">
-      <span class="stem"></span>
-      <span class="pill">接进来<span class="note">变成 Flink 内部的一条数据流</span></span>
-      <span class="stem"></span><span class="head"></span>
-    </div><div class="lane tone-violet">
-        <div class="lane-meta">
-          <span class="ln">第二段</span>
-          <b>Transformation</b>
-          <small>数据怎么加工 —— 业务规则全在这里</small>
-        </div>
-        <div class="lane-body"><div class="pnode">
-        <b>清洗 / 过滤</b>
-        <small>map · filter · flatMap</small>
-        
-      </div><div class="pnode">
-        <b>分组 / 聚合</b>
-        <small>keyBy · reduce · aggregate</small>
-        
-      </div><div class="pnode">
-        <b>合并 / 关联</b>
-        <small>union · join</small>
-        
-      </div><div class="pnode tone-red">
-        <b>复杂事件</b>
-        <small>process</small>
-        <span class="tag tone-red">状态 + 定时器</span>
-      </div></div>
-      </div><div class="lane tone-green">
-        <div class="lane-meta">
-          <span class="ln">第三段</span>
-          <b>Sink</b>
-          <small>结果写到哪</small>
-        </div>
-        <div class="lane-body"><div class="pnode">
-        <b>ClickHouse</b>
-        <small>给 BI 看板查</small>
-        
-      </div><div class="pnode">
-        <b>Kafka</b>
-        <small>继续给下游消费</small>
-        
-      </div><div class="pnode">
-        <b>Elasticsearch</b>
-        <small>搜索 / 日志检索</small>
-        
-      </div></div>
-      </div></div><div class="callout tone-blue tinted">
-      <span class="ic">🏭</span>
-      <div><p>Source 只负责<strong>把数据接进来<strong>，Sink 只负责</strong>把结果送出去</strong>。
-<mark class="mk-blue">真正承载业务规则的只有中间那段</mark> —— 一个 Flink 作业写得对不对，八成取决于 Transformation。</p>
-</div>
-    </div><h2 id="source五种入口"><span class="num">02</span>Source：五种入口</h2>
-<div class="cards" data-cols="3"><div class="ccard tone-blue">
-          <span class="tag tone-blue">消息队列</span>
-          <h4>Kafka</h4>
-          <p>最常见的实时源。订单、埋点、支付、日志都往这里写，Flink 持续消费</p>
-          
-          
-        </div><div class="ccard tone-violet">
-          <span class="tag tone-violet">变更日志</span>
-          <h4>MySQL CDC</h4>
-          <p>读 binlog，拿到 INSERT / UPDATE / DELETE 变更流，而不是扫表</p>
-          
-          
-        </div><div class="ccard tone-green">
-          <span class="tag tone-green">有界</span>
-          <h4>文件</h4>
-          <p>OSS / S3 / HDFS 上的 CSV、Parquet。读完就没了 —— 这是有界流</p>
-          
-          
-        </div><div class="ccard tone-blue">
-          <span class="tag tone-blue">消息队列</span>
-          <h4>RocketMQ / Pulsar</h4>
-          <p>和 Kafka 同类，公司已经在用哪个就用哪个</p>
-          
-          
-        </div><div class="ccard tone-muted">
-          <span class="tag tone-muted">学习用</span>
-          <h4>Socket</h4>
-          <p>本地起个端口手工敲几行字，用来学原理。生产环境不会用它</p>
-          
-          
-        </div></div><div class="callout tone-amber">
-      <span class="ic">⚠</span>
-      <div><p><mark class="mk-amber">CDC 的源头是数据库的变更日志（binlog），不是 Flink 一遍遍全表扫描。</mark>
-全表扫描要么压垮业务库，要么漏掉两次扫描之间发生的删除 —— binlog 里这些都有。</p>
-</div>
-    </div><p>文件这类源有个特点值得单独记住：<strong>它有末尾</strong>。读到文件结束，数据就没了，任务可以退出。
-这在 Flink 的术语里叫<strong>有界流<strong>；而 Kafka 那种永远不会有「最后一条」的叫</strong>无界流</strong> ——
-两者怎么区分、怎么分别处理，见 <a href="../flink-bounded-vs-unbounded/">Flink 的有界流与无界流</a>。</p>
-<h2 id="算子写在代码里的一张流程图"><span class="num">03</span>算子：写在代码里的一张流程图</h2>
-<p>前面那个箭头图里的每一个处理站，就是一个<strong>算子（Operator）</strong>。</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">订单1 → 订单2 → 订单3 → 订单4 → ...
-              ↓
-   [算子 A] 做一种处理
-              ↓
-   [算子 B] 做下一种处理
-              ↓
-          输出结果
-</code></pre></div>
-<p>但这里有一个<strong>非常容易搞错</strong>的地方。你写下这样一串链式调用：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-java">DataStream&lt;UserAmount&gt; result = orderStream
-    .map(json -&gt; parseOrder(json))          // 算子 1：转格式
-    .filter(order -&gt; order.getAmount() &gt; 0) // 算子 2：过滤
-    .keyBy(order -&gt; order.getUserId())      // 算子 3：按用户分组
-    .map(order -&gt; new UserAmount(...));     // 算子 4：再转一次
-</code></pre></div>
-<p>看起来像在调四个普通 Java 方法。但 <mark class="mk-blue">这几行代码不会立刻处理任何数据</mark>。</p>
-<div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;code&quot;,&quot;to&quot;:&quot;graph&quot;,&quot;label&quot;:&quot;只是描述&quot;},{&quot;from&quot;:&quot;graph&quot;,&quot;to&quot;:&quot;run&quot;,&quot;label&quot;:&quot;提交&quot;}]">
-      <svg class="flowd-svg" aria-hidden="true">
-        <defs>
-          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
-                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
-            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
-          </marker>
-        </defs>
-      </svg>
-      <div class="flowd-groups"></div>
-      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-blue" data-id="code">
-              
-              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5L3 8l3 4.5M10 3.5L13 8l-3 4.5"/></svg>
-              <b>你写的链式调用</b>
-              <small>map → filter → keyBy → map</small>
-            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="graph">
-              
-              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5L3 8l3 4.5M10 3.5L13 8l-3 4.5"/></svg>
-              <b>Flink 收集成一张执行图</b>
-              <small>Source → Map → Filter → KeyBy → Map → Sink</small>
-            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="run">
-              
-              
-              <b>env.execute() 之后才真正跑</b>
-              <small>提交任务 · 开始消费 Kafka</small>
-            </div></div></div>
-      
-    </div><div class="callout tone-violet tinted">
-      <span class="ic">🧩</span>
-      <div><p>所以 <mark class="mk-blue">算子代码的含义不是「立刻执行这个函数」，而是「告诉 Flink 在这里加一个处理节点」</mark>。
-这跟写 SQL 是一个道理：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-sql">SELECT city, sum(amount) FROM orders WHERE status = 'PAID' GROUP BY city;
-</code></pre></div>
-<p>你写的是「我要怎么处理数据」，<strong>怎么执行由引擎决定</strong>。
-<code>env.execute(&quot;realtime-order-job&quot;)</code> 才是按下启动键的那一刻。</p>
-</div>
-    </div><h2 id="运行时从算子到集群"><span class="num">04</span>运行时：从算子到集群</h2>
-<p>先回答一个常见问题：<strong>Flink 一定要分布式跑吗？</strong></p>
-<p>不一定。本地学习调试时可以在本机跑（本地读个文件、起个 Socket 做 WordCount），
-就算设了并行度，也只是本机多个线程在跑，不涉及跨机器网络。
-但<mark class="mk-blue">生产环境几乎都是集群</mark>：一个 JobManager + 好几个 TaskManager。</p>
-<p>那集群里到底有哪些东西？先把五个极易混的词分清：</p>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>词</th><th>是什么</th><th>别和谁混</th></tr></thead><tbody><tr><th>Operator</th><td data-label="是什么">逻辑上的一个处理步骤，比如 map / filter / sum</td><td data-label="别和谁混">Subtask —— Operator 是图纸，本身没有并行度</td></tr><tr><th>Subtask</th><td data-label="是什么">某个算子的一个并行副本。parallelism = 3 就有 3 个 Subtask</td><td data-label="别和谁混">Operator —— 一个是逻辑，一个是实例</td></tr><tr><th>Task</th><td data-label="是什么">真正被调度的执行单元，通常是一串链起来的算子</td><td data-label="别和谁混">TaskManager —— Task 是工作单元，TaskManager 是进程</td></tr><tr><th>TaskManager</th><td data-label="是什么">干活的 Worker 进程（JVM），跑一个或多个 Task</td><td data-label="别和谁混">JobManager —— 它干活，JobManager 管事</td></tr><tr><th>Slot</th><td data-label="是什么">TaskManager 划出来的一份资源配额</td><td data-label="别和谁混">「1 Slot = 1 算子」—— 不是这样</td></tr></tbody></table></div><h3 id="operator逻辑上的处理步骤">Operator：逻辑上的处理步骤</h3>
-<p><code>source.map(...).filter(...).keyBy(...).sum(...)</code> 里的 Source / Map / Filter / KeyBy / Sum，
-每一个都是一个 Operator。它们只是你定义的「处理流程」—— <mark class="mk-blue">还没体现跑在哪台机器、启动几个实例</mark>。</p>
-<h3 id="subtask一个算子的并行副本">Subtask：一个算子的并行副本</h3>
-<p>设了 <code>env.setParallelism(3)</code> 之后，一个 <code>Map</code> 算子会被拆成 3 个并行实例：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">Map 算子
-├── Map Subtask 0
-├── Map Subtask 1
-└── Map Subtask 2
-</code></pre></div>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">Operator    ：一个逻辑算子
-Subtask     ：该算子的一个并行执行副本
-Parallelism ：该算子启动多少个 Subtask
-</code></pre></div>
-<p>所以 <code>Map(3)</code> 并不是「一个 Map」，而是<strong>3 个 Map Subtask 同时处理不同部分的数据</strong>。</p>
-<h3 id="task真正被调度的执行单元">Task：真正被调度的执行单元</h3>
-<p>Flink 会把<strong>不需要重分区</strong>的连续算子合并成一个 Task，这叫<strong>算子链（Operator Chaining）</strong>：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">代码里写的：
-Source → map → filter → keyBy → sum
-
-运行时实际跑的：
-Task 1 = Source + map + filter        ← 串在一起，一个线程跑完
-        ↓ keyBy 必须重分区（网络 shuffle）
-Task 2 = sum
-</code></pre></div>
-<p>好处很实在：一条数据进来，在同一个线程里依次完成「读 Kafka → 解析 JSON → 过滤」，
-<mark class="mk-blue">中间不做线程切换、不做序列化、不走网络</mark>。</p>
-<div class="callout tone-blue">
-      <span class="ic">🧱</span>
-      <div><p>所以 <code>Task</code> 常常不是「一个算子」，而是<strong>「一串可合并算子的一个并行实例」</strong>。
-这也解释了为什么上一节的执行图里有 6 个算子，运行时可能只有 2 个 Task。</p>
-</div>
-    </div><h3 id="taskmanager-和-slot">TaskManager 和 Slot</h3>
-<p><strong>TaskManager</strong> 是集群里干活的 Worker 进程（JVM）：跑 Task、管内存和网络、维护本地状态、向 JobManager 汇报。</p>
-<p><strong>Slot</strong> 是 TaskManager 划出来的一份资源配额。一个配了 3 个 Slot 的 TaskManager：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">TaskManager-1
-├── Slot 0
-├── Slot 1
-└── Slot 2
-</code></pre></div>
-<p><mark class="mk-amber">千万不要把它理解成「1 Slot = 1 算子」。</mark>
-更接近的说法是：<strong>1 Slot = TaskManager 可分配给作业执行的一份资源</strong>。
-多个 Task 也可以通过 Slot Sharing 共享同一个 Slot。</p>
-<h3 id="把它们串起来">把它们串起来</h3>
-<div class="flarch">
-  <div class="fa-node tone-muted">
-    <b>Flink Client</b>
-    <small>提交 JAR / SQL Job</small>
-  </div>
-  <div class="fa-down tone-muted">提交 JobGraph</div>
-  <div class="fa-node tone-violet">
-    <b>JobManager</b>
-    <small>接收作业 · 生成执行计划 · 调度 Task · 协调 Checkpoint · 故障恢复</small>
-  </div>
-  <div class="fa-down tone-violet">分配 Task / Slot</div>
-  <div class="fa-flow">
-    <div class="fa-tm tone-blue">
-      <div class="fa-tm-head">TaskManager-1<small>一台机器 · 一个 JVM</small></div>
-      <div class="fa-slots">
-        <div class="fa-slot"><b>Slot 0</b><span>Task = Source + Map + Filter</span><em>3 个 Subtask 链在一起</em></div>
-        <div class="fa-slot"><b>Slot 1</b><span>Task = Source + Map + Filter</span><em>3 个 Subtask 链在一起</em></div>
-      </div>
-    </div>
-    <div class="fa-shuffle">keyBy(userId)<br>按 Key 哈希<br>网络 Shuffle</div>
-    <div class="fa-tm tone-green">
-      <div class="fa-tm-head">TaskManager-2<small>另一台机器 · 另一个 JVM</small></div>
-      <div class="fa-slots">
-        <div class="fa-slot"><b>Slot 0</b><span>Task = Aggregate</span><em>负责 u01 / u04 / …</em></div>
-        <div class="fa-slot"><b>Slot 1</b><span>Task = Aggregate</span><em>负责 u02 / u05 / …</em></div>
-      </div>
-    </div>
-  </div>
-  <div class="fa-down tone-green">写出结果</div>
-  <div class="fa-node tone-green">
-    <b>ClickHouse / Redis / Kafka</b>
-    <small>下游系统</small>
-  </div>
-</div>
-<p>五个词的包含关系可以背成一行：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">TaskManager  ⊃  Slot  ⊃  Task  ⊃  Subtask  ⊃  Operator
-（进程）        （资源）   （执行单元） （并行副本）   （逻辑步骤）
-</code></pre></div>
-<h2 id="九个算子其实是五类"><span class="num">05</span>九个算子，其实是五类</h2>
-<p><mark class="mk-amber">先说清楚：这不是 Flink 官方的严格分类标准，而是一种「按解决什么问题来分」的功能分类。</mark></p>
-<p>它的用处是：拿到一个需求时，先判断该用哪一类。</p>
-<div class="cards" data-cols="3"><div class="ccard tone-blue">
-          <span class="tag tone-blue">无状态</span>
-          <h4>逐条处理</h4>
-          <p>map / filter / flatMap。每条数据独立处理，不看别人脸色</p>
-          
-          
-        </div><div class="ccard tone-amber">
-          <span class="tag tone-amber">不产出</span>
-          <h4>分组</h4>
-          <p>keyBy。不加工数据，也不改变条数，只决定后续计算以什么为单位</p>
-          
-          
-        </div><div class="ccard tone-green">
-          <span class="tag tone-green">需要状态</span>
-          <h4>有状态聚合</h4>
-          <p>reduce / aggregate。跟在 keyBy 后面，每个 key 各存一份状态</p>
-          
-          
-        </div><div class="ccard tone-violet">
-          <span class="tag tone-violet">两条流</span>
-          <h4>多流处理</h4>
-          <p>union 只是合并不关联；join 才把两条流的数据拼起来</p>
-          
-          
-        </div><div class="ccard tone-red">
-          <span class="tag tone-red">什么都能干</span>
-          <h4>底层逃生口</h4>
-          <p>process。能读写状态、注册定时器、处理迟到数据</p>
-          
-          
-        </div></div><p>分完类，每个算子的定位就清楚了：</p>
-<table>
-<thead>
-<tr>
-<th>算子</th>
-<th>一条进几条出</th>
-<th>要不要 <code>keyBy</code></th>
-<th>有没有状态</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td><code>map</code></td>
-<td>1 → 1</td>
-<td>不要</td>
-<td>无</td>
-</tr>
-<tr>
-<td><code>filter</code></td>
-<td>1 → 0 或 1</td>
-<td>不要</td>
-<td>无</td>
-</tr>
-<tr>
-<td><code>flatMap</code></td>
-<td>1 → 0 到多条</td>
-<td>不要</td>
-<td>无</td>
-</tr>
-<tr>
-<td><code>keyBy</code></td>
-<td><strong>条数不变</strong></td>
-<td>它自己</td>
-<td>无</td>
-</tr>
-<tr>
-<td><code>reduce</code></td>
-<td>N → N（每条都出一条）</td>
-<td><strong>要</strong></td>
-<td>有</td>
-</tr>
-<tr>
-<td><code>aggregate</code></td>
-<td>N → N（每条都出一条）</td>
-<td><strong>要</strong></td>
-<td>有</td>
-</tr>
-<tr>
-<td><code>union</code></td>
-<td>两条流 → 一条流，条数相加</td>
-<td>不要</td>
-<td>无</td>
-</tr>
-<tr>
-<td><code>join</code></td>
-<td>两条流 → 一条流，按 key 配对</td>
-<td><strong>要</strong></td>
-<td>有（要缓存等待）</td>
-</tr>
-<tr>
-<td><code>process</code></td>
-<td>随便</td>
-<td>通常要</td>
-<td>有（自己管）</td>
-</tr>
-</tbody>
-</table>
-<div class="callout tone-amber tinted">
-      <span class="ic">🔑</span>
-      <div><p><mark class="mk-blue"><code>keyBy</code> 不产出数据。</mark> 它做的事只有一件：<strong>告诉 Flink「接下来的计算按这个 Key 分开算」</strong>。
-所以 <code>keyBy</code> 单独用是看不出任何效果的 —— 它必须跟着 reduce / aggregate / window / process 才有意义。</p>
-</div>
-    </div><h2 id="亲手跑一遍同一批订单过不同算子"><span class="num">06</span>亲手跑一遍：同一批订单，过不同算子</h2>
-<p>下面 6 条订单，点算子看产出。盯三件事：<strong>输入栏哪几条被划掉了<strong>、</strong>输出栏多了还是少了几行<strong>、</strong>输出到底是一条条记录还是一堆桶</strong>。</p>
-<div class="demo" data-widget="operator-lab">
+<p><mark class="mk-blue">这张图里混了四种完全不同的关系，所以越看越糊：</mark></p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>关系</th><th>谁和谁</th><th>是长久的吗</th></tr></thead><tbody><tr><th>谁创建谁</th><td data-label="谁和谁">镜像 → 容器 → Pod → Deployment</td><td data-label="是长久的吗"><span class="tag tone-amber">创建完就结束了，不是持续关系</span></td></tr><tr><th>谁在内存里跑着</th><td data-label="谁和谁">dockerd / containerd / kubelet / 容器进程</td><td data-label="是长久的吗"><span class="tag tone-green">只有这个是「谁压着谁」</span></td></tr><tr><th>谁管谁</th><td data-label="谁和谁">Deployment 管 Pod，kubelet 管容器</td><td data-label="是长久的吗">常驻的命令关系，但<strong>双方不一定在同一台机器上</strong></td></tr><tr><th>谁依赖谁的代码</th><td data-label="谁和谁">containerd 调用 runc</td><td data-label="是长久的吗"><span class="tag tone-red"><strong>代码依赖</strong>，不是进程层级</span></td></tr></tbody></table></div><p>还有一个更根本的错：<mark class="mk-blue"><strong><code>runc</code> 根本不是一层。</strong></mark> 它只在「创建容器」那一瞬间存在，建完就退出了。</p>
+<div class="timeline"><div class="titem tone-blue">
+          <span class="when">t = 2</span>
+          <h4>containerd fork 出 runc</h4>
+          <p>它要干的是调 clone / unshare / setns，把进程建出来</p>
+        </div><div class="titem tone-red">
+          <span class="when">t = 3</span>
+          <h4>runc 就退出了</h4>
+          <p>活了一瞬间。它不是「容器进程运行的依赖」，只是「容器进程的接生婆」</p>
+        </div><div class="titem tone-green">
+          <span class="when">t = 3 之后</span>
+          <h4>真正留下来陪容器的是 containerd-shim</h4>
+          <p>它才是容器进程的父进程，一直活到容器被删</p>
+        </div></div><p>看这条时间轴，比看任何分层图都清楚：一起吃住的和只来一趟的，长度差得很远。</p>
+<div class="demo" data-widget="runtime-timeline" data-config="{&quot;tMax&quot;:8,&quot;procs&quot;:[{&quot;id&quot;:&quot;kubelet&quot;,&quot;name&quot;:&quot;kubelet&quot;,&quot;sub&quot;:&quot;K8s 在这台机器上的代表&quot;,&quot;note&quot;:&quot;systemd 拉起来的。它只管下命令，自己不碰容器&quot;,&quot;spans&quot;:[[0,8]]},{&quot;id&quot;:&quot;containerd&quot;,&quot;name&quot;:&quot;containerd&quot;,&quot;sub&quot;:&quot;拉镜像 · 备 rootfs&quot;,&quot;note&quot;:&quot;一个节点一个。==重启它，容器照跑==&quot;,&quot;spans&quot;:[[0,5],[6,8]]},{&quot;id&quot;:&quot;runc&quot;,&quot;name&quot;:&quot;runc&quot;,&quot;sub&quot;:&quot;根据 namespace / cgroup 建进程&quot;,&quot;note&quot;:&quot;一次性。建完就退出，不留下来&quot;,&quot;spans&quot;:[[2,3]]},{&quot;id&quot;:&quot;shim&quot;,&quot;name&quot;:&quot;containerd-shim&quot;,&quot;sub&quot;:&quot;容器进程的父进程&quot;,&quot;note&quot;:&quot;每个容器一个，常驻到容器被删&quot;,&quot;spans&quot;:[[3,7]]},{&quot;id&quot;:&quot;nginx&quot;,&quot;name&quot;:&quot;nginx（容器进程）&quot;,&quot;sub&quot;:&quot;容器里真正跑的东西&quot;,&quot;note&quot;:&quot;它的爹是 shim。它和 containerd 之间没有任何层级关系&quot;,&quot;spans&quot;:[[3,7]]}],&quot;steps&quot;:[{&quot;at&quot;:0,&quot;what&quot;:&quot;机器刚起来，只有管理平面。kubelet 和 containerd 由 systemd 拉起，跟容器没有任何关系。&quot;},{&quot;at&quot;:1,&quot;what&quot;:&quot;kubelet 从 apiserver 收到「要有一个 nginx Pod」，通过 CRI 接口告诉本机的 containerd。所以在这个视角里，控制面只是个消息来源，不在这一层里。&quot;},{&quot;at&quot;:2,&quot;what&quot;:&quot;containerd 动手，fork 出一个 runc。&quot;},{&quot;at&quot;:3,&quot;what&quot;:&quot;runc 调 clone / unshare / setns，把进程建出来、套上 namespace 和 cgroup，然后它自己就退出了。==它不是常驻的一层==。&quot;},{&quot;at&quot;:4,&quot;what&quot;:&quot;containerd fork 出 shim。这个 shim 才是容器进程的亲爹：它负责 waitpid 收尸、转发 stdio（所以 kubectl logs 能看到东西）、向 containerd 汇报退出码。&quot;},{&quot;at&quot;:5,&quot;what&quot;:&quot;nginx 跑起来了。==它和 containerd 之间没有父子关系==，它的爹是 shim，而它和 containerd 都只是内核上的普通进程。&quot;},{&quot;at&quot;:6,&quot;what&quot;:&quot;重启 containerd。==容器照跑，一点没受影响==，因为顶着的是 shim，不是 containerd。这就是 shim 存在的全部理由。&quot;},{&quot;at&quot;:7,&quot;what&quot;:&quot;删掉容器：nginx 和 shim 一起消失。管理平面上那两位不受影响。&quot;}]}">
       <div class="demo-head">
-        <span class="title">同一批订单，过不同算子</span>
-        <span class="status" data-status>点一个算子</span>
+        <span class="title">创建、重启、删除：谁在，谁不在</span>
+        <span class="status" data-status>点「下一步」或「自动跑」</span>
         <span class="spacer"></span>
-        <button class="btn" data-run>▶ 开始模拟</button><button class="btn ghost" data-reset>重置</button>
+        
       </div>
-      <div class="demo-body custom"><div class="ol" data-ol>
-  <div class="ol-top">
-    <div class="seg" data-ol-modes></div>
-  </div>
-  <p class="ol-rule tone-blue" data-ol-rule></p>
-  <div class="ol-cols">
-    <div class="pane">
-      <div class="pane-head">
-        <span class="tag tone-blue">输入</span>
-        <span data-ol-inhead>输入 · 6 条订单</span>
-      </div>
-      <div class="log" data-log="in"></div>
-    </div>
-    <div class="pane">
-      <div class="pane-head">
-        <span class="tag tone-green">输出</span>
-        <span data-ol-outhead>输出</span>
-      </div>
-      <div class="log" data-log="out"></div>
-    </div>
-  </div>
-  <div class="ol-io tone-muted" data-ol-io></div>
-</div></div>
-    </div><p>三个值得注意的地方：</p>
-<ul>
-<li><strong><code>filter</code> 划掉了两条，但输出还是「记录」</strong>：<code>1002</code>（金额 0）和 <code>1003</code>（金额 -10）在输入栏被划掉，输出栏干干净净剩 4 条。丢数据是 <code>filter</code> 的本职。</li>
-<li><strong><code>flatMap</code> 让条数变多了</strong>：6 条订单拆成 7 条商品行。而订单 <code>1006</code> 一个商品都没有 —— <mark class="mk-blue">它一条也不产出</mark>，这就是 <code>flatMap</code> 的「1 → 0」。</li>
-<li><strong><code>keyBy</code> 的输出不是列表，是三个桶<strong>：6 条进、6 条出，</strong>一条没多一条没少</strong>，但数据被分成了 <code>u01 / u02 / u03</code> 三堆。这是全篇最该记住的一张图。</li>
-</ul>
-<h2 id="keyby唯一一个不产出数据的算子"><span class="num">07</span><code>keyBy</code>：唯一一个不产出数据的算子</h2>
-<p>它同时做了三件事，缺一不可：</p>
-<ol>
-<li><strong>路由</strong> —— 相同 Key 的数据被送到<strong>同一个并行实例</strong>上。<code>u01</code> 的三笔订单一定落在同一个 slot。</li>
-<li><strong>开状态</strong> —— 因为路由确定了，Flink 才能按 Key 存状态：<code>u01</code> 的累计值存在 <code>u01</code> 名下，<code>u02</code> 的存在 <code>u02</code> 名下，互不干扰。</li>
-<li><strong>为后续操作铺路</strong> —— 按 Key 的聚合、窗口、定时器，全都建立在「同一 Key 在同一实例」这个前提上。</li>
-</ol>
-<p>上面交互里点 <code>keyBy + sum</code>，你会看到 <code>u01</code> 那三笔订单各自吐出一行「当前累计」（99 → 89 → 109）。
-那不是「最后算出一个数」，而是<strong>每来一条就更新一次</strong>。</p>
-<h3 id="为什么没有-keyby-就会算错">为什么没有 <code>keyBy</code> 就会算错</h3>
-<p>Flink 是分布式的，一个作业通常开多个并行任务。假设并行度是 3，订单是这样被分下去的：</p>
-<div class="keyby-viz">
-  <div class="kb-case tone-red">
-    <div class="kb-label">
-      <span class="tag tone-red">没 keyBy</span>
-      <b>同一个 u01 的两笔订单，散落在两个 Task 上</b>
-      <small>每个 Task 只看得见自己手上那几条 —— 谁都不知道 u01 总共花了多少</small>
-    </div>
-    <div class="kb-tasks">
-      <div class="kb-task tone-red">
-        <div class="kb-head">Task 1</div>
-        <div class="kb-rec">u01 · 99 元</div>
-        <div class="kb-out wrong">以为 u01 累计 = 99</div>
-      </div>
-      <div class="kb-task tone-red">
-        <div class="kb-head">Task 2</div>
-        <div class="kb-rec">u01 · 20 元</div>
-        <div class="kb-out wrong">以为 u01 累计 = 20</div>
-      </div>
-      <div class="kb-task tone-muted">
-        <div class="kb-head">Task 3</div>
-        <div class="kb-rec">u02 · 50 元</div>
-        <div class="kb-out">u02 累计 = 50</div>
-      </div>
-    </div>
-  </div>
-  <div class="kb-shuffle">keyBy(userId) 重新洗牌</div>
-  <div class="kb-case tone-green">
-    <div class="kb-label">
-      <span class="tag tone-green">keyBy 之后</span>
-      <b>同一个 Key 全在同一个 Task</b>
-      <small>累计值就在自己手里，不用去问别人</small>
-    </div>
-    <div class="kb-tasks">
-      <div class="kb-task tone-green">
-        <div class="kb-head">Task 1 <small>负责 u01</small></div>
-        <div class="kb-rec">u01 · 99 元</div>
-        <div class="kb-rec">u01 · 20 元</div>
-        <div class="kb-out right">u01 累计 = 119</div>
-      </div>
-      <div class="kb-task tone-green">
-        <div class="kb-head">Task 2 <small>负责 u02</small></div>
-        <div class="kb-rec">u02 · 50 元</div>
-        <div class="kb-out right">u02 累计 = 50</div>
-      </div>
-    </div>
-  </div>
-</div>
-<p><mark class="mk-blue">同一个 <code>u01</code> 的两笔订单落在两个不同的 Task 上，那两个 Task 谁都算不出 <code>u01</code> 的真实累计。</mark>
-这不是精度问题，是<strong>根本算不出来</strong> —— 每个 Task 只看得到自己手上那几条。</p>
-<p><code>keyBy(userId)</code> 做的事情，就是把这些数据<strong>重新洗一遍牌</strong>：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">keyBy = 指定分组 Key  +  让相同 Key 的数据汇聚到同一处
-</code></pre></div>
-<p>这个过程叫 <strong>shuffle（洗牌）/ repartition（重分区）</strong> —— 数据要跨网络搬到别的 Task 上，是有成本的。</p>
-<div class="callout tone-amber">
-      <span class="ic">🔑</span>
-      <div><p>所以 <code>keyBy</code> 在 Flink 里是个<strong>分界线</strong>：
-<code>keyBy</code> 之前，数据可以在 Task 之间随便分配；
-<code>keyBy</code> 之后，<mark class="mk-blue">同一 Key 必须汇聚到同一个下游实例</mark>。</p>
-<p>这也是 Flink 能做对「按用户累计」的前提，
-也是它能做对「按用户去重」「按用户超时提醒」的前提。</p>
-</div>
-    </div><h3 id="keyby-怎么决定去哪一个哈希函数"><code>keyBy</code> 怎么决定「去哪」：一个哈希函数</h3>
-<p>规则简单到一行：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">hash(key) % 下游并行度  →  决定这条记录发给哪个下游 Subtask
-</code></pre></div>
-<p>下游并行度是 3 的时候，三个用户可能这样分：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">u01 → Aggregate Subtask 0
-u02 → Aggregate Subtask 2
-u03 → Aggregate Subtask 1
-</code></pre></div>
-<p>于是所有 <code>u01</code> 的订单都去 Subtask 0，它手里的累计值就能一路算对：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">Aggregate Subtask 0：
-u01: 99 → 119 → 149
-</code></pre></div>
-<p><mark class="mk-blue">这就是 Keyed State（按 Key 存储的状态）能工作的基础</mark> —— 不是 Flink 记住了 u01，
-而是<strong>哈希函数保证 u01 每次都落到同一个地方</strong>，所以那个地方攒的状态就是 u01 的。</p>
-<h3 id="同一个-key-到同一个-task这句话不够准确">「同一个 Key 到同一个 Task」这句话不够准确</h3>
-<p>前面为了好理解写的是「同一个 Key 到同一个 Task」，但严谨一点应该说：</p>
-<blockquote>
-<p>在<strong>同一次作业运行、同一个 <code>keyBy</code> 之后</strong>，相同 Key 的记录会稳定路由到同一个
-<strong>下游 Keyed Operator Subtask</strong>，而这个 Subtask 通常包含在某个实际执行的 Task 里。</p>
-</blockquote>
-<p>三个原因：</p>
-<ol>
-<li><strong>一个 Task 里可能链了多个算子</strong> —— Task 是执行单元，不是「Key 的归属单位」；</li>
-<li><strong>扩缩容、故障恢复后，Key 到并行实例的具体分配可能变</strong> —— 并行度从 3 改成 4，哈希取模的结果就全变了；</li>
-<li><strong>但 Flink 会处理状态重分配</strong>，保证恢复后计算仍然正确。</li>
-</ol>
-<p>所以正确的理解不是：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">u01 永远固定在某一台机器、某个 Task 上
-</code></pre></div>
-<p>而是：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">在当前运行拓扑中，同一个 Key 的数据一定汇聚到同一个负责该 Key 的下游实例，
-因此那个实例可以放心地维护这个 Key 的状态。
-</code></pre></div>
-<h3 id="并行度-2-时整条链路长什么样">并行度 = 2 时，整条链路长什么样</h3>
-<p>把前面几节的东西合起来看一遍：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-java">orders
-    .map(json -&gt; parseOrder(json))
-    .filter(order -&gt; order.getAmount() &gt; 0)
-    .keyBy(order -&gt; order.getUserId())
-    .sum(&quot;amount&quot;)
-    .sinkTo(clickHouseSink);
-</code></pre></div>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">上游 Task 0：Source Subtask 0 + Map Subtask 0 + Filter Subtask 0
-上游 Task 1：Source Subtask 1 + Map Subtask 1 + Filter Subtask 1
-                        │
-                        │  keyBy(userId) —— 网络 Shuffle
-                        ▼
-        ┌───────────────┴───────────────┐
-        ▼                               ▼
-下游 Task 0：Sum Subtask 0        下游 Task 1：Sum Subtask 1
-负责 u01、u03、u09 …             负责 u02、u04、u08 …
-        │                               │
-        └───────────────┬───────────────┘
-                        ▼
-                   Sink：把每个用户的统计结果写出
-</code></pre></div>
-<p>拆开看每一段在干嘛：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">Map / Filter ：每条数据可独立处理，所以很容易并行
-keyBy        ：按 userId 重分区（跨网络）
-Sum          ：按用户保存累计金额状态（Keyed State）
-Sink         ：把每个用户的统计结果写出去
-</code></pre></div>
-<h3 id="reduce-和-aggregate-差在哪"><code>reduce</code> 和 <code>aggregate</code> 差在哪</h3>
-<p>两个都是「同一个 Key 的多条数据不断合并成一个结果」，区别在<strong>输入、状态、输出是不是同一个类型</strong>：</p>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>维度</th><th>reduce</th><th>aggregate</th></tr></thead><tbody><tr><th>输入 / 输出类型</th><td data-label="reduce">必须同类型（进来 Order，出去还得是 Order）</td><td data-label="aggregate">可以不同（进来 Order，出去 UserTotal）</td></tr><tr><th>中间状态</th><td data-label="reduce">就是上一条结果本身</td><td data-label="aggregate">自己定义累加器对象，想放几个字段放几个</td></tr><tr><th>适合</th><td data-label="reduce">简单的「两条同类型数据合并」，比如求和、取最大值</td><td data-label="aggregate">复杂统计，比如同时算总额 / 笔数 / 均值 / 最大值</td></tr><tr><th>例子</th><td data-label="reduce">keyBy(uid).sum(amount)</td><td data-label="aggregate">keyBy(uid).aggregate(new CitySalesAggregate())</td></tr></tbody></table></div><div class="callout tone-green">
-      <span class="ic">✅</span>
-      <div><p>判断标准很简单：<strong>如果算到一半的中间结果和最终结果长得不一样，就用 <code>aggregate</code>。</strong>
-比如「总额 / 笔数 / 均值 / 最大值」四个指标，中间要同时维护四个数，最终只输出一个对象 ——
-这用 <code>reduce</code> 表达起来就很别扭。</p>
-</div>
-    </div><h2 id="两个真正难的地方"><span class="num">08</span>两个真正难的地方</h2>
-<h3 id="流式-join两条数据不一定同时到">流式 <code>join</code>：两条数据不一定同时到</h3>
-<p><code>join</code> 就是把数据库里那套 <code>JOIN</code> 思想搬到流上。但搬过去之后，最大的变化是<strong>时间</strong>：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">10:00:01  订单先到    order_id=1001, user_id=u01, amount=99
-10:00:03  用户资料后到 user_id=u01, user_name=小明, city=北京
-</code></pre></div>
-<p>数据库里两张表都是完整的，查询那一刻配得上就配上了。流里不是 —— 订单到的时候，用户资料可能还没来。</p>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>维度</th><th>数据库里的 JOIN</th><th>流里的 join</th></tr></thead><tbody><tr><th>两边数据的状态</th><td data-label="数据库里的 JOIN">都在表里躺着，完整且随时可查</td><td data-label="流里的 join">各自在流动，谁先到、晚多久都不一定</td></tr><tr><th>关联发生在</th><td data-label="数据库里的 JOIN">查询执行的那一瞬间</td><td data-label="流里的 join">数据到达的那一刻，必须当场决定怎么办</td></tr><tr><th>「等不到对面」怎么办</th><td data-label="数据库里的 JOIN">没有「等」这回事，一次算完</td><td data-label="流里的 join"><span class="tag tone-amber">要自己决定等多久、等不到怎么算，这才是难点</span></td></tr><tr><th>靠什么解决</th><td data-label="数据库里的 JOIN">SQL 一条语句</td><td data-label="流里的 join">时间窗口 / 维表 join / 广播状态 / temporal join</td></tr></tbody></table></div><p>所以「把 10 分钟内能按 <code>user_id</code> 配上的订单和用户更新关联起来」这句话里，<strong>「10 分钟内」不是优化，是语义的一部分</strong> ——
-它回答了「等不到怎么办」。</p>
-<h3 id="process需要等一会儿再检查时"><code>process</code>：需要「等一会儿再检查」时</h3>
-<p><code>map</code> / <code>filter</code> / <code>reduce</code> 都是「来一条处理一条，处理完就完事」。但有些需求必须<strong>记住过去、并且在未来某个时刻回头看</strong>：</p>
-<blockquote>
-<p>某用户下单后 30 分钟仍未支付，就发一条「未支付订单提醒」。</p>
-</blockquote>
-<p>这个需求里有三样东西是前面那些算子给不了的：<strong>状态<strong>（记住这笔订单）、</strong>定时器<strong>（30 分钟后叫我）、</strong>侧输出</strong>（提醒走另一条流）。</p>
-<div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;e&quot;,&quot;to&quot;:&quot;s&quot;,&quot;label&quot;:&quot;存下来&quot;},{&quot;from&quot;:&quot;e&quot;,&quot;to&quot;:&quot;t&quot;,&quot;label&quot;:&quot;定个闹钟&quot;},{&quot;from&quot;:&quot;s&quot;,&quot;to&quot;:&quot;chk&quot;,&quot;label&quot;:&quot;读出状态&quot;},{&quot;from&quot;:&quot;t&quot;,&quot;to&quot;:&quot;chk&quot;,&quot;label&quot;:&quot;到点了&quot;},{&quot;from&quot;:&quot;chk&quot;,&quot;to&quot;:&quot;yes&quot;,&quot;label&quot;:&quot;已支付&quot;},{&quot;from&quot;:&quot;chk&quot;,&quot;to&quot;:&quot;no&quot;,&quot;label&quot;:&quot;未支付&quot;}]">
+      <div class="demo-body custom" data-mount></div>
+    </div><hr>
+<h2 id="真实的样子两个平面-一个内核"><span class="num">02</span>真实的样子：两个平面 + 一个内核</h2>
+<figure class="archfig" data-arch>
+      <svg viewBox="0 0 1146 814" role="img" aria-labelledby="archify-diagram-title archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
+        <title id="archify-diagram-title">一台 K8s 工作节点：内存里到底有什么</title>
+        <desc id="archify-diagram-description">管理平面和每个容器的 shim 是两拨人，容器进程直接站在内核上</desc>
+        <!-- Definitions -->
+        <defs>
+          <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-default" />
+          </marker>
+          <marker id="arrowhead-emphasis" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-emphasis" />
+          </marker>
+          <marker id="arrowhead-security" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-security" />
+          </marker>
+          <marker id="arrowhead-dashed" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-dashed" />
+          </marker>
+          <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+            <path d="M 40 0 L 0 0 0 40" class="c-grid" stroke-width="0.5"/>
+          </pattern>
+        </defs>
+
+        <!-- Background Grid -->
+        <rect width="100%" height="100%" fill="url(#grid)" />
+
+        <!-- Boundaries (behind everything) -->
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="0" x="300" y="78" width="280" height="108" rx="12" class="c-region" stroke-width="1"/>
+        <text x="308" y="96" class="t-cloud" font-size="9" font-weight="600">K8s 控制面 —— 别的机器上；这台机器只收到下发的期望状态</text>
+
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="1" x="30" y="218" width="806" height="112" rx="12" class="c-region" stroke-width="1"/>
+        <text x="38" y="236" class="t-cloud" font-size="9" font-weight="600">管理平面 —— 一个节点就这一套，开机就在</text>
+
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="2" x="30" y="358" width="806" height="250" rx="12" class="c-region" stroke-width="1"/>
+        <text x="38" y="376" class="t-cloud" font-size="9" font-weight="600">每个容器一套 —— shim 和它的孩子，跟 containerd 是两拨人</text>
+
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="3" x="30" y="638" width="806" height="108" rx="12" class="c-region" stroke-width="1"/>
+        <text x="38" y="656" class="t-cloud" font-size="9" font-weight="600">内核 —— 容器在这里的全部痕迹，就是这些标签和限额，没有「容器」这个对象</text>
+
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="4" x="840" y="358" width="266" height="108" rx="12" class="c-region" stroke-width="1"/>
+        <text x="848" y="376" class="t-cloud" font-size="9" font-weight="600">磁盘 —— 镜像睡在这里，不在内存里</text>
+
+        <!-- Connection paths (before components for correct z-order) -->
+        <path data-edge-from="api" data-edge-to="kubelet" data-edge-label="期望状态" data-edge-key="0" data-edge-id="e1" data-composition-points="440,166;440,207;158,207;158,248" d="M 440 166 L 440 199 Q 440 207 432 207 L 166 207 Q 158 207 158 215 L 158 248" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="kubelet" data-edge-to="containerd" data-edge-label="CRI" data-edge-key="1" data-edge-id="e2" data-composition-points="256,279;600,279" d="M 256 279 L 600 279" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
+        <path data-edge-from="containerd" data-edge-to="shim" data-edge-label="fork" data-edge-key="2" data-edge-id="e3" data-composition-points="703,310;703,349;163,349;163,388" d="M 703 310 L 703 341 Q 703 349 695 349 L 171 349 Q 163 349 163 357 L 163 388" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="shim" data-edge-to="nginx" data-edge-label="亲爹" data-edge-key="3" data-edge-id="e4" data-composition-points="163,450;163,474;179,474;179,504;158,504;158,528" d="M 163 450 L 163 466 Q 163 474 171 474 L 171 474 Q 179 474 179 482 L 179 496 Q 179 504 171 504 L 166 504 Q 158 504 158 512 L 158 528" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
+        <path data-edge-from="img" data-edge-to="java" data-edge-label="只读根目录" data-edge-key="4" data-edge-id="e5" data-composition-points="973,446;973,487;703,487;703,528" d="M 973 446 L 973 479 Q 973 487 965 487 L 711 487 Q 703 487 703 495 L 703 528" class="a-dashed" stroke-width="1.5" marker-end="url(#arrowhead-dashed)"/>
+
+        <!-- Components -->
+        <g id="node-api" data-node-id="api" data-node-label="kube-apiserver" tabindex="0" role="button" aria-label="Focus kube-apiserver, 你 kubectl 打交道的那个, K8s 控制面 —— 别的机器上；这台机器只收到下发的期望状态" aria-pressed="false" data-node-kind="cloud" data-node-sublabel="你 kubectl 打交道的那个" data-node-context="K8s 控制面 —— 别的机器上；这台机器只收到下发的期望状态">
+          <title>kube-apiserver · 你 kubectl 打交道的那个 · K8s 控制面 —— 别的机器上；这台机器只收到下发的期望状态</title>
+          <rect x="330" y="108" width="220" height="58" rx="6" class="c-mask"/>
+          <rect x="330" y="108" width="220" height="58" rx="6" class="c-cloud" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="cloud" class="semantic-sigil s-cloud" transform="translate(336 114) scale(0.6875)">
+            <path d="M4.3 12.5h7.3a2.4 2.4 0 0 0 .2-4.8 4 4 0 0 0-7.5-1.3A3.1 3.1 0 0 0 4.3 12.5Z"/>
+          </g>
+          <text data-detail-anchor x="440" y="135" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">kube-apiserver</text>
+        <text data-detail="context" x="440" y="151" class="t-muted" font-size="9" text-anchor="middle">你 kubectl 打交道的那个</text>
+        </g>
+
+        <g id="node-kubelet" data-node-id="kubelet" data-node-label="kubelet" tabindex="0" role="button" aria-label="Focus kubelet, 这台机器上唯一的 K8s 代表, 管理平面 —— 一个节点就这一套，开机就在" aria-pressed="false" data-node-kind="backend" data-node-sublabel="这台机器上唯一的 K8s 代表" data-node-tag="systemd 拉起来的" data-node-context="管理平面 —— 一个节点就这一套，开机就在">
+          <title>kubelet · 这台机器上唯一的 K8s 代表 · 管理平面 —— 一个节点就这一套，开机就在 · systemd 拉起来的</title>
+          <rect x="60" y="248" width="196" height="62" rx="6" class="c-mask"/>
+          <rect x="60" y="248" width="196" height="62" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(66 254) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text data-detail-anchor x="158" y="277" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">kubelet</text>
+        <text data-detail="context" x="158" y="293" class="t-muted" font-size="9" text-anchor="middle">这台机器上唯一的 K8s 代表</text>
+        <text data-detail="fine" x="158" y="302" class="t-backend" font-size="7" text-anchor="middle">systemd 拉起来的</text>
+        </g>
+
+        <g id="node-containerd" data-node-id="containerd" data-node-label="containerd" tabindex="0" role="button" aria-label="Focus containerd, 拉镜像 · 备 rootfs · 管生命周期, 管理平面 —— 一个节点就这一套，开机就在" aria-pressed="false" data-node-kind="backend" data-node-sublabel="拉镜像 · 备 rootfs · 管生命周期" data-node-tag="一个节点一个" data-node-context="管理平面 —— 一个节点就这一套，开机就在">
+          <title>containerd · 拉镜像 · 备 rootfs · 管生命周期 · 管理平面 —— 一个节点就这一套，开机就在 · 一个节点一个</title>
+          <rect x="600" y="248" width="206" height="62" rx="6" class="c-mask"/>
+          <rect x="600" y="248" width="206" height="62" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(606 254) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text data-detail-anchor x="703" y="277" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">containerd</text>
+        <text data-detail="context" x="703" y="293" class="t-muted" font-size="9" text-anchor="middle">拉镜像 · 备 rootfs · 管生命周期</text>
+        <text data-detail="fine" x="703" y="302" class="t-backend" font-size="7" text-anchor="middle">一个节点一个</text>
+        </g>
+
+        <g id="node-shim" data-node-id="shim" data-node-label="containerd-shim" tabindex="0" role="button" aria-label="Focus containerd-shim, 容器进程的父进程，常驻, 每个容器一套 —— shim 和它的孩子，跟 containerd 是两拨人" aria-pressed="false" data-node-kind="security" data-node-sublabel="容器进程的父进程，常驻" data-node-tag="每个容器一个" data-node-context="每个容器一套 —— shim 和它的孩子，跟 containerd 是两拨人">
+          <title>containerd-shim · 容器进程的父进程，常驻 · 每个容器一套 —— shim 和它的孩子，跟 containerd 是两拨人 · 每个容器一个</title>
+          <rect x="60" y="388" width="206" height="62" rx="6" class="c-mask"/>
+          <rect x="60" y="388" width="206" height="62" rx="6" class="c-security" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="security" class="semantic-sigil s-security" transform="translate(66 394) scale(0.6875)">
+            <path d="M8 2.2 13 4v3.5c0 3.1-1.8 5.4-5 6.5-3.2-1.1-5-3.4-5-6.5V4Z"/>
+            <path d="m5.8 8 1.5 1.5 3-3"/>
+          </g>
+          <text data-detail-anchor x="163" y="417" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">containerd-shim</text>
+        <text data-detail="context" x="163" y="433" class="t-muted" font-size="9" text-anchor="middle">容器进程的父进程，常驻</text>
+        <text data-detail="fine" x="163" y="442" class="t-security" font-size="7" text-anchor="middle">每个容器一个</text>
+        </g>
+
+        <g id="node-img" data-node-id="img" data-node-label="镜像层" tabindex="0" role="button" aria-label="Focus 镜像层, 只读，叠起来就是一个 rootfs, 磁盘 —— 镜像睡在这里，不在内存里" aria-pressed="false" data-node-kind="external" data-node-sublabel="只读，叠起来就是一个 rootfs" data-node-context="磁盘 —— 镜像睡在这里，不在内存里">
+          <title>镜像层 · 只读，叠起来就是一个 rootfs · 磁盘 —— 镜像睡在这里，不在内存里</title>
+          <rect x="870" y="388" width="206" height="58" rx="6" class="c-mask"/>
+          <rect x="870" y="388" width="206" height="58" rx="6" class="c-external" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="external" class="semantic-sigil s-external" transform="translate(876 394) scale(0.6875)">
+            <rect x="2.5" y="5" width="8.5" height="8" rx="1.5"/>
+            <path d="M8 2.5h5.5V8M13.5 2.5 7.5 8.5"/>
+          </g>
+          <text data-detail-anchor x="973" y="415" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">镜像层</text>
+        <text data-detail="context" x="973" y="431" class="t-muted" font-size="9" text-anchor="middle">只读，叠起来就是一个 rootfs</text>
+        </g>
+
+        <g id="node-nginx" data-node-id="nginx" data-node-label="nginx 进程" tabindex="0" role="button" aria-label="Focus nginx 进程, 容器里真正跑的东西, 每个容器一套 —— shim 和它的孩子，跟 containerd 是两拨人" aria-pressed="false" data-node-kind="frontend" data-node-sublabel="容器里真正跑的东西" data-node-context="每个容器一套 —— shim 和它的孩子，跟 containerd 是两拨人">
+          <title>nginx 进程 · 容器里真正跑的东西 · 每个容器一套 —— shim 和它的孩子，跟 containerd 是两拨人</title>
+          <rect x="60" y="528" width="196" height="60" rx="6" class="c-mask"/>
+          <rect x="60" y="528" width="196" height="60" rx="6" class="c-frontend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="frontend" class="semantic-sigil s-frontend" transform="translate(66 534) scale(0.6875)">
+            <rect x="2" y="3" width="12" height="10" rx="2"/>
+            <path d="M2 6.5h12"/>
+            <circle cx="4.1" cy="4.8" r=".7" class="sigil-fill"/>
+            <circle cx="6.3" cy="4.8" r=".7" class="sigil-fill"/>
+          </g>
+          <text data-detail-anchor x="158" y="556" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">nginx 进程</text>
+        <text data-detail="context" x="158" y="572" class="t-muted" font-size="9" text-anchor="middle">容器里真正跑的东西</text>
+        </g>
+
+        <g id="node-java" data-node-id="java" data-node-label="java 进程" tabindex="0" role="button" aria-label="Focus java 进程, 另一个容器，另配一个 shim, 每个容器一套 —— shim 和它的孩子，跟 containerd 是两拨人" aria-pressed="false" data-node-kind="frontend" data-node-sublabel="另一个容器，另配一个 shim" data-node-context="每个容器一套 —— shim 和它的孩子，跟 containerd 是两拨人">
+          <title>java 进程 · 另一个容器，另配一个 shim · 每个容器一套 —— shim 和它的孩子，跟 containerd 是两拨人</title>
+          <rect x="600" y="528" width="206" height="60" rx="6" class="c-mask"/>
+          <rect x="600" y="528" width="206" height="60" rx="6" class="c-frontend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="frontend" class="semantic-sigil s-frontend" transform="translate(606 534) scale(0.6875)">
+            <rect x="2" y="3" width="12" height="10" rx="2"/>
+            <path d="M2 6.5h12"/>
+            <circle cx="4.1" cy="4.8" r=".7" class="sigil-fill"/>
+            <circle cx="6.3" cy="4.8" r=".7" class="sigil-fill"/>
+          </g>
+          <text data-detail-anchor x="703" y="556" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">java 进程</text>
+        <text data-detail="context" x="703" y="572" class="t-muted" font-size="9" text-anchor="middle">另一个容器，另配一个 shim</text>
+        </g>
+
+        <g id="node-ns" data-node-id="ns" data-node-label="namespace" tabindex="0" role="button" aria-label="Focus namespace, PID / NET / MNT / UTS …, 内核 —— 容器在这里的全部痕迹，就是这些标签和限额，没有「容器」这个对象" aria-pressed="false" data-node-kind="database" data-node-sublabel="PID / NET / MNT / UTS …" data-node-context="内核 —— 容器在这里的全部痕迹，就是这些标签和限额，没有「容器」这个对象">
+          <title>namespace · PID / NET / MNT / UTS … · 内核 —— 容器在这里的全部痕迹，就是这些标签和限额，没有「容器」这个对象</title>
+          <rect x="60" y="668" width="196" height="58" rx="6" class="c-mask"/>
+          <rect x="60" y="668" width="196" height="58" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(66 674) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <text data-detail-anchor x="158" y="695" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">namespace</text>
+        <text data-detail="context" x="158" y="711" class="t-muted" font-size="9" text-anchor="middle">PID / NET / MNT / UTS …</text>
+        </g>
+
+        <g id="node-cg" data-node-id="cg" data-node-label="cgroup" tabindex="0" role="button" aria-label="Focus cgroup, 能用多少 CPU / 内存, 内核 —— 容器在这里的全部痕迹，就是这些标签和限额，没有「容器」这个对象" aria-pressed="false" data-node-kind="database" data-node-sublabel="能用多少 CPU / 内存" data-node-context="内核 —— 容器在这里的全部痕迹，就是这些标签和限额，没有「容器」这个对象">
+          <title>cgroup · 能用多少 CPU / 内存 · 内核 —— 容器在这里的全部痕迹，就是这些标签和限额，没有「容器」这个对象</title>
+          <rect x="330" y="668" width="180" height="58" rx="6" class="c-mask"/>
+          <rect x="330" y="668" width="180" height="58" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(336 674) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <text data-detail-anchor x="420" y="695" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">cgroup</text>
+        <text data-detail="context" x="420" y="711" class="t-muted" font-size="9" text-anchor="middle">能用多少 CPU / 内存</text>
+        </g>
+
+        <g id="node-net" data-node-id="net" data-node-label="网络栈" tabindex="0" role="button" aria-label="Focus 网络栈, veth 网卡 · iptables 规则, 内核 —— 容器在这里的全部痕迹，就是这些标签和限额，没有「容器」这个对象" aria-pressed="false" data-node-kind="database" data-node-sublabel="veth 网卡 · iptables 规则" data-node-context="内核 —— 容器在这里的全部痕迹，就是这些标签和限额，没有「容器」这个对象">
+          <title>网络栈 · veth 网卡 · iptables 规则 · 内核 —— 容器在这里的全部痕迹，就是这些标签和限额，没有「容器」这个对象</title>
+          <rect x="600" y="668" width="206" height="58" rx="6" class="c-mask"/>
+          <rect x="600" y="668" width="206" height="58" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(606 674) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <text data-detail-anchor x="703" y="695" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">网络栈</text>
+        <text data-detail="context" x="703" y="711" class="t-muted" font-size="9" text-anchor="middle">veth 网卡 · iptables 规则</text>
+        </g>
+
+        <!-- Connection labels -->
+        <g data-detail="context" data-edge-from="api" data-edge-to="kubelet" data-edge-label="期望状态" data-edge-key="0" data-edge-id="e1">
+          <rect x="274.8" y="217" width="48.4" height="14" rx="3" class="c-mask"/>
+          <text x="299" y="227" class="t-muted" font-size="8" text-anchor="middle">期望状态</text>
+        </g>
+        <g data-detail="context" data-edge-from="kubelet" data-edge-to="containerd" data-edge-label="CRI" data-edge-key="1" data-edge-id="e2">
+          <rect x="413" y="259" width="30" height="14" rx="3" class="c-mask"/>
+          <text x="428" y="269" class="t-backend" font-size="8" text-anchor="middle">CRI</text>
+        </g>
+        <g data-detail="context" data-edge-from="containerd" data-edge-to="shim" data-edge-label="fork" data-edge-key="2" data-edge-id="e3">
+          <rect x="418" y="329" width="30" height="14" rx="3" class="c-mask"/>
+          <text x="433" y="339" class="t-muted" font-size="8" text-anchor="middle">fork</text>
+        </g>
+        <g data-detail="context" data-edge-from="shim" data-edge-to="nginx" data-edge-label="亲爹" data-edge-key="3" data-edge-id="e4">
+          <rect x="156" y="454" width="30" height="14" rx="3" class="c-mask"/>
+          <text x="171" y="464" class="t-backend" font-size="8" text-anchor="middle">亲爹</text>
+        </g>
+        <g data-detail="context" data-edge-from="img" data-edge-to="java" data-edge-label="只读根目录" data-edge-key="4" data-edge-id="e5">
+          <rect x="809" y="497" width="58" height="14" rx="3" class="c-mask"/>
+          <text x="838" y="507" class="t-messagebus" font-size="8" text-anchor="middle">只读根目录</text>
+        </g>
+
+        <!-- Legend -->
+        <g data-legend data-legend-bridge>
+          <text x="40" y="778" class="t-primary" font-size="12" font-weight="650">Legend</text>
+          <g data-legend-semantic-kind="frontend" data-legend-kind="frontend" data-legend-label="Frontend" data-legend-x="40" data-legend-baseline="798" data-legend-width="83">
+            <rect x="40" y="789" width="16" height="10" rx="2.5" class="c-frontend" stroke-width="1"/>
+            <text x="62" y="798" class="t-muted" font-size="10" font-weight="500">Frontend</text>
+          </g>
+          <g data-legend-semantic-kind="backend" data-legend-kind="backend" data-legend-label="Backend" data-legend-x="145" data-legend-baseline="798" data-legend-width="78">
+            <rect x="145" y="789" width="16" height="10" rx="2.5" class="c-backend" stroke-width="1"/>
+            <text x="167" y="798" class="t-muted" font-size="10" font-weight="500">Backend</text>
+          </g>
+          <g data-legend-semantic-kind="database" data-legend-kind="database" data-legend-label="Database" data-legend-x="245" data-legend-baseline="798" data-legend-width="83">
+            <rect x="245" y="789" width="16" height="10" rx="2.5" class="c-database" stroke-width="1"/>
+            <text x="267" y="798" class="t-muted" font-size="10" font-weight="500">Database</text>
+          </g>
+          <g data-legend-semantic-kind="cloud" data-legend-kind="cloud" data-legend-label="Cloud" data-legend-x="350" data-legend-baseline="798" data-legend-width="68">
+            <rect x="350" y="789" width="16" height="10" rx="2.5" class="c-cloud" stroke-width="1"/>
+            <text x="372" y="798" class="t-muted" font-size="10" font-weight="500">Cloud</text>
+          </g>
+          <g data-legend-semantic-kind="security" data-legend-kind="security" data-legend-label="Security" data-legend-x="440" data-legend-baseline="798" data-legend-width="83">
+            <rect x="440" y="789" width="16" height="10" rx="2.5" class="c-security" stroke-width="1"/>
+            <text x="462" y="798" class="t-muted" font-size="10" font-weight="500">Security</text>
+          </g>
+          <g data-legend-semantic-kind="external" data-legend-kind="external" data-legend-label="External" data-legend-x="545" data-legend-baseline="798" data-legend-width="83">
+            <rect x="545" y="789" width="16" height="10" rx="2.5" class="c-external" stroke-width="1"/>
+            <text x="567" y="798" class="t-muted" font-size="10" font-weight="500">External</text>
+          </g>
+        </g>
+      </svg>
+      <figcaption>管理平面（一个节点一套）和每个容器的 shim 是两拨人。<mark class="mk-blue">容器进程不经过它们，直接站在内核上。</mark></figcaption>
+      <p class="arch-hint">
+        <span class="idle">点头上的任意一个框，只看它和它连出去的关系</span>
+        <span class="focused">再点一次空白处取消</span>
+      </p>
+    </figure><p>这张图上有三处值得盯着看：</p>
+<ul class="check warn"><li>containerd 和容器进程之间没有箭头：它们不是父子，是两个各自的进程</li><li>shim 的箭头是实线加粗的，那才是唯一的父子关系</li><li>内核那一段标着 namespace / cgroup / 网络栈，这就是「容器」在系统里的全部痕迹</li></ul><hr>
+<h2 id="那容器到底是个什么东西"><span class="num">03</span>那「容器」到底是个什么东西</h2>
+<p>直说：<mark class="mk-blue"><strong>内核里没有「容器」这个对象。</strong></mark></p>
+<p>它是一个纯约定俗成的说法，指代的是这么一组东西：</p>
+<div class="flowd has-grid has-groups" data-flow data-edges="[{&quot;from&quot;:&quot;proc&quot;,&quot;to&quot;:&quot;ns&quot;,&quot;label&quot;:&quot;把标签挂到这个进程上&quot;},{&quot;from&quot;:&quot;ns&quot;,&quot;to&quot;:&quot;cg&quot;,&quot;label&quot;:&quot;同上&quot;},{&quot;from&quot;:&quot;cg&quot;,&quot;to&quot;:&quot;root&quot;,&quot;label&quot;:&quot;同上&quot;}]">
       <svg class="flowd-svg" aria-hidden="true">
         <defs>
           <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
@@ -4962,177 +4639,157 @@ Sink         ：把每个用户的统计结果写出去
           </marker>
         </defs>
       </svg>
-      <div class="flowd-groups"></div>
-      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-blue" data-id="e">
-              
-              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M3 5h10M3 8h10M3 11h6"/></svg>
-              <b>收到「创建订单」</b>
-              <small>order_id = 1001</small>
-            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="s">
-              
-              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="8" cy="4.2" rx="5" ry="1.9"/><path d="M3 4.2v7.6c0 1.05 2.24 1.9 5 1.9s5-.85 5-1.9V4.2"/></svg>
-              <b>存进状态</b>
-              <small>keyBy(userId) 的状态里</small>
-            </div><div class="fnode tone-violet" data-id="t">
-              
-              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5L3 8l3 4.5M10 3.5L13 8l-3 4.5"/></svg>
-              <b>注册定时器</b>
-              <small>30 分钟后触发</small>
-            </div></div><div class="flowd-row"><div class="fnode tone-amber" data-id="chk">
-              
-              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5L3 8l3 4.5M10 3.5L13 8l-3 4.5"/></svg>
-              <b>30 分钟后回头看</b>
-              <small>这笔订单支付了吗</small>
-            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="yes">
+      <div class="flowd-groups"><div class="fgroup tone-blue" data-group-box="notobj">
+          <span class="fgroup-label">你在 docker ps 里看到的那一行，在内存里对应的就是这些</span>
+        </div></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-blue" data-id="proc" data-group="notobj">
               
               
-              <b>什么都不做</b>
-              <small>状态里已标记已支付</small>
-            </div><div class="fnode tone-red" data-id="no">
+              <b>一个（组）普通进程</b>
+              <small>nginx、java，跟你在本机直接跑的一模一样</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="ns" data-group="notobj">
               
               
-              <b>输出未支付提醒</b>
-              <small>侧输出流 → 告警系统</small>
+              <b>一组 namespace 标签</b>
+              <small>决定它能看见哪些别的进程、哪块网卡</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="cg" data-group="notobj">
+              
+              
+              <b>一个 cgroup</b>
+              <small>决定它最多能用多少 CPU、内存、IO</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="root" data-group="notobj">
+              
+              
+              <b>一个 rootfs</b>
+              <small>镜像叠出来的只读根目录，加上一层可写层</small>
             </div></div></div>
       
-    </div><p>判断该不该用 <code>process</code>，看需求里有没有这两个信号：</p>
-<ul class="check warn"><li>需求里出现「等 N 分钟 / 等到某个时刻」—— 这是定时器，前面所有算子都没有</li><li>需求里出现「之前发生过什么」—— 这是状态，只有 reduce / aggregate / process 有</li><li>需求要输出不止一条流（主流 + 告警流）—— 这是侧输出，只有 process 有</li></ul><h2 id="sink结果写到哪"><span class="num">09</span>Sink：结果写到哪</h2>
-<div class="cards" data-cols="3"><div class="ccard tone-blue">
-          <span class="tag tone-blue">继续流转</span>
-          <h4>Kafka</h4>
-          <p>清洗后的数据继续交给下游消费，解耦上下游、搭多级实时链路</p>
-          
-          
-        </div><div class="ccard tone-violet">
-          <span class="tag tone-violet">给业务查</span>
-          <h4>MySQL / PostgreSQL</h4>
-          <p>用户画像、运营后台要查的中小规模结果。它不是高吞吐分析库，要配批量写和幂等更新</p>
-          
-          
-        </div><div class="ccard tone-violet">
-          <span class="tag tone-violet">搜索</span>
-          <h4>Elasticsearch</h4>
-          <p>商品搜索、日志检索。日志清洗后进 ES，再用 Kibana 看板</p>
-          
-          
-        </div><div class="ccard tone-red">
-          <span class="tag tone-red">毫秒级读</span>
-          <h4>Redis</h4>
-          <p>要极低延迟读的结果：商品浏览量、库存、购物车数量。接口直读</p>
-          
-          
-        </div><div class="ccard tone-green">
-          <span class="tag tone-green">看板</span>
-          <h4>ClickHouse / Doris / StarRocks</h4>
-          <p>高性能分析查询，BI 看板的标配组合</p>
-          
-          
-        </div><div class="ccard tone-green">
-          <span class="tag tone-green">长期存储</span>
-          <h4>HDFS / Hive / Iceberg / Paimon</h4>
-          <p>明细长期存储、数据湖、湖仓一体。供 Flink SQL / Spark / Trino 再查</p>
-          
-          
-        </div></div><div class="callout tone-blue">
-      <span class="ic">🎯</span>
-      <div><p><mark class="mk-blue">选 Sink 就是选「下游怎么读」</mark>，不是选「哪个技术更厉害」：
-下游要毫秒级点查 → Redis；要 SQL 分析 → ClickHouse；要全文检索 → ES；
-要长期存明细 → 数据湖；要给别人继续加工 → 回到 Kafka。</p>
+    </div><p><code>docker run nginx</code> 在你眼里是「启动了一个容器」，在系统眼里是「<strong>fork 一个进程，然后给这个进程挂上几样属性</strong>」。</p>
+<p>这也解释了一件让你困惑的事：<strong>为什么 <code>docker ps</code> 看到的容器、<code>ps aux</code> 看到的 nginx 进程、<code>kubectl get pods</code> 看到的 Pod，是同一件事的三个说法。</strong></p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>视角</th><th>看到的是什么</th><th>同一个东西的不同包装</th></tr></thead><tbody><tr><th>docker ps</th><td data-label="看到的是什么">容器 ID + 名字 + 镜像</td><td data-label="同一个东西的不同包装">给「那个进程」起了个人类友好的名字</td></tr><tr><th>ps aux</th><td data-label="看到的是什么">nginx: master process</td><td data-label="同一个东西的不同包装"><span class="tag tone-green"><mark class="mk-blue">这才是真实存在的东西</mark>：一个进程</span></td></tr><tr><th>lsns / systemd-cgls</th><td data-label="看到的是什么">namespace 列表 / cgroup 树</td><td data-label="同一个东西的不同包装">那个进程身上挂的属性</td></tr><tr><th>kubectl get pods</th><td data-label="看到的是什么">Pod 名字 + 状态</td><td data-label="同一个东西的不同包装">K8s 给一组共享标签的进程打的另一个名字</td></tr></tbody></table></div><hr>
+<h2 id="一台机器上的进程家族树"><span class="num">04</span>一台机器上的进程家族树</h2>
+<p>按「谁 fork 了谁」画，比按「谁调用谁」画清楚得多：</p>
+<div class="tree" data-tree><ul class="tlist"><li class="has-kids">
+            <div class="tnode tone-violet" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>systemd (PID 1)</b>
+              
+              <span class="tnote">机器上所有进程的根</span>
+            </div>
+            <ul class="tlist"><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>kubelet</b>
+              <code>由 systemd 拉起</code>
+              <span class="tnote">它不 fork 容器，只跟 containerd 说话</span>
+            </div>
+            
+          </li><li class="has-kids">
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>containerd</b>
+              <code>由 systemd 拉起</code>
+              <span class="tnote">管理平面。它 fork 的是 shim，不是容器进程</span>
+            </div>
+            <ul class="tlist"><li class="has-kids">
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>containerd-shim</b>
+              
+              <span class="tnote">每个运行中的容器一个。它是容器进程真正的父进程</span>
+            </div>
+            <ul class="tlist"><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>nginx</b>
+              
+              <span class="tnote"><mark class="mk-blue">容器进程在这里</mark>。</span>
+            </div>
+            
+          </li></ul>
+          </li><li class="has-kids">
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>containerd-shim</b>
+              
+              <span class="tnote">另一个容器的</span>
+            </div>
+            <ul class="tlist"><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>java</b>
+              
+              <span class="tnote">它也是别人的孩子，不是你想象的那个层级</span>
+            </div>
+            
+          </li></ul>
+          </li></ul>
+          </li></ul>
+          </li></ul></div><p><code>runc</code> 不在这棵树里，<mark class="mk-blue">因为它活不到你能 <code>ps</code> 到它的时候。</mark> 它在 shim 被创建的那一刻出现，建完进程就走。</p>
+<div class="callout tone-violet">
+      <span class="ic">🧬</span>
+      <div><p><strong>「容器」和「Pod」都不在这棵树上，因为它们都不是进程。</strong></p>
+<p>它们是<strong>标签的集合</strong>：</p>
+<ul>
+<li><mark class="mk-blue">容器</mark> = 一个进程 + 那四样属性（namespace / cgroup / rootfs / 自己的 shim）</li>
+<li><mark class="mk-blue">Pod</mark> = 几个共享 Network / IPC / UTS namespace 的容器，再加一个 <code>pause</code> 容器当它们的共享骨架</li>
+</ul>
+<p>所以「Pod 里有哪些容器」这个问题问得通，
+而「Pod 进程的 PID 是多少」问不通：<strong>它自己没有 PID。</strong></p>
 </div>
-    </div><h2 id="为什么要设计这么多算子"><span class="num">10</span>为什么要设计这么多算子</h2>
-<p>核心原因是一句话：<strong>流式计算不是简单地「逐条执行 Java 代码」。</strong></p>
-<p>Flink 得同时应付：数据源源不断地来、数据量很大、任务要并行、同一个用户的数据得正确汇聚、
-任务挂了不能算错或丢数据、状态可能很大、数据可能乱序迟到、计算逻辑还得可组合可维护。</p>
-<div class="cards" data-cols="3"><div class="ccard tone-blue">
-          <span class="tag tone-blue">原因一</span>
-          <h4>拆成可组合的小步骤</h4>
-          <p>每个算子只管一件事，像 Unix 管道一样拼起来</p>
+    </div><hr>
+<h2 id="那镜像呢"><span class="num">05</span>那镜像呢</h2>
+<p>镜像<strong>不在内存里</strong>。它在磁盘上睡大觉：</p>
+<div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-muted">第 1 站</span>
+            <span class="name">镜像仓库（别的机器）</span>
+            <span class="spacer"></span>
+            <span class="tag tone-muted">躺着</span>
+          </div>
+          <div class="rec"><div class="">
+            <b>长什么样</b><span>registry.example.com/backend:v1</span></div><div class="">
+            <b>在哪</b><span>Harbor / Docker Hub / 云厂商的仓库</span></div></div>
           
+          <p class="jnote">这一步只在「拉取」时发生，拉完就跟它没关系了</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">containerd 把它拉下来<span class="note">落到这台机器的磁盘上</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-blue">第 2 站</span>
+            <span class="name">节点磁盘</span>
+            <span class="spacer"></span>
+            <span class="tag tone-blue">==睡在这里，不在内存里==</span>
+          </div>
+          <div class="rec"><div class="">
+            <b>解压后的层</b><span>/var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/</span></div><div class="">
+            <b>原始压缩包</b><span>/var/lib/containerd/io.containerd.content.v1.content/</span></div><div class="warn">
+            <b>用 Docker 的话</b><span>/var/lib/docker/overlay2/</span><em>另一套目录</em></div></div>
           
-        </div><div class="ccard tone-amber">
-          <span class="tag tone-amber">原因二</span>
-          <h4>告诉 Flink 怎么并行</h4>
-          <p>不同算子的并行方式不同，keyBy 就是在说「这里必须按 Key 重分区」</p>
+          <p class="jnote bad">镜像层是只读的，所有容器共用同一份</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">创建容器时<span class="note">叠成一个文件系统给进程看</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-green">第 3 站</span>
+            <span class="name">容器进程眼里的根目录</span>
+            <span class="spacer"></span>
+            <span class="tag tone-green">只是挂载视图</span>
+          </div>
+          <div class="rec"><div class="">
+            <b>看到的是</b><span>一个完整的根目录 /</span></div><div class="ok">
+            <b>实际是</b><span>几个只读层叠起来 + 一层可写层</span><em>写时才复制</em></div></div>
           
-          
-        </div><div class="ccard tone-green">
-          <span class="tag tone-green">原因三</span>
-          <h4>让状态可管理、可恢复</h4>
-          <p>状态交给 Flink 托管，才能做 Checkpoint 和故障恢复</p>
-          
-          
-        </div><div class="ccard tone-violet">
-          <span class="tag tone-violet">原因四</span>
-          <h4>让 Flink 能做优化</h4>
-          <p>轻量的逐条算子可以被串成一个 Task，省掉网络传输</p>
-          
-          
-        </div><div class="ccard tone-muted">
-          <span class="tag tone-muted">原因五</span>
-          <h4>统一批流</h4>
-          <p>有界流和无界流用同一套「数据流 + 算子」模型处理</p>
-          
-          
-        </div></div><h3 id="原因一把大函数拆成可组合的小步骤">原因一：把大函数拆成可组合的小步骤</h3>
-<p>不用算子的话，很容易写成一个巨大的处理函数：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-java">handleEverything(message) {
-    // 解析 JSON
-    // 校验字段
-    // 过滤异常订单
-    // 按用户保存金额
-    // 判断是否超时
-    // 关联用户资料
-    // 写 ClickHouse
-}
-</code></pre></div>
-<p>问题很现实：逻辑混在一起，难测试、难复用、难定位问题、也难做并行优化。</p>
-<p>用算子之后，每一段的职责就清楚了：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">map       ：负责解析
-filter    ：负责清洗
-keyBy     ：负责分组
-aggregate ：负责统计
-process   ：负责复杂规则
-sink      ：负责写结果
-</code></pre></div>
-<p>这跟 Unix 管道是同一个思路：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-bash">cat access.log | grep ERROR | awk '{...}' | sort | uniq -c
-</code></pre></div>
-<p>每一步只做好一件事，再组合成完整流程。</p>
-<h3 id="原因二让-flink-知道该怎么并行">原因二：让 Flink 知道该怎么并行</h3>
-<p>这一条上一节已经讲透了：<code>map</code> / <code>filter</code> 里每条数据互不依赖，分到哪个 Task 都行；
-而 <code>keyBy + aggregate</code> 必须保证同一个 Key 到同一个 Task，否则累计结果就是错的。</p>
-<p><mark class="mk-blue">所以算子不只描述业务逻辑，它同时也在告诉 Flink 「这段该怎么并行」。</mark></p>
-<h3 id="原因三让状态可管理可恢复">原因三：让状态可管理、可恢复</h3>
-<p>如果你自己用 Java 的全局变量累计金额：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-java">Map&lt;String, Double&gt; userTotal = new HashMap&lt;&gt;();
-</code></pre></div>
-<p>程序一重启，内存里的数据就没了：<code>u01</code> 原本累计 169 元，宕机重启后变成 0。</p>
-<p>而 <code>keyBy</code> + 有状态算子会把状态交给 Flink 托管，Flink 就能通过 <strong>Checkpoint（检查点）</strong> 定期保存状态快照：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">定期把状态快照写下来
-        ↓
-      宕机重启
-        ↓
-从最近一次 Checkpoint 恢复状态  +  从 Kafka 对应位点重新消费
-        ↓
-      接着往下算
-</code></pre></div>
-<p>这样才能做到接近 <strong>Exactly-Once（精确一次）</strong> —— 尽量不丢数据、不重复统计。</p>
-<p><mark class="mk-amber">状态必须是「Flink 托管的」，自己塞在一个 <code>static</code> 变量里的东西，Checkpoint 管不到，也恢复不了。</mark></p>
-<h3 id="原因四让-flink-有机会做性能优化">原因四：让 Flink 有机会做性能优化</h3>
-<p>这一条前面已经见过了：<code>map → filter → map</code> 这种轻量、逐条、无状态的算子，
-会被 Flink 串成一个 Task（算子链），省掉中间的网络传输和序列化。</p>
-<p><mark class="mk-blue">算子把语义表达清楚了，Flink 才有机会自动优化执行计划。</mark></p>
-<p>如果所有逻辑都写在一个大函数里，引擎能做的事就只剩「原样执行」。</p>
-<h3 id="原因五一套模型同时处理批和流">原因五：一套模型同时处理批和流</h3>
-<p>Flink 既要处理 Kafka 那种持续到来的无界流，也要处理 CSV / HDFS 上的历史文件（有界流）。
-而两者的处理过程往往长得一样：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">读取 → map → filter → keyBy → 聚合 → 输出
-</code></pre></div>
-<p>所以 Flink 用统一的「数据流 + 算子」模型处理它们，区别只在<strong>数据会不会结束</strong> ——
-见 <a href="../flink-bounded-vs-unbounded/">Flink 的有界流与无界流</a>。</p>
-<h2 id="连起来一个电商实时大盘"><span class="num">11</span>连起来：一个电商实时大盘</h2>
-<p>需求：大盘每分钟展示订单数量、GMV、各城市销售额、销量 Top 10。</p>
-<div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;svc&quot;,&quot;to&quot;:&quot;mq&quot;,&quot;label&quot;:&quot;写消息&quot;},{&quot;from&quot;:&quot;mq&quot;,&quot;to&quot;:&quot;clean&quot;,&quot;label&quot;:&quot;Source 消费&quot;},{&quot;from&quot;:&quot;clean&quot;,&quot;to&quot;:&quot;agg&quot;,&quot;label&quot;:&quot;清洗后&quot;},{&quot;from&quot;:&quot;agg&quot;,&quot;to&quot;:&quot;ch&quot;,&quot;label&quot;:&quot;Sink 写入&quot;},{&quot;from&quot;:&quot;ch&quot;,&quot;to&quot;:&quot;bi&quot;,&quot;label&quot;:&quot;查询&quot;}]">
+          <p class="jnote">这一站才和内存有关系。但进内存的是「被读到的那些块」，不是整个镜像</p>
+        </div><p><mark class="mk-blue">所以「镜像跑起来需要容器吗」这个问题，答案要分两半：</mark></p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>说法</th><th>对不对</th><th>准确的问法</th></tr></thead><tbody><tr><th>镜像运行起来需要容器</th><td data-label="对不对"><span class="tag tone-amber">大致对，但不准确</span></td><td data-label="准确的问法">镜像自己永远不会运行。真正运行的是<strong>进程</strong>，容器只是这个进程的包装说法</td></tr><tr><th>一个镜像可以有多个容器</th><td data-label="对不对"><span class="tag tone-green">对</span></td><td data-label="准确的问法">准确说：同一份只读镜像，可以给多个进程当根目录。100 个副本 = 一份镜像 + 100 个进程</td></tr><tr><th>容器是镜像的实例</th><td data-label="对不对"><span class="tag tone-amber">对，但别当成面向对象</span></td><td data-label="准确的问法">没有「类」和「对象」那种实体；就是同一批只读层被挂到不同的进程上</td></tr></tbody></table></div><hr>
+<h2 id="docker-单机-和-k8s-节点差在哪"><span class="num">06</span>Docker 单机 和 K8s 节点，差在哪</h2>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>有什么</th><th>只管 Docker 的机器</th><th>K8s 工作节点</th></tr></thead><tbody><tr><th>容器进程</th><td data-label="只管 Docker 的机器"><span class="tag tone-green">有</span></td><td data-label="K8s 工作节点"><span class="tag tone-green">有，一模一样</span></td></tr><tr><th>containerd</th><td data-label="只管 Docker 的机器"><span class="tag tone-green">有</span></td><td data-label="K8s 工作节点"><span class="tag tone-green">有</span></td></tr><tr><th>containerd-shim</th><td data-label="只管 Docker 的机器"><span class="tag tone-green">有</span></td><td data-label="K8s 工作节点"><span class="tag tone-green">有，一模一样</span></td></tr><tr><th>runc</th><td data-label="只管 Docker 的机器"><span class="tag tone-green">有，一样是一次性的</span></td><td data-label="K8s 工作节点"><span class="tag tone-green">有，一样是一次性的</span></td></tr><tr><th>dockerd</th><td data-label="只管 Docker 的机器"><span class="tag tone-amber">有</span></td><td data-label="K8s 工作节点"><span class="tag tone-red"><mark class="mk-blue">没有</mark> —— K8s 不需要它</span></td></tr><tr><th>docker CLI</th><td data-label="只管 Docker 的机器"><span class="tag tone-amber">有</span></td><td data-label="K8s 工作节点"><span class="tag tone-red">没有</span></td></tr><tr><th>kubelet</th><td data-label="只管 Docker 的机器"><span class="tag tone-red">没有</span></td><td data-label="K8s 工作节点"><span class="tag tone-green">有</span></td></tr><tr><th>pause 容器</th><td data-label="只管 Docker 的机器"><span class="tag tone-red">没有</span></td><td data-label="K8s 工作节点"><span class="tag tone-green">每个 Pod 一个</span></td></tr></tbody></table></div><p><mark class="mk-blue">底下三层完全一样。</mark> K8s 不是「在 Docker 之上加了一层」，而是<strong>换掉了最上面那层用户界面</strong>：</p>
+<div class="flowd has-grid has-groups" data-flow data-edges="[{&quot;from&quot;:&quot;cli&quot;,&quot;to&quot;:&quot;dockerd&quot;,&quot;label&quot;:&quot;&quot;},{&quot;from&quot;:&quot;api&quot;,&quot;to&quot;:&quot;kube&quot;,&quot;label&quot;:&quot;&quot;},{&quot;from&quot;:&quot;dockerd&quot;,&quot;to&quot;:&quot;cd&quot;,&quot;label&quot;:&quot;gRPC&quot;},{&quot;from&quot;:&quot;kube&quot;,&quot;to&quot;:&quot;cd&quot;,&quot;label&quot;:&quot;CRI&quot;,&quot;labelDx&quot;:46},{&quot;from&quot;:&quot;cd&quot;,&quot;to&quot;:&quot;shim&quot;,&quot;label&quot;:&quot;fork&quot;},{&quot;from&quot;:&quot;shim&quot;,&quot;to&quot;:&quot;ctn&quot;,&quot;label&quot;:&quot;亲爹&quot;}]">
       <svg class="flowd-svg" aria-hidden="true">
         <defs>
           <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
@@ -5141,149 +4798,140 @@ sink      ：负责写结果
           </marker>
         </defs>
       </svg>
-      <div class="flowd-groups"></div>
-      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-blue" data-id="svc">
+      <div class="flowd-groups"><div class="fgroup tone-blue" data-group-box="dk">
+          <span class="fgroup-label">Docker 单机的入口</span>
+        </div><div class="fgroup tone-green" data-group-box="k8">
+          <span class="fgroup-label">K8s 节点的入口</span>
+        </div><div class="fgroup tone-muted" data-group-box="same">
+          <span class="fgroup-label">这两边一样</span>
+        </div></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-blue" data-id="cli" data-group="dk">
               
-              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5L3 8l3 4.5M10 3.5L13 8l-3 4.5"/></svg>
-              <b>订单服务</b>
-              <small>下单 / 支付</small>
-            </div></div><div class="flowd-row"><div class="fnode tone-amber" data-id="mq">
               
-              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M3 5h10M3 8h10M3 11h6"/></svg>
-              <b>Kafka · order_topic</b>
-              <small>订单消息一条条进</small>
-            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="clean">
+              <b>docker CLI</b>
+              <small>你说 docker run</small>
+            </div><div class="fnode tone-green" data-id="api" data-group="k8">
               
-              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5L3 8l3 4.5M10 3.5L13 8l-3 4.5"/></svg>
-              <b>map + filter</b>
-              <small>JSON → Order，丢掉非法和未支付</small>
-            </div><div class="fnode tone-violet" data-id="agg">
               
-              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5L3 8l3 4.5M10 3.5L13 8l-3 4.5"/></svg>
-              <b>keyBy + 窗口聚合</b>
-              <small>按城市 / 商品，每分钟一次</small>
-            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="ch">
+              <b>kubectl</b>
+              <small>你说 kubectl apply</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-blue" data-id="dockerd" data-group="dk">
               
-              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="8" cy="4.2" rx="5" ry="1.9"/><path d="M3 4.2v7.6c0 1.05 2.24 1.9 5 1.9s5-.85 5-1.9V4.2"/></svg>
-              <b>ClickHouse</b>
-              <small>每分钟的聚合结果</small>
-            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="bi">
               
-              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="3" width="11" height="8.5" rx="1.5"/><path d="M2.5 6h11"/></svg>
-              <b>BI 大盘</b>
-              <small>订单量 · GMV · 城市 · Top10</small>
+              <b>dockerd</b>
+              <small>把命令翻译一下，再往下交</small>
+            </div><div class="fnode tone-green" data-id="kube" data-group="k8">
+              
+              
+              <b>kubelet</b>
+              <small>盯着期望状态，有差距就去补</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="cd" data-group="same">
+              
+              
+              <b>containerd</b>
+              <small>一个节点一个</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="shim" data-group="same">
+              
+              
+              <b>containerd-shim</b>
+              <small>每个容器一个</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="ctn" data-group="same">
+              
+              
+              <b>容器进程</b>
+              <small>nginx / java</small>
             </div></div></div>
-      <div class="flegend"><span class="fleg-item tone-green">
-                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"
-                     stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5L3 8l3 4.5M10 3.5L13 8l-3 4.5"/></svg>
-                backend <em>3</em></span><span class="fleg-item tone-amber">
-                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"
-                     stroke-linecap="round" stroke-linejoin="round"><path d="M3 5h10M3 8h10M3 11h6"/></svg>
-                messagebus <em>1</em></span><span class="fleg-item tone-violet">
-                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"
-                     stroke-linecap="round" stroke-linejoin="round"><ellipse cx="8" cy="4.2" rx="5" ry="1.9"/><path d="M3 4.2v7.6c0 1.05 2.24 1.9 5 1.9s5-.85 5-1.9V4.2"/></svg>
-                database <em>1</em></span><span class="fleg-item tone-muted">
-                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"
-                     stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="3" width="11" height="8.5" rx="1.5"/><path d="M2.5 6h11"/></svg>
-                frontend <em>1</em></span></div>
-    </div><p>写成一行就是：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">Kafka → Flink 读取 → 清洗 → 分组 → 窗口聚合 → ClickHouse → 数据大盘
-</code></pre></div>
-<p>对应的代码骨架（伪代码，重点是形状）：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-java">// ① Source：从 Kafka 拿订单 JSON
-DataStream&lt;String&gt; jsonStream = readFromKafka(&quot;order_topic&quot;);
-
-// ② Transformation：解析 → 过滤 → 只留已支付
-DataStream&lt;Order&gt; orders = jsonStream
-    .map(json -&gt; parseJsonToOrder(json))
-    .filter(order -&gt; order.getAmount() &gt; 0)
-    .filter(order -&gt; &quot;PAID&quot;.equals(order.getStatus()));
-
-// ③ Transformation：按城市分组，每分钟聚合一次
-DataStream&lt;CitySales&gt; citySales = orders
-    .keyBy(order -&gt; order.getCity())
-    .window(TumblingEventTimeWindows.of(Time.minutes(1)))
-    .aggregate(new CitySalesAggregate());
-
-// ④ Sink：写 ClickHouse
-citySales.sinkTo(clickHouseSink);
-</code></pre></div>
-<p>最后用一张「需求 → 算子」的表收尾。看到需求先定位算子，再想代码怎么写：</p>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>你想做什么</th><th>优先考虑什么算子</th></tr></thead><tbody><tr><th>修改每条数据的格式</th><td data-label="优先考虑什么算子"><code>map</code></td></tr><tr><th>过滤掉不需要的数据</th><td data-label="优先考虑什么算子"><code>filter</code></td></tr><tr><th>一条记录拆成多条</th><td data-label="优先考虑什么算子"><code>flatMap</code></td></tr><tr><th>按用户 / 商品 / 城市分组</th><td data-label="优先考虑什么算子"><code>keyBy</code></td></tr><tr><th>累计金额、计数、最大值</th><td data-label="优先考虑什么算子"><code>keyBy</code> + <code>reduce</code> / <code>aggregate</code></td></tr><tr><th>合并 App 和 Web 两条同类型流</th><td data-label="优先考虑什么算子"><code>union</code></td></tr><tr><th>订单流关联用户流 / 商品流</th><td data-label="优先考虑什么算子"><code>join</code></td></tr><tr><th>超时提醒、去重、定时检查、复杂状态机</th><td data-label="优先考虑什么算子"><code>process</code></td></tr></tbody></table></div><div class="summary">
-      <h3 id="一句话总结">一句话总结</h3>
-      <p><code>Source</code> 把数据接进来，<code>Transformation</code> 按业务规则实时加工，<code>Sink</code> 把结果写给下游。
-九个算子只分五类，<mark class="mk-blue">而 <code>keyBy</code> 是唯一一个「不产出数据」的算子</mark> —— 它的作用是让后续计算按 Key 分开算。
-剩下两个难点，本质上都是<strong>时间</strong>：<code>join</code> 要处理「对面还没到」，<code>process</code> 要处理「等一会儿再回头看」。
-至于为什么要有这么多算子 —— <mark class="mk-blue">算子既描述业务逻辑，也告诉 Flink 怎么并行、状态存在哪、能不能串起来跑</mark>。</p>
-
-    </div><h2 id="自测">自测</h2>
+      
+    </div><hr>
+<h2 id="pod-多出来的那个东西"><span class="num">07</span>Pod 多出来的那个东西</h2>
+<p>K8s 比 Docker 多出来的核心概念是 <strong>Pod</strong>，而 Pod 在内存里的实现，靠的是一个几乎什么都不干的容器：</p>
+<div class="flowd has-grid has-groups" data-flow data-edges="[{&quot;from&quot;:&quot;pause&quot;,&quot;to&quot;:&quot;a&quot;,&quot;label&quot;:&quot;把 NET 这个 namespace 借给它&quot;},{&quot;from&quot;:&quot;pause&quot;,&quot;to&quot;:&quot;b&quot;,&quot;label&quot;:&quot;同一个&quot;},{&quot;from&quot;:&quot;b&quot;,&quot;to&quot;:&quot;why&quot;,&quot;label&quot;:&quot;&quot;}]">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"><div class="fgroup tone-green" data-group-box="pod">
+          <span class="fgroup-label">一个 Pod 在内存里 = 一个 pause 容器 + 若干业务容器</span>
+        </div></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-violet" data-id="pause" data-group="pod">
+              
+              
+              <b>pause 容器</b>
+              <small>镜像只有几百 KB，跑起来就干一件事：sleep</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="a" data-group="pod">
+              
+              
+              <b>nginx 容器</b>
+              <small>共享 pause 的 Network namespace</small>
+            </div><div class="fnode tone-green" data-id="b" data-group="pod">
+              
+              
+              <b>sidecar 容器</b>
+              <small>共享同一个 Network namespace</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-amber" data-id="why" data-group="pod">
+              
+              
+              <b>为什么要有它</b>
+              <small>它持有那组共享的 namespace。业务容器崩了重建，Pod 的网络身份不变</small>
+            </div></div></div>
+      
+    </div><p>所以同一个 Pod 里的两个容器，<code>localhost</code> 能互相访问，<mark class="mk-blue">因为它们共用同一张网卡，不是因为它们之间有网络。</mark></p>
+<div class="callout tone-violet">
+      <span class="ic">📦</span>
+      <div><p><strong>从这里就能看出 Pod 的定位：它不是「更大的容器」，是「共享命名空间的一小组容器」。</strong></p>
+<p>它带来的实际约束是：</p>
+<ul>
+<li>同一 Pod 里的容器<strong>必须被调度到同一台机器上</strong>（因为要共享 namespace）</li>
+<li>它们<strong>一起生、一起死</strong>（生命周期绑在一起）</li>
+<li>端口是按 Pod 分的：<mark class="mk-blue">同一个 Pod 里两个容器不能都监听 80</mark></li>
+</ul>
+<p>这三条都不是人为规定，是「共享 namespace」这个实现方式的直接推论。</p>
+</div>
+    </div><hr>
 <div class="quiz"><details>
-        <summary>九个 Transformation 算子能不能按「一条进几条出」分成三类？<code>keyBy</code> 属于哪类？</summary>
-        <div class="a"><p>逐条处理的那三个可以：<mark class="mk-blue"><code>map</code> 是 1 → 1，<code>filter</code> 是 1 → 0 或 1，<code>flatMap</code> 是 1 → 0 到多条</mark>。
-但 <code>keyBy</code> <strong>哪一类都不属于</strong> —— 它不改变条数，也不改变内容，
-它改变的是「后续计算以什么为单位」。所以它单独用看不出任何效果。</p>
+        <summary>containerd 和容器进程是什么关系？</summary>
+        <div class="a"><p>不是父子，也不是上下级。containerd 是节点级的管理进程，它 fork 出的是 shim；
+shim 才是容器进程的父进程（负责 waitpid 收尸、转发 stdio、汇报退出码）。
+containerd 直接和容器进程之间没有任何层级关系，它们都只是内核上的普通进程。
+这也是为什么重启 containerd 不会影响正在运行的容器：顶着的是 shim。</p>
 </div>
       </details><details>
-        <summary>为什么只有 <code>keyBy</code> 之后才能算「每个用户的累计消费」？</summary>
-        <div class="a"><p>因为 <code>keyBy</code> 把相同 Key 的数据<strong>路由到同一个并行实例</strong>，
-Flink 才能按 Key 保存状态：<code>u01</code> 的累计值存在 <code>u01</code> 名下，<code>u02</code> 的存在 <code>u02</code> 名下，互不干扰。
-没有 <code>keyBy</code>，就没有「按 Key 的状态」可言。</p>
+        <summary>runc 在系统里长期存在吗？</summary>
+        <div class="a"><p>不存在。它是「一次性」的：containerd 在创建容器时 fork 出它，
+它调 clone / unshare / setns 把进程建出来、套上 namespace 和 cgroup，
+然后就退出了。它更像接生婆而不是保姆，所以任何把它画成「一层」的图都是错的。</p>
 </div>
       </details><details>
-        <summary>写下 <code>stream.map(...).filter(...).keyBy(...)</code> 这几行之后，Flink 立刻就开始处理 Kafka 数据了吗？</summary>
-        <div class="a"><p>没有。<mark class="mk-blue">这几行只是在「描述一张数据处理流程图」</mark>，
-告诉 Flink「这里要加一个 map 节点、那里要加一个 filter 节点」。
-真正按下启动键的是 <code>env.execute()</code> —— 到那一步 Flink 才提交任务、开始消费 Kafka。
-跟写 SQL 是一个道理：你写「我要怎么处理」，引擎决定「怎么执行」。</p>
+        <summary>「容器」在 Linux 里对应哪个内核对象？</summary>
+        <div class="a"><p>没有这样一个对象。内核里没有 container 这个东西，
+「容器」是一个约定俗成的说法，指代「一个（组）普通进程 + 一组 namespace 标签</p>
+<ul>
+<li>一个 cgroup 限额 + 一个 rootfs」这一整包。
+所以 docker ps 看到的条目、ps 看到的 nginx 进程、kubectl get pods 看到的 Pod，
+是同一个东西的三种不同命名方式。</li>
+</ul>
 </div>
       </details><details>
-        <summary>并行度是 3，<code>u01</code> 的两笔订单被分到了 Task 1 和 Task 2，能算出 <code>u01</code> 的累计消费吗？</summary>
-        <div class="a"><p>不能，而且不是精度问题，是<strong>根本算不出来</strong> ——
-<mark class="mk-blue">每个 Task 只看得见自己手上那几条</mark>，Task 1 以为 u01 累计 99，Task 2 以为 20。
-<code>keyBy(userId)</code> 做的就是把这些数据重新洗牌（shuffle / repartition），
-保证同一个 Key 的数据落到同一个 Task 上，累计值才能算对。</p>
+        <summary>我一个镜像起了 3 个副本，磁盘上会存 3 份镜像吗？</summary>
+        <div class="a"><p>不会。镜像层是只读的，3 个副本共用同一份。
+它们各自的差别只在那一层「可写层」，而且写时才复制。
+所以磁盘占用是「一份镜像 + 三份改动」，不是三份镜像。</p>
 </div>
       </details><details>
-        <summary><code>Operator</code>、<code>Subtask</code>、<code>Task</code>、<code>TaskManager</code>、<code>Slot</code> 这五个词，能按粒度从大到小排一遍吗？</summary>
-        <div class="a"><p><mark class="mk-blue"><code>TaskManager</code> ⊃ <code>Slot</code> ⊃ <code>Task</code> ⊃ <code>Subtask</code> ⊃ <code>Operator</code></mark>。
-TaskManager 是干活的进程（JVM），它划出一份份 Slot 作为资源配额；
-Slot 里跑 Task，而 Task 常常是<strong>一串链起来的算子</strong>；
-链上的每一个算子，各自又有自己的并行副本，就是 Subtask。
-最容易混的是 Task 和 TaskManager —— <strong>Task 是工作单元，TaskManager 是进程</strong>。</p>
-</div>
-      </details><details>
-        <summary>「同一个 Key 的数据一定到同一个 Task 上」，这句话严谨吗？</summary>
-        <div class="a"><p>作为入门理解可以，但严谨说法是「<strong>汇聚到同一个下游 Keyed Operator Subtask</strong>」。
-三个原因：① 一个 Task 里可能链了多个算子，Task 不是「Key 的归属单位」；
-② 扩缩容或故障恢复后，Key 到并行实例的分配可能变（并行度从 3 改成 4，哈希取模结果就全变了）；
-③ 但 Flink 会处理状态重分配，保证恢复后算得对。
-所以不是「u01 永远固定在某个 Task」，而是「当前拓扑下 u01 总是去同一个地方」。</p>
-</div>
-      </details><details>
-        <summary><code>keyBy</code> 凭什么能把同一个 Key 的数据聚到一起？</summary>
-        <div class="a"><p>一个哈希函数：<mark class="mk-blue"><code>hash(key) % 下游并行度</code></mark>。
-并行度是 3 时，<code>u01</code> 可能恒等于 <code>0</code>，于是它的每一笔订单都去 Aggregate Subtask 0。
-这不是 Flink「记住了 u01」，而是<strong>哈希函数保证 u01 每次都落到同一个地方</strong> ——
-所以那个地方攒的状态就是 u01 的。这就是 Keyed State 能工作的基础。</p>
-</div>
-      </details><details>
-        <summary>流里的 <code>join</code> 比数据库里的 <code>JOIN</code> 难在哪？</summary>
-        <div class="a"><p>数据库里两张表都是完整的，查询那一刻就配上了。
-流里两条数据各自在动，<mark class="mk-blue">订单先到、用户资料可能三秒后才到</mark>。
-所以流式 join 必须自己决定「等多久、等不到怎么算」——
-时间窗口、维表 join、广播状态这些机制，存在的意义就是回答这个问题。</p>
-</div>
-      </details><details>
-        <summary>什么信号说明你该用 <code>process</code> 而不是 <code>map</code> / <code>filter</code> / <code>reduce</code>？</summary>
-        <div class="a"><p>需求里出现「<strong>等一段时间再检查<strong>」或者「</strong>要记住之前发生过什么</strong>」的时候。
-比如「下单 30 分钟还没支付就提醒」—— 需要状态（记住这笔订单）、
-定时器（30 分钟后叫我）、侧输出（提醒走另一条流），这三样只有 <code>process</code> 给得了。</p>
+        <summary>cd 进一个容器里改的东西，会在别的副本里出现吗？</summary>
+        <div class="a"><p>不会。你改的落在那个容器自己的可写层上，只对该容器可见。
+镜像的那些层始终是只读的，这是容器能秒级启动、能复用的前提。
+要持久化得挂 volume，要固化成新镜像得 commit / build。</p>
 </div>
       </details></div>
 
     <footer>
-      <span>Flink 的 Source / Transformation / Sink：一条数据加工流水线</span>
-      <span>最后更新 2026-09-26 · 单文件可离线打开</span>
+      <span>一台机器上：Docker / K8s / 容器 / 镜像到底谁压着谁</span>
+      <span>最后更新 2026-10-06 · 单文件可离线打开</span>
     </footer>
   </main>
 </div>
