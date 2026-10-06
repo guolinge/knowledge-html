@@ -1,0 +1,428 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-has-toc="1">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>cgroup · 一棵树，每个节点是一组配额</title>
+<meta name="description" content="「限制资源」也只是一个概括。cgroup 的具体形状是一棵树：每个节点是一组配额，配额对整棵子树生效，进程挂在某个节点上。而且内存超限会被杀掉，CPU 超限只是被节流 —— 这两件事完全不一样。" />
+<link rel="stylesheet" href="../../assets/theme.css" />
+  <link rel="stylesheet" href="../../assets/blocks.css" />
+  <link rel="stylesheet" href="../../assets/archify-embed.css" />
+</head>
+<body>
+<div id="progress"></div>
+<div id="tocScrim"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
+    <a class="brand" href="../../index.html"><span class="dot"></span>知识笔记</a>
+    
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="toc" id="toc">
+      <p class="toc-title">目录</p>
+      <a href="../../index.html" class="sub">← 全部笔记</a>
+      <a href="#限制资源也太笼统">「限制资源」也太笼统</a>
+      <a href="#一棵树">一棵树</a>
+      <a href="#超限了会发生什么内存和-cpu-完全不是一回事">超限了会发生什么：内存和 CPU 完全不是一回事</a>
+      <a href="#docker-run-的参数最后落在哪">docker run 的参数最后落在哪</a>
+      <a href="#限制和统计是同一份数据的两面">限制和统计是同一份数据的两面</a>
+      <a href="#为什么从好几棵树变成一棵树">为什么从「好几棵树」变成「一棵树」</a>
+      <a href="#那cgroup-namespace是什么">那「cgroup namespace」是什么</a>
+      <a href="#两个机制合起来才是容器">两个机制合起来，才是「容器」</a>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow">● 容器 · 资源控制</span>
+      <h1>cgroup · 一棵树，每个节点是一组配额</h1>
+      <p class="lede">「限制资源」也只是一个概括。cgroup 的具体形状是一棵树：每个节点是一组配额，配额对整棵子树生效，进程挂在某个节点上。而且内存超限会被杀掉，CPU 超限只是被节流 —— 这两件事完全不一样。</p>
+    </div>
+
+    <div class="draft-banner">
+    <span>⚠</span>
+    <span>本页状态为 <b>draft</b>：内容尚未人工核对，引用前请自行验证。</span>
+  </div>
+<aside class="needs">
+      <p class="needs-title">读这篇之前，你需要先知道</p>
+      <a class="need" href="../runtime-on-one-machine/">← <b>1. 一台机器上的结构</b><span>谁在内存里、谁是一次性的、容器为什么不是一个内核对象</span></a>
+    </aside>
+    <div class="provenance"><span><b>来源</b> AI 中台问答：系统中的 namespace 和 cgroup 是什么（原始素材） · kernel.org 文档 · Control Group v2 https://docs.kernel.org/admin-guide/cgroup-v2.html · man7 · cgroup_namespaces(7) https://man7.org/linux/man-pages/man7/cgroup_namespaces.7.html · man7 · namespaces(7) https://man7.org/linux/man-pages/man7/namespaces.7.html</span><span><b>生成</b> 2026-10-06</span><span><b>模型</b> claude-opus-4-5</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">容器</span> <span class="tag tone-muted">cgroup</span> <span class="tag tone-muted">Linux 内核</span> <span class="tag tone-muted">资源限制</span></span></div>
+
+<h2 id="限制资源也太笼统"><span class="num">01</span>「限制资源」也太笼统</h2>
+<p>中台给的定义同样是对的、但同样不告诉你形状：</p>
+<blockquote>
+<p>cgroup 用于对一组进程进行资源限制、统计、优先级控制和进程管理。</p>
+</blockquote>
+<p><mark class="mk-blue">它的具体形状是一棵树：<strong>每个节点是一组配额，配额对整棵子树生效，进程挂在某个节点上。</strong></mark></p>
+<p>记住这一句，后面所有东西都是从它推出来的。</p>
+<hr>
+<h2 id="一棵树"><span class="num">02</span>一棵树</h2>
+<div class="tree" data-tree><ul class="tlist"><li class="has-kids">
+            <div class="tnode tone-violet" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>/</b>
+              
+              <span class="tnote">cgroup 的根。机器上所有进程都在这棵树下</span>
+            </div>
+            <ul class="tlist"><li class="has-kids">
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>system.slice</b>
+              
+              <span class="tnote">systemd 管的系统服务都挂在这</span>
+            </div>
+            <ul class="tlist"><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>containerd.service</b>
+              <code>memory.max = max</code>
+              <span class="tnote">containerd 自己也在一个 cgroup 里，也受管</span>
+            </div>
+            
+          </li></ul>
+          </li><li class="has-kids">
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>kubepods.slice</b>
+              
+              <span class="tnote">K8s 会把自己的 cgroup 树挂在这一支下面</span>
+            </div>
+            <ul class="tlist"><li class="has-kids">
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>pod3f2a8c1b</b>
+              <code>memory.max = 1073741824</code>
+              <span class="tnote">一个 Pod 一个节点。这一层的配额，下面所有容器一起分</span>
+            </div>
+            <ul class="tlist"><li class="has-kids">
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>&lt;nginx 容器 id&gt;</b>
+              <code>cpu.max = 200000 100000</code>
+              <span class="tnote">真正挂进程的叶子节点</span>
+            </div>
+            <ul class="tlist"><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>PID 48213 · nginx</b>
+              
+              
+            </div>
+            
+          </li></ul>
+          </li><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>&lt;sidecar 容器 id&gt;</b>
+              <code>cpu.max = 100000 100000</code>
+              <span class="tnote">同一个 Pod 里的另一个容器，各有一份自己的配额</span>
+            </div>
+            
+          </li></ul>
+          </li></ul>
+          </li></ul>
+          </li></ul></div><p>三件事从这张树上直接看出来：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>树上的位置</th><th>意味着什么</th><th>实际的后果</th></tr></thead><tbody><tr><th>配额挂在节点上</th><td data-label="意味着什么">写一次，整棵子树都受约束</td><td data-label="实际的后果">在 Pod 这一层写 memory.max = 1G，就是 Pod 里所有容器合起来不超过 1G</td></tr><tr><th>一个进程只在一个节点上</th><td data-label="意味着什么"><span class="tag tone-blue">不能同时在两个 cgroup 里</span></td><td data-label="实际的后果">所以「这个容器用了多少」是个确定的问题</td></tr><tr><th>一个进程的所有线程</th><td data-label="意味着什么">跟它的主进程在同一个 cgroup 里</td><td data-label="实际的后果"><mark class="mk-blue">不能把同一个进程的线程拆到两个 cgroup</mark></td></tr></tbody></table></div><div class="flowd has-grid has-groups" data-flow data-edges="[{&quot;from&quot;:&quot;pod&quot;,&quot;to&quot;:&quot;a&quot;,&quot;label&quot;:&quot;把它和它的后代一起管住&quot;},{&quot;from&quot;:&quot;pod&quot;,&quot;to&quot;:&quot;b&quot;,&quot;label&quot;:&quot;&quot;}]">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"><div class="fgroup tone-amber" data-group-box="sup">
+          <span class="fgroup-label">父节点的配额，是给整棵子树的总量</span>
+        </div></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-amber" data-id="pod" data-group="sup">
+              
+              
+              <b>pod3f2a8c1b</b>
+              <small>memory.max = 1G</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="a" data-group="sup">
+              
+              
+              <b>nginx 容器</b>
+              <small>自己没写 memory.max，所以继承 pod 那层的约束</small>
+            </div><div class="fnode tone-green" data-id="b" data-group="sup">
+              
+              
+              <b>sidecar 容器</b>
+              <small>同上。它俩合起来不能超过 1G</small>
+            </div></div></div>
+      
+    </div><hr>
+<h2 id="超限了会发生什么内存和-cpu-完全不是一回事"><span class="num">03</span>超限了会发生什么：内存和 CPU 完全不是一回事</h2>
+<p>这条中台完全没讲，但它是最实用的一条。<mark class="mk-blue">内存超了是<strong>死<strong>，CPU 超了只是</strong>慢</strong>。</mark></p>
+<div class="demo" data-widget="cg-limit" data-config="{&quot;demand&quot;:{&quot;mem&quot;:1229,&quot;cpu&quot;:2.5},&quot;mem&quot;:{&quot;min&quot;:256,&quot;max&quot;:2048,&quot;step&quot;:64,&quot;def&quot;:1024},&quot;cpu&quot;:{&quot;min&quot;:0.25,&quot;max&quot;:4,&quot;step&quot;:0.25,&quot;def&quot;:3}}">
+      <div class="demo-head">
+        <span class="title">拖配额，看进程的两种结局</span>
+        <span class="status" data-status>拖两个滑块，把配额拖到进程想要的值以下</span>
+        <span class="spacer"></span>
+        
+      </div>
+      <div class="demo-body custom" data-mount></div>
+    </div><p>为什么差别这么大？因为这两件事的物理约束不一样：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>资源</th><th>内核能怎么处理</th><th>于是结局是</th></tr></thead><tbody><tr><th>内存</th><td data-label="内核能怎么处理">要么给它页，要么不给。<mark class="mk-blue">没有「给一半慢慢跑」这个选项</mark></td><td data-label="于是结局是"><span class="tag tone-red">触及上限且回收不出内存 → OOM killer 给整个 cgroup 发 SIGKILL</span></td></tr><tr><th>CPU</th><td data-label="内核能怎么处理">时间是可分割的。这一毫秒没轮到它，下一毫秒再给</td><td data-label="于是结局是"><span class="tag tone-amber">被节流：每个周期里最多用配额那么多时间，用超了就等到下个周期</span></td></tr><tr><th>磁盘 I/O</th><td data-label="内核能怎么处理">同 CPU，可以排队</td><td data-label="于是结局是">被限速，请求在队列里等</td></tr><tr><th>进程数</th><td data-label="内核能怎么处理">创建是即时的，超额就直接拒绝</td><td data-label="于是结局是">fork 失败，返回错误</td></tr></tbody></table></div><p><mark class="mk-amber">所以「容器莫名其妙被 OOM kill 了」和「容器变慢了」是两个完全不同的排查方向。</mark></p>
+<div class="callout tone-violet">
+      <span class="ic">💡</span>
+      <div><p><strong>OOM 的判定单位是 cgroup，不是整台机器。</strong></p>
+<p>内核在触发 OOM 时，会先在这棵子树上找人杀（选内存占用最大的那个）。
+所以经常出现「机器还剩很多内存，但我的容器被杀」：<mark class="mk-blue">它超出的是自己那份配额，不是机器的容量。</mark></p>
+<p>反过来也成立：<code>memory.high</code> 是个「软上限」，超了先节流（直接回收 + 让进程变慢），
+而不是直接杀。想要「别死但可以慢」，配的就是它。</p>
+</div>
+    </div><hr>
+<h2 id="docker-run-的参数最后落在哪"><span class="num">04</span><code>docker run</code> 的参数最后落在哪</h2>
+<div class="flowd has-grid has-groups" data-flow data-edges="[{&quot;from&quot;:&quot;cmd&quot;,&quot;to&quot;:&quot;max&quot;,&quot;label&quot;:&quot;写成字节&quot;},{&quot;from&quot;:&quot;cmd&quot;,&quot;to&quot;:&quot;cmax&quot;,&quot;label&quot;:&quot;拆成配额链&quot;},{&quot;from&quot;:&quot;max&quot;,&quot;to&quot;:&quot;cur&quot;,&quot;label&quot;:&quot;&quot;},{&quot;from&quot;:&quot;cmax&quot;,&quot;to&quot;:&quot;stat&quot;,&quot;label&quot;:&quot;&quot;}]">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"><div class="fgroup tone-violet" data-group-box="all">
+          <span class="fgroup-label">同一条命令，最后落在这些文件上</span>
+        </div></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-blue" data-id="cmd" data-group="all">
+              
+              
+              <b>docker run</b>
+              <small>--memory=1g --cpus=2</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="max" data-group="all">
+              
+              
+              <b>memory.max</b>
+              <small>1073741824</small>
+            </div><div class="fnode tone-violet" data-id="cmax" data-group="all">
+              
+              
+              <b>cpu.max</b>
+              <small>200000 100000</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-muted" data-id="cur" data-group="all">
+              
+              
+              <b>memory.current</b>
+              <small>实际用量，只读</small>
+            </div><div class="fnode tone-muted" data-id="stat" data-group="all">
+              
+              
+              <b>cpu.stat</b>
+              <small>被节流了多久</small>
+            </div></div></div>
+      
+    </div><p><code>cpu.max</code> 的格式是 <code>$MAX $PERIOD</code>，单位都是微秒，默认周期是 100000（=100ms）。</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code>cpu.max = 200000 100000   →  每 100ms 里最多用 200ms 的 CPU 时间
+                             也就是说：它最多能占满 2 个核
+</code></pre></div>
+<p><mark class="mk-blue">所以「几个核」这个说法，底层其实是「每个周期给多少微秒」。</mark> <code>--cpus=2</code> 就是配额 200000。写成 <code>--cpus=0.5</code>，就是 <code>50000 100000</code>。</p>
+<div class="callout tone-amber">
+      <span class="ic">📁</span>
+      <div><p><strong>查看的位置（cgroup v2）：</strong></p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code>/sys/fs/cgroup/&lt;容器所在的那条路径&gt;/
+    ├── memory.max        上限（&quot;max&quot; = 不限）
+    ├── memory.current    当前用了多少
+    ├── memory.high       软上限：超了先节流，不杀
+    ├── memory.events     oom_kill 次数就在这
+    ├── cpu.max           &quot;配额 周期&quot;
+    └── cpu.stat          被节流了多久（throttled_usec）
+</code></pre></div>
+<p><mark class="mk-green"><code>cpu.stat</code> 里的 <code>nr_throttled</code> 和 <code>throttled_usec</code> 是排查「容器为什么变慢」的第一站。</mark></p>
+</div>
+    </div><hr>
+<h2 id="限制和统计是同一份数据的两面"><span class="num">05</span>限制和统计是同一份数据的两面</h2>
+<p>中台把「限制」和「统计」列成两件事，其实它们就是同一个机制的两个方向：</p>
+<div class="flowd has-grid has-groups" data-flow data-edges="[{&quot;from&quot;:&quot;write&quot;,&quot;to&quot;:&quot;cnt&quot;,&quot;label&quot;:&quot;设一条线&quot;},{&quot;from&quot;:&quot;cnt&quot;,&quot;to&quot;:&quot;read&quot;,&quot;label&quot;:&quot;读出来就是当前值&quot;}]">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"><div class="fgroup tone-violet" data-group-box="one">
+          <span class="fgroup-label">同一个 cgroup 节点，同一份计数器</span>
+        </div></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-blue" data-id="write" data-group="one">
+              
+              
+              <b>你写入 memory.max</b>
+              <small>这是「限制」</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="cnt" data-group="one">
+              
+              
+              <b>内核在记账</b>
+              <small>每次分配/释放都更新那个计数器</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="read" data-group="one">
+              
+              
+              <b>你读 memory.current</b>
+              <small>这是「统计」</small>
+            </div></div></div>
+      
+    </div><p><mark class="mk-blue">没有单独的「统计机制」。</mark> 内核本来就是一边记账一边判断有没有超线：账本就是统计，那条线就是限制。</p>
+<p>这也解释了为什么 cgroup 能顺带提供「这个容器实际用了多少 CPU / 内存」：它本来就在记。</p>
+<hr>
+<h2 id="为什么从好几棵树变成一棵树"><span class="num">06</span>为什么从「好几棵树」变成「一棵树」</h2>
+<p>你看到的 <code>cgroup v2</code> 是 2016 年之后的新方案。之前（v1）不是一棵树：</p>
+<div class="flowd has-grid has-groups" data-flow data-edges="[{&quot;from&quot;:&quot;c1&quot;,&quot;to&quot;:&quot;m1&quot;,&quot;label&quot;:&quot;同一个进程在三棵树里位置可以不同&quot;},{&quot;from&quot;:&quot;m1&quot;,&quot;to&quot;:&quot;i1&quot;,&quot;label&quot;:&quot;&quot;},{&quot;from&quot;:&quot;u1&quot;,&quot;to&quot;:&quot;u2&quot;,&quot;label&quot;:&quot;统一了&quot;},{&quot;from&quot;:&quot;u2&quot;,&quot;to&quot;:&quot;u3&quot;,&quot;label&quot;:&quot;&quot;}]">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"><div class="fgroup tone-red" data-group-box="v1">
+          <span class="fgroup-label">cgroup v1：每种资源一棵独立的树</span>
+        </div><div class="fgroup tone-green" data-group-box="v2">
+          <span class="fgroup-label">cgroup v2：只有一棵树</span>
+        </div></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-red" data-id="c1" data-group="v1">
+              
+              
+              <b>cpu 树</b>
+              <small>进程 A 在 /web 下</small>
+            </div><div class="fnode tone-green" data-id="u1" data-group="v2">
+              
+              
+              <b>一棵树管所有控制器</b>
+              <small>cpu / memory / io / pids 都在同一个节点上生效</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-red" data-id="m1" data-group="v1">
+              
+              
+              <b>memory 树</b>
+              <small>同一个进程 A 在 /batch 下</small>
+            </div><div class="fnode tone-green" data-id="u2" data-group="v2">
+              
+              
+              <b>一个进程一个位置</b>
+              <small>不再可能出现「在 CPU 树里属于 A，在内存树里属于 B」</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-red" data-id="i1" data-group="v1">
+              
+              
+              <b>io 树</b>
+              <small>它又在 /web/high 下</small>
+            </div><div class="fnode tone-green" data-id="u3" data-group="v2">
+              
+              
+              <b>子树的总量更好算</b>
+              <small>一个节点就是一份完整的配额</small>
+            </div></div></div>
+      
+    </div><p>v1 最麻烦的地方就是那个「位置可以不同」：<mark class="mk-blue">一个进程在 CPU 树里属于「Web 组」，在内存树里属于「批处理组」，于是「这个容器的配额是多少」根本答不上来。</mark></p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>v1</th>
+<th>v2</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>树的棵数</td>
+<td>每种控制器一棵，可以有任意多棵</td>
+<td><strong>只有一棵</strong></td>
+</tr>
+<tr>
+<td>一个进程的位置</td>
+<td>每棵树里各有一个，互不相干</td>
+<td>全树唯一</td>
+</tr>
+<tr>
+<td>新控制器</td>
+<td>只能挂到没被占用的那棵树上</td>
+<td>自动挂到统一树上</td>
+</tr>
+<tr>
+<td>默认启用</td>
+<td>老发行版</td>
+<td>systemd 243（2019-09）起</td>
+</tr>
+</tbody>
+</table>
+<hr>
+<h2 id="那cgroup-namespace是什么"><span class="num">07</span>那「cgroup namespace」是什么</h2>
+<div class="callout tone-red">
+      <span class="ic">⚠</span>
+      <div><p><strong>它和 cgroup 完全是两件事，只是名字像。</strong></p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>管什么</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>cgroup</td>
+<td>真实的配额。限制进程能用多少 CPU / 内存</td>
+</tr>
+<tr>
+<td>cgroup namespace</td>
+<td><mark class="mk-blue">只影响 <code>/proc/&lt;pid&gt;/cgroup</code> 的输出</mark>，让容器里的人以为自己就在根上</td>
+</tr>
+</tbody>
+</table>
+<p>它带来的唯一好处是：容器里 <code>cat /proc/self/cgroup</code> 看到的是 <code>0::/</code>，
+而不是 <code>/kubepods.slice/pod3f2a8c1b.slice/&lt;一长串&gt;</code>，
+既整洁，也不泄露宿主机的 cgroup 结构。</p>
+<p><mark class="mk-green">限额一点没变。</mark> 别把它当成「cgroup 被隔离了」。</p>
+</div>
+    </div><hr>
+<h2 id="两个机制合起来才是容器"><span class="num">08</span>两个机制合起来，才是「容器」</h2>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>机制</th><th>它负责</th><th>它不负责</th></tr></thead><tbody><tr><th>namespace</th><td data-label="它负责"><span class="tag tone-blue">进程能看到哪些对象</span></td><td data-label="它不负责"><span class="tag tone-red">一点都不管用了多少</span></td></tr><tr><th>cgroup</th><td data-label="它负责"><span class="tag tone-blue">进程能用多少资源</span></td><td data-label="它不负责"><span class="tag tone-red">一点都不管能看到什么</span></td></tr><tr><th>rootfs（镜像叠出来的挂载视图）</th><td data-label="它负责">进程看到的 / 是什么</td><td data-label="它不负责">同上，不限制资源</td></tr></tbody></table></div><p><mark class="mk-blue">所以「容器」这个词底下没有新东西</mark>：它就是三样现成的机制拼起来，再给那个进程起个名字。</p>
+<p>这也解释了为什么容器启动那么快：<strong>没有虚拟机、没有 Guest OS、没有新的内核</strong> —— 只是 fork 一个进程，然后给它挂上标签和配额。</p>
+<hr>
+<div class="quiz"><details>
+        <summary>cgroup 的「一棵树」这个形状，直接推出了哪些性质？</summary>
+        <div class="a"><p>三条。第一，配额挂在节点上、对整棵子树生效 —— 所以「Pod 这一层写 1G」是给整个 Pod 的总量。
+第二，一个进程只能在一个节点上，不能同时在两个 cgroup 里，所以「这个容器用了多少」是确定的。
+第三，一个进程的所有线程必须在同一个 cgroup 里，不能把线程拆开。</p>
+</div>
+      </details><details>
+        <summary>容器内存超限和 CPU 超限，处理方式有什么本质区别？</summary>
+        <div class="a"><p>内存是「要么给、要么不给」，没有中间状态，所以触及上限又回收不出内存时，
+内核直接给整个 cgroup 发 SIGKILL（OOM kill）。
+CPU 是时间，可以切分也可以延后，所以超限只是被节流 —— 每个周期最多用配额那么多，
+用超了就等到下个周期，进程变慢但不会死。
+「被 kill」和「变慢」是两个完全不同的排查方向。</p>
+</div>
+      </details><details>
+        <summary>为什么经常出现「机器还剩很多内存，但我的容器被 OOM 杀了」？</summary>
+        <div class="a"><p>因为 OOM 判定的单位是 cgroup，不是整台机器。
+内核在你的那个 cgroup 子树上发现超出配额、又回收不出足够内存时，
+就在这棵子树上挑一个进程杀掉（通常选占得最多的那个）。
+机器整体的剩余内存和这件事无关 —— 它超出的是自己那份配额。</p>
+</div>
+      </details><details>
+        <summary>cgroup namespace 会让容器里的进程不受配额限制吗？</summary>
+        <div class="a"><p>不会。它只虚拟化 /proc/<pid>/cgroup 和 mountinfo 这两处输出，
+让容器里的人以为自己在 cgroup 树的根上。
+配额本身完全没有被虚拟化 —— 该限多少还是多少。
+名字里带 cgroup，但它和「资源限制」是两件事。</p>
+</div>
+      </details></div>
+
+    <footer>
+      <span>cgroup · 一棵树，每个节点是一组配额</span>
+      <span>最后更新 2026-10-06 · 单文件可离线打开</span>
+    </footer>
+  </main>
+</div>
+
+<script src="../../assets/app.js"></script>
+</body>
+</html>

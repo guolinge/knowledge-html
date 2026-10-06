@@ -1576,13 +1576,13 @@ text: |
 | `summary` | 小结 |
 | `raw` | 直接写 HTML |
 
-**交互控件 29 个**（在 `assets/app.js` 的 `WIDGETS` 里，供 `demo` 积木引用）：
+**交互控件 31 个**（在 `assets/app.js` 的 `WIDGETS` 里，供 `demo` 积木引用）：
 `polling-vs-cdc` `combination-count` `join-lab` `on-vs-where` `knex-chain`
 `stepper` `tuner` `diff` `stream-modes` `operator-lab` `hashring` `partition-prune`
 `dsl-lab` `null-lab` `config-to-ui` `field-lineage` `count-dedup-lab`
 `row-to-catalog` `sql-inject-lab` `validate-lab` `sched-lab` `switch-cost`
 `io-models` `inode-trace` `link-refcount` `gmp-lab` `handoff-lab` `ipc-flow-lab`
-`runtime-timeline`
+`runtime-timeline` `ns-view` `cg-limit`
 
 **已知缺口**（按优先级）：
 
@@ -2067,7 +2067,7 @@ npm run visual-check
 用无头浏览器真的去量每个积木容器：子元素有没有溢出边界、有没有横向滚动。
 **已经接进 pre-push 钩子，推送前自动跑。**
 
-#### 六次踩坑记录
+#### 七次踩坑记录
 
 | 症状 | 根因 |
 |---|---|
@@ -2077,8 +2077,43 @@ npm run visual-check
 | 两个区域框重叠 | **每行独立居中** → 同组节点跨行会水平错位，两组包围盒几乎相接，框一往外扩就重叠 |
 | `cards` 里的 `<pre>` 撑破容器 | **grid item 默认 `min-width: auto`**，不会缩到内容宽度以下 |
 | **切换深浅色后，某个色块停在旧主题的颜色上** | `transition: background` + `background: color-mix(...)` —— 见下面第六次 |
+| **点了按钮再截图，样式还是点击前的** | `--virtual-time-budget` 下过渡不推进 —— 见下面第七次 |
 
-#### 第六次：`color-mix` 配 `transition`，换主题时会卡住
+#### 第七次：`--virtual-time-budget` 下 CSS 过渡不会被推进 —— 截图会骗你
+
+````callout
+tone: red
+icon: 📸
+text: |
+  **点一下控件再截图，截到的是点击前的样式 —— 而 DOM 里 class 已经是对的。**
+
+  实测：一个「选中态」按钮。点第二个之后，
+  ==class 和计算样式完全对调== —— 掉了 `.on` 的那个显示成选中态，加上 `.on` 的显示成未选中。
+
+  ```
+  0 [nw-seg-btn]     bg=rgb(234,241,255)   ← 看起来是选中的，其实不是
+  1 [nw-seg-btn on]  bg=rgb(255,255,255)   ← 明明是选中的
+  ```
+````
+
+**根因**：所有无头截图都跑在 `--virtual-time-budget` 下，而**那个模式下 CSS 过渡（transition）不会随虚拟时间推进** ——
+元素停在过渡的起点，再也不会动。
+
+**怎么确认是它**：注入 `* { transition: none !important }` 之后再读一次计算样式，样式立刻归位。
+上面那个例子，关掉过渡后两个按钮的颜色正好对调回来。
+
+**已经修在工具里**：`tools/block.mjs` 生成的预览页现在带一条
+
+```css
+*, *::before, *::after { transition: none !important; animation: none !important; }
+```
+
+==过渡只在值**改变**时触发，初次渲染不受影响== —— 所以量静态布局的 `visual-check` 基本不受影响，
+只有「点一下再截图」这条路会踩到。
+
+**自己写截图脚本时也要记得加这条**，否则会像我一样，花时间去找一个根本不存在的 CSS bug。
+
+#### 第五次：archify 的共用 CSS 被削薄
 
 ```callout
 tone: red

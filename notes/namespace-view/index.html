@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-has-toc="1">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>namespace · 同一个内核，八张不同的地图</title>
+<meta name="description" content="「隔离你看得见什么」这句话太抽象 —— 真正的机制是：内核里那些「名字 → 对象」的全局表，可以被复制成好几份，每个进程绑定其中一份。所以同一个进程在两个 namespace 里可以有不同的 PID。" />
+<link rel="stylesheet" href="../../assets/theme.css" />
+  <link rel="stylesheet" href="../../assets/blocks.css" />
+  <link rel="stylesheet" href="../../assets/archify-embed.css" />
+</head>
+<body>
+<div id="progress"></div>
+<div id="tocScrim"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
+    <a class="brand" href="../../index.html"><span class="dot"></span>知识笔记</a>
+    
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="toc" id="toc">
+      <p class="toc-title">目录</p>
+      <a href="../../index.html" class="sub">← 全部笔记</a>
+      <a href="#隔离这个词说了等于没说">「隔离」这个词，说了等于没说</a>
+      <a href="#看一眼就懂了同一个内核两个-ps">看一眼就懂了：同一个内核，两个 ps</a>
+      <a href="#八种-namespace各自在复制哪张表">八种 namespace，各自在复制哪张表</a>
+      <a href="#三个特写">三个特写</a>
+      <a href="#pid容器里的-1-号进程" class="sub">PID：容器里的 1 号进程</a>
+      <a href="#netveth-是两头各一个网卡" class="sub">NET：veth 是两头各一个网卡</a>
+      <a href="#user容器里的-root-不是真-root" class="sub">USER：容器里的 root 不是真 root</a>
+      <a href="#怎么确认自己绑的是哪一份表">怎么确认自己绑的是哪一份表</a>
+      <a href="#但-namespace-一点都不管用多少">但 namespace 一点都不管「用多少」</a>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow">● 容器 · 隔离机制</span>
+      <h1>namespace · 同一个内核，八张不同的地图</h1>
+      <p class="lede">「隔离你看得见什么」这句话太抽象 —— 真正的机制是：内核里那些「名字 → 对象」的全局表，可以被复制成好几份，每个进程绑定其中一份。所以同一个进程在两个 namespace 里可以有不同的 PID。</p>
+    </div>
+
+    <div class="draft-banner">
+    <span>⚠</span>
+    <span>本页状态为 <b>draft</b>：内容尚未人工核对，引用前请自行验证。</span>
+  </div>
+<aside class="needs">
+      <p class="needs-title">读这篇之前，你需要先知道</p>
+      <a class="need" href="../runtime-on-one-machine/">← <b>1. 一台机器上的结构</b><span>谁在内存里、谁是一次性的、容器为什么不是一个内核对象</span></a>
+    </aside>
+    <div class="provenance"><span><b>来源</b> AI 中台问答：系统中的 namespace 和 cgroup 是什么（原始素材） · kernel.org 文档 · Control Group v2 https://docs.kernel.org/admin-guide/cgroup-v2.html · man7 · cgroup_namespaces(7) https://man7.org/linux/man-pages/man7/cgroup_namespaces.7.html · man7 · namespaces(7) https://man7.org/linux/man-pages/man7/namespaces.7.html</span><span><b>生成</b> 2026-10-06</span><span><b>模型</b> claude-opus-4-5</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">容器</span> <span class="tag tone-muted">namespace</span> <span class="tag tone-muted">Linux 内核</span> <span class="tag tone-muted">隔离</span></span></div>
+
+<h2 id="隔离这个词说了等于没说"><span class="num">01</span>「隔离」这个词，说了等于没说</h2>
+<p>中台给你的定义是：</p>
+<blockquote>
+<p>namespace 负责「隔离你看得到什么」。</p>
+</blockquote>
+<p>对，但它没告诉你<strong>怎么做到的</strong>。所以「隔离」听起来像给进程发了一个房间。而房间是实体的东西，得有地方造、得占地方。</p>
+<p><mark class="mk-blue">真实的机制要朴素得多：内核里那些「名字 → 对象」的表，被做成了可以有多份。</mark></p>
+<p>先看内核自己需要哪些表：</p>
+<div class="cards" data-cols="2"><div class="ccard tone-violet">
+          
+          <h4>pid 表</h4>
+          <p>pid 号 → 哪个进程</p>
+          <div class="cbody"><p>你 <code>ps</code> 看到的一列数字，就是这张表。
+有了它，<code>kill 1234</code> 才知道该杀谁。</p>
+</div>
+          
+        </div><div class="ccard tone-violet">
+          
+          <h4>网卡与路由表</h4>
+          <p>有哪些网卡、往哪发</p>
+          <div class="cbody"><p><code>ip addr</code> 列出的是它，<code>ip route</code> 也是它。
+还有一整套 iptables 规则表。</p>
+</div>
+          
+        </div><div class="ccard tone-violet">
+          
+          <h4>挂载表</h4>
+          <p>哪个路径对应哪个文件系统</p>
+          <div class="cbody"><p><code>mount</code> 看到的就是它。它决定了「<code>/</code> 底下有什么」。</p>
+</div>
+          
+        </div><div class="ccard tone-violet">
+          
+          <h4>主机名 / 用户 / IPC 对象</h4>
+          <p>hostname、uid 映射、共享内存段</p>
+          <div class="cbody"><p>三样东西各有一张表。
+IPC 那张决定了你能看到哪些共享内存和消息队列。</p>
+</div>
+          
+        </div></div><p>这些表<strong>本来都只有一份<strong>。namespace 做的事，就是</strong>让它们可以有好几份</strong>。</p>
+<div class="flowd has-grid has-groups" data-flow data-edges="[{&quot;from&quot;:&quot;b1&quot;,&quot;to&quot;:&quot;a1&quot;,&quot;label&quot;:&quot;让它可以有多份&quot;,&quot;labelDy&quot;:26},{&quot;from&quot;:&quot;a1&quot;,&quot;to&quot;:&quot;a2&quot;,&quot;label&quot;:&quot;同一个进程，两张表里两个号&quot;}]">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"><div class="fgroup tone-green" data-group-box="after">
+          <span class="fgroup-label">有了 PID namespace 之后：同一批进程，两张表</span>
+        </div></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-muted" data-id="b1">
+              
+              
+              <b>一份 pid 表</b>
+              <small>没有 namespace 时，全机器只有这一份，1 号进程只能有一个</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-blue" data-id="a1" data-group="after">
+              
+              
+              <b>宿主机看到的那份</b>
+              <small>pause 是 47900、nginx 是 48213</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="a2" data-group="after">
+              
+              
+              <b>容器里看到的那份</b>
+              <small>同一个 pause 叫 1、nginx 叫 7</small>
+            </div></div></div>
+      
+    </div><p><mark class="mk-blue">同一个进程，在同一时刻，可以有两个 PID。</mark> 因为它同时出现在两张表里，而每个人只能看见自己绑定的那张。</p>
+<p>这就是「隔离」的全部机制。没有房间，没有沙箱，只是<strong>换了一张表看</strong>。</p>
+<hr>
+<h2 id="看一眼就懂了同一个内核两个-ps"><span class="num">02</span>看一眼就懂了：同一个内核，两个 <code>ps</code></h2>
+<div class="demo" data-widget="ns-view" data-config="{&quot;hint&quot;:&quot;进程列表和网卡变化最直观。留意「我是谁」那一栏：两边的 uid 都是 0，但底下指向的不是同一个身份。&quot;,&quot;views&quot;:[{&quot;id&quot;:&quot;host&quot;,&quot;name&quot;:&quot;站在宿主机上&quot;,&quot;sub&quot;:&quot;root@web-node-01（运维登进来的）&quot;},{&quot;id&quot;:&quot;ct&quot;,&quot;name&quot;:&quot;站在容器里&quot;,&quot;sub&quot;:&quot;root@3f2a8c1b9e04（exec 进去的）&quot;}],&quot;facets&quot;:[{&quot;id&quot;:&quot;proc&quot;,&quot;cmd&quot;:&quot;ps aux&quot;,&quot;ns&quot;:&quot;pid&quot;,&quot;tone&quot;:&quot;blue&quot;,&quot;host&quot;:[&quot;USER  PID  COMMAND&quot;,&quot;root   1   systemd&quot;,&quot;root 47900 containerd-shim&quot;,&quot;root 48213 nginx: master&quot;,&quot;…共 137 个进程&quot;],&quot;ct&quot;:[&quot;USER  PID  COMMAND&quot;,&quot;*root   1   nginx: master&quot;,&quot;*root   7   nginx: worker&quot;,&quot;*…共 3 个进程&quot;]},{&quot;id&quot;:&quot;net&quot;,&quot;cmd&quot;:&quot;ip addr&quot;,&quot;ns&quot;:&quot;net&quot;,&quot;tone&quot;:&quot;violet&quot;,&quot;host&quot;:[&quot;1: lo     127.0.0.1/8&quot;,&quot;2: eth0   10.0.1.7/24&quot;,&quot;*11: veth3a2  10.0.1.7 的一端&quot;,&quot;…还有 9 张 veth 网卡，每个容器一张&quot;],&quot;ct&quot;:[&quot;1: lo     127.0.0.1/8&quot;,&quot;*2: eth0   172.17.0.2/16&quot;,&quot;*（它就是宿主机上那张 veth3a2 的另一头）&quot;]},{&quot;id&quot;:&quot;uts&quot;,&quot;cmd&quot;:&quot;hostname&quot;,&quot;ns&quot;:&quot;uts&quot;,&quot;tone&quot;:&quot;green&quot;,&quot;host&quot;:[&quot;*web-node-01&quot;],&quot;ct&quot;:[&quot;*3f2a8c1b9e04&quot;]},{&quot;id&quot;:&quot;user&quot;,&quot;cmd&quot;:&quot;id&quot;,&quot;ns&quot;:&quot;user&quot;,&quot;tone&quot;:&quot;amber&quot;,&quot;host&quot;:[&quot;uid=0(root) gid=0(root)&quot;,&quot;（这就是真的 root）&quot;],&quot;ct&quot;:[&quot;uid=0(root) gid=0(root)&quot;,&quot;*（看着一样，但它在宿主机上实际是 uid 100000）&quot;]},{&quot;id&quot;:&quot;mnt&quot;,&quot;cmd&quot;:&quot;ls /&quot;,&quot;ns&quot;:&quot;mnt&quot;,&quot;tone&quot;:&quot;blue&quot;,&quot;host&quot;:[&quot;bin boot dev etc home …&quot;,&quot;*（宿主机的真根目录）&quot;],&quot;ct&quot;:[&quot;bin dev etc usr var …&quot;,&quot;*（是镜像层叠出来的另一个根，看不到上面的 /home）&quot;]},{&quot;id&quot;:&quot;cg&quot;,&quot;cmd&quot;:&quot;cat /proc/self/cgroup&quot;,&quot;ns&quot;:&quot;cgroup&quot;,&quot;tone&quot;:&quot;muted&quot;,&quot;host&quot;:[&quot;0::/system.slice/containerd.service&quot;],&quot;ct&quot;:[&quot;*0::/&quot;,&quot;（它以为自己就在 cgroup 树的根上）&quot;]}]}">
+      <div class="demo-head">
+        <span class="title">同一台机器，切换视角看同一批命令</span>
+        <span class="status" data-status>点上面的两个视角来回切</span>
+        <span class="spacer"></span>
+        
+      </div>
+      <div class="demo-body custom" data-mount></div>
+    </div><p>六栏里，每一栏上面都标着<strong>是哪一类 namespace 在管它</strong>。你可以挨个切两遍，看哪几栏会变。</p>
+<p><mark class="mk-blue">一栏都不变的那种，就是没被 namespace 管的东西。</mark></p>
+<hr>
+<h2 id="八种-namespace各自在复制哪张表"><span class="num">03</span>八种 namespace，各自在复制哪张表</h2>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>namespace</th><th>它复制的是哪张表</th><th>于是你能看到什么</th><th>容器里怎么用</th></tr></thead><tbody><tr><th>PID</th><td data-label="它复制的是哪张表">pid 号 → 进程</td><td data-label="于是你能看到什么">一份独立的进程列表，自己的 1 号进程</td><td data-label="容器里怎么用">容器里的 nginx 是 PID 1，宿主机上它是 48213</td></tr><tr><th>NET</th><td data-label="它复制的是哪张表">网卡 · 路由 · iptables · 端口</td><td data-label="于是你能看到什么">一套独立的网络栈，假的 localhost</td><td data-label="容器里怎么用">每个容器一张 veth，配一段自己的 IP 段</td></tr><tr><th>MNT</th><td data-label="它复制的是哪张表">路径 → 挂载的文件系统</td><td data-label="于是你能看到什么">一棵独立的挂载树，自己的 /</td><td data-label="容器里怎么用">镜像层在这个 namespace 里被挂成根目录</td></tr><tr><th>UTS</th><td data-label="它复制的是哪张表">主机名 · 域名</td><td data-label="于是你能看到什么">一个独立的主机名</td><td data-label="容器里怎么用">容器名变成 hostname，<code>hostname</code> 命令看得出差别</td></tr><tr><th>USER</th><td data-label="它复制的是哪张表">uid / gid 的映射关系</td><td data-label="于是你能看到什么">一套可以让 root 不等于真 root 的映射</td><td data-label="容器里怎么用">容器里的 uid 0 落到宿主机上是个普通用户</td></tr><tr><th>IPC</th><td data-label="它复制的是哪张表">共享内存段 · 消息队列 · 信号量</td><td data-label="于是你能看到什么">一组独立的 IPC 对象</td><td data-label="容器里怎么用">同 Pod 的容器共享它，不同 Pod 互相看不见</td></tr><tr><th>CGROUP</th><td data-label="它复制的是哪张表"><code>/proc/pid/cgroup</code> 的输出</td><td data-label="于是你能看到什么"><span class="tag tone-amber">一个独立的 cgroup 树视图（<strong>不是</strong> cgroup 本身）</span></td><td data-label="容器里怎么用">容器里看到自己在「根」上，看不到宿主机那棵大树</td></tr><tr><th>TIME</th><td data-label="它复制的是哪张表">单调时钟与启动时间的偏移</td><td data-label="于是你能看到什么">一组不同的时间基准</td><td data-label="容器里怎么用">少用。做检查点恢复之类的需要</td></tr></tbody></table></div><p><mark class="mk-amber">最后一行那个 CGROUP namespace 最容易看错。</mark></p>
+<div class="callout tone-red">
+      <span class="ic">⚠</span>
+      <div><p><strong>cgroup namespace 隔离的不是资源，是「你看 cgroup 树的视野」。</strong></p>
+<p>它只影响 <code>/proc/&lt;pid&gt;/cgroup</code> 和 <code>/proc/&lt;pid&gt;/mountinfo</code> 这两处输出。
+<mark class="mk-blue">cgroup 本身完全没有被虚拟化</mark>：限额还是那份限额，树还是那棵树，
+只是让容器里的人误以为自己在根上，看不到宿主机的 cgroup 结构（主要是隐私与整洁）。</p>
+<p>中台那张表把它和别的 namespace 并列写成「让进程看到独立的 cgroup 层级视图」，
+措辞是对的，但<mark class="mk-blue">很容易让人以为「cgroup 被隔离了」</mark>，那就错了。</p>
+</div>
+    </div><hr>
+<h2 id="三个特写"><span class="num">04</span>三个特写</h2>
+<h3 id="pid容器里的-1-号进程">PID：容器里的 1 号进程</h3>
+<div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-blue">宿主机视角</span>
+            <span class="name">真实的 pid</span>
+            <span class="spacer"></span>
+            <span class="tag tone-blue">一个普通数字</span>
+          </div>
+          <div class="rec"><div class="">
+            <b>pause 容器</b><span>47900</span></div><div class="">
+            <b>nginx</b><span>48213</span></div><div class="">
+            <b>你 exec 进去的 shell</b><span>48310</span></div></div>
+          
+          <p class="jnote">在这张表里，它们只是三个普通的进程号，和别的进程没有区别</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">换成容器的 pid namespace 再看<span class="note">同一批进程，号码全变了</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-green">容器视角</span>
+            <span class="name">同一批进程的另一套号</span>
+            <span class="spacer"></span>
+            <span class="tag tone-green">从 1 开始编号</span>
+          </div>
+          <div class="rec"><div class="ok">
+            <b>pause 容器</b><span>1</span><em>它在容器里是「1 号进程」</em></div><div class="">
+            <b>nginx</b><span>7</span></div><div class="">
+            <b>你的 shell</b><span>23</span></div></div>
+          
+          <p class="jnote"><mark class="mk-blue">PID namespace 里的 1 号就是「这个 namespace 的 init」</mark> —— 它挂了，整个 namespace 一起被内核清掉</p>
+        </div><p>所以容器里那个几乎什么都不干的 <code>pause</code> 放在 1 号，是有原因的：<mark class="mk-blue">它得活着当那根柱。</mark></p>
+<h3 id="netveth-是两头各一个网卡">NET：<code>veth</code> 是两头各一个网卡</h3>
+<div class="flowd has-grid has-groups" data-flow data-edges="[{&quot;from&quot;:&quot;eth&quot;,&quot;to&quot;:&quot;veth&quot;,&quot;label&quot;:&quot;宿主机本来就有&quot;},{&quot;from&quot;:&quot;veth&quot;,&quot;to&quot;:&quot;veth2&quot;,&quot;label&quot;:&quot;像一根网线的两端&quot;},{&quot;from&quot;:&quot;veth2&quot;,&quot;to&quot;:&quot;lo&quot;,&quot;label&quot;:&quot;容器里的 localhost 只指它自己&quot;}]">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"><div class="fgroup tone-blue" data-group-box="h">
+          <span class="fgroup-label">宿主机那边</span>
+        </div><div class="fgroup tone-green" data-group-box="c">
+          <span class="fgroup-label">容器那边</span>
+        </div></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-blue" data-id="eth" data-group="h">
+              
+              
+              <b>eth0</b>
+              <small>10.0.1.7</small>
+            </div><div class="fnode tone-violet" data-id="veth" data-group="h">
+              
+              
+              <b>veth3a2</b>
+              <small>宿主机这一头，看不见 IP</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="veth2" data-group="c">
+              
+              
+              <b>eth0</b>
+              <small>172.17.0.2 —— veth 的另一头</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="lo" data-group="c">
+              
+              
+              <b>lo</b>
+              <small>127.0.0.1，也是独立的一个</small>
+            </div></div></div>
+      
+    </div><p><mark class="mk-blue"><code>veth</code> 永远成对出现，一头在宿主机、一头在容器。</mark> 这就是「容器有独立网络，但又能出网」的实现方式。</p>
+<p>也顺带解释了同 Pod 的容器为什么 <code>localhost</code> 互通：它们的 NET namespace 是<strong>同一个</strong>，根本不需要走网络。</p>
+<h3 id="user容器里的-root-不是真-root">USER：容器里的 root 不是真 root</h3>
+<div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;root&quot;,&quot;to&quot;:&quot;map&quot;,&quot;label&quot;:&quot;它以为自己是谁&quot;},{&quot;from&quot;:&quot;map&quot;,&quot;to&quot;:&quot;real&quot;,&quot;label&quot;:&quot;内核判定权利时用的是这个&quot;}]">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-amber" data-id="root">
+              
+              
+              <b>uid 0（root）</b>
+              <small>容器里看到的：它以为自己就是 root</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="map">
+              
+              
+              <b>uid_map 这张映射表</b>
+              <small>0 → 100000</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="real">
+              
+              
+              <b>uid 100000</b>
+              <small>宿主机上实际落的：一个没有特权的普通用户</small>
+            </div></div></div>
+      
+    </div><p><mark class="mk-blue">所以「容器里是 root、会不会把宿主机搞坏」这个问题，取决于用户命名空间怎么配的。</mark></p>
+<p>没开 user namespace 的容器（默认的 Docker 就是），容器里的 root <strong>就是</strong>宿主机的 root。这是「容器不等于安全边界」的原因之一。</p>
+<hr>
+<h2 id="怎么确认自己绑的是哪一份表"><span class="num">05</span>怎么确认自己绑的是哪一份表</h2>
+<div class="callout tone-violet">
+      <span class="ic">🔍</span>
+      <div><p><strong><code>/proc/&lt;pid&gt;/ns/</code> 下面每个文件都是一个 inode，inode 号相同就是同一个 namespace。</strong></p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-console">$ ls -l /proc/48213/ns
+lrwxrwxrwx 1 root root 0 ... cgroup -&gt; 'cgroup:[4026531835]'
+lrwxrwxrwx 1 root root 0 ... ipc    -&gt; 'ipc:[4026531839]'
+lrwxrwxrwx 1 root root 0 ... mnt    -&gt; 'mnt:[4026532501]'
+lrwxrwxrwx 1 root root 0 ... net    -&gt; 'net:[4026532563]'
+lrwxrwxrwx 1 root root 0 ... pid    -&gt; 'pid:[4026532566]'
+lrwxrwxrwx 1 root root 0 ... uts    -&gt; 'uts:[4026532500]'
+</code></pre></div>
+<p>两个进程的 <code>net</code> 一栏 inode 号一样 → 它们共用同一套网络栈（同 Pod 的容器就是这样）。
+<code>pid</code> 不一样 → 它们各自一套进程表。</p>
+<p><mark class="mk-blue">这个 inode 号就是 namespace 的身份证。</mark> 有了它，「谁和谁在一个 namespace 里」
+就不再是概念问题，而是 <code>diff</code> 一下的事。</p>
+</div>
+    </div><hr>
+<h2 id="但-namespace-一点都不管用多少"><span class="num">06</span>但 namespace 一点都不管「用多少」</h2>
+<p>到这儿可以把 namespace 的一句话结论说死了：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>说法</th><th>对不对</th></tr></thead><tbody><tr><th>namespace 让进程以为自己独占一台机器</th><td data-label="对不对"><span class="tag tone-green">对（视角层面）</span></td></tr><tr><th>namespace 会阻止进程占满 CPU</th><td data-label="对不对"><span class="tag tone-red">✗ 完全不会</span></td></tr><tr><th>namespace 会阻止进程吃光内存</th><td data-label="对不对"><span class="tag tone-red">✗ 完全不会</span></td></tr><tr><th>namespace 会阻止 fork 炸弹</th><td data-label="对不对"><span class="tag tone-red">✗ 完全不会</span></td></tr></tbody></table></div><p>一个只用了 namespace 的「容器」，里面跑一个 <code>yes &gt; /dev/null</code>，照样能把整台机器的 CPU 吃干净。它只是<strong>看不见别人<strong>，不是</strong>动不了别人的东西</strong>。</p>
+<p><mark class="mk-blue">这就是为什么容器必须同时有 cgroup。</mark> 下一篇讲它。</p>
+<hr>
+<div class="quiz"><details>
+        <summary>namespace 到底做了什么？用一句话说清机制，不要说「隔离」。</summary>
+        <div class="a"><p>它让内核里那些「名字 → 对象」的全局表可以有多份。
+pid 表、网卡表、挂载表、uid 映射表各有一份，进程在创建时被绑定到其中一份上。
+所以同一个进程可以在两张 pid 表里有两个不同的号：能看到它的那一份，决定了它叫什么。</p>
+</div>
+      </details><details>
+        <summary>cgroup namespace 和 cgroup 是一回事吗？</summary>
+        <div class="a"><p>不是。cgroup 是资源限制机制（真实的限额、一棵树）；
+cgroup namespace 只虚拟化「你看这棵树的视野」，影响 /proc/<pid>/cgroup 和 mountinfo 的输出，
+让容器里的人以为自己就在根上。
+限额本身完全没有被虚拟化。这是最容易记混的一处。</p>
+</div>
+      </details><details>
+        <summary>为什么容器里的 1 号进程通常是个几乎不干活的 pause？</summary>
+        <div class="a"><p>因为 PID namespace 里的 1 号就是这个 namespace 的 init：它一挂，内核会把整个 namespace 清掉。
+所以得放一个最不可能崩、也最不需要干活的进程在那儿当柱子。
+业务容器崩了重建，Pod 的网络身份不受影响，靠的就是它。</p>
+</div>
+      </details><details>
+        <summary>一个容器只用了 namespace、没配 cgroup，会有什么后果？</summary>
+        <div class="a"><p>容器会「看起来」很隔离：看不到别人的进程、有自己的网卡和主机名，
+但它可以毫无阻碍地吃光宿主机的 CPU、内存，或者 fork 出一堆进程把机器拖死。
+namespace 管的是「看得见什么」，不是「能用多少」。这两件事从来是分开的。</p>
+</div>
+      </details></div>
+
+    <footer>
+      <span>namespace · 同一个内核，八张不同的地图</span>
+      <span>最后更新 2026-10-06 · 单文件可离线打开</span>
+    </footer>
+  </main>
+</div>
+
+<script src="../../assets/app.js"></script>
+</body>
+</html>

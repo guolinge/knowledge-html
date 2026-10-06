@@ -4789,6 +4789,172 @@
     draw();
   };
 
+  /* ============================================================
+     控件：ns-view —— 站外 vs 站里，同一台机器的两套视图
+     ------------------------------------------------------------
+     一个切换开关，下面一排「你会看到什么」。切的时候整组刷掉，
+     每张卡上标着是哪类 namespace 在管这件事。
+
+     要让人一眼看到的：同一个内核，`ps` 却能给出两份完全不同的答案。
+
+     config:
+       views:  [{ id, name, sub }]                两个视角（外 / 里）
+       facets: [{ id, cmd, ns, host: [...], ct: [...], tone }]
+  ============================================================ */
+  WIDGETS['ns-view'] = (root) => {
+    const cfg = cfgOf(root);
+    const views = cfg.views || [];
+    const facets = cfg.facets || [];
+    if (views.length < 2 || !facets.length) return;
+    const box = mountOf(root);
+    const statusEl = root.querySelector('[data-status]');
+
+    /* —— 视角切换 —— */
+    const seg = el('div', 'nw-seg');
+    const btns = views.map((v, k) => {
+      const b = el('button', 'nw-seg-btn');
+      b.append(el('b', '', v.name));
+      if (v.sub) b.append(el('span', 'nw-seg-sub', v.sub));
+      b.addEventListener('click', () => pick(k));
+      seg.append(b);
+      return b;
+    });
+
+    /* —— 一栏归一个可见的东西 —— */
+    const grid = el('div', 'nw-grid');
+    const cards = facets.map((f) => {
+      const c = el('div', 'nw-card');
+      const hd = el('div', 'nw-head');
+      hd.append(el('code', 'nw-cmd', f.cmd));
+      hd.append(el('span', 'nw-ns', f.ns));
+      c.append(hd);
+      const body = el('div', 'nw-body');
+      c.append(body);
+      grid.append(c);
+      return { f, c, body };
+    });
+
+    const hint = el('p', 'nw-hint', cfg.hint || '');
+    box.append(seg, grid, hint);
+
+    let cur = 0;
+    function pick(k) {
+      const prev = cur;
+      cur = k;
+      btns.forEach((b, i) => b.classList.toggle('on', i === k));
+      cards.forEach(({ f, c, body }) => {
+        const lines = (k === 0 ? f.host : f.ct) || [];
+        c.classList.toggle('nw-tone', !!f.tone);
+        if (f.tone) c.style.setProperty('--nw-tone', 'var(--' + f.tone + ')');
+        /* 切了视角且内容真的不同 —— 闪一下，让人看到「这一项变了」 */
+        const changed = k !== prev && JSON.stringify(f.host) !== JSON.stringify(f.ct);
+        c.classList.toggle('nw-changed', changed);
+        body.textContent = '';
+        lines.forEach((ln) => {
+          const isKey = lns(ln);
+          body.append(el('div', 'nw-line' + (isKey ? ' nw-key' : ''), ln.replace(/^\*/, '')));
+        });
+      });
+      if (statusEl) statusEl.textContent = views[k].name;
+    }
+    /* 行首带 * = 这一行是重点 */
+    const lns = (s) => typeof s === 'string' && s.startsWith('*');
+
+    btns.forEach((b, i) => b.addEventListener('click', () => pick(i)));
+    pick(0);
+  };
+
+  /* ============================================================
+     控件：cg-limit —— 配额卡不住的时候，内存和 CPU 的下场不一样
+     ------------------------------------------------------------
+     进程想要多少是固定的，拖的是「给它多少配额」。
+     然后看两个完全不同的结局：内存超了直接被杀，CPU 超了只是变慢。
+
+     config:
+       demand: { mem: 1229, cpu: 2.5 }              进程想要多少（MB / 核）
+       mem:  { min, max, step, def }
+       cpu:  { min, max, step, def }
+  ============================================================ */
+  WIDGETS['cg-limit'] = (root) => {
+    const cfg = cfgOf(root);
+    const d = cfg.demand || { mem: 1229, cpu: 2.5 };
+    const box = mountOf(root);
+    const statusEl = root.querySelector('[data-status]');
+
+    const mk = (label, spec, unit) => {
+      const w = el('div', 'cg-sl');
+      const lab = el('span', 'cg-sl-lab', label);
+      const r = el('input', 'cg-range');
+      r.type = 'range'; r.min = String(spec.min); r.max = String(spec.max);
+      r.step = String(spec.step); r.value = String(spec.def);
+      const v = el('b', 'cg-sl-val');
+      w.append(lab, r, v);
+      return { w, r, v, unit };
+    };
+    const sMem = mk('内存配额 memory.max', cfg.mem || { min: 256, max: 2048, step: 64, def: 512 }, 'MB');
+    const sCpu = mk('CPU 配额 cpu.max', cfg.cpu || { min: 0.25, max: 4, step: 0.25, def: 1 }, '核');
+    const sliders = el('div', 'cg-sls');
+    sliders.append(sMem.w, sCpu.w);
+
+    const out = el('div', 'cg-out');
+    const files = el('div', 'cg-files');
+    box.append(sliders, out, files);
+
+    const card = (title, tone, verdict, detail) => {
+      const c = el('div', 'cg-card');
+      c.style.setProperty('--cg-tone', 'var(--' + tone + ')');
+      c.append(el('div', 'cg-card-ttl', title));
+      c.append(el('div', 'cg-verdict', verdict));
+      c.append(richText(el('p', 'cg-detail'), detail));
+      return c;
+    };
+
+    function draw() {
+      const mem = Number(sMem.r.value), cpu = Number(sCpu.r.value);
+      sMem.v.textContent = mem + ' MB';
+      sCpu.v.textContent = cpu + ' 核';
+
+      const memDead = mem < d.mem;
+      const cpuThrottled = cpu < d.cpu;
+
+      out.textContent = '';
+      out.append(card('进程想要 1.2 GB 内存，你给它 ' + mem + ' MB',
+        memDead ? 'red' : 'green',
+        memDead ? '进程被杀（OOM kill）' : '正常跑着',
+        memDead
+          ? '内存是「要么给够、要么去死」的：一旦触及上限且回收不出足够内存，内核直接给整个 cgroup 发 SIGKILL。==它不会让你跑慢一点。=='
+          : '配额够用，内存这一个维度上它不受约束。'));
+      out.append(card('进程想要 2.5 个核，你给它 ' + cpu + ' 核',
+        cpuThrottled ? 'amber' : 'green',
+        cpuThrottled ? '被节流，变慢' : '正常跑着',
+        cpuThrottled
+          ? 'CPU 是「按配额排队」的：每个周期里最多只能用这么多时间，用超了就被暂停到下一个周期。==它被杀不掉，只是变慢。=='
+          : '配额够用，它可以占满想要的核数。'));
+
+      files.textContent = '';
+      const fh = el('div', 'cg-files-head');
+      richText(fh, '你在 `docker run` 里写的参数，最后就是这几个文件');
+      files.append(fh);
+      const f = (path, val, note) => {
+        const r = el('div', 'cg-frow');
+        r.append(el('code', 'cg-fpath', path));
+        r.append(el('code', 'cg-fval', val));
+        r.append(el('span', 'cg-fnote', note));
+        files.append(r);
+      };
+      f('/sys/fs/cgroup/<容器>/memory.max', String(mem * 1024 * 1024),
+        memDead ? '比 current 小 → 触发回收，回收不出来就 OOM' : '比 current 大 → 不管');
+      f('/sys/fs/cgroup/<容器>/memory.current', String(Math.round(d.mem * 1024 * 1024)), '实际用了多少（只读）');
+      f('/sys/fs/cgroup/<容器>/cpu.max', `${Math.round(cpu * 100000)} 100000`,
+        '格式是「配额 周期」：每 100ms 里最多用这么多微秒');
+      if (statusEl) statusEl.textContent = `内存 ${mem}MB · CPU ${cpu} 核`;
+    }
+
+    sMem.r.addEventListener('input', draw);
+    sCpu.r.addEventListener('input', draw);
+    draw();
+  };
+
   /* ---------- 挂载 ---------- */
   document.querySelectorAll('[data-widget]').forEach((root) => {
     var name = root.getAttribute('data-widget');

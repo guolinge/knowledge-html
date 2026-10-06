@@ -214,6 +214,13 @@ ${assets}
   .bp-bar { max-width: 1280px; margin: 0 auto; padding: 10px 24px 0;
     font: 12px/1.6 ui-monospace, monospace; color: var(--text-faint); }
   .bp-bar b { color: var(--text-2); }
+  /* 截图/量高都跑在 --virtual-time-budget 下，而**那个模式下 CSS 过渡不会被推进** ——
+     元素会停在过渡的起点。控件一旦点了按钮（切状态），截出来就是点击前的样子，
+     而 DOM 里的 class 其实已经是对的。实测：按钮的 class 和计算样式完全对调。
+     ==所以预览页里一律关掉过渡==，截到的永远是最终态。
+     （transition 只在值**改变**时触发，初次渲染不受影响 —— 所以 visual-check 量静态布局没事，
+       只有「点一下再截图」会踩到。） */
+  *, *::before, *::after { transition: none !important; animation: none !important; }
 </style></head>
 <body>
 <div class="bp-bar">第 <b>${n}</b>/${blocks.length} 个块 · <b>${target.lang}</b> · L${target.startLine}–${target.endLine}</div>
