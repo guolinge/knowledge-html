@@ -4955,6 +4955,182 @@
     draw();
   };
 
+  /* ============================================================
+     控件：poll-lab —— 一个线程挨个问过去，两个病一起恶化
+     ------------------------------------------------------------
+     拖「连接数」，同时看到两件事变差：
+       ① 白问率   —— 线程手里只有一张连接号清单，它不知道谁有数据
+       ② 每次调用要交多少份名单 —— select/poll 是 3N，epoll 只拿就绪的那几个
+
+     「这格有没有数据」按**下标算一个稳定的散列**，不用 Math.random ——
+     否则同一组参数每次渲出来都不一样，截图和自检都没法比对。
+
+     config: conn / busy 各一个 { min, max, step, def }
+  ============================================================ */
+  WIDGETS['poll-lab'] = (root) => {
+    const cfg = cfgOf(root);
+    const box = mountOf(root);
+    const statusEl = root.querySelector('[data-status]');
+    const runBtn = root.querySelector('[data-run]');
+    const resetBtn = root.querySelector('[data-reset]');
+    const C = cfg.conn || { min: 8, max: 200, step: 4, def: 64 };
+    const B = cfg.busy || { min: 5, max: 100, step: 5, def: 10 };
+
+    const sl = (label, spec, unit) => {
+      const w = el('div', 'pl-sl');
+      w.append(el('span', 'pl-sl-lab', label));
+      const r = el('input', 'pl-range');
+      r.type = 'range';
+      r.min = String(spec.min); r.max = String(spec.max);
+      r.step = String(spec.step); r.value = String(spec.def);
+      const v = el('b', 'pl-sl-val');
+      w.append(r, v);
+      return { w, r, v, unit };
+    };
+    const sConn = sl('同时在线的连接数', C, ' 条');
+    const sBusy = sl('此刻真有数据的比例', B, '%');
+    const sliders = el('div', 'pl-sls');
+    sliders.append(sConn.w, sBusy.w);
+
+    const line    = el('div', 'pl-line');
+    const cells   = el('div', 'pl-cells');
+    const stats   = el('div', 'pl-stats');
+    const cost    = el('div', 'pl-cost');
+    const costHead = el('div', 'pl-cost-head', '而这才是后面要解决的问题：每调用一次，名单要重新交一遍');
+    box.append(sliders, line, cells, stats, costHead, cost);
+
+    let n = 0, pct = 0;
+    let state = [], cursor = -1, hits = 0, miss = 0, timer = null;
+    let totalHits = 0, totalMiss = 0;   // 跑完一轮才有意义
+
+    /* Node.append() / Element.append() **返回 undefined**（它不是 jQuery）。
+       所以 `richText(x.append(el(...)), t)` 会把 undefined 传进去然后抛掉 ——
+       而且是在 render() 中途抛，后面半张面板全空、动画也一起停。
+       包一层：建节点 → 填富文本 → 返回节点。 */
+    const richIn = (tag, cls, text) => {
+      const node = el(tag, cls);
+      richText(node, text);
+      return node;
+    };
+
+    /* Knuth 黄金比例乘数 —— 分布够散，而且完全确定 */
+    const isReady = (i, p) => (((i * 2654435761) >>> 0) % 10000) < p * 100;
+
+    function readyCount() {
+      let c = 0;
+      for (let i = 0; i < n; i++) if (isReady(i, pct)) c++;
+      return c;
+    }
+
+    function drawCells() {
+      cells.textContent = '';
+      for (let i = 0; i < n; i++) {
+        let cls = 'pl-cell';
+        if (state[i] === 'hit') cls += ' is-hit';
+        else if (state[i] === 'miss') cls += ' is-miss';
+        if (i === cursor) cls += ' is-cursor';
+        cells.append(el('span', cls));
+      }
+    }
+
+    function stat(tone, label, value, sub) {
+      const c = el('div', 'pl-stat');
+      c.style.setProperty('--pl-tone', 'var(--' + tone + ')');
+      c.append(el('div', 'pl-stat-lab', label));
+      c.append(el('div', 'pl-stat-val', value));
+      c.append(richIn('div', 'pl-stat-sub', sub));
+      return c;
+    }
+
+    function render() {
+      sConn.v.textContent = n + sConn.unit;
+      sBusy.v.textContent = pct + sBusy.unit;
+      drawCells();
+
+      const asked = hits + miss;
+      // richText 是 append，不清空 —— 每次重画前先把这一行擦掉，
+      // 否则跑一轮会看到「正在问第 2 号…正在问第 3 号…」连成一大串
+      line.textContent = '';
+      if (asked === 0) {
+        richText(line, '线程手里只有一张==连接号清单==，它并不知道谁有数据 —— 只能一个一个问过去。');
+      } else if (asked < n) {
+        richText(line, '正在问第 **' + (asked + 1) + '** 号连接…');
+      } else {
+        richText(line, '问完一轮：**' + hits + '** 次有收获，**' + miss + '** 次白问 —— 一共 ' + n + ' 次系统调用。');
+      }
+
+      const done = asked === n && n > 0;
+      const h = done ? hits : readyCount();
+      const m = done ? miss : n - readyCount();
+      const rate = n ? Math.round((m / n) * 100) : 0;
+
+      stats.textContent = '';
+      stats.append(
+        stat('green', '真有数据的', String(h), '这些才是你想要的'),
+        stat('red', '白问的次数', String(m), '==问了等于没问=='),
+        stat('amber', '白问率', rate + '%', '连接越多，这一格越难看'),
+      );
+
+      cost.textContent = '';
+      const row = (name, tone, mid, total, note) => {
+        const r = el('div', 'pl-cost-row');
+        r.style.setProperty('--pl-tone', 'var(--' + tone + ')');
+        r.append(el('span', 'pl-cost-name', name));
+        r.append(richIn('span', 'pl-cost-mid', mid));
+        r.append(el('b', 'pl-cost-total', total));
+        r.append(richIn('span', 'pl-cost-note', note));
+        return r;
+      };
+      cost.append(row('select / poll', 'red',
+        '搬进去 **' + n + '** 份 + 内核走 **' + n + '** 遍 + 拷回来再走 **' + n + '** 遍',
+        String(3 * n) + ' 份',
+        '每次调用都要重交整份名单，内核不记得你上次关心谁'));
+      cost.append(row('epoll', 'green',
+        '名单早就交过了，这次只拿回就绪的那几个',
+        String(h) + ' 份',
+        '==不随连接数涨=='));
+
+      if (statusEl) statusEl.textContent = n + ' 条连接 · 一轮 ' + n + ' 次系统调用 · 白问 ' + rate + '%';
+    }
+
+    function stop() {
+      if (timer) { clearTimeout(timer); timer = null; }
+      if (runBtn) { runBtn.disabled = false; runBtn.textContent = '▶ 跑一轮'; }
+    }
+
+    function reset() {
+      stop();
+      n = Number(sConn.r.value);
+      pct = Number(sBusy.r.value);
+      state = new Array(n).fill('idle');
+      cursor = -1; hits = 0; miss = 0;
+      render();
+    }
+
+    function step() {
+      cursor++;
+      if (cursor >= n) { cursor = -1; stop(); render(); return; }
+      if (isReady(cursor, pct)) { state[cursor] = 'hit'; hits++; }
+      else { state[cursor] = 'miss'; miss++; }
+      render();
+      // 总时长控制在 2.5 秒左右 —— 连接多了不能一格一格慢慢爬
+      timer = setTimeout(step, Math.max(8, Math.min(40, Math.round(2500 / n))));
+    }
+
+    function run() {
+      if (timer) { stop(); return; }
+      if (hits + miss > 0) { reset(); }
+      if (runBtn) { runBtn.disabled = false; runBtn.textContent = '❙❙ 暂停'; }
+      timer = setTimeout(step, 60);
+    }
+
+    sConn.r.addEventListener('input', reset);
+    sBusy.r.addEventListener('input', reset);
+    if (runBtn) runBtn.addEventListener('click', run);
+    if (resetBtn) resetBtn.addEventListener('click', reset);
+    reset();
+  };
+
   /* ---------- 挂载 ---------- */
   document.querySelectorAll('[data-widget]').forEach((root) => {
     var name = root.getAttribute('data-widget');

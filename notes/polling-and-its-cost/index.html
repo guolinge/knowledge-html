@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-has-toc="1">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>轮询：不等了，去问</title>
+<meta name="description" content="「等待不该占用执行资源」落到操作上，第一步就是别让线程等、让它去问 —— 一个线程终于能招呼多个连接。但「问」自己欠下两个病：白问太多，而且名单每次都要重新交一遍。第二个才是 epoll 存在的理由。" />
+<link rel="stylesheet" href="../../assets/theme.css" />
+  <link rel="stylesheet" href="../../assets/blocks.css" />
+  <link rel="stylesheet" href="../../assets/archify-embed.css" />
+</head>
+<body>
+<div id="progress"></div>
+<div id="tocScrim"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
+    <a class="brand" href="../../index.html"><span class="dot"></span>知识笔记</a>
+    
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="toc" id="toc">
+      <p class="toc-title">目录</p>
+      <a href="../../index.html" class="sub">← 全部笔记</a>
+      <a href="#上一句留下的话">上一句留下的话</a>
+      <a href="#非阻塞改的是返回的语义不是速度">非阻塞改的是「返回的语义」，不是「速度」</a>
+      <a href="#一个线程终于能招呼很多连接了">一个线程终于能招呼很多连接了</a>
+      <a href="#病一绝大部分问是白问">病一：绝大部分问是白问</a>
+      <a href="#病二名单每次都要重新交一遍">病二：名单每次都要重新交一遍</a>
+      <a href="#病灶不在谁在遍历在内核不记得">病灶不在「谁在遍历」，在「内核不记得」</a>
+      <a href="#那要治它需要什么">那要治它，需要什么</a>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow">● I/O 多路复用 · 第一步</span>
+      <h1>轮询：不等了，去问</h1>
+      <p class="lede">「等待不该占用执行资源」落到操作上，第一步就是别让线程等、让它去问 —— 一个线程终于能招呼多个连接。但「问」自己欠下两个病：白问太多，而且名单每次都要重新交一遍。第二个才是 epoll 存在的理由。</p>
+    </div>
+
+    <div class="draft-banner">
+    <span>⚠</span>
+    <span>本页状态为 <b>draft</b>：内容尚未人工核对，引用前请自行验证。</span>
+  </div>
+<aside class="needs">
+      <p class="needs-title">读这篇之前，你需要先知道</p>
+      <span class="need is-planned">← <b>2. 一连接一线程亏在哪</b><span>那个线程不是死了，是停在那占着名额 —— 等待不该占用执行资源</span><em>待产出</em></span>
+    </aside>
+    <div class="provenance"><span><b>来源</b> man7 · epoll(7) https://man7.org/linux/man-pages/man7/epoll.7.html · man7 · epoll_ctl(2) https://man7.org/linux/man-pages/man2/epoll_ctl.2.html · man7 · select(2) https://man7.org/linux/man-pages/man2/select.2.html · man7 · poll(2) https://man7.org/linux/man-pages/man2/poll.2.html · 本机核实：FD_SETSIZE 默认 1024（Darwin 与 glibc 一致）；EWOULDBLOCK 与 EAGAIN 同值</span><span><b>生成</b> 2026-10-06</span><span><b>模型</b> claude-opus-4-5</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">epoll</span> <span class="tag tone-muted">I/O 多路复用</span> <span class="tag tone-muted">非阻塞</span> <span class="tag tone-muted">select</span> <span class="tag tone-muted">poll</span> <span class="tag tone-muted">Linux 内核</span></span></div>
+
+<h2 id="上一句留下的话"><span class="num">01</span>上一句留下的话</h2>
+<p>上一篇的结论是：<strong>「等待」不产生任何价值，但一连接一线程的做法让每个「在等」的连接都占着一个线程的名额。</strong></p>
+<p>那第一步就很自然：<strong>别让线程等，让它去问。</strong> <code>O_NONBLOCK</code> 干的就是这件事。但它在很多材料里被讲成「性能优化」，这一点会把人带歪。</p>
+<hr>
+<h2 id="非阻塞改的是返回的语义不是速度"><span class="num">02</span>非阻塞改的是「返回的语义」，不是「速度」</h2>
+<p>先把这点钉死，否则后面全歪。</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>设置</th><th>数据没到时 <code>read</code> 干了什么</th><th>你的代码要做什么</th></tr></thead><tbody><tr><th>阻塞（默认）</th><td data-label="数据没到时 `read` 干了什么">把你挂起、交出 CPU，数据到了再唤醒你</td><td data-label="你的代码要做什么">什么都不用做，<code>read</code> 返回时数据已经在手里</td></tr><tr><th>非阻塞（<code>O_NONBLOCK</code>）</th><td data-label="数据没到时 `read` 干了什么"><span class="tag tone-red">立刻返回 -1，errno = EAGAIN</span></td><td data-label="你的代码要做什么">自己决定什么时候再来问，这就是轮询</td></tr></tbody></table></div><p><mark class="mk-amber"><code>EAGAIN</code> 和 <code>EWOULDBLOCK</code> 在 Linux 上是<strong>同一个值</strong>（Darwin/BSD 也一样）。</mark> 看到哪个都是一个意思：<strong>「这会儿没有，别等了」。</strong></p>
+<p><mark class="mk-blue">注意 <code>O_NONBLOCK</code> 一个字都没提「快」。</mark> 它不让 I/O 变快，也不减少任何一次拷贝，只是把「等」换成了一句「还没好」。<strong>它换掉的是行为，不是成本。</strong></p>
+<hr>
+<h2 id="一个线程终于能招呼很多连接了"><span class="num">03</span>一个线程终于能招呼很多连接了</h2>
+<p>这是轮询解决的问题。它值一句话：</p>
+<blockquote>
+<p><strong>线程不再被某一个连接绑住。</strong></p>
+</blockquote>
+<p>以前 500 个连接要 500 个线程，其中绝大部分时间都在睡。现在一个线程拿着 500 个 fd 挨个问，谁好了就处理谁。</p>
+<div class="demo" data-widget="poll-lab" data-config="{&quot;conn&quot;:{&quot;min&quot;:8,&quot;max&quot;:200,&quot;step&quot;:4,&quot;def&quot;:64},&quot;busy&quot;:{&quot;min&quot;:5,&quot;max&quot;:100,&quot;step&quot;:5,&quot;def&quot;:10}}">
+      <div class="demo-head">
+        <span class="title">一个线程挨个问过去</span>
+        <span class="status" data-status>先拖「连接数」和「有数据的比例」，再点开始</span>
+        <span class="spacer"></span>
+        <button class="btn" data-run>▶ 开始模拟</button><button class="btn ghost" data-reset>重置</button>
+      </div>
+      <div class="demo-body custom" data-mount></div>
+    </div><p>格子默认全是灰的：在问之前，<strong>线程并不知道谁有数据<strong>，这就是它必须一个个问过去的原因。跑完一轮再看那片格子：</strong>一片灰里几个绿点</strong>，<mark class="mk-blue">那几个绿点是你想要的全部，剩下全是白问。</mark></p>
+<hr>
+<h2 id="病一绝大部分问是白问"><span class="num">04</span>病一：绝大部分问是白问</h2>
+<p>上图默认值下白问率是 <strong>90%</strong>。而这件事<strong>没法靠调频率治好</strong>：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>问的频率</th><th>会发生什么</th><th>结果</th></tr></thead><tbody><tr><th>问得太密</th><td data-label="会发生什么">CPU 全烧在系统调用上</td><td data-label="结果"><span class="tag tone-red">「忙等」这个词就是这么来的：它一点都不闲</span></td></tr><tr><th>问得太疏</th><td data-label="会发生什么">数据早就到了，你还在睡</td><td data-label="结果"><span class="tag tone-amber">延迟上去了</span></td></tr><tr><th>不快不慢</th><td data-label="会发生什么">但你并不知道数据什么时候来</td><td data-label="结果"><span class="tag tone-red"><mark class="mk-blue">没有一个频率是对的</mark></span></td></tr></tbody></table></div><p>抓一个白问的比例是 100%，抓一万个还是 100%。<strong>这个病不随规模改善，只随规模放大。</strong></p>
+<hr>
+<h2 id="病二名单每次都要重新交一遍"><span class="num">05</span>病二：名单每次都要重新交一遍</h2>
+<p>这是更要命的一个，也是很多讲 epoll 的材料直接跳过去的那一步。</p>
+<div class="seqd has-grid" data-seq data-n="2" data-segs="[{&quot;from&quot;:1,&quot;to&quot;:3,&quot;label&quot;:&quot;每调用一次，全部重来&quot;}]">
+      <svg class="seqd-svg" aria-hidden="true">
+        <defs>
+          <marker id="s-fill" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+          <marker id="s-open" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10" fill="none" stroke="currentColor" stroke-width="1.4"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="seqd-head"><div class="scell"><div class="spart tone-blue" data-id="u">
+          <b>你的程序</b><small>用户态</small>
+        </div></div><div class="scell"><div class="spart tone-amber" data-id="k">
+          <b>内核</b><small>select / poll</small>
+        </div></div></div>
+      <div class="seqd-body"><div class="smsg" data-from="u" data-to="k" data-kind="sync" data-i="1" data-note="500 个"><span class="snote">500 个</span><span class="slabel">① 整份名单交过去</span></div><div class="smsg is-self" data-from="k" data-to="k" data-kind="self" data-i="2" data-note="你好了吗"><span class="snote">你好了吗</span><span class="slabel">② 挨个走一遍</span></div><div class="smsg" data-from="k" data-to="u" data-kind="reply" data-i="3" data-note="改了几个位"><span class="snote">改了几个位</span><span class="slabel">③ 整份名单发回来</span></div><div class="smsg is-self" data-from="u" data-to="u" data-kind="self" data-i="4" data-note="其实只有 2 个"><span class="snote">其实只有 2 个</span><span class="slabel">④ 你再走一遍找谁好了</span></div></div>
+    </div><p><mark class="mk-amber"><strong>你关心的是 2 个，付的是 500 × 3 的代价。</strong></mark> 而上图那个控件已经把这一行的算式算给你了：调大连接数，<code>select / poll</code> 那一栏跟着线性涨，<code>epoll</code> 那一栏纹丝不动。</p>
+<hr>
+<h2 id="病灶不在谁在遍历在内核不记得"><span class="num">06</span>病灶不在「谁在遍历」，在「内核不记得」</h2>
+<p>有人以为 <code>select</code> 慢是因为「自己写 for 循环慢」，于是让内核替他遍历。<strong>病没治好，只是换了个地方。</strong></p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>三代做法</th><th>名单谁遍历</th><th>每次调用要交多少</th></tr></thead><tbody><tr><th>自己写 for 循环</th><td data-label="名单谁遍历">你自己，在你自己进程里</td><td data-label="每次调用要交多少">名单不用交，但每问一个就是一次系统调用</td></tr><tr><th><code>select</code></th><td data-label="名单谁遍历">内核替你遍历</td><td data-label="每次调用要交多少"><span class="tag tone-amber">整份位图，进也拷、出也拷</span></td></tr><tr><th><code>poll</code></th><td data-label="名单谁遍历">内核替你遍历</td><td data-label="每次调用要交多少"><span class="tag tone-amber">整个数组，进也拷、出也拷</span></td></tr></tbody></table></div><p><code>select</code> 和 <code>poll</code> 的差别只在一处：<code>select</code> 的 <code>fd_set</code> 是<strong>固定大小的位图</strong>，所以被 <code>FD_SETSIZE</code> 卡住（Linux/glibc 上默认 <strong>1024</strong>）；<code>poll</code> 换成了数组，去掉了这个上限。</p>
+<p><strong>但「每次全拷、全遍历」一点没动。</strong></p>
+<p><mark class="mk-amber">所以真正的病灶是这一句：<strong>内核不记得你上次关心谁。</strong></mark> 每次调用，你都得从头交代一遍，因为上一次的交代它已经忘了。</p>
+<div class="callout tone-violet">
+      <span class="ic">💡</span>
+      <div><p>换个角度看会更清楚：<strong><code>select</code> / <code>poll</code> 的内核实现是无状态的。</strong></p>
+<p>它像个每次都要重新填表的窗口：你交一份表、它办完、把表还给你，
+下一次来它完全不认识你。所以成本必然和「表有多厚」成正比，
+而不是和「这次办成了几件事」成正比。</p>
+<p><mark class="mk-blue">要跳出这个结构，就得让内核那头「记着」。</mark></p>
+</div>
+    </div><hr>
+<h2 id="那要治它需要什么"><span class="num">07</span>那要治它，需要什么</h2>
+<p>三条。这一篇不给答案，<strong>它是下一篇的题目。</strong></p>
+<div class="cards" data-cols="1"><div class="ccard tone-blue">
+          
+          <h4>① 内核得记住我关心哪些 fd</h4>
+          
+          <div class="cbody"><p>现在内核是无状态的：这次调用结束它就忘了，下次你还得从头交代。
+所以第一件事是<strong>有个地方把名单存下来</strong>，登记一次、长期有效。</p>
+</div>
+          
+        </div><div class="ccard tone-green">
+          
+          <h4>② 内核得只把「好了的那几个」还给我</h4>
+          
+          <div class="cbody"><p>不要「整个名单 + 几个标记位」，要<strong>就绪的那几个本身</strong>。
+这样返回的数据量就不随连接总数涨，只随本次真有多少个就绪涨。</p>
+</div>
+          
+        </div><div class="ccard tone-violet">
+          
+          <h4>③ 等待不能再占用执行资源</h4>
+          
+          <div class="cbody"><p>这条最根本，就是这一篇开头那句。前两条是它的实现手段：
+名单存在内核里，谁就绪内核自己知道，线程才能睡到「真有事」为止。</p>
+</div>
+          
+        </div></div><p>这三条正好对应下一篇要讲的三样东西。而其中<strong>第二条会引出一个很多人没想清的词：「就绪」。</strong> 那是再下一篇的事。</p>
+<hr>
+<div class="quiz"><details>
+        <summary><code>O_NONBLOCK</code> 让 I/O 变快了吗？</summary>
+        <div class="a"><p>没有。它一个字都没提「快」：不减少拷贝、不减少系统调用，只是把
+「数据没到时挂起你」改成「立刻返回 EAGAIN」。
+它换掉的是<strong>行为<strong>（等 → 问），不是</strong>成本</strong>。</p>
+</div>
+      </details><details>
+        <summary>轮询解决了什么问题？</summary>
+        <div class="a"><p>线程不再被某一个连接绑住。以前 500 个连接要 500 个线程，大部分时间在睡；
+现在一个线程拿着 500 个 fd 挨个问，谁好了处理谁。
+代价是「等」从线程里搬走了，但「问」本身有成本。</p>
+</div>
+      </details><details>
+        <summary>轮询自己欠下哪两个病？为什么第一个治不好？</summary>
+        <div class="a"><p>病一是白问：大部分询问都没有结果。病二是名单每次都要重新交一遍。
+第一个治不好是因为你<strong>不知道数据什么时候来</strong>：问太密烧 CPU，
+问太疏延迟高，没有一个频率是对的。而且它不随规模改善，只随规模放大。</p>
+</div>
+      </details><details>
+        <summary><code>select</code> 和 <code>poll</code> 的区别是什么？它们的共同病灶在哪？</summary>
+        <div class="a"><p>区别只有一处：select 的 fd_set 是固定大小的位图，被 FD_SETSIZE 卡住
+（Linux/glibc 默认 1024）；poll 换成数组，去掉了这个上限。
+共同病灶不在「谁在遍历」，而是<strong>内核不记得你上次关心谁</strong>：
+所以每次调用你都得重交整份名单，成本必然和名单厚度成正比，
+而不是和「这次办成了几件事」成正比。</p>
+</div>
+      </details><details>
+        <summary>要治这两个病，需要哪三样东西？</summary>
+        <div class="a"><p>① 内核得记住我关心哪些 fd（登记一次，长期有效）；
+② 内核得只把就绪的那几个还给我（返回量不随连接总数涨）；
+③ 等待不能再占用执行资源（这是最根本的一条，前两条是它的实现手段）。</p>
+</div>
+      </details></div>
+
+    <footer>
+      <span>轮询：不等了，去问</span>
+      <span>最后更新 2026-10-06 · 单文件可离线打开</span>
+    </footer>
+  </main>
+</div>
+
+<script src="../../assets/app.js"></script>
+</body>
+</html>
