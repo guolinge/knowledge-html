@@ -1,3 +1,46 @@
+```arch
+svg: epoll-objects
+caption: 两张表是**结果**，这张图是**过程**。中间那格「等待队列」是上一篇控件里没有的 —— 回调就挂在那儿。
+parts:
+  fdset:
+    label: 被监视的那些 fd
+    detail: 你交给 epoll 的就是一组 fd。==它们本身还是普通的 socket fd==，epoll 没有替换掉它们。
+  epinst:
+    label: epoll 实例
+    detail: '`epoll_create` 造出来的一个内核对象。一个实例管一组 fd，N 个实例互不相干。'
+  rbtree:
+    label: 红黑树 · 登记表
+    detail: '`epoll_ctl` 往里加，加完**一直在**。==这就是「内核那头记着」那句的具体含义== —— 所以调用一次之后你不用再交代一遍。'
+  waitq:
+    label: 目标 fd 的等待队列
+    detail: ==这一格是这张图的关键。==登记表里的每一项，会在**目标 fd 自己的等待队列**上挂一个回调。`select` / `poll` 不做这件事，它们是调用的时候挨个去查。
+  ready:
+    label: 就绪链表 · 就绪表
+    detail: 回调被触发时，把那个 fd 挂进这里。==放进去这个动作发生在「数据到的那一刻」，不是「你问的那一刻」。==
+  wait:
+    label: '`epoll_wait`'
+    detail: 它只把就绪表拿走。**登记表一个字节都不动** —— 所以下一轮不用重新登记。这也是它和 `select` / `poll` 最根本的区别。
+  dev:
+    label: 网卡 / 磁盘
+    detail: 数据到了，触发中断。整条链路的起点在这里，不在你的循环里。
+anchors:
+  - { part: waitq, label: "回调到底挂在哪" }
+  - { part: fdset, label: "我从「交出去的 fd」看" }
+  - { part: wait, label: "我从 epoll_wait 看" }
+tours:
+  - id: one-fd
+    label: "一个 fd 从登记到就绪"
+    steps:
+      - { at: [fdset, epinst], text: "先把一组 fd 交给 `epoll_create` 造出来的那个实例。" }
+      - { at: [epinst, rbtree], text: "它们被登记进==红黑树==。加完一直在 —— 这就是「内核那头记着」的意思。" }
+      - { at: [rbtree, waitq], text: "登记的时候，每一项会在**目标 fd 自己的等待队列**上挂一个回调。\n\n==这一格是 epoll 和 select / poll 的分水岭== —— 那两个是调用的时候才挨个去查。" }
+      - { at: [dev, waitq], text: "数据到了。中断触发回调 —— ==注意这个时刻是「数据到的时刻」，不是「你去问的时刻」。==" }
+      - { at: [waitq, ready], text: "回调把那个 fd 挂进==就绪链表==。这张表永远很短，因为它只装这一刻真有事的那几个。" }
+      - { at: [ready, wait, fdset], text: "`epoll_wait` 把就绪表拿走。==登记表一个字节都不动==，所以下一轮不用重新登记。" }
+```
+
+---
+
 ## 01 · 三条需求，三样东西
 
 上一篇的结尾列了三条。现在让它们一一对上：

@@ -1,3 +1,49 @@
+```arch
+svg: socket-fd-anatomy
+caption: 这张是这一篇的地图。左边和右边是**同一个结构的两份实例** —— 同一条 fd 表、同一条三层链，只是尽头挂的东西不一样。
+parts:
+  fdtable:
+    label: fd 表
+    sub: 号码 → 表项的数组
+    detail: ==fd 只是一个下标，本身不含任何数据。==同一个进程里，监听的和连接的都挂在这一张表上。
+  lid:
+    label: listen_fd
+    detail: 进程启动时开的一个，一直守着 80 端口。**它是这几条链里唯一没有对端的那个。**
+  cid:
+    label: conn_fd
+    detail: 每来一个客户端多一个。==它们和 listen_fd 是并列的表项，不是它的子项。==
+  chain:
+    label: file → socket → sock
+    detail: 每个 fd 都走这条三层链。==前半段（fd → 打开文件表 → struct file）socket 和普通文件一模一样== —— 这就是为什么 socket 也能用 `read` / `write` / `close`。
+  lsock:
+    label: 监听 sock
+    detail: 状态 `LISTEN`，没有对端。==它自己不传数据==，全部工作就是等新连接。
+  csock:
+    label: 连接 sock
+    detail: 状态 `ESTABLISHED`，有完整的四元组 —— 它知道自己在和谁说话。
+  queues:
+    label: 半连接队列 / 全连接队列
+    detail: 挂在监听 sock 名下。握手没走完的排半连接，走完的排全连接，等 `accept` 来取。
+  buf:
+    label: 接收缓冲 + 发送缓冲
+    detail: ==每条连接各一份。==所以「一万条连接」在内核里的开销不是一万个编号（那很便宜），是一万份等待。
+anchors:
+  - { part: chain, label: "我只想搞清这串对象" }
+  - { part: lsock, label: "我从监听这头看" }
+  - { part: csock, label: "我从连接这头看" }
+tours:
+  - id: one-fd
+    label: "一个 fd 牵出多少东西"
+    steps:
+      - { at: [fdtable, lid, cid], text: "先看最上面：==fd 就是这张表的下标==。监听的、连接的，都挂在这一张表上，彼此并列。" }
+      - { at: [chain], text: "表项指向一条三层链：`struct file` → `struct socket` → `struct sock`。==这一段 socket 和普通文件完全一样==，所以 socket 才能用 `read` / `write`。" }
+      - { at: [chain, lsock, csock], text: "分叉在尽头。左边那条的尽头是==监听 sock==（没有对端），右边那条是==连接 sock==（有完整四元组）。" }
+      - { at: [lsock, queues], text: "监听 sock 名下挂着==两条队列== —— 这是它比普通 socket 多出来的东西。" }
+      - { at: [csock, buf], text: "连接 sock 名下挂着==收发缓冲==。==每条连接各一份==，这就是「一万条连接」真正贵的地方。" }
+```
+
+---
+
 ## 01 · accept 还给你的只是一个整数
 
 服务器代码大概长这样：
