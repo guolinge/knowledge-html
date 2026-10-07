@@ -631,6 +631,32 @@ const KIND_TONE = {
     put('anchors', cfg.anchors);
     put('tours', cfg.tours);
 
+    /* 零件 id 的校验。
+       ------------------------------------------------------------
+       `parts` / `anchors` / `tours` 里的 id 必须和 Archify spec 里的组件 id 一致，
+       但那是**两个文件**。改图时改了 spec、忘了同步 note —— 不会报错，
+       只是那个「我熟悉 ___」的按钮点了没反应，或者面板里显示成 id。
+       这种错只有人点上去才发现，所以在构建期就拦下来。 */
+    const nodeIds = new Set();
+    for (const m of svg.matchAll(/data-node-id="([^"]+)"/g)) nodeIds.add(m[1]);
+    const refs = [];
+    Object.keys(cfg.parts || {}).forEach((k) => refs.push([k, `parts.${k}`]));
+    (cfg.anchors || []).forEach((a, i) => refs.push([a.part, `anchors[${i}]`]));
+    (cfg.tours || []).forEach((t, i) => {
+      (t.steps || []).forEach((st, j) => {
+        (st.at || []).forEach((id) => refs.push([id, `tours[${i}].steps[${j}].at`]));
+      });
+    });
+    const bad = refs.filter((r) => r[0] && !nodeIds.has(r[0]));
+    if (bad.length) {
+      throw new Error(
+        `${name}.svg 里没有这些零件 id：\n` +
+          bad.map(([id, where]) => `      ${where} → "${id}"`).join('\n') +
+          `\n    图里实际有的是：${[...nodeIds].join(' ')}` +
+          `\n    多半是改了 archify/${name}.json 的组件 id，忘了同步这一处。`,
+      );
+    }
+
     const hasUI = cfg.anchors || cfg.tours || cfg.parts;
     const hint = hasUI
       ? `<span class="idle">点头上的任意一个框看它的关系；或者从下面的「我熟悉」进去</span>`

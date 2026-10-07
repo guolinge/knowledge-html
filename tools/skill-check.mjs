@@ -13,6 +13,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { slugify } from './lib/blocks.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const SKILL_DIR = path.join(ROOT, '.agents/skills/knowledge-html');
@@ -204,6 +205,89 @@ if (fs.existsSync(svPath)) {
         );
       }
     }
+  }
+}
+
+/* ============================================================
+   内部链接检查
+   ------------------------------------------------------------
+   为什么要先加这一条：skill 要拆成多个文件，而拆文件最容易**悄悄弄断链接** ——
+   跨文件的 `#锚点`、`references/x.md` 指向、指向笔记的路径。
+   断链不会报错，只会让人点进去发现是空页。所以先装网，再动刀。
+
+   锚点的算法必须和 skill-view.mjs 的 addAnchors 一致（同一个 slugify），
+   否则会误报。
+   ============================================================ */
+{
+  const files = [];
+  const walk = (dir, rel = '') => {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      const r = path.join(rel, e.name);
+      if (e.isDirectory()) walk(path.join(dir, e.name), r);
+      else if (e.name.endsWith('.md')) files.push(r);
+    }
+  };
+  walk(SKILL_DIR);
+
+  // 每个文件里，能当锚点的标题
+  const anchorsOf = {};
+  const headingsOf = (src) => {
+    const out = [];
+    src.split('\n').forEach((l) => {
+      const m = l.match(/^(#{2,3})\s+(.*)$/);
+      if (!m) return;
+      const text = m[2].replace(/[*`=]/g, '').trim();
+      const m2 = text.match(/^(\d+[a-z]?)\s*[·:：]\s*(.+)$/);
+      out.push(slugify(m2 ? m2[2] : text));
+    });
+    return out;
+  };
+  for (const f of files) anchorsOf[f] = headingsOf(read(path.join(SKILL_DIR, f)));
+
+  const bad = [];
+  for (const f of files) {
+    const src = read(path.join(SKILL_DIR, f));
+    const dir = path.dirname(f);
+    // [文字](目标) —— 排除外链和图片
+    for (const m of src.matchAll(/\[([^\]]*)\]\(([^)]+)\)/g)) {
+      const target = m[2].trim();
+      if (/^(https?:|mailto:|#!)/.test(target)) continue;
+      const [filePart, anchor] = target.split('#');
+      if (!filePart) {
+        if (anchor && !(anchorsOf[f] || []).includes(decodeURIComponent(anchor))) {
+          bad.push(`${f}: 锚点 #${anchor} 在本文件里不存在`);
+        }
+        continue;
+      }
+      const abs = path.resolve(SKILL_DIR, dir, filePart);
+      const asSkillFile = path.relative(SKILL_DIR, abs);
+      if (files.includes(asSkillFile)) {
+        // ① 指向 skill 自己的另一个 .md：连带查锚点
+        if (anchor && !(anchorsOf[asSkillFile] || []).includes(decodeURIComponent(anchor))) {
+          bad.push(`${f}: ${filePart} 里没有锚点 #${anchor}`);
+        }
+      } else {
+        /* ② 指向仓库里别的东西（笔记、其它 skill 目录）。
+           基准有两种：多数相对 skill 目录写（`../../notes/x/`），
+           也有相对仓库根写的（`notes/x/note.md`）——
+           skill-view 渲染时两种都会重写成站内链接，所以这里也两种都试。
+           ⚠️ 判断顺序很重要：`notes/x/note.md` 也以 `.md` 结尾，
+           不能只看后缀就当成 skill 内部文件（踩过，5 处假报错）。 */
+        const a2 = path.resolve(ROOT, filePart);
+        if (!fs.existsSync(abs) && !fs.existsSync(a2)) {
+          bad.push(`${f}: 路径不存在 → ${filePart}`);
+        }
+      }
+    }
+  }
+
+  if (bad.length) {
+    console.log(`  ✗ skill 内部链接有 ${bad.length} 处问题：`);
+    problems.push(`内部链接 ${bad.length} 处断链`);
+    bad.slice(0, 12).forEach((b) => console.error(`      ${b}`));
+    if (bad.length > 12) console.error(`      …还有 ${bad.length - 12} 处`);
+  } else {
+    console.log(`  ✓ skill 内部链接全部有效（${files.length} 个文件）`);
   }
 }
 

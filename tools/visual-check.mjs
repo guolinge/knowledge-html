@@ -38,6 +38,7 @@ const CONTAINERS = [
   '.mx',          // matrix
   '.tree',        // tree
   '.archfig',     // arch（内联 archify 的图）
+  '.pano-ui',     // archfig 的语义层（入口 / 导览 / 面板）
   '.spec',        // spec
   '.streamshape', // streamshape（raw 写的）
   '.keyby-viz',   // keyby-viz（raw 写的）
