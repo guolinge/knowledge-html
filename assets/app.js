@@ -5556,6 +5556,123 @@
     render();
   };
 
+  /* ============================================================
+     控件：code-and-stacks —— 一份代码，N 个执行现场
+     ------------------------------------------------------------
+     这个控件专治一个误解：「每个线程里是不是复制了服务端代码」。
+     上面代码段**只有一份**（只读的机器指令），下面每个线程一份栈，
+     那个 `char buf[1024]` 因此有 N 份 —— 它在各自的栈上。
+
+     点任意一个栈 = 让它阻塞在 read。用来演示「一个线程等的不是别人」：
+     它自己停住，其余线程照跑，因为它们执行的是同一份代码。
+
+     config: threads { min, max, step, def }
+  ============================================================ */
+  WIDGETS['code-and-stacks'] = (root) => {
+    const cfg = cfgOf(root);
+    const box = mountOf(root);
+    const statusEl = root.querySelector('[data-status]');
+    const runBtn = root.querySelector('[data-run]');
+    const resetBtn = root.querySelector('[data-reset]');
+    const T = cfg.threads || { min: 1, max: 6, step: 1, def: 3 };
+
+    const richIn = (tag, cls, text) => {
+      const node = el(tag, cls);
+      richText(node, text);
+      return node;
+    };
+
+    const LINES = [
+      'void handle_request(int fd) {',
+      '    char buf[1024];',
+      '    read(fd, buf, sizeof buf);',
+      '    ...',
+      '}',
+    ];
+
+    const sl = el('div', 'cs-sl');
+    sl.append(el('span', 'cs-sl-lab', '同时跑几个线程'));
+    const rng = el('input', 'cs-range');
+    rng.type = 'range';
+    rng.min = String(T.min); rng.max = String(T.max);
+    rng.step = String(T.step); rng.value = String(T.def);
+    const val = el('b', 'cs-sl-val');
+    sl.append(rng, val);
+
+    const code = el('div', 'cs-code');
+    const cHead = el('div', 'cs-code-head');
+    cHead.append(el('span', 'cs-code-ttl', '代码段'));
+    cHead.append(el('span', 'cs-code-tag', '只读 · 全进程一份'));
+    code.append(cHead);
+    const cBody = el('div', 'cs-code-body');
+    LINES.forEach((t, i) => {
+      const r = el('div', 'cs-line');
+      r.append(el('span', 'cs-ln', String(i + 1)));
+      r.append(el('span', 'cs-code-txt', t));
+      cBody.append(r);
+    });
+    code.append(cBody);
+
+    const arrow = el('div', 'cs-arrow');
+
+    const stacks = el('div', 'cs-stacks');
+    const verdict = el('div', 'cs-verdict');
+    box.append(sl, code, arrow, stacks, verdict);
+
+    let n = 0, blocked = new Set();
+
+    function render() {
+      val.textContent = n + ' 个';
+
+      stacks.textContent = '';
+      for (let i = 0; i < n; i++) {
+        const isB = blocked.has(i);
+        const c = el('button', 'cs-stack' + (isB ? ' is-blocked' : ''));
+        const h = el('div', 'cs-stack-head');
+        h.append(el('span', 'cs-stack-ttl', '线程 ' + (i + 1)));
+        h.append(el('span', 'cs-stack-badge', isB ? '阻塞在 read' : '运行中'));
+        c.append(h);
+        const b = el('div', 'cs-stack-body');
+        b.append(el('span', 'cs-stack-seg', 'buf[1024]'));
+        b.append(el('span', 'cs-stack-note', isB ? 'read 没返回，卡在这' : '正在执行 read'));
+        c.append(b);
+        c.append(el('div', 'cs-stack-hint', isB ? '点一下让它继续' : '点一下让它阻塞'));
+        c.addEventListener('click', () => {
+          if (blocked.has(i)) blocked.delete(i); else blocked.add(i);
+          render();
+        });
+        stacks.append(c);
+      }
+
+      arrow.textContent = '';
+      richText(arrow, '**↑** ==下面这 ' + n + ' 个线程，执行的都是上面那一份指令==');
+
+      const nb = blocked.size;
+      verdict.textContent = '';
+      verdict.className = 'cs-verdict' + (nb ? ' is-warn' : '');
+      richText(verdict,
+        '**代码段 1 份 · 栈 ' + n + ' 份 · `buf` 也是 ' + n + ' 份**（每个栈上一块）。' +
+        (nb
+          ? ' 现在有 **' + nb + '** 个线程卡在 `read` 上 —— 但它们卡住的**不是同一件事**：' +
+            '各自等各自的 fd。余下 ' + (n - nb) + ' 个照常在跑，==因为它们执行的本就是同一份代码，互不干扰==。'
+          : ' 点任意一张栈，让它阻塞在 `read` —— 你会看到只有它自己停住。'));
+
+      if (statusEl) {
+        statusEl.textContent = n + ' 线程 · 代码段 1 份 · 阻塞中 ' + nb;
+      }
+    }
+
+    rng.addEventListener('input', () => {
+      n = Number(rng.value);
+      for (const i of [...blocked]) if (i >= n) blocked.delete(i);
+      render();
+    });
+    if (runBtn) runBtn.style.display = 'none';
+    if (resetBtn) resetBtn.addEventListener('click', () => { blocked = new Set(); render(); });
+    n = Number(rng.value);
+    render();
+  };
+
   /* ---------- 挂载 ---------- */
   document.querySelectorAll('[data-widget]').forEach((root) => {
     var name = root.getAttribute('data-widget');

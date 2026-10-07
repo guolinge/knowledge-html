@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-has-toc="1">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>你写的那段代码，跑起来之后</title>
+<meta name="description" content="一段十几行的服务器代码，跑起来会变成内存和内核里的什么？主线只有一个问题：哪些东西是一份，哪些是 N 份。答案顺手解开了两个常见困惑 —— 为什么一堆连接能共用 80 端口，以及线程到底会不会复制服务端代码。" />
+<link rel="stylesheet" href="../../assets/theme.css" />
+  <link rel="stylesheet" href="../../assets/blocks.css" />
+  <link rel="stylesheet" href="../../assets/archify-embed.css" />
+</head>
+<body>
+<div id="progress"></div>
+<div id="tocScrim"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
+    <a class="brand" href="../../index.html"><span class="dot"></span>知识笔记</a>
+    
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="toc" id="toc">
+      <p class="toc-title">目录</p>
+      <a href="../../index.html" class="sub">← 全部笔记</a>
+      <a href="#先看那段代码">先看那段代码</a>
+      <a href="#内核里先站住一个东西监听-socket">内核里先站住一个东西：监听 socket</a>
+      <a href="#浏览器来了内核里多了什么">浏览器来了：内核里多了什么</a>
+      <a href="#为什么一堆连接能共用-80-端口">为什么一堆连接能共用 80 端口</a>
+      <a href="#线程里发生了什么一份代码n-个栈">线程里发生了什么：一份代码，N 个栈</a>
+      <a href="#一张表把一份-n-份列清">一张表把「一份 / N 份」列清</a>
+      <a href="#于是一连接一线程的代价就清楚了">于是「一连接一线程」的代价就清楚了</a>
+      <a href="#顺带回答第二个问题监听-socket-和连接-socket-的区别">顺带回答第二个问题：监听 socket 和连接 socket 的区别</a>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow">● 一台服务器 · 起点</span>
+      <h1>你写的那段代码，跑起来之后</h1>
+      <p class="lede">一段十几行的服务器代码，跑起来会变成内存和内核里的什么？主线只有一个问题：哪些东西是一份，哪些是 N 份。答案顺手解开了两个常见困惑 —— 为什么一堆连接能共用 80 端口，以及线程到底会不会复制服务端代码。</p>
+    </div>
+
+    <div class="draft-banner">
+    <span>⚠</span>
+    <span>本页状态为 <b>draft</b>：内容尚未人工核对，引用前请自行验证。</span>
+  </div>
+
+    <div class="provenance"><span><b>来源</b> 用户与 AI 中台的问答（原始素材，两问：一连接一线程是否复制代码 / 监听 socket 与普通 socket 的区别） · man7 · listen(2) / accept(2) https://man7.org/linux/man-pages/man2/listen.2.html · TCP 连接由四元组唯一确定；监听 socket 使用通配地址与 LISTEN 状态</span><span><b>生成</b> 2026-10-07</span><span><b>模型</b> claude-opus-4-5</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">socket</span> <span class="tag tone-muted">线程</span> <span class="tag tone-muted">服务器</span> <span class="tag tone-muted">文件描述符</span> <span class="tag tone-muted">epoll</span> <span class="tag tone-muted">Linux 内核</span></span></div>
+
+<h2 id="先看那段代码"><span class="num">01</span>先看那段代码</h2>
+<p>一个最朴素的服务器，核心就这十几行：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+bind(listen_fd, 0.0.0.0, 80);
+listen(listen_fd, 128);
+
+for (;;) {
+    conn_fd = accept(listen_fd, ...);
+    pthread_create(&amp;t, NULL, handle_request, &amp;conn_fd);
+}
+
+void handle_request(int fd) {
+    char buf[1024];
+    read(fd, buf, sizeof buf);
+    ...
+}
+</code></pre></div>
+<p>它跑起来之后，会变成内存和内核里的什么？<mark class="mk-blue"><strong>这一篇只问一个问题：哪些东西是一份，哪些是 N 份。</strong></mark></p>
+<p>这个问题看着朴素，但它是一大片困惑的根源，尤其是「每个线程里是不是复制了一份服务端代码」。</p>
+<hr>
+<h2 id="内核里先站住一个东西监听-socket"><span class="num">02</span>内核里先站住一个东西：监听 socket</h2>
+<p>前三个调用干的事，是<strong>让内核里出现一个对象，并给它一个身份证</strong>：</p>
+<div class="cards" data-cols="3"><div class="ccard tone-blue">
+          <span class="tag tone-blue">第 1 步</span>
+          <h4>socket()</h4>
+          <p>造一个空的 socket 对象，返回它的 fd</p>
+          
+          
+        </div><div class="ccard tone-blue">
+          <span class="tag tone-blue">第 2 步</span>
+          <h4>bind()</h4>
+          <p>给它绑上 <code>0.0.0.0:80</code>，这是它的地址</p>
+          
+          
+        </div><div class="ccard tone-blue">
+          <span class="tag tone-blue">第 3 步</span>
+          <h4>listen()</h4>
+          <p>让它进入 <code>LISTEN</code> 状态，开始接客</p>
+          
+          
+        </div></div><p><code>listen_fd</code> 就是一个普通的 fd，顺下去还是那条链（读文件系统那篇的 04 节）：<code>fd → 打开文件表 → struct file → struct socket → struct sock</code>。</p>
+<div class="callout tone-blue">
+      <span class="ic">🪧</span>
+      <div><p>这个 socket 和后面那些<strong>不一样的地方</strong>，在它的地址和状态：</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>监听 socket</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>地址</td>
+<td><code>0.0.0.0:80</code>，<code>0.0.0.0</code> 是<strong>通配地址</strong>，意思是「本机所有网卡上的 80 端口都归我」</td>
+</tr>
+<tr>
+<td>状态</td>
+<td><code>LISTEN</code></td>
+</tr>
+<tr>
+<td>有没有对端</td>
+<td><strong>没有</strong>。它不知道会跟谁说话</td>
+</tr>
+</tbody>
+</table>
+<p><mark class="mk-blue">它不传业务数据。</mark> 它的全部工作就是「等新连接」。</p>
+</div>
+    </div><hr>
+<h2 id="浏览器来了内核里多了什么"><span class="num">03</span>浏览器来了：内核里多了什么</h2>
+<p>三个浏览器几乎同时连上来。<strong>注意顺序</strong>：</p>
+<div class="seqd has-grid" data-seq data-n="3">
+      <svg class="seqd-svg" aria-hidden="true">
+        <defs>
+          <marker id="s-fill" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+          <marker id="s-open" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10" fill="none" stroke="currentColor" stroke-width="1.4"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="seqd-head"><div class="scell"><div class="spart tone-blue" data-id="b">
+          <b>浏览器</b><small>三个客户端</small>
+        </div></div><div class="scell"><div class="spart tone-violet" data-id="k">
+          <b>内核</b><small>协议栈 + 监听 socket</small>
+        </div></div><div class="scell"><div class="spart tone-green" data-id="a">
+          <b>你的程序</b><small>卡在 accept 上</small>
+        </div></div></div>
+      <div class="seqd-body"><div class="smsg" data-from="b" data-to="k" data-kind="sync" data-i="1" data-note="三次握手"><span class="snote">三次握手</span><span class="slabel">SYN</span></div><div class="smsg" data-from="k" data-to="b" data-kind="reply" data-i="2"><span class="slabel">SYN + ACK</span></div><div class="smsg" data-from="b" data-to="k" data-kind="sync" data-i="3" data-note="连接建立"><span class="snote">连接建立</span><span class="slabel">ACK</span></div><div class="smsg is-self" data-from="k" data-to="k" data-kind="self" data-i="4"><span class="slabel">造一个连接 socket，放进 accept 队列</span></div><div class="smsg" data-from="k" data-to="a" data-kind="reply" data-i="5"><span class="slabel">accept 返回一个新 fd</span></div></div>
+    </div><p><mark class="mk-blue"><strong>连接是在三次握手完成的那一刻就在内核里建好的</strong>，不等你 accept。</mark></p>
+<p><code>accept</code> 做的事只有一件：<strong>从队列里取出一个已经建好的连接，把它的 fd 交给你</strong>。所以：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">listen_fd  →  一直守着 0.0.0.0:80
+conn_fd 1  →  浏览器 A
+conn_fd 2  →  浏览器 B
+conn_fd 3  →  浏览器 C
+</code></pre></div>
+<p>每个连接 socket 在内核里记着这些（都是<strong>各自独立</strong>的）：</p>
+<div class="cards" data-cols="2"><div class="ccard tone-violet">
+          
+          <h4>四元组</h4>
+          <p>谁和谁在说话，下一篇会专门讲它</p>
+          
+          
+        </div><div class="ccard tone-amber">
+          
+          <h4>接收缓冲区</h4>
+          <p>网卡收到的数据先落在这里</p>
+          
+          
+        </div><div class="ccard tone-amber">
+          
+          <h4>发送缓冲区</h4>
+          <p>你 write 进去、还没发出去的</p>
+          
+          
+        </div><div class="ccard tone-muted">
+          
+          <h4>TCP 序列号 / 状态 / 窗口 / 超时</h4>
+          <p>这条连接自己的账本</p>
+          
+          
+        </div></div><hr>
+<h2 id="为什么一堆连接能共用-80-端口"><span class="num">04</span>为什么一堆连接能共用 80 端口</h2>
+<p>这是最容易卡住的一处：<strong>80 端口只有一个，怎么可能同时被一百条连接用着？</strong></p>
+<p>因为<mark class="mk-blue">一条 TCP 连接不是靠「端口」认的，是靠<strong>四元组</strong>认的</mark>：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>四元组里的那一项</th><th>连接 1</th><th>连接 2</th><th>连接 3</th></tr></thead><tbody><tr><th>服务端 IP</th><td data-label="连接 1">192.168.1.10</td><td data-label="连接 2">192.168.1.10</td><td data-label="连接 3">192.168.1.10</td></tr><tr><th>服务端端口</th><td data-label="连接 1">80</td><td data-label="连接 2">80</td><td data-label="连接 3">80</td></tr><tr><th>客户端 IP</th><td data-label="连接 1">10.0.0.1</td><td data-label="连接 2"><mark class="mk-blue">10.0.0.2</mark></td><td data-label="连接 3">10.0.0.1</td></tr><tr><th>客户端端口</th><td data-label="连接 1">50001</td><td data-label="连接 2">50001</td><td data-label="连接 3"><mark class="mk-blue">50002</mark></td></tr></tbody></table></div><p><mark class="mk-amber">看第 1 和第 2 列：<strong>客户端端口都是 50001，服务端也是同一个 80</strong>，照样是两条不同的连接，因为客户端 IP 不一样。</mark></p>
+<p><mark class="mk-blue">所以「80 端口被占用了」这个说法不准确。</mark> 准确的说法是：<strong>这 N 条连接都把 80 当作自己的那一端。</strong> 内核靠四元组的任意一位不同来区分它们。</p>
+<p>监听 socket 的 <code>0.0.0.0:80</code> 也不是「一条连接」，它是一个<strong>通配的接收条件</strong>，「凡是发到本机 80 端口的、我还没见过的连接，都送到我这来」。</p>
+<hr>
+<h2 id="线程里发生了什么一份代码n-个栈"><span class="num">05</span>线程里发生了什么：一份代码，N 个栈</h2>
+<p>现在回答那个正题：<strong>每个线程里是不是复制了一份服务端代码？</strong></p>
+<p><strong>不是。</strong> 而且这件事用一个函数就看清楚了：</p>
+<div class="demo" data-widget="code-and-stacks" data-config="{&quot;threads&quot;:{&quot;min&quot;:1,&quot;max&quot;:6,&quot;step&quot;:1,&quot;def&quot;:3}}">
+      <div class="demo-head">
+        <span class="title">一份代码，N 个执行现场</span>
+        <span class="status" data-status>点任意一张栈，让它阻塞在 read</span>
+        <span class="spacer"></span>
+        <button class="btn" data-run>▶ 开始模拟</button><button class="btn ghost" data-reset>重置</button>
+      </div>
+      <div class="demo-body custom" data-mount></div>
+    </div><p>上面那个 <code>handle_request</code> 函数，<strong>编译出来的机器指令在整个进程里只有一份</strong>，放在只读的代码段。三个线程谁被调度到，谁就执行同一份指令。</p>
+<p>但下面那三块 <code>char buf[1024]</code> 是 <strong>3 份<strong>，因为它是</strong>局部变量<strong>，局部变量住在</strong>各自的栈</strong>上。</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>东西</th><th>几份</th><th>为什么</th></tr></thead><tbody><tr><th>函数代码（机器指令）</th><td data-label="几份"><span class="tag tone-green">1 份</span></td><td data-label="为什么">只读的代码段。<mark class="mk-blue">所有线程执行的是同一份指令</mark></td></tr><tr><th><code>char buf[1024]</code></th><td data-label="几份"><span class="tag tone-red">N 份</span></td><td data-label="为什么">局部变量住在栈上，每个线程有自己的栈</td></tr><tr><th>全局变量 / 堆</th><td data-label="几份"><span class="tag tone-amber">1 份</span></td><td data-label="为什么">共享：<mark class="mk-blue">所以多线程改它要加锁</mark></td></tr><tr><th>文件描述符表</th><td data-label="几份"><span class="tag tone-amber">1 份</span></td><td data-label="为什么">共享：<mark class="mk-blue">所以 fd 7 在哪个线程里指的都是同一个 socket</mark></td></tr><tr><th>寄存器 / 程序计数器</th><td data-label="几份"><span class="tag tone-red">N 份</span></td><td data-label="为什么">每个线程执行到哪、手上有什么，各记各的</td></tr></tbody></table></div><p><mark class="mk-amber">所以准确的说法不是「复制了代码」，而是：<strong>同一份代码，N 个执行现场。</strong></mark></p>
+<p><mark class="mk-blue">「代码」和「正在执行代码」是两件事。</mark> 前者是只读的字节，谁都能跑；后者需要寄存器、需要栈、需要一个「执行到哪了」的位置，这些才是一个线程真正独有的东西。</p>
+<hr>
+<h2 id="一张表把一份-n-份列清"><span class="num">06</span>一张表把「一份 / N 份」列清</h2>
+<p>这一篇的所有内容，压缩成一张表：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>东西</th><th>一份还是 N 份</th><th>后果</th></tr></thead><tbody><tr><th>服务端代码</th><td data-label="一份还是 N 份"><span class="tag tone-green">一份</span></td><td data-label="后果">一万个线程也不会多占一个字节</td></tr><tr><th>监听 socket</th><td data-label="一份还是 N 份"><span class="tag tone-green">一份</span></td><td data-label="后果">一个端口一个；它只负责接新连接</td></tr><tr><th>连接 socket</th><td data-label="一份还是 N 份"><span class="tag tone-red">N 份</span></td><td data-label="后果">每条连接一个，各带自己的缓冲区和状态</td></tr><tr><th>接收 / 发送缓冲区</th><td data-label="一份还是 N 份"><span class="tag tone-red">N 份</span></td><td data-label="后果">内核的内存，每个 socket 自己的</td></tr><tr><th>线程栈 + 寄存器</th><td data-label="一份还是 N 份"><span class="tag tone-red">N 份</span></td><td data-label="后果">局部变量在这里，所以 <code>buf</code> 有 N 份</td></tr><tr><th>打开文件表 / 堆</th><td data-label="一份还是 N 份"><span class="tag tone-amber">一份</span></td><td data-label="后果">共享，所以需要同步</td></tr></tbody></table></div><p>需要 <code>needs</code> 深挖的，回这两篇：线程共享/独享的完整清单在 <code>os-thread</code> 的 02 节；一个 socket 在内核里长什么样在 <code>socket-fd</code>。</p>
+<hr>
+<h2 id="于是一连接一线程的代价就清楚了"><span class="num">07</span>于是「一连接一线程」的代价就清楚了</h2>
+<p>一万个浏览器连上来，一连接一线程，那么：</p>
+<div class="flowd has-grid has-groups" data-flow data-edges="[{&quot;from&quot;:&quot;code&quot;,&quot;to&quot;:&quot;sock&quot;,&quot;label&quot;:&quot;&quot;},{&quot;from&quot;:&quot;sock&quot;,&quot;to&quot;:&quot;stack&quot;,&quot;label&quot;:&quot;&quot;},{&quot;from&quot;:&quot;stack&quot;,&quot;to&quot;:&quot;sched&quot;,&quot;label&quot;:&quot;&quot;}]">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"><div class="fgroup tone-green" data-group-box="one">
+          <span class="fgroup-label">全进程只有一份</span>
+        </div><div class="fgroup tone-red" data-group-box="many">
+          <span class="fgroup-label">每个连接各一份</span>
+        </div></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-green" data-id="code" data-group="one">
+              
+              
+              <b>服务端代码</b>
+              <small>机器指令，只读</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-red" data-id="sock" data-group="many">
+              
+              
+              <b>一万个连接 socket</b>
+              <small>各带自己的接收缓冲区</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-red" data-id="stack" data-group="many">
+              
+              
+              <b>一万个线程栈</b>
+              <small>各带自己的局部变量</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-red" data-id="sched" data-group="many">
+              
+              
+              <b>一万个调度实体</b>
+              <small><mark class="mk-blue">都排在调度器名单上</mark></small>
+            </div></div></div>
+      
+    </div><p><strong>但注意：一万份「N 份」的东西里，代码不在其中。</strong> 所以亏的不是内存里的代码，而是：</p>
+<blockquote>
+<p><strong>一万份「因为要等而必须养着」的执行资源。</strong></p>
+</blockquote>
+<p><mark class="mk-blue">这就是下一段故事的开头，也是「等待不该占用执行资源」那句话的具体样子。</mark></p>
+<hr>
+<h2 id="顺带回答第二个问题监听-socket-和连接-socket-的区别"><span class="num">08</span>顺带回答第二个问题：监听 socket 和连接 socket 的区别</h2>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>对比项</th><th>监听 socket</th><th>已连接 socket</th></tr></thead><tbody><tr><th>怎么来的</th><td data-label="监听 socket"><code>socket → bind → listen</code></td><td data-label="已连接 socket"><code>accept()</code> 从队列里取出来的</td></tr><tr><th>TCP 状态</th><td data-label="监听 socket"><code>LISTEN</code></td><td data-label="已连接 socket">通常 <code>ESTABLISHED</code></td></tr><tr><th>地址</th><td data-label="监听 socket"><code>0.0.0.0:80</code>（通配）</td><td data-label="已连接 socket">服务端 IP:80 ↔ 对端 IP:端口</td></tr><tr><th>有没有对端</th><td data-label="监听 socket"><span class="tag tone-amber">没有</span></td><td data-label="已连接 socket"><span class="tag tone-green">有，就那一个</span></td></tr><tr><th>干什么</th><td data-label="监听 socket">只接新连接，不传数据</td><td data-label="已连接 socket">收发这条连接的业务数据</td></tr><tr><th>平时调什么</th><td data-label="监听 socket"><code>accept()</code></td><td data-label="已连接 socket"><code>read()</code> / <code>write()</code></td></tr><tr><th>数量</th><td data-label="监听 socket">一个端口一个（就一个）</td><td data-label="已连接 socket">每条连接一个</td></tr><tr><th>关掉它</th><td data-label="监听 socket">再也不能接新连接</td><td data-label="已连接 socket">只断开那一个客户端</td></tr></tbody></table></div><p><mark class="mk-amber">最常见的误解是「<code>accept()</code> 把监听 socket 变成了连接 socket」。</mark> 不是：<mark class="mk-blue"><code>accept</code> 不动监听 socket，它只是<strong>另外</strong>给你一个新的。</mark> <code>listen_fd</code> 从进程启动到进程结束，一直在那守着。</p>
+<hr>
+<div class="quiz"><details>
+        <summary>一个连接是什么时候在内核里被建出来的？accept 那一刻吗？</summary>
+        <div class="a"><p>不是。三次握手完成的那一刻，内核就已经为这条连接建好了 socket 对象，
+并放进 accept 队列。accept 做的事只是「从队列里取出来，把 fd 交给你」。
+所以握手是内核替你完成的，你的程序不需要在场。</p>
+</div>
+      </details><details>
+        <summary>为什么一堆连接可以共用 80 端口？</summary>
+        <div class="a"><p>因为一条 TCP 连接是靠四元组（服务端 IP、服务端端口、客户端 IP、客户端端口）
+唯一确定的，不是靠端口。
+只要四元组里有任意一位不同，就是两条不同的连接 ——
+哪怕客户端端口都一样，客户端 IP 不同也能区分开。
+所以「80 端口被占用了 N 次」这个说法不准确，
+准确说是这 N 条连接都把 80 当作自己的那一端。</p>
+</div>
+      </details><details>
+        <summary>一万个线程会不会复制一万份服务端代码？</summary>
+        <div class="a"><p>不会。代码段是只读的，整个进程一份，所有线程执行的是同一份机器指令。
+每个线程独有的是栈、寄存器、程序计数器这些「执行现场」。
+准确的说法不是「复制了代码」，而是「同一份代码，N 个执行现场」。
+「代码」和「正在执行代码」是两件事。</p>
+</div>
+      </details><details>
+        <summary>那 <code>handle_request</code> 里的 <code>char buf[1024]</code> 有几份？</summary>
+        <div class="a"><p>有几份线程就有几份。它是局部变量，局部变量住在栈上，
+每个线程有自己的栈，所以 buf 在各自的栈上各有一块。
+这也是这段代码能安全地同时处理多个连接的原因：
+只要不碰全局变量和堆，线程之间就互不干扰。</p>
+</div>
+      </details><details>
+        <summary>一连接一线程时，一万个连接真正被浪费掉的是什么？</summary>
+        <div class="a"><p>不是代码（代码始终只有一份），而是「因为要等而必须养着」的执行资源：
+一万个线程栈、一万个调度实体，其中绝大部分时间什么也没干。
+连接 socket 和它的缓冲区是必须的（每个连接本来就要有），
+线程不是，它只是因为「阻塞式代码需要一个线程来承接等待」才被创建。</p>
+</div>
+      </details></div>
+
+    <footer>
+      <span>你写的那段代码，跑起来之后</span>
+      <span>最后更新 2026-10-07 · 单文件可离线打开</span>
+    </footer>
+  </main>
+</div>
+
+<script src="../../assets/app.js"></script>
+</body>
+</html>

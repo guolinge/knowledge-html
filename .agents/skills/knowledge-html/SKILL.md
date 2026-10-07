@@ -1701,14 +1701,14 @@ text: |
 | `summary` | 小结 |
 | `raw` | 直接写 HTML |
 
-**交互控件 35 个**（在 `assets/app.js` 的 `WIDGETS` 里，供 `demo` 积木引用）：
+**交互控件 36 个**（在 `assets/app.js` 的 `WIDGETS` 里，供 `demo` 积木引用）：
 `polling-vs-cdc` `combination-count` `join-lab` `on-vs-where` `knex-chain`
 `stepper` `tuner` `diff` `stream-modes` `operator-lab` `hashring` `partition-prune`
 `dsl-lab` `null-lab` `config-to-ui` `field-lineage` `count-dedup-lab`
 `row-to-catalog` `sql-inject-lab` `validate-lab` `sched-lab` `switch-cost`
 `io-models` `inode-trace` `link-refcount` `gmp-lab` `handoff-lab` `ipc-flow-lab`
 `runtime-timeline` `ns-view` `cg-limit` `poll-lab`
-`epoll-tables` `lt-vs-et` `thread-audit`
+`epoll-tables` `lt-vs-et` `thread-audit` `code-and-stacks`
 
 **已知缺口**（按优先级）：
 
@@ -2913,6 +2913,9 @@ pre-push 会重建 + 量图。**它拦下来通常不是你的问题。**
 - [ ] 概念层里**没有类型名 / 类名 / 文件名**
 - [ ] 用户说的那个卡点，**有没有变成一张图或一个交互**？（唯一的成功判据）
 - [ ] **没有为了迁就积木而扭曲表达**；需要时改了积木或用了 `raw`
+- [ ] **用了不熟的积木，render 之后截图看过** —— `check` 只验 YAML 能不能解析，
+      ==不验字段名对不对==。我拿 `matrix` 当表格用过一次：写了 `rows`/`cols`/`cells`，
+      它其实只认 `x`/`y`/`cells`（四个格子），结果静默渲染成一片空白，`check` 报 0 错
 - [ ] `flow` 的**每条边都能说出一句关系**；没有「为了排在一列」而加的空边
 - [ ] 图里没有把**过渡句**做成节点（「从这里开始分叉」这类该写在图外面）
 - [ ] 原文里的铺垫、重复、客套删掉了没有

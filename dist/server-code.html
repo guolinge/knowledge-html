@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>管道 / 消息队列 / 共享内存 · 三种 IPC 到底差在哪</title>
-<meta name="description" content="「它们都是把信息放在一块公共内存上」—— 这句话对了一半。管道和消息队列的缓冲区确实在内核里，但进程碰不到它；只有共享内存是真正两个进程在看同一块内存。差别全在拷贝次数、边界、以及内核帮不帮你管秩序。" />
+<title>你写的那段代码，跑起来之后</title>
+<meta name="description" content="一段十几行的服务器代码，跑起来会变成内存和内核里的什么？主线只有一个问题：哪些东西是一份，哪些是 N 份。答案顺手解开了两个常见困惑 —— 为什么一堆连接能共用 80 端口，以及线程到底会不会复制服务端代码。" />
 <style>
 /* ============================================================
    theme.css — 设计 token 与页面骨架
@@ -4685,25 +4685,21 @@ svg[data-preset="blueprint"] .c-security-group,
   <aside class="toc" id="toc">
       <p class="toc-title">目录</p>
       <a href="../../index.html" class="sub">← 全部笔记</a>
-      <a href="#你的直觉对了一半">你的直觉对了一半</a>
-      <a href="#数据怎么走三种并排跑一遍">数据怎么走：三种并排跑一遍</a>
-      <a href="#管道两次拷贝a-和-b-永远看不到那个缓冲区">管道：两次拷贝，A 和 B 永远看不到那个缓冲区</a>
-      <a href="#消息队列也是两次拷贝但一条一条有边界">消息队列：也是两次拷贝，但一条一条有边界</a>
-      <a href="#共享内存零拷贝但内核什么都不管">共享内存：零拷贝，但内核什么都不管</a>
-      <a href="#三者核心区别一览">三者核心区别一览</a>
-      <a href="#三个区别各自意味着什么">三个区别各自意味着什么</a>
-      <a href="#区别一拷贝次数的差距会随数据量放大" class="sub">区别一：拷贝次数的差距，会随数据量放大</a>
-      <a href="#区别二字节流-vs-消息-vs-自由格式" class="sub">区别二：字节流 vs 消息 vs 自由格式</a>
-      <a href="#区别三内核帮不帮你管秩序" class="sub">区别三：内核帮不帮你管秩序</a>
-      <a href="#用类比一次说清">用类比一次说清</a>
-      <a href="#什么时候用哪个">什么时候用哪个</a>
+      <a href="#先看那段代码">先看那段代码</a>
+      <a href="#内核里先站住一个东西监听-socket">内核里先站住一个东西：监听 socket</a>
+      <a href="#浏览器来了内核里多了什么">浏览器来了：内核里多了什么</a>
+      <a href="#为什么一堆连接能共用-80-端口">为什么一堆连接能共用 80 端口</a>
+      <a href="#线程里发生了什么一份代码n-个栈">线程里发生了什么：一份代码，N 个栈</a>
+      <a href="#一张表把一份-n-份列清">一张表把「一份 / N 份」列清</a>
+      <a href="#于是一连接一线程的代价就清楚了">于是「一连接一线程」的代价就清楚了</a>
+      <a href="#顺带回答第二个问题监听-socket-和连接-socket-的区别">顺带回答第二个问题：监听 socket 和连接 socket 的区别</a>
   </aside>
 
   <main>
     <div class="hero">
-      <span class="eyebrow">● 操作系统 · 进程间通信</span>
-      <h1>管道 / 消息队列 / 共享内存 · 三种 IPC 到底差在哪</h1>
-      <p class="lede">「它们都是把信息放在一块公共内存上」—— 这句话对了一半。管道和消息队列的缓冲区确实在内核里，但进程碰不到它；只有共享内存是真正两个进程在看同一块内存。差别全在拷贝次数、边界、以及内核帮不帮你管秩序。</p>
+      <span class="eyebrow">● 一台服务器 · 起点</span>
+      <h1>你写的那段代码，跑起来之后</h1>
+      <p class="lede">一段十几行的服务器代码，跑起来会变成内存和内核里的什么？主线只有一个问题：哪些东西是一份，哪些是 N 份。答案顺手解开了两个常见困惑 —— 为什么一堆连接能共用 80 端口，以及线程到底会不会复制服务端代码。</p>
     </div>
 
     <div class="draft-banner">
@@ -4711,171 +4707,164 @@ svg[data-preset="blueprint"] .c-security-group,
     <span>本页状态为 <b>draft</b>：内容尚未人工核对，引用前请自行验证。</span>
   </div>
 
-    <div class="provenance"><span><b>来源</b> 飞书文档《管道，共享内存，消息队列》 https://futu.feishu.cn/docx/XRqldrpn8oL9OIxHLbWcZxrOnKd @ revision 105</span><span><b>生成</b> 2026-10-01</span><span><b>模型</b> claude-opus-4-5</span></div>
-    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">操作系统</span> <span class="tag tone-muted">IPC</span> <span class="tag tone-muted">共享内存</span> <span class="tag tone-muted">消息队列</span></span></div>
+    <div class="provenance"><span><b>来源</b> 用户与 AI 中台的问答（原始素材，两问：一连接一线程是否复制代码 / 监听 socket 与普通 socket 的区别） · man7 · listen(2) / accept(2) https://man7.org/linux/man-pages/man2/listen.2.html · TCP 连接由四元组唯一确定；监听 socket 使用通配地址与 LISTEN 状态</span><span><b>生成</b> 2026-10-07</span><span><b>模型</b> claude-opus-4-5</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">socket</span> <span class="tag tone-muted">线程</span> <span class="tag tone-muted">服务器</span> <span class="tag tone-muted">文件描述符</span> <span class="tag tone-muted">epoll</span> <span class="tag tone-muted">Linux 内核</span></span></div>
 
-<h2 id="你的直觉对了一半"><span class="num">01</span>你的直觉对了一半</h2>
-<blockquote>
-<p>我的理解是，它们都是把一些信息放在一块公共内存上而已。</p>
-</blockquote>
-<p>这句话里<strong>「缓冲区在哪」说对了，「谁能碰它」说错了。</strong></p>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>机制</th><th>缓冲区在哪</th><th>进程能直接访问吗</th><th>数据怎么过去</th></tr></thead><tbody><tr><th>共享内存</th><td data-label="缓冲区在哪">同一块物理内存</td><td data-label="进程能直接访问吗"><span class="tag tone-green">能。这才是它唯一的卖点</span></td><td data-label="数据怎么过去">不用过去 —— A 写进去，B 直接就看到</td></tr><tr><th>管道</th><td data-label="缓冲区在哪">内核内存里的环形队列</td><td data-label="进程能直接访问吗"><span class="tag tone-red">不能。进程碰不到那块内存</span></td><td data-label="数据怎么过去">让内核拷贝两次</td></tr><tr><th>消息队列</th><td data-label="缓冲区在哪">内核内存里的一段</td><td data-label="进程能直接访问吗"><span class="tag tone-red">不能。同上</span></td><td data-label="数据怎么过去">让内核拷贝两次</td></tr></tbody></table></div><p><mark class="mk-blue">管道和消息队列的缓冲区确实在内核内存里，但那是内核的内存，不是「公共内存」。</mark> 进程只能通过系统调用请内核帮你搬。</p>
-<p>这个区别的后果很具体：<strong>拷贝次数从 2 变成 0。</strong></p>
+<h2 id="先看那段代码"><span class="num">01</span>先看那段代码</h2>
+<p>一个最朴素的服务器，核心就这十几行：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+bind(listen_fd, 0.0.0.0, 80);
+listen(listen_fd, 128);
+
+for (;;) {
+    conn_fd = accept(listen_fd, ...);
+    pthread_create(&amp;t, NULL, handle_request, &amp;conn_fd);
+}
+
+void handle_request(int fd) {
+    char buf[1024];
+    read(fd, buf, sizeof buf);
+    ...
+}
+</code></pre></div>
+<p>它跑起来之后，会变成内存和内核里的什么？<mark class="mk-blue"><strong>这一篇只问一个问题：哪些东西是一份，哪些是 N 份。</strong></mark></p>
+<p>这个问题看着朴素，但它是一大片困惑的根源，尤其是「每个线程里是不是复制了一份服务端代码」。</p>
 <hr>
-<h2 id="数据怎么走三种并排跑一遍"><span class="num">02</span>数据怎么走：三种并排跑一遍</h2>
-<p>把三种机制摆在同一排，同步推进，看数据停在哪一格、计数怎么变：</p>
-<div class="demo" data-widget="ipc-flow-lab" data-config="{&quot;payload&quot;:&quot;hello&quot;,&quot;interval&quot;:900}">
+<h2 id="内核里先站住一个东西监听-socket"><span class="num">02</span>内核里先站住一个东西：监听 socket</h2>
+<p>前三个调用干的事，是<strong>让内核里出现一个对象，并给它一个身份证</strong>：</p>
+<div class="cards" data-cols="3"><div class="ccard tone-blue">
+          <span class="tag tone-blue">第 1 步</span>
+          <h4>socket()</h4>
+          <p>造一个空的 socket 对象，返回它的 fd</p>
+          
+          
+        </div><div class="ccard tone-blue">
+          <span class="tag tone-blue">第 2 步</span>
+          <h4>bind()</h4>
+          <p>给它绑上 <code>0.0.0.0:80</code>，这是它的地址</p>
+          
+          
+        </div><div class="ccard tone-blue">
+          <span class="tag tone-blue">第 3 步</span>
+          <h4>listen()</h4>
+          <p>让它进入 <code>LISTEN</code> 状态，开始接客</p>
+          
+          
+        </div></div><p><code>listen_fd</code> 就是一个普通的 fd，顺下去还是那条链（读文件系统那篇的 04 节）：<code>fd → 打开文件表 → struct file → struct socket → struct sock</code>。</p>
+<div class="callout tone-blue">
+      <span class="ic">🪧</span>
+      <div><p>这个 socket 和后面那些<strong>不一样的地方</strong>，在它的地址和状态：</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>监听 socket</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>地址</td>
+<td><code>0.0.0.0:80</code>，<code>0.0.0.0</code> 是<strong>通配地址</strong>，意思是「本机所有网卡上的 80 端口都归我」</td>
+</tr>
+<tr>
+<td>状态</td>
+<td><code>LISTEN</code></td>
+</tr>
+<tr>
+<td>有没有对端</td>
+<td><strong>没有</strong>。它不知道会跟谁说话</td>
+</tr>
+</tbody>
+</table>
+<p><mark class="mk-blue">它不传业务数据。</mark> 它的全部工作就是「等新连接」。</p>
+</div>
+    </div><hr>
+<h2 id="浏览器来了内核里多了什么"><span class="num">03</span>浏览器来了：内核里多了什么</h2>
+<p>三个浏览器几乎同时连上来。<strong>注意顺序</strong>：</p>
+<div class="seqd has-grid" data-seq data-n="3">
+      <svg class="seqd-svg" aria-hidden="true">
+        <defs>
+          <marker id="s-fill" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+          <marker id="s-open" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10" fill="none" stroke="currentColor" stroke-width="1.4"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="seqd-head"><div class="scell"><div class="spart tone-blue" data-id="b">
+          <b>浏览器</b><small>三个客户端</small>
+        </div></div><div class="scell"><div class="spart tone-violet" data-id="k">
+          <b>内核</b><small>协议栈 + 监听 socket</small>
+        </div></div><div class="scell"><div class="spart tone-green" data-id="a">
+          <b>你的程序</b><small>卡在 accept 上</small>
+        </div></div></div>
+      <div class="seqd-body"><div class="smsg" data-from="b" data-to="k" data-kind="sync" data-i="1" data-note="三次握手"><span class="snote">三次握手</span><span class="slabel">SYN</span></div><div class="smsg" data-from="k" data-to="b" data-kind="reply" data-i="2"><span class="slabel">SYN + ACK</span></div><div class="smsg" data-from="b" data-to="k" data-kind="sync" data-i="3" data-note="连接建立"><span class="snote">连接建立</span><span class="slabel">ACK</span></div><div class="smsg is-self" data-from="k" data-to="k" data-kind="self" data-i="4"><span class="slabel">造一个连接 socket，放进 accept 队列</span></div><div class="smsg" data-from="k" data-to="a" data-kind="reply" data-i="5"><span class="slabel">accept 返回一个新 fd</span></div></div>
+    </div><p><mark class="mk-blue"><strong>连接是在三次握手完成的那一刻就在内核里建好的</strong>，不等你 accept。</mark></p>
+<p><code>accept</code> 做的事只有一件：<strong>从队列里取出一个已经建好的连接，把它的 fd 交给你</strong>。所以：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">listen_fd  →  一直守着 0.0.0.0:80
+conn_fd 1  →  浏览器 A
+conn_fd 2  →  浏览器 B
+conn_fd 3  →  浏览器 C
+</code></pre></div>
+<p>每个连接 socket 在内核里记着这些（都是<strong>各自独立</strong>的）：</p>
+<div class="cards" data-cols="2"><div class="ccard tone-violet">
+          
+          <h4>四元组</h4>
+          <p>谁和谁在说话，下一篇会专门讲它</p>
+          
+          
+        </div><div class="ccard tone-amber">
+          
+          <h4>接收缓冲区</h4>
+          <p>网卡收到的数据先落在这里</p>
+          
+          
+        </div><div class="ccard tone-amber">
+          
+          <h4>发送缓冲区</h4>
+          <p>你 write 进去、还没发出去的</p>
+          
+          
+        </div><div class="ccard tone-muted">
+          
+          <h4>TCP 序列号 / 状态 / 窗口 / 超时</h4>
+          <p>这条连接自己的账本</p>
+          
+          
+        </div></div><hr>
+<h2 id="为什么一堆连接能共用-80-端口"><span class="num">04</span>为什么一堆连接能共用 80 端口</h2>
+<p>这是最容易卡住的一处：<strong>80 端口只有一个，怎么可能同时被一百条连接用着？</strong></p>
+<p>因为<mark class="mk-blue">一条 TCP 连接不是靠「端口」认的，是靠<strong>四元组</strong>认的</mark>：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>四元组里的那一项</th><th>连接 1</th><th>连接 2</th><th>连接 3</th></tr></thead><tbody><tr><th>服务端 IP</th><td data-label="连接 1">192.168.1.10</td><td data-label="连接 2">192.168.1.10</td><td data-label="连接 3">192.168.1.10</td></tr><tr><th>服务端端口</th><td data-label="连接 1">80</td><td data-label="连接 2">80</td><td data-label="连接 3">80</td></tr><tr><th>客户端 IP</th><td data-label="连接 1">10.0.0.1</td><td data-label="连接 2"><mark class="mk-blue">10.0.0.2</mark></td><td data-label="连接 3">10.0.0.1</td></tr><tr><th>客户端端口</th><td data-label="连接 1">50001</td><td data-label="连接 2">50001</td><td data-label="连接 3"><mark class="mk-blue">50002</mark></td></tr></tbody></table></div><p><mark class="mk-amber">看第 1 和第 2 列：<strong>客户端端口都是 50001，服务端也是同一个 80</strong>，照样是两条不同的连接，因为客户端 IP 不一样。</mark></p>
+<p><mark class="mk-blue">所以「80 端口被占用了」这个说法不准确。</mark> 准确的说法是：<strong>这 N 条连接都把 80 当作自己的那一端。</strong> 内核靠四元组的任意一位不同来区分它们。</p>
+<p>监听 socket 的 <code>0.0.0.0:80</code> 也不是「一条连接」，它是一个<strong>通配的接收条件</strong>，「凡是发到本机 80 端口的、我还没见过的连接，都送到我这来」。</p>
+<hr>
+<h2 id="线程里发生了什么一份代码n-个栈"><span class="num">05</span>线程里发生了什么：一份代码，N 个栈</h2>
+<p>现在回答那个正题：<strong>每个线程里是不是复制了一份服务端代码？</strong></p>
+<p><strong>不是。</strong> 而且这件事用一个函数就看清楚了：</p>
+<div class="demo" data-widget="code-and-stacks" data-config="{&quot;threads&quot;:{&quot;min&quot;:1,&quot;max&quot;:6,&quot;step&quot;:1,&quot;def&quot;:3}}">
       <div class="demo-head">
-        <span class="title">同一份数据，三种走法</span>
-        <span class="status" data-status>点「下一步」或「自动跑」</span>
+        <span class="title">一份代码，N 个执行现场</span>
+        <span class="status" data-status>点任意一张栈，让它阻塞在 read</span>
         <span class="spacer"></span>
-        
+        <button class="btn" data-run>▶ 开始模拟</button><button class="btn ghost" data-reset>重置</button>
       </div>
       <div class="demo-body custom" data-mount></div>
-    </div><p>三列的上格和下格长得一样（发送方 / 接收方的用户空间）。<mark class="mk-blue">有差别的只有中间那格。</mark></p>
+    </div><p>上面那个 <code>handle_request</code> 函数，<strong>编译出来的机器指令在整个进程里只有一份</strong>，放在只读的代码段。三个线程谁被调度到，谁就执行同一份指令。</p>
+<p>但下面那三块 <code>char buf[1024]</code> 是 <strong>3 份<strong>，因为它是</strong>局部变量<strong>，局部变量住在</strong>各自的栈</strong>上。</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>东西</th><th>几份</th><th>为什么</th></tr></thead><tbody><tr><th>函数代码（机器指令）</th><td data-label="几份"><span class="tag tone-green">1 份</span></td><td data-label="为什么">只读的代码段。<mark class="mk-blue">所有线程执行的是同一份指令</mark></td></tr><tr><th><code>char buf[1024]</code></th><td data-label="几份"><span class="tag tone-red">N 份</span></td><td data-label="为什么">局部变量住在栈上，每个线程有自己的栈</td></tr><tr><th>全局变量 / 堆</th><td data-label="几份"><span class="tag tone-amber">1 份</span></td><td data-label="为什么">共享：<mark class="mk-blue">所以多线程改它要加锁</mark></td></tr><tr><th>文件描述符表</th><td data-label="几份"><span class="tag tone-amber">1 份</span></td><td data-label="为什么">共享：<mark class="mk-blue">所以 fd 7 在哪个线程里指的都是同一个 socket</mark></td></tr><tr><th>寄存器 / 程序计数器</th><td data-label="几份"><span class="tag tone-red">N 份</span></td><td data-label="为什么">每个线程执行到哪、手上有什么，各记各的</td></tr></tbody></table></div><p><mark class="mk-amber">所以准确的说法不是「复制了代码」，而是：<strong>同一份代码，N 个执行现场。</strong></mark></p>
+<p><mark class="mk-blue">「代码」和「正在执行代码」是两件事。</mark> 前者是只读的字节，谁都能跑；后者需要寄存器、需要栈、需要一个「执行到哪了」的位置，这些才是一个线程真正独有的东西。</p>
 <hr>
-<h2 id="管道两次拷贝a-和-b-永远看不到那个缓冲区"><span class="num">03</span>管道：两次拷贝，A 和 B 永远看不到那个缓冲区</h2>
-<div class="jcard">
-          <div class="jcard-head">
-            <span class="tag tone-blue">第 1 站</span>
-            <span class="name">进程 A 的缓冲区</span>
-            <span class="spacer"></span>
-            <span class="tag tone-blue">拷贝 0 次</span>
-          </div>
-          <div class="rec"><div class="">
-            <b>内容</b><span>hello</span></div><div class="">
-            <b>谁能看见</b><span>只有 A 自己</span></div></div>
-          
-          <p class="jnote">这就是一块普通的用户态内存，跟内核没关系</p>
-        </div><div class="conn">
-      <span class="stem"></span>
-      <span class="pill">A 调 write()<span class="note">陷入内核，请内核帮忙搬</span></span>
-      <span class="stem"></span><span class="head"></span>
-    </div><div class="jcard">
-          <div class="jcard-head">
-            <span class="tag tone-violet">第 2 站</span>
-            <span class="name">管道缓冲区（内核里）</span>
-            <span class="spacer"></span>
-            <span class="tag tone-violet">拷贝 1 次</span>
-          </div>
-          <div class="rec"><div class="">
-            <b>结构</b><span>环形队列</span></div><div class="warn">
-            <b>谁能看见</b><span>只有内核。A 和 B 都不知道它长什么样</span><em>关键</em></div></div>
-          
-          <p class="jnote">数据到这里就已经被搬过一次了。但还没到 B 手上</p>
-        </div><div class="conn">
-      <span class="stem"></span>
-      <span class="pill">B 调 read()<span class="note">再陷入内核一次</span></span>
-      <span class="stem"></span><span class="head"></span>
-    </div><div class="jcard">
-          <div class="jcard-head">
-            <span class="tag tone-green">第 3 站</span>
-            <span class="name">进程 B 的缓冲区</span>
-            <span class="spacer"></span>
-            <span class="tag tone-green">拷贝 2 次</span>
-          </div>
-          <div class="rec"><div class="ok">
-            <b>内容</b><span>hello</span><em>和 A 写进去的一样</em></div><div class="">
-            <b>管道缓冲区</b><span>空了 —— 水已经流过去了</span></div></div>
-          
-          <p class="jnote">读完就没了，像水流过水管</p>
-        </div><div class="compare-wrap"><table class="compare"><thead><tr><th>谁来搬</th><th>次数</th><th>说明</th></tr></thead><tbody><tr><th>拷贝</th><td data-label="次数"><span class="tag tone-amber">2 次</span></td><td data-label="说明">A 的用户态 → 内核，内核 → B 的用户态</td></tr><tr><th>系统调用</th><td data-label="次数"><span class="tag tone-amber">2 次</span></td><td data-label="说明">write() 一次，read() 一次。每次都要陷入内核</td></tr><tr><th>进程直接碰缓冲区</th><td data-label="次数"><span class="tag tone-red">碰不到</span></td><td data-label="说明">它只能递一个指针给内核，剩下的内核办</td></tr></tbody></table></div><p><mark class="mk-blue">管道的格式是「字节流」，没有边界。</mark> 这一点后面单独说，它会造成一个很实际的麻烦。</p>
+<h2 id="一张表把一份-n-份列清"><span class="num">06</span>一张表把「一份 / N 份」列清</h2>
+<p>这一篇的所有内容，压缩成一张表：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>东西</th><th>一份还是 N 份</th><th>后果</th></tr></thead><tbody><tr><th>服务端代码</th><td data-label="一份还是 N 份"><span class="tag tone-green">一份</span></td><td data-label="后果">一万个线程也不会多占一个字节</td></tr><tr><th>监听 socket</th><td data-label="一份还是 N 份"><span class="tag tone-green">一份</span></td><td data-label="后果">一个端口一个；它只负责接新连接</td></tr><tr><th>连接 socket</th><td data-label="一份还是 N 份"><span class="tag tone-red">N 份</span></td><td data-label="后果">每条连接一个，各带自己的缓冲区和状态</td></tr><tr><th>接收 / 发送缓冲区</th><td data-label="一份还是 N 份"><span class="tag tone-red">N 份</span></td><td data-label="后果">内核的内存，每个 socket 自己的</td></tr><tr><th>线程栈 + 寄存器</th><td data-label="一份还是 N 份"><span class="tag tone-red">N 份</span></td><td data-label="后果">局部变量在这里，所以 <code>buf</code> 有 N 份</td></tr><tr><th>打开文件表 / 堆</th><td data-label="一份还是 N 份"><span class="tag tone-amber">一份</span></td><td data-label="后果">共享，所以需要同步</td></tr></tbody></table></div><p>需要 <code>needs</code> 深挖的，回这两篇：线程共享/独享的完整清单在 <code>os-thread</code> 的 02 节；一个 socket 在内核里长什么样在 <code>socket-fd</code>。</p>
 <hr>
-<h2 id="消息队列也是两次拷贝但一条一条有边界"><span class="num">04</span>消息队列：也是两次拷贝，但一条一条有边界</h2>
-<div class="jcard">
-          <div class="jcard-head">
-            <span class="tag tone-blue">第 1 站</span>
-            <span class="name">进程 A 装好一条消息</span>
-            <span class="spacer"></span>
-            <span class="tag tone-blue">拷贝 0 次</span>
-          </div>
-          <div class="rec"><div class="">
-            <b>type</b><span>1</span></div><div class="">
-            <b>data</b><span>order#99</span></div></div>
-          
-          <p class="jnote">消息是一个带类型标记的完整单位，不是一串字节</p>
-        </div><div class="conn">
-      <span class="stem"></span>
-      <span class="pill">A 调 msgsnd()<span class="note">陷入内核</span></span>
-      <span class="stem"></span><span class="head"></span>
-    </div><div class="jcard">
-          <div class="jcard-head">
-            <span class="tag tone-violet">第 2 站</span>
-            <span class="name">消息队列（内核里）</span>
-            <span class="spacer"></span>
-            <span class="tag tone-violet">拷贝 1 次</span>
-          </div>
-          <div class="rec"><div class="">
-            <b>排队</b><span>type=1 order#99</span></div><div class="">
-            <b>后面还排着</b><span>type=2 hello</span></div><div class="ok">
-            <b>还能按 type 分拣</b><span>B 可以选择只取某一种</span><em>管道做不到</em></div></div>
-          
-          <p class="jnote">队列是有序的，消息之间的边界被完整保留</p>
-        </div><div class="conn">
-      <span class="stem"></span>
-      <span class="pill">B 调 msgrcv()<span class="note">再陷入内核一次</span></span>
-      <span class="stem"></span><span class="head"></span>
-    </div><div class="jcard">
-          <div class="jcard-head">
-            <span class="tag tone-green">第 3 站</span>
-            <span class="name">进程 B 收到一整条</span>
-            <span class="spacer"></span>
-            <span class="tag tone-green">拷贝 2 次</span>
-          </div>
-          <div class="rec"><div class="ok">
-            <b>拿到的</b><span>type=1 · order#99</span><em>边界还在</em></div></div>
-          
-          <p class="jnote">取走就没了，像从邮局取走信件</p>
-        </div><p><mark class="mk-blue">拷贝次数和管道一样，但它多给你一样东西：边界和类型。</mark></p>
-<hr>
-<h2 id="共享内存零拷贝但内核什么都不管"><span class="num">05</span>共享内存：零拷贝，但内核什么都不管</h2>
-<div class="jcard">
-          <div class="jcard-head">
-            <span class="tag tone-blue">第 1 站</span>
-            <span class="name">两个进程各自 shmat()</span>
-            <span class="spacer"></span>
-            <span class="tag tone-blue">拷贝 0 次</span>
-          </div>
-          <div class="rec"><div class="">
-            <b>A 的虚拟地址</b><span>0x7f001000</span></div><div class="warn">
-            <b>B 的虚拟地址</b><span>0x7f009000</span><em>地址不一样</em></div><div class="ok">
-            <b>指向的物理内存</b><span>同一块</span><em>关键就在这</em></div></div>
-          
-          <p class="jnote">页表把两个不同的虚拟地址翻译到同一块物理内存上</p>
-        </div><div class="conn">
-      <span class="stem"></span>
-      <span class="pill">A 开始写<span class="note">之后就不需要内核了</span></span>
-      <span class="stem"></span><span class="head"></span>
-    </div><div class="jcard">
-          <div class="jcard-head">
-            <span class="tag tone-green">第 2 站</span>
-            <span class="name">A 写 ptr[0]</span>
-            <span class="spacer"></span>
-            <span class="tag tone-green">拷贝 0 次 · 系统调用 0 次</span>
-          </div>
-          <div class="rec"><div class="ok">
-            <b>这是一条什么指令</b><span>就是最普通的内存写</span><em>不是系统调用</em></div><div class="">
-            <b>数据去了哪</b><span>直接落在了那块共享的物理内存上</span></div></div>
-          
-          <p class="jnote">没有拷贝 —— 因为它写的就是最终目的地</p>
-        </div><div class="conn">
-      <span class="stem"></span>
-      <span class="pill">B 去读<span class="note">也不需要内核</span></span>
-      <span class="stem"></span><span class="head"></span>
-    </div><div class="jcard">
-          <div class="jcard-head">
-            <span class="tag tone-green">第 3 站</span>
-            <span class="name">B 读 ptr[0]</span>
-            <span class="spacer"></span>
-            <span class="tag tone-green">全程 0 拷贝</span>
-          </div>
-          <div class="rec"><div class="ok">
-            <b>拿到的</b><span>'H' —— 它直接看到了</span><em>中间没有任何搬运</em></div><div class="">
-            <b>代价</b><span>内核不帮你保证任何秩序</span></div></div>
-          
-          <p class="jnote">像两个人在同一块黑板上写字和看字</p>
-        </div><p>但<strong>快不等于好。</strong> 内核在这里什么都不管，包括「A 写到一半 B 就来读」：</p>
-<div class="flowd has-grid has-groups" data-flow data-edges="[{&quot;from&quot;:&quot;a1&quot;,&quot;to&quot;:&quot;switch&quot;,&quot;label&quot;:&quot;&quot;},{&quot;from&quot;:&quot;switch&quot;,&quot;to&quot;:&quot;b&quot;,&quot;label&quot;:&quot;B 不知道它只写了一半&quot;},{&quot;from&quot;:&quot;b&quot;,&quot;to&quot;:&quot;b2&quot;,&quot;label&quot;:&quot;&quot;}]">
+<h2 id="于是一连接一线程的代价就清楚了"><span class="num">07</span>于是「一连接一线程」的代价就清楚了</h2>
+<p>一万个浏览器连上来，一连接一线程，那么：</p>
+<div class="flowd has-grid has-groups" data-flow data-edges="[{&quot;from&quot;:&quot;code&quot;,&quot;to&quot;:&quot;sock&quot;,&quot;label&quot;:&quot;&quot;},{&quot;from&quot;:&quot;sock&quot;,&quot;to&quot;:&quot;stack&quot;,&quot;label&quot;:&quot;&quot;},{&quot;from&quot;:&quot;stack&quot;,&quot;to&quot;:&quot;sched&quot;,&quot;label&quot;:&quot;&quot;}]">
       <svg class="flowd-svg" aria-hidden="true">
         <defs>
           <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
@@ -4884,189 +4873,83 @@ svg[data-preset="blueprint"] .c-security-group,
           </marker>
         </defs>
       </svg>
-      <div class="flowd-groups"><div class="fgroup tone-red" data-group-box="race">
-          <span class="fgroup-label">共享内存里没有「一条消息」这个概念，只有裸的内存</span>
+      <div class="flowd-groups"><div class="fgroup tone-green" data-group-box="one">
+          <span class="fgroup-label">全进程只有一份</span>
+        </div><div class="fgroup tone-red" data-group-box="many">
+          <span class="fgroup-label">每个连接各一份</span>
         </div></div>
-      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-green" data-id="a1" data-group="race">
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-green" data-id="code" data-group="one">
               
               
-              <b>A 写了 count = 42</b>
-              <small>结构体的第一个字段</small>
-            </div></div><div class="flowd-row"><div class="fnode tone-amber" data-id="switch" data-group="race">
+              <b>服务端代码</b>
+              <small>机器指令，只读</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-red" data-id="sock" data-group="many">
               
               
-              <b>A 还没写 name 就被换下了</b>
-              <small>时间片到了</small>
-            </div></div><div class="flowd-row"><div class="fnode tone-red" data-id="b" data-group="race">
+              <b>一万个连接 socket</b>
+              <small>各带自己的接收缓冲区</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-red" data-id="stack" data-group="many">
               
               
-              <b>B 读到了 count = 42</b>
-              <small>新数据</small>
-            </div></div><div class="flowd-row"><div class="fnode tone-red" data-id="b2" data-group="race">
+              <b>一万个线程栈</b>
+              <small>各带自己的局部变量</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-red" data-id="sched" data-group="many">
               
               
-              <b>但 name 是旧值或垃圾</b>
-              <small>内核不会阻止这件事发生</small>
+              <b>一万个调度实体</b>
+              <small><mark class="mk-blue">都排在调度器名单上</mark></small>
             </div></div></div>
       
-    </div><p><mark class="mk-blue">这就是为什么共享内存几乎总是和信号量一起用。</mark> 那份「谁该等谁」的秩序，得你自己补上。</p>
+    </div><p><strong>但注意：一万份「N 份」的东西里，代码不在其中。</strong> 所以亏的不是内存里的代码，而是：</p>
+<blockquote>
+<p><strong>一万份「因为要等而必须养着」的执行资源。</strong></p>
+</blockquote>
+<p><mark class="mk-blue">这就是下一段故事的开头，也是「等待不该占用执行资源」那句话的具体样子。</mark></p>
 <hr>
-<h2 id="三者核心区别一览"><span class="num">06</span>三者核心区别一览</h2>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>维度</th><th>管道</th><th>消息队列</th><th>共享内存</th></tr></thead><tbody><tr><th>数据拷贝</th><td data-label="管道"><span class="tag tone-amber">2 次</span></td><td data-label="消息队列"><span class="tag tone-amber">2 次</span></td><td data-label="共享内存"><span class="tag tone-green">0 次</span></td></tr><tr><th>需要系统调用搬数据</th><td data-label="管道">每次 read/write 都要进内核</td><td data-label="消息队列">每次 msgsnd/msgrcv 都要进内核</td><td data-label="共享内存"><span class="tag tone-green">只在建立映射时；之后就是普通内存读写</span></td></tr><tr><th>速度</th><td data-label="管道">中等</td><td data-label="消息队列">中等</td><td data-label="共享内存"><span class="tag tone-green">最快</span></td></tr><tr><th>数据格式</th><td data-label="管道">字节流，没有边界</td><td data-label="消息队列">一条一条的消息，有边界有类型</td><td data-label="共享内存">随便你，结构体数组都行</td></tr><tr><th>内核帮你管秩序吗</th><td data-label="管道"><span class="tag tone-green">管。读空自动阻塞，写满自动阻塞</span></td><td data-label="消息队列"><span class="tag tone-green">管。队列空/满都自动阻塞</span></td><td data-label="共享内存"><span class="tag tone-red">不管。要自己配信号量</span></td></tr><tr><th>数据持久性</th><td data-label="管道">读完就没了，像水流过水管</td><td data-label="消息队列">取走就没了，像取走信件</td><td data-label="共享内存">一直在那里，直到你覆盖或删除</td></tr></tbody></table></div><hr>
-<h2 id="三个区别各自意味着什么"><span class="num">07</span>三个区别各自意味着什么</h2>
-<h3 id="区别一拷贝次数的差距会随数据量放大">区别一：拷贝次数的差距，会随数据量放大</h3>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>数据量</th><th>拷贝的代价</th><th>于是瓶颈落在哪</th></tr></thead><tbody><tr><th>小数据（几十字节）</th><td data-label="拷贝的代价">拷贝两次也就几百纳秒，感知不到</td><td data-label="于是瓶颈落在哪"><mark class="mk-blue">两次陷入内核的固定成本反而更显眼</mark></td></tr><tr><th>大数据（视频帧、大文件）</th><td data-label="拷贝的代价"><span class="tag tone-red">同样两次拷贝，但要搬几 MB</span></td><td data-label="于是瓶颈落在哪"><span class="tag tone-green">内存带宽直接成了瓶颈 —— 共享内存的优势在这里才体现</span></td></tr></tbody></table></div><div class="callout tone-violet">
-      <span class="ic">📐</span>
-      <div><p><strong>所以「共享内存最快」这句话只在数据量大时才成立。</strong></p>
-<p>小消息场景里，省下来的那次拷贝可能还不如「共享内存要自己加信号量」带来的复杂度。</p>
-<p><mark class="mk-blue">选它的理由应该是「数据大」或「访问频繁」，而不是「它最快」。</mark></p>
-</div>
-    </div><h3 id="区别二字节流-vs-消息-vs-自由格式">区别二：字节流 vs 消息 vs 自由格式</h3>
-<p><strong>管道不保留边界</strong>，这件事在写得比读得快的时候会立刻暴露：</p>
-<div class="jcard">
-          <div class="jcard-head">
-            <span class="tag tone-blue">A 这边</span>
-            <span class="name">三次 write，三次都是一小段</span>
-            <span class="spacer"></span>
-            <span class="tag tone-blue">写入方很清楚边界</span>
-          </div>
-          <div class="rec"><div class="">
-            <b>第 1 次</b><span>write(fd, &quot;aaa&quot;, 3)</span></div><div class="">
-            <b>第 2 次</b><span>write(fd, &quot;bb&quot;, 2)</span></div><div class="">
-            <b>第 3 次</b><span>write(fd, &quot;cccc&quot;, 4)</span></div></div>
-          
-          <p class="jnote">在 A 看来，这是三个逻辑上独立的东西</p>
-        </div><div class="conn">
-      <span class="stem"></span>
-      <span class="pill">写进了同一条字节流<span class="note">边界在这就没了</span></span>
-      <span class="stem"></span><span class="head"></span>
-    </div><div class="jcard">
-          <div class="jcard-head">
-            <span class="tag tone-red">B 这边</span>
-            <span class="name">一次 read，全糊在一起</span>
-            <span class="spacer"></span>
-            <span class="tag tone-red">边界丢失</span>
-          </div>
-          <div class="rec"><div class="">
-            <b>read(fd</b><span>&quot;aaabbcccc&quot;</span></div><div class="warn">
-            <b>B 想知道的</b><span>哪里是第一段的结尾？</span><em>读不出来了</em></div></div>
-          
-          <p class="jnote bad"><mark class="mk-blue">管道不保证「写三次就读三次」。</mark> 想要边界，就得自己在协议里划（长度前缀、分隔符）</p>
-        </div><p>消息队列把这件事替你做掉了：</p>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>机制</th><th>边界</th><th>能不能挑着收</th></tr></thead><tbody><tr><th>管道</th><td data-label="边界"><span class="tag tone-red">没有。「三次写」可能被一次读全拿走</span></td><td data-label="能不能挑着收">不能，只能按顺序读</td></tr><tr><th>消息队列</th><td data-label="边界"><span class="tag tone-green">有。一条就是一条，边界完整保留</span></td><td data-label="能不能挑着收"><span class="tag tone-green">能。可以只取 type=1 的那些</span></td></tr><tr><th>共享内存</th><td data-label="边界">你自己在内存里怎么摆就有怎么样的边界</td><td data-label="能不能挑着收">无所谓边界，你直接读结构体</td></tr></tbody></table></div><h3 id="区别三内核帮不帮你管秩序">区别三：内核帮不帮你管秩序</h3>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>情况</th><th>管道 / 消息队列</th><th>共享内存</th></tr></thead><tbody><tr><th>空了</th><td data-label="管道 / 消息队列"><span class="tag tone-green">read 自动阻塞，等数据来</span></td><td data-label="共享内存"><span class="tag tone-red">读到一半的旧数据，你自己保证</span></td></tr><tr><th>满了</th><td data-label="管道 / 消息队列"><span class="tag tone-green">write 自动阻塞，等对方取走</span></td><td data-label="共享内存">根本没有「满」的概念</td></tr><tr><th>写了一半被换下</th><td data-label="管道 / 消息队列">不可能 —— 一次 write 是原子的（小于 PIPE_BUF 时）</td><td data-label="共享内存"><span class="tag tone-red">完全可能，B 会看到半成品</span></td></tr><tr><th>你还要写多少代码</th><td data-label="管道 / 消息队列"><span class="tag tone-green">几乎不用</span></td><td data-label="共享内存"><span class="tag tone-amber">一套信号量或互斥锁，而且很容易写错</span></td></tr></tbody></table></div><p><mark class="mk-blue">这三种机制是「内核替你担了多少责任」的三档。</mark> 管道和消息队列把它全担了；共享内存一点都不担，换来的是那两次拷贝。</p>
+<h2 id="顺带回答第二个问题监听-socket-和连接-socket-的区别"><span class="num">08</span>顺带回答第二个问题：监听 socket 和连接 socket 的区别</h2>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>对比项</th><th>监听 socket</th><th>已连接 socket</th></tr></thead><tbody><tr><th>怎么来的</th><td data-label="监听 socket"><code>socket → bind → listen</code></td><td data-label="已连接 socket"><code>accept()</code> 从队列里取出来的</td></tr><tr><th>TCP 状态</th><td data-label="监听 socket"><code>LISTEN</code></td><td data-label="已连接 socket">通常 <code>ESTABLISHED</code></td></tr><tr><th>地址</th><td data-label="监听 socket"><code>0.0.0.0:80</code>（通配）</td><td data-label="已连接 socket">服务端 IP:80 ↔ 对端 IP:端口</td></tr><tr><th>有没有对端</th><td data-label="监听 socket"><span class="tag tone-amber">没有</span></td><td data-label="已连接 socket"><span class="tag tone-green">有，就那一个</span></td></tr><tr><th>干什么</th><td data-label="监听 socket">只接新连接，不传数据</td><td data-label="已连接 socket">收发这条连接的业务数据</td></tr><tr><th>平时调什么</th><td data-label="监听 socket"><code>accept()</code></td><td data-label="已连接 socket"><code>read()</code> / <code>write()</code></td></tr><tr><th>数量</th><td data-label="监听 socket">一个端口一个（就一个）</td><td data-label="已连接 socket">每条连接一个</td></tr><tr><th>关掉它</th><td data-label="监听 socket">再也不能接新连接</td><td data-label="已连接 socket">只断开那一个客户端</td></tr></tbody></table></div><p><mark class="mk-amber">最常见的误解是「<code>accept()</code> 把监听 socket 变成了连接 socket」。</mark> 不是：<mark class="mk-blue"><code>accept</code> 不动监听 socket，它只是<strong>另外</strong>给你一个新的。</mark> <code>listen_fd</code> 从进程启动到进程结束，一直在那守着。</p>
 <hr>
-<h2 id="用类比一次说清"><span class="num">08</span>用类比一次说清</h2>
-<div class="cards" data-cols="3"><div class="ccard tone-blue">
-          <span class="tag tone-blue">单向、连续</span>
-          <h4>管道 = 水管</h4>
-          <p>倒进去的是水，接出来的也是水，看不出你倒了几杯</p>
-          <div class="cbody"><ul>
-<li><strong>单向流动</strong>：一端写，另一端读</li>
-<li><strong>连续的水流</strong>：没有「一份一份」的概念</li>
-<li><strong>有背压</strong>：管满了就倒不进去，管空了就接不到</li>
-<li>水流过去就没了，不能再取一次</li>
-</ul>
-</div>
-          
-        </div><div class="ccard tone-violet">
-          <span class="tag tone-violet">一件一件</span>
-          <h4>消息队列 = 邮局</h4>
-          <p>每封信是独立的，还能按类型分拣</p>
-          <div class="cbody"><ul>
-<li><strong>每封信独立</strong>：边界完整，取一次就是完整的一封</li>
-<li><strong>可以按类型取</strong>：先拿紧急的那封</li>
-<li><strong>取走就没了</strong></li>
-<li><strong>经过邮局中转</strong>：内核帮你搬，但你看不到中转仓</li>
-</ul>
-</div>
-          
-        </div><div class="ccard tone-green">
-          <span class="tag tone-green">大家都看得见</span>
-          <h4>共享内存 = 公共黑板</h4>
-          <p>直接在黑板上写，但别人也可能同时在写</p>
-          <div class="cbody"><ul>
-<li><strong>不需要中间人</strong>：省掉了搬运</li>
-<li><strong>没有边界、没有顺序、没有背压</strong>：一块内存而已</li>
-<li><strong>两个人同时写就会打架</strong>（竞态）</li>
-<li><mark class="mk-blue">所以几乎总是配一把锁（信号量）</mark></li>
-</ul>
-</div>
-          
-        </div></div><hr>
-<h2 id="什么时候用哪个"><span class="num">09</span>什么时候用哪个</h2>
-<div class="mx">
-      <div class="mx-ylab">你能接受多少复杂度</div>
-      <div class="mx-body">
-        <div class="mx-y mx-yto">愿意自己管同步</div>
-        <div class="mx-grid">
-          <div class="mcell tone-blue">
-            <b>管道就够了</b>
-            <span>父子进程传个命令、shell 管线。字节流、有背压，代码三行</span>
-          </div>
-          <div class="mcell tone-violet">
-            <b>消息队列</b>
-            <span>要边界、要按类型分拣。内核帮你排队和阻塞，省心</span>
-          </div>
-          <div class="mcell tone-muted">
-            <b>管道也够用</b>
-            <span>小数据下两次拷贝感知不到，别为省这点开销背上一套锁</span>
-          </div>
-          <div class="mcell tone-green">
-            <b>共享内存 + 信号量</b>
-            <span>视频帧、大缓冲区、高频共享表。零拷贝的收益在这里才划算</span>
-          </div>
-        </div>
-        <div class="mx-y mx-yfrom">越省心越好</div>
-        <div class="mx-xrow">
-          <span>小消息</span><span>大数据 / 高频访问</span>
-        </div>
-        <div class="mx-xlab">数据量</div>
-      </div>
-    </div><div class="callout tone-violet">
-      <span class="ic">🎯</span>
-      <div><p><strong>一句话记住这三者的定位。</strong></p>
-<ul>
-<li>管道：<mark class="mk-blue">内核帮你搬数据</mark>，字节流，有背压，简单省心</li>
-<li>消息队列：<mark class="mk-blue">内核帮你搬数据</mark>，一条一条的，还能按类型取</li>
-<li>共享内存：<mark class="mk-blue">不搬数据</mark>，两个进程直接看同一块内存，最快但最危险</li>
-</ul>
-<p><mark class="mk-green">它们不是「都放在公共内存上」。前两个是「让内核当快递员帮你搬」，
-只有第三个是「真正的公共黑板，你们自己直接读写」。</mark></p>
-</div>
-    </div><hr>
 <div class="quiz"><details>
-        <summary>管道和消息队列的缓冲区也在内核内存里，那为什么不能说它们是「共享内存」？</summary>
-        <div class="a"><p>因为「在哪」和「谁能碰」是两件事。缓冲区确实在内核内存里，但那是内核的内存，
-进程没有权限直接访问，也没有映射到自己的地址空间里。
-进程能做的只是递一个指针给内核，请它帮忙搬，于是有了两次拷贝。
-共享内存是把同一块物理内存映射进两个进程的地址空间，两边都能直接读写，所以是零拷贝。</p>
+        <summary>一个连接是什么时候在内核里被建出来的？accept 那一刻吗？</summary>
+        <div class="a"><p>不是。三次握手完成的那一刻，内核就已经为这条连接建好了 socket 对象，
+并放进 accept 队列。accept 做的事只是「从队列里取出来，把 fd 交给你」。
+所以握手是内核替你完成的，你的程序不需要在场。</p>
 </div>
       </details><details>
-        <summary>共享内存比管道快，是不是应该尽量用共享内存？</summary>
-        <div class="a"><p>要看数据量。小消息场景下，省掉的那次拷贝可能还不如系统调用的固定开销显眼，
-而共享内存要自己补一整套信号量或锁，复杂度和出错概率都上去了。
-它真正的优势在大数据量（视频帧、大缓冲区）或高频访问时才体现出来。
-选它的理由应该是「数据大」或「访问频繁」，不是「它最快」。</p>
+        <summary>为什么一堆连接可以共用 80 端口？</summary>
+        <div class="a"><p>因为一条 TCP 连接是靠四元组（服务端 IP、服务端端口、客户端 IP、客户端端口）
+唯一确定的，不是靠端口。
+只要四元组里有任意一位不同，就是两条不同的连接 ——
+哪怕客户端端口都一样，客户端 IP 不同也能区分开。
+所以「80 端口被占用了 N 次」这个说法不准确，
+准确说是这 N 条连接都把 80 当作自己的那一端。</p>
 </div>
       </details><details>
-        <summary>为什么共享内存几乎总是和信号量一起用？</summary>
-        <div class="a"><p>因为内核在这里什么都不管。管道和消息队列满了会阻塞、空了会阻塞，
-而且一次 write 或 msgsnd 是原子的；共享内存里没有「一条消息」这个概念，
-只有裸的内存。A 写完结构体的第一个字段就被换下，B 就可能读到半成品。
-这份「谁该等谁」的秩序内核不会给你，只能自己用信号量或互斥锁补上。</p>
+        <summary>一万个线程会不会复制一万份服务端代码？</summary>
+        <div class="a"><p>不会。代码段是只读的，整个进程一份，所有线程执行的是同一份机器指令。
+每个线程独有的是栈、寄存器、程序计数器这些「执行现场」。
+准确的说法不是「复制了代码」，而是「同一份代码，N 个执行现场」。
+「代码」和「正在执行代码」是两件事。</p>
 </div>
       </details><details>
-        <summary>往管道里 write 三次，另一端 read 一次会把三次的内容一起读走吗？</summary>
-        <div class="a"><p>可能会。管道是字节流，不保留写入的边界，三次写进去的内容在缓冲区里是连成一片的。
-一次 read 完全可能把三段的拼接一起拿走，读的人没法从数据本身判断哪里是第一段的结尾。
-想要边界，要么自己在协议里加长度前缀或分隔符，要么改用消息队列。</p>
+        <summary>那 <code>handle_request</code> 里的 <code>char buf[1024]</code> 有几份？</summary>
+        <div class="a"><p>有几份线程就有几份。它是局部变量，局部变量住在栈上，
+每个线程有自己的栈，所以 buf 在各自的栈上各有一块。
+这也是这段代码能安全地同时处理多个连接的原因：
+只要不碰全局变量和堆，线程之间就互不干扰。</p>
+</div>
+      </details><details>
+        <summary>一连接一线程时，一万个连接真正被浪费掉的是什么？</summary>
+        <div class="a"><p>不是代码（代码始终只有一份），而是「因为要等而必须养着」的执行资源：
+一万个线程栈、一万个调度实体，其中绝大部分时间什么也没干。
+连接 socket 和它的缓冲区是必须的（每个连接本来就要有），
+线程不是，它只是因为「阻塞式代码需要一个线程来承接等待」才被创建。</p>
 </div>
       </details></div>
 
     <footer>
-      <span>管道 / 消息队列 / 共享内存 · 三种 IPC 到底差在哪</span>
-      <span>最后更新 2026-10-01 · 单文件可离线打开</span>
+      <span>你写的那段代码，跑起来之后</span>
+      <span>最后更新 2026-10-07 · 单文件可离线打开</span>
     </footer>
   </main>
 </div>
