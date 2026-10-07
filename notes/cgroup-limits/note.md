@@ -185,24 +185,17 @@ edges:
 
 你看到的 `cgroup v2` 是 2016 年之后的新方案。之前（v1）不是一棵树：
 
-```flow
-grid: true
-groups:
-  - { id: v1, label: "cgroup v1：每种资源一棵独立的树", tone: red }
-  - { id: v2, label: "cgroup v2：只有一棵树", tone: green }
-nodes:
-  - { id: c1, label: "cpu 树", sub: "进程 A 在 /web 下", row: 0, tone: red, group: v1 }
-  - { id: m1, label: "memory 树", sub: "同一个进程 A 在 /batch 下", row: 1, tone: red, group: v1 }
-  - { id: i1, label: "io 树", sub: "它又在 /web/high 下", row: 2, tone: red, group: v1 }
-  - { id: u1, label: "一棵树管所有控制器", sub: "cpu / memory / io / pids 都在同一个节点上生效", row: 0, tone: green, group: v2 }
-  - { id: u2, label: "一个进程一个位置", sub: "不再可能出现「在 CPU 树里属于 A，在内存树里属于 B」", row: 1, tone: green, group: v2 }
-  - { id: u3, label: "子树的总量更好算", sub: "一个节点就是一份完整的配额", row: 2, tone: green, group: v2 }
-edges:
-  - { from: c1, to: m1, label: "同一个进程在三棵树里位置可以不同" }
-  - { from: m1, to: i1, label: "" }
-  - { from: u1, to: u2, label: "统一了" }
-  - { from: u2, to: u3, label: "" }
+v1 的问题不在「树多」，在**同一个进程在每棵树里的位置可以不一样**：
+
+```cards
+cols: 3
+items:
+  - { title: "cpu 树", desc: "进程 A 在 `/web` 下", tag: cgroup v1, tone: red }
+  - { title: "memory 树", desc: "同一个进程 A 在 `/batch` 下", tag: cgroup v1, tone: red }
+  - { title: "io 树", desc: "它又在 `/web/high` 下", tag: cgroup v1, tone: red }
 ```
+
+==三棵树各管一段，谁也不知道谁。== 于是没有了「这个进程属于哪一组」这个答案。
 
 v1 最麻烦的地方就是那个「位置可以不同」：==一个进程在 CPU 树里属于「Web 组」，在内存树里属于「批处理组」，于是「这个容器的配额是多少」根本答不上来。==
 

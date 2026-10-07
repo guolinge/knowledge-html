@@ -189,19 +189,12 @@ rows:
 
 ### 区别一：拷贝次数的差距，会随数据量放大
 
-```flow
-grid: true
-groups:
-  - { id: small, label: "小数据（几十字节）", tone: muted }
-  - { id: big, label: "大数据（视频帧、大文件）", tone: red }
-nodes:
-  - { id: s1, label: "拷贝两次也就几百纳秒", sub: "小消息传个命令，谁快谁慢感知不到", row: 0, tone: muted, group: small }
-  - { id: s2, label: "系统调用开销反而更显眼", sub: "两次陷入内核是固定成本", row: 1, tone: muted, group: small }
-  - { id: b1, label: "同样两次拷贝，但要搬几 MB", sub: "内存带宽直接成了瓶颈", row: 0, tone: red, group: big }
-  - { id: b2, label: "共享内存优势在这里才真正体现", sub: "写一次对方就看到，中间不搬家", row: 1, tone: green, group: big }
-edges:
-  - { from: s1, to: s2, label: "" }
-  - { from: b1, to: b2, label: "" }
+```compare
+first: 数据量
+head: [拷贝的代价, 于是瓶颈落在哪]
+rows:
+  - 小数据（几十字节）: ["拷贝两次也就几百纳秒，感知不到", "==两次陷入内核的固定成本反而更显眼=="]
+  - 大数据（视频帧、大文件）: [{ text: "同样两次拷贝，但要搬几 MB", tone: red }, { text: "内存带宽直接成了瓶颈 —— 共享内存的优势在这里才体现", tone: green }]
 ```
 
 ```callout

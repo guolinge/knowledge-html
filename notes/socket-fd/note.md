@@ -29,12 +29,12 @@ nodes:
   - { id: fd, label: "fd 7", sub: "只是一个下标，本身不含任何数据", row: 0, tone: blue, group: common }
   - { id: tbl, label: "进程的打开文件表", sub: "fd 是这张表的下标", row: 1, tone: blue, group: common }
   - { id: file, label: "内核的 `struct file`", sub: "这一次「打开」的现场：读写位置、标志位", row: 2, tone: blue, group: common }
-  - { id: fork, label: "从这里开始分叉", sub: "看这个 file 指向的是什么", row: 3, tone: violet }
 edges:
-  - { from: fd, to: tbl, label: "查表" }
-  - { from: tbl, to: file, label: "" }
-  - { from: file, to: fork, label: "" }
+  - { from: fd, to: tbl, label: "fd 是这张表的下标" }
+  - { from: tbl, to: file, label: "表项指向它" }
 ```
+
+==到这里为止，socket 和普通文件走的是同一条路。== 分叉在下一步：看这个 `file` 往下指向什么。
 
 ```compare
 first: file 指向
@@ -50,19 +50,16 @@ rows:
 
 ## 03 · 后半段分叉了
 
-`struct sock` 里挂着的是网络协议栈需要的那些东西，其中和这个系列直接相关的是**两条队列**：
+`struct sock` 里挂着网络协议栈需要的那些东西。==它们是并列的成员，不是一条流程==，所以下面这张图用的是归属线而不是箭头：
 
-```flow
-grid: true
-groups:
-  - { id: sk, label: "struct sock，一个 socket 的协议层状态", tone: violet }
-nodes:
-  - { id: rq, label: "接收队列", sub: "网卡收到的数据先落在这里，等你 read", row: 0, tone: amber, group: sk }
-  - { id: sq, label: "发送队列", sub: "你 write 进去的、还没发出去的数据", row: 1, tone: amber, group: sk }
-  - { id: st, label: "连接状态、序号、窗口、超时…", sub: "TCP 要记的一大堆东西", row: 2, tone: muted, group: sk }
-edges:
-  - { from: rq, to: sq, label: "" }
-  - { from: sq, to: st, label: "" }
+```tree
+- label: struct sock
+  tone: violet
+  note: 一个 socket 的协议层状态。它下面挂着这些，==彼此并列，没有先后==
+  children:
+    - { label: 接收队列, note: "网卡收到的数据先落在这里，等你 read", tone: amber }
+    - { label: 发送队列, note: "你 write 进去的、还没发出去的数据", tone: amber }
+    - { label: "连接状态 / 序号 / 窗口 / 超时…", note: TCP 要记的一大堆东西, tone: muted }
 ```
 
 !!接收队列就是下一篇的主角。!! 记住它现在的位置：**它在内核里，它是内核的内存，数据到了先在这里待着**。
