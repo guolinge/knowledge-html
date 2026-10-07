@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-has-toc="1">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>会话板协议</title>
+<meta name="description" content="板子在哪、怎么读、怎么发、硬规矩" />
+<link rel="stylesheet" href="../assets/theme.css" />
+  <link rel="stylesheet" href="../assets/blocks.css" />
+  <link rel="stylesheet" href="../assets/archify-embed.css" />
+</head>
+<body>
+<div id="progress"></div>
+<div id="tocScrim"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
+    <a class="brand" href="../index.html"><span class="dot"></span>knowledge-html skill</a>
+    <nav class="topnav"><a href="./skill.html">knowledge-html skill</a><a href="./principles.html">原则 · 七条判据</a><a href="./workflow.html">工作流 · 规划（第 0~5 步）</a><a href="./writing.html">工作流 · 写与构建（第 6~7 步）</a><a href="./review.html">工作流 · 复盘与反馈（第 8~9 步）</a><a href="./blocks.html">积木参考</a><a href="./style.html">版面与样式</a><a href="./variants.html">变体</a><a href="./mult-session.html">多会话协作</a><a href="./board.html" class="on">会话板协议</a><a href="./extend.html">加新积木 / 新控件</a><a href="./checklist.html">写完检查 · 参考</a></nav>
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="toc" id="toc">
+      <p class="toc-title">目录</p>
+      <a href="../index.html" class="sub">← 全部笔记</a>
+      <a href="#为什么是一个文件而不是别的">为什么是「一个文件」而不是别的</a>
+      <a href="#文件在哪">文件在哪</a>
+      <a href="#消息格式">消息格式</a>
+      <a href="#五条规则">五条规则</a>
+      <a href="#①-一条消息一次-printf-gtgt-追加" class="sub">① 一条消息一次 printf &amp;gt;&amp;gt; 追加</a>
+      <a href="#②-永远不要重写整个文件" class="sub">② 永远不要重写整个文件</a>
+      <a href="#③-不编辑别人的消息" class="sub">③ 不编辑别人的消息</a>
+      <a href="#④-不阻塞" class="sub">④ 不阻塞</a>
+      <a href="#⑤-关键动作前后各读一次" class="sub">⑤ 关键动作前后各读一次</a>
+      <a href="#它解决不了什么">它解决不了什么</a>
+      <a href="#附为什么不用-git-分支来通信">附：为什么不用 git 分支来通信</a>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow">● skill 文档</span>
+      <h1>会话板协议</h1>
+      <p class="lede">板子在哪、怎么读、怎么发、硬规矩</p>
+    </div>
+
+    
+
+    
+    
+
+<blockquote>
+<p>这份文档定义了一套<strong>跨会话通信协议</strong>。它解决的问题是：
+用户在同一个仓库上开好几个 AI 会话（各自一个 worktree、各自一个规划），
+它们平时互相看不见 —— 于是会出现「提交撞车」「两个人改同一个文件」
+「一个人把另一个人做到一半的东西提交了」。</p>
+</blockquote>
+<hr>
+<h2 id="为什么是一个文件而不是别的">为什么是「一个文件」而不是别的</h2>
+<p><strong>因为这是 pi 官方推荐的跨进程协调方式。</strong> <code>pi-subagents</code> 自己的文档写着：</p>
+<blockquote>
+<p><code>pi.events</code> is in-process only. It does not reach separate Pi processes or child
+subagents; use <strong>the file lifecycle artifacts</strong> or <code>pi-intercom</code> for cross-process
+coordination.</p>
+</blockquote>
+<p><code>pi-intercom</code> 是一个需要额外安装的扩展 —— 没装的时候，<strong>文件就是唯一的通道</strong>。</p>
+<p>这条路子还有几个额外好处：</p>
+<table>
+<thead>
+<tr>
+<th>好处</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>零基础设施</td>
+<td>不需要守护进程、不需要端口、不需要网络</td>
+</tr>
+<tr>
+<td>和 git 无关</td>
+<td>它在仓库<strong>外面</strong>，所以不会被提交、不会有冲突、不需要 pull</td>
+</tr>
+<tr>
+<td>任何会话都能用</td>
+<td>不依赖某个会话的 commit 状态 —— 纯 shell 一行就够</td>
+</tr>
+<tr>
+<td>人和 AI 都能读</td>
+<td>就是个 markdown 文件，用户自己也能看</td>
+</tr>
+</tbody>
+</table>
+<hr>
+<h2 id="文件在哪">文件在哪</h2>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code>~/works/codes/.kh-board.md
+</code></pre></div>
+<p>推导方式（<strong>在任何 worktree 里结果都一样</strong>）：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-bash">BOARD=&quot;$(dirname &quot;$(dirname &quot;$(git rev-parse --path-format=absolute --git-common-dir)&quot;)&quot;)/.kh-board.md&quot;
+</code></pre></div>
+<p><code>--git-common-dir</code> 是所有 worktree <strong>共享的那一个</strong> <code>.git</code>，所以从它往上退两级
+就落在所有 worktree 的共同父目录。这一步是整个协议能成立的关键：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code>~/works/codes/knowledge-html/     ← 主仓库
+~/works/codes/kh-ipc/             ← worktree
+~/works/codes/kh-go/              ← worktree
+~/works/codes/.kh-board.md        ← 板子在这里，三个都看得见
+</code></pre></div>
+<blockquote>
+<p>⚠️ <strong>方案文件<strong>（<code>plans/*.yaml</code>）放在仓库里是对的，但</strong>通信</strong>不能放在仓库里 ——
+各 worktree 是各自独立的目录，仓库里的文件互相看不见。</p>
+</blockquote>
+<hr>
+<h2 id="消息格式">消息格式</h2>
+<p><strong>一条消息 = 一行。</strong> 这是为了能做到「原子追加」。</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code>[&lt;会话名&gt; | &lt;月-日 时:分&gt; | &lt;状态&gt;] 在做…; 会动…; 需要…
+</code></pre></div>
+<ul>
+<li><strong>会话名</strong>：用 worktree 目录名（<code>basename &quot;$(git rev-parse --show-toplevel)&quot;</code>）</li>
+<li><strong>状态</strong>：<code>进行中</code> / <code>帮助</code> / <code>冲突</code> / <code>收工</code></li>
+<li><strong>在做 / 会动 / 需要</strong>：三段自由文本，用 <code>;</code> 隔开</li>
+</ul>
+<p>真实例子：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code>[kh-ipc | 10-02 02:40 | 进行中] 在做 IPC 对比 6 篇; 会动 notes/ipc-compare-*、assets/app.js 的 WIDGETS 段; 需要 无
+[kh-os  | 10-02 02:45 | 帮助]   求助：我要把 assets/blocks.css 的 .flowd-row gap 从 30px 调到 44px，会影响所有 flow 图的标签宽度。kh-ipc 你那边有 flow 吗？ 到 03:00
+[kh-ipc | 10-02 03:05 | 冲突]   我也有 flow（sched-lab 那张）。建议你改的时候只用 .flowd-row 加个 modifier class，别动全局。我先去写别的，到 03:30 没回复我就按你的方案接受
+[kh-os  | 10-02 03:10 | 进行中] 按 kh-ipc 说的办：新增 .flowd.wide-label 而不是改 .flowd-row
+</code></pre></div>
+<hr>
+<h2 id="五条规则">五条规则</h2>
+<h3 id="①-一条消息一次-printf-gtgt-追加">① 一条消息一次 <code>printf &gt;&gt;</code> 追加</h3>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-bash">printf '%s\n' &quot;[$NAME | $(date '+%m-%d %H:%M') | 进行中] ...&quot; &gt;&gt; &quot;$BOARD&quot;
+</code></pre></div>
+<p><code>&gt;&gt;</code>（<code>O_APPEND</code>）的一次 <code>write()</code> 是原子的。只要<strong>一条消息在一次调用里写完</strong>，
+就不会和别人的写交错。</p>
+<h3 id="②-永远不要重写整个文件">② 永远不要重写整个文件</h3>
+<p><strong>不要<strong>用编辑器打开改，</strong>不要</strong>用 <code>&gt;</code>（那是截断）。</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-bash">printf '...' &gt;  &quot;$BOARD&quot;     # ❌ 别人刚写的全没了
+vim &quot;$BOARD&quot;                 # ❌ 保存时会覆盖掉这期间的写入
+printf '...' &gt;&gt; &quot;$BOARD&quot;     # ✅
+</code></pre></div>
+<h3 id="③-不编辑别人的消息">③ 不编辑别人的消息</h3>
+<p>要更正就<strong>再发一条<strong>。板子是</strong>流水账</strong>，不是文档 —— 让读者看到「先说了什么、
+后改成了什么」，比一个被改干净的现状更有信息量。</p>
+<h3 id="④-不阻塞">④ 不阻塞</h3>
+<p>声明完就去干，<strong>不要等回复</strong>。</p>
+<ul>
+<li>真撞上了 → 发一条「我建议怎么办 + 我的截止时间」，然后<strong>去干不冲突的部分</strong></li>
+<li>到点没回复 → 按自己写的方案干，<strong>再发一条告诉对方你按什么干了</strong></li>
+<li>对方的反对意见可能在你干完之后才到 —— 那时再看要不要改</li>
+</ul>
+<blockquote>
+<p>这条很重要。两个只在被调用时才醒着的 AI，如果互相等，就是死锁。</p>
+</blockquote>
+<h3 id="⑤-关键动作前后各读一次">⑤ 关键动作前后各读一次</h3>
+<p>板子<strong>不会通知你</strong> —— 它只在你去读的时候生效。所以：</p>
+<table>
+<thead>
+<tr>
+<th>什么时候读</th>
+<th>看什么</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>开工时</td>
+<td>全局态势：有几个人、各自在动什么</td>
+</tr>
+<tr>
+<td>**动共享源之前<strong>（<code>assets/*</code>、<code>tools/*</code>、`.agents/skills/</strong>`）</td>
+<td>有没有人正在动同一个文件</td>
+</tr>
+<tr>
+<td><strong>推送之前</strong></td>
+<td>有没有人和你撞在同一批文件上；有没有人给你留了话</td>
+</tr>
+<tr>
+<td>收到别人的求助 / 冲突消息后</td>
+<td>回一句</td>
+</tr>
+</tbody>
+</table>
+<hr>
+<h2 id="它解决不了什么">它解决不了什么</h2>
+<p>诚实说清楚，免得当成万能药：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>问题</th><th>板子能帮上什么</th><th>真正的解法</th></tr></thead><tbody><tr><th>两个人改同一个文件</th><td data-label="板子能帮上什么">只能让他们<strong>知道</strong>对方在改，不能阻止</td><td data-label="真正的解法">worktree 隔离 + 改共享源要小步 + 改完立刻提交</td></tr><tr><th>提交时带上别人的半成品</th><td data-label="板子能帮上什么">发一条「我要推了」能减少概率</td><td data-label="真正的解法"><mark class="mk-blue">点名 <code>git add</code>，不用 <code>-A</code></mark>；推之前 <code>npm run status</code> 分类看一遍</td></tr><tr><th>推送被拒（别人先推了）</th><td data-label="板子能帮上什么">提前知道能少撞几次</td><td data-label="真正的解法"><code>git pull --rebase</code> → <code>npm run build:standalone</code> → 再推</td></tr><tr><th><code>index.html</code> 冲突</th><td data-label="板子能帮上什么">——</td><td data-label="真正的解法">它是生成的，<strong>别手动 merge</strong>：随便选一边，重建，再提交</td></tr><tr><th><code>visual-check</code> 报出并不存在的问题</th><td data-label="板子能帮上什么">——</td><td data-label="真正的解法"><mark class="mk-blue">并行会话也在跑无头浏览器时会假阳性</mark>。等负载降下来重跑</td></tr><tr><th>两个会话都在等对方</th><td data-label="板子能帮上什么">规则 ④ 就是为了防这个</td><td data-label="真正的解法">声明完就干，不要阻塞</td></tr></tbody></table></div><p><strong>一句话<strong>：板子解决的是</strong>信息不对称<strong>，不解决</strong>资源争用</strong>。
+资源争用还得靠 worktree + 点名 add + 改完立刻提交。</p>
+<hr>
+<h2 id="附为什么不用-git-分支来通信">附：为什么不用 git 分支来通信</h2>
+<p>有人会想：开一个 <code>board</code> 分支，大家往上提交不就行了？</p>
+<p>不行，有三个硬伤：</p>
+<ol>
+<li><strong>每次读都要 <code>fetch</code></strong> —— 板子要的是「随手看一眼」，走 git 就变成了一次网络操作</li>
+<li><strong>write-write 冲突要人工解</strong> —— 两个会话同时提交，第二个必然冲突，而「合并两条公告」没有任何自动化价值</li>
+<li><strong>读到的可能是旧的</strong> —— 别人 push 了你没 pull，等于没看</li>
+</ol>
+<p>文件直读没有这三个问题：读永远是「当前的样子」，写永远不会冲突。</p>
+
+
+    <footer>
+      <span>会话板协议</span>
+      <span>最后更新 — · 单文件可离线打开</span>
+    </footer>
+  </main>
+</div>
+
+<script src="../assets/app.js"></script>
+</body>
+</html>

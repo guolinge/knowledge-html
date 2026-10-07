@@ -45,40 +45,42 @@ const widgets = [
 
 /* ─────────── 待检：skill 文档 ─────────── */
 
+/* 拆成多页之后，积木清单和控件清单都搬到了 references/blocks.md —— 
+   这两条检查跟着搬，别再盯 SKILL.md。 */
 const skillSrc = read(path.join(SKILL_DIR, 'SKILL.md'));
 const blocksDoc = read(path.join(SKILL_DIR, 'references/blocks.md'));
 
-// 1. SKILL.md 的积木清单表：| `name` | 说明 |
-const skillBlocksTable = skillSrc.match(/### 积木清单（(\d+) 个）([\s\S]*?)\n###/);
+// 1. 积木清单表：| `name` | 说明 |
+const skillBlocksTable = blocksDoc.match(/### 积木清单（(\d+) 个）([\s\S]*?)\n###/);
 if (!skillBlocksTable) {
-  note('SKILL.md 里找不到「积木清单（N 个）」小节');
+  note('references/blocks.md 里找不到「积木清单（N 个）」小节');
 } else {
   const claimed = Number(skillBlocksTable[1]);
   const listed = [...skillBlocksTable[2].matchAll(/^\| `([\w-]+)`/gm)].map((m) => m[1]);
 
   if (claimed !== blocks.length) {
-    note(`SKILL.md 说「${claimed} 个积木」，代码里实际 ${blocks.length} 个`);
+    note(`blocks.md 说「${claimed} 个积木」，代码里实际 ${blocks.length} 个`);
   }
   const missing = blocks.filter((b) => !listed.includes(b));
   const extra = listed.filter((b) => !blocks.includes(b));
-  if (missing.length) note(`SKILL.md 积木清单少了：${missing.join(' ')}`);
-  if (extra.length) note(`SKILL.md 积木清单多了（代码里没有）：${extra.join(' ')}`);
+  if (missing.length) note(`blocks.md 积木清单少了：${missing.join(' ')}`);
+  if (extra.length) note(`blocks.md 积木清单多了（代码里没有）：${extra.join(' ')}`);
 }
 
-// 2. SKILL.md 的控件清单：一行反引号包着的名字
-const widgetLine = skillSrc.match(/交互控件 (\d+) 个[^\n]*\n([\s\S]*?)\n\n/);
+// 2. 控件清单：一行反引号包着的名字
+const widgetLine = blocksDoc.match(/交互控件 (\d+) 个[^\n]*\n([\s\S]*?)\n\n/);
 if (!widgetLine) {
-  note('SKILL.md 里找不到「交互控件 N 个」那一行');
+  note('references/blocks.md 里找不到「交互控件 N 个」那一行');
 } else {
   const claimed = Number(widgetLine[1]);
   const listed = [...widgetLine[2].matchAll(/`([\w-]+)`/g)].map((m) => m[1]);
   if (claimed !== widgets.length) {
-    note(`SKILL.md 说「${claimed} 个控件」，代码里实际 ${widgets.length} 个`);
+    note(`blocks.md 说「${claimed} 个控件」，代码里实际 ${widgets.length} 个`);
   }
   const missing = widgets.filter((w) => !listed.includes(w));
   const extra = listed.filter((w) => !widgets.includes(w));
-  if (missing.length) note(`SKILL.md 控件清单少了：${missing.join(' ')}`);
-  if (extra.length) note(`SKILL.md 控件清单多了（代码里没有）：${extra.join(' ')}`);
+  if (missing.length) note(`blocks.md 控件清单少了：${missing.join(' ')}`);
+  if (extra.length) note(`blocks.md 控件清单多了（代码里没有）：${extra.join(' ')}`);
 }
 
 // 3. blocks.md 是否每个积木都有文档（标题里出现名字即算，summary/raw 共用一个标题）

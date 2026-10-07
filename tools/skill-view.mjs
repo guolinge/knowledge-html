@@ -30,19 +30,73 @@ const DEFAULT_PAGES = [
     slug: 'skill',
     file: 'SKILL.md',
     title: 'knowledge-html skill',
-    summary: '总入口：原则 · 工作流 · 规范 · 多会话协作 · 硬约束',
+    summary: '总入口（路由页）：两个最常犯的错 · 路由表 · 硬约束',
+  },
+  {
+    slug: 'principles',
+    file: 'references/principles.md',
+    title: '原则 · 七条判据',
+    summary: '图是本体 / 整体图 / 信息量 / 讲透卡点 / 对齐层次 / 表格是排版 / 积木是词汇',
+  },
+  {
+    slug: 'workflow',
+    file: 'references/workflow.md',
+    title: '工作流 · 规划（第 0~5 步）',
+    summary: '一个点还是一个面 → 知识树 → 卡点 → 骨架 → 决定画哪些图',
+  },
+  {
+    slug: 'writing',
+    file: 'references/writing.md',
+    title: '工作流 · 写与构建（第 6~7 步）',
+    summary: '写 note.md、构建、量单块效果',
+  },
+  {
+    slug: 'review',
+    file: 'references/review.md',
+    title: '工作流 · 复盘与反馈（第 8~9 步）',
+    summary: '九条复盘，以及交付后的自我反馈',
   },
   {
     slug: 'blocks',
     file: 'references/blocks.md',
     title: '积木参考',
-    summary: '17 个积木的完整 DSL（示例都是真的，能直接跑）',
+    summary: '18 个积木的完整 DSL · 39 个控件 · 视觉规范 · archify',
+  },
+  {
+    slug: 'style',
+    file: 'references/style.md',
+    title: '版面与样式',
+    summary: '间距 · 颜色 · 响应式 · 代码块分色 · 依赖策略',
+  },
+  {
+    slug: 'variants',
+    file: 'references/variants.md',
+    title: '变体',
+    summary: '源码通读 · 拆解一个东西',
+  },
+  {
+    slug: 'mult-session',
+    file: 'references/mult-session.md',
+    title: '多会话协作',
+    summary: 'worktree · 点名 add · 产物竞态',
+  },
+  {
+    slug: 'board',
+    file: 'references/multi-session-board.md',
+    title: '会话板协议',
+    summary: '板子在哪、怎么读、怎么发、硬规矩',
   },
   {
     slug: 'extend',
     file: 'references/extend.md',
-    title: '加新积木',
+    title: '加新积木 / 新控件',
     summary: '积木不够用时怎么办',
+  },
+  {
+    slug: 'checklist',
+    file: 'references/checklist.md',
+    title: '写完检查 · 参考',
+    summary: '交付前的最后一遍',
   },
 ];
 
@@ -107,9 +161,15 @@ for (const p of PAGES) {
      · 仓库里的笔记 → ../notes/<slug>/
    （不换的话线上点进去是 404 —— 链接检查能查出来，但没人会去查整个 skill。） */
 function relink(html) {
-  return html
-    .replace(/href="references\/blocks\.md[^"]*"/g, 'href="./blocks.html"')
-    .replace(/href="references\/extend\.md[^"]*"/g, 'href="./extend.html"')
+  /* 拆成多页之后，任何 `references/X.md` 都要指向 `./X.html`。
+     原来只硬编码了 blocks 和 extend 两个，拆完就漏了。 */
+  const slugOf = {};
+  PAGES.forEach((p) => { slugOf[path.basename(p.file, '.md')] = p.slug; });
+  let out = html.replace(/href="(?:references\/)?([\w-]+)\.md(#[^"]*)?"/g, (m, name, hash) => {
+    const slug = slugOf[name];
+    return slug ? `href="./${slug}.html${hash || ''}"` : m;
+  });
+  return out
     .replace(/href="(\.\.\/)*notes\/([a-z0-9-]+)\/note\.md"/g, 'href="../notes/$2/"')
     .replace(/href="(?:\.\.\/)*(plans|tools|assets)\//g, 'href="../$1/');
 }
