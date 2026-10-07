@@ -1,3 +1,31 @@
+```arch
+svg: ns-two-containers
+caption: 上面那张表说的是「每种 namespace 在复制哪张表」。这张说的是另一件事：==两个容器之间，哪些各有一份、哪些是同一份。== 中间那个红色的是共用的。
+parts:
+  pidA:
+    label: PID namespace
+    detail: 一份**自己复制出来的进程列表**。容器里的 1 号进程，在宿主机上有个别的 PID。两个容器各有一份，互相看不见。
+  mntA:
+    label: MNT namespace
+    detail: 一棵自己复制出来的挂载树。镜像层就是在这个 namespace 里被挂成根目录的。
+  shared:
+    label: NET + IPC namespace
+    detail: '==这两个是同一个 Pod 里的容器**共用**的。==所以它们共享一个 localhost、一张网卡、一组共享内存段 —— 这正是「同 Pod 的容器像一个机上邻居」的原因。'
+anchors:
+  - { part: shared, label: "哪些是两个容器共用的" }
+  - { part: pidA, label: "我从 PID 这头看" }
+tours:
+  - id: two-containers
+    label: "两个容器：各自的和共用的"
+    steps:
+      - { at: [procA, pidA, mntA], text: "先看左边这个容器。它的进程 ==各有一份 PID namespace 和 MNT namespace== —— 自己的一份进程列表，自己的一棵 / 树。" }
+      - { at: [procB, pidB, mntB], text: "右边那个也一样。==「隔离」这个词的具体内容，就是这一圈各复制一份。==" }
+      - { at: [shared], text: "但中间这个不一样。\n\n==NET 和 IPC 是两个容器**共用同一份**的== —— 它们指着同一份表，不是各复制一份。" }
+      - { at: [shared, procA, procB], text: "这就是 K8s 里「同一个 Pod 的容器像一个机上邻居」的全部机制：**保留几个 namespace 不复制**。\n\n反过来，不同 Pod 之间连这几个也复制了，所以互相看不见。" }
+```
+
+---
+
 ## 01 · 「隔离」这个词，说了等于没说
 
 中台给你的定义是：
