@@ -1,0 +1,424 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-has-toc="1">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>内核里没有「进程对象」</title>
+<meta name="description" content="Linux 只有一种结构 task_struct。「进程」和「线程」的差别不在类型，而在 clone() 那一串开关——共享在这里是连续刻度，不是二选一。" />
+<link rel="stylesheet" href="../../assets/theme.css" />
+  <link rel="stylesheet" href="../../assets/blocks.css" />
+  <link rel="stylesheet" href="../../assets/archify-embed.css" />
+</head>
+<body>
+<div id="progress"></div>
+<div id="tocScrim"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
+    <a class="brand" href="../../index.html"><span class="dot"></span>知识笔记</a>
+    
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="toc" id="toc">
+      <p class="toc-title">目录</p>
+      <a href="../../index.html" class="sub">← 全部笔记</a>
+      <a href="#先否掉一个直觉内核里维护着两个类">先否掉一个直觉：内核里维护着两个类</a>
+      <a href="#linux-的答案只有一种对象">Linux 的答案：只有一种对象</a>
+      <a href="#它是一张索引图不是一个仓库">它是一张索引图，不是一个仓库</a>
+      <a href="#为什么必须是索引">为什么必须是索引？</a>
+      <a href="#一个顺手的类比inode">一个顺手的类比：inode</a>
+      <a href="#落到系统调用上fork-和-pthreadcreate-走同一扇门">落到系统调用上：fork 和 pthread_create 走同一扇门</a>
+      <a href="#一个反直觉的推论">一个反直觉的推论</a>
+      <a href="#反向开关容器是从这里长出来的">反向开关：容器是从这里长出来的</a>
+      <a href="#好处不是概念洁癖是复用">好处不是概念洁癖，是复用</a>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow">● 操作系统 · 进程与线程</span>
+      <h1>内核里没有「进程对象」</h1>
+      <p class="lede">Linux 只有一种结构 task_struct。「进程」和「线程」的差别不在类型，而在 clone() 那一串开关——共享在这里是连续刻度，不是二选一。</p>
+    </div>
+
+    <div class="draft-banner">
+    <span>⚠</span>
+    <span>本页状态为 <b>draft</b>：内容尚未人工核对，引用前请自行验证。</span>
+  </div>
+
+    <div class="provenance"><span><b>来源</b> Linux Kernel Labs: Processes — https://linux-kernel-labs.github.io/refs/heads/master/lectures/processes.html · clone(2) — https://man7.org/linux/man-pages/man2/clone.2.html · Silberschatz 第 4 章笔记 — https://www.cs.uic.edu/~jbell/CourseNotes/OperatingSystems/4_Threads.html · Eli Bendersky: Measuring context switching — https://eli.thegreenplace.net/2018/measuring-context-switching-and-memory-overheads-for-linux-threads</span><span><b>生成</b> 2026-10-07</span><span><b>模型</b> claude-opus-4-5</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">操作系统</span> <span class="tag tone-muted">Linux</span> <span class="tag tone-muted">task_struct</span> <span class="tag tone-muted">clone</span> <span class="tag tone-muted">命名空间</span></span></div>
+
+<h2 id="先否掉一个直觉内核里维护着两个类"><span class="num">01</span>先否掉一个直觉：内核里维护着两个类</h2>
+<p>要理解「进程和线程到底差在哪」，大多数人脑子里是这样一张图：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-ts">// 直觉模型 —— 内核里有两个类
+class Process {
+  addrSpace: AddrSpace;
+  files: FdTable;
+  threads: Thread[];        // 进程持有线程列表
+}
+class Thread {
+  pc: number;
+  regs: Registers;
+  stack: Stack;
+  process: Process;         // 线程回指进程
+}
+</code></pre></div>
+<p>这个模型<strong>很清楚，而且是错的</strong> —— 至少 Linux 不是这样。它错在代价：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>代价</th><th>两套类意味着什么</th></tr></thead><tbody><tr><th>两套调度逻辑</th><td data-label="两套类意味着什么">调度器要分别处理 Process 和 Thread，选下一个跑的时候先得判断「我在调度哪一类」</td></tr><tr><th>两套同步逻辑</th><td data-label="两套类意味着什么">同一种锁要维护两个版本；阻塞、唤醒、优先级继承全都要写两遍</td></tr><tr><th>两个类互相引用</th><td data-label="两套类意味着什么">进程持有线程列表、线程回指进程 —— 任何一次调度决策都要在两套状态之间翻译</td></tr><tr><th>边界上的特判</th><td data-label="两套类意味着什么"><span class="tag tone-red">「一个进程最后一条线程退出时该做什么」这类问题，在两套模型里永远有缝隙</span></td></tr></tbody></table></div><p><mark class="mk-blue">一句话：两套类会带来两套调度、两套同步，而它们之间还要互相翻译。</mark></p>
+<hr>
+<h2 id="linux-的答案只有一种对象"><span class="num">02</span>Linux 的答案：只有一种对象</h2>
+<p>Linux 内核里<strong>没有「线程对象」</strong>。只有一种数据结构：<code>task_struct</code>。</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>应用层的叫法</th><th>内核里实际是什么</th></tr></thead><tbody><tr><th>进程</th><td data-label="内核里实际是什么"><mark class="mk-blue">资源不被共享的那群 <code>task</code></mark></td></tr><tr><th>线程</th><td data-label="内核里实际是什么"><mark class="mk-blue">资源被共享的那群 <code>task</code></mark></td></tr></tbody></table></div><p>差别<strong>不在类型，而在指针</strong>。<code>task_struct</code> 里存的是指向资源的指针：
+共享时只复制指针，不共享时才复制资源。</p>
+<div class="callout tone-violet">
+      <span class="ic">🧬</span>
+      <div><p><strong>用面向对象的话说：进程是深拷贝，线程是浅拷贝。</strong></p>
+<ul>
+<li><strong>深拷贝</strong>（<code>structuredClone</code> 那种）：<code>taskB.mm = copyOf(taskA.mm)</code> —— 资源翻倍，彼此独立</li>
+<li><strong>浅拷贝</strong>（对象图只复制引用）：<code>taskB.mm = taskA.mm</code> —— 一份资源，两个引用</li>
+</ul>
+<p>但 Linux 比这还细一层：<mark class="mk-blue">它的「浅拷贝」不是一刀切的，
+而是<strong>逐资源维度</strong>各有一个开关</mark>（下一节展开）。</p>
+<p><mark class="mk-green">这就是 <code>clone()</code> 的 <code>CLONE_*</code> 标志 —— 把「复制还是共享」变成了一个参数。</mark></p>
+</div>
+    </div><p>另一个主流设计是 <strong>Windows 式的分层</strong>：线程是独立的数据结构，链接到它所属的进程结构。
+两条路线都成立，取舍不同 —— 分层式有显式的进程对象，账目清晰；
+统一式消灭了第二类对象，全部机制只服务一种结构。</p>
+<hr>
+<h2 id="它是一张索引图不是一个仓库"><span class="num">03</span>它是一张索引图，不是一个仓库</h2>
+<p>「资源全部内联进一个大结构体」这个模型也不成立。看 <code>task_struct</code> 的实际形态：</p>
+<figure class="archfig" data-arch>
+      <svg viewBox="0 0 1046 536" role="img" aria-labelledby="archify-diagram-title archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
+        <title id="archify-diagram-title">task_struct 是一个索引节点，不是一个仓库</title>
+        <desc id="archify-diagram-description">它自己只有约 8KB / 155 个字段，却描述着以 MB 计的资源 —— 因为它存的全是指向资源的指针</desc>
+        <!-- Definitions -->
+        <defs>
+          <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-default" />
+          </marker>
+          <marker id="arrowhead-emphasis" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-emphasis" />
+          </marker>
+          <marker id="arrowhead-security" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-security" />
+          </marker>
+          <marker id="arrowhead-dashed" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-dashed" />
+          </marker>
+          <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+            <path d="M 40 0 L 0 0 0 40" class="c-grid" stroke-width="0.5"/>
+          </pattern>
+        </defs>
+
+        <!-- Background Grid -->
+        <rect width="100%" height="100%" fill="url(#grid)" />
+
+        <!-- Boundaries (behind everything) -->
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="0" x="26" y="228" width="980" height="110" rx="12" class="c-region" stroke-width="1"/>
+        <text x="34" y="246" class="t-cloud" font-size="9" font-weight="600">资源对象 —— 各自独立，各有各的生灭时机</text>
+
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="1" x="26" y="358" width="180" height="110" rx="12" class="c-region" stroke-width="1"/>
+        <text x="34" y="376" class="t-cloud" font-size="9" font-weight="600">真正大块的东西在这一层</text>
+
+        <!-- Connection paths (before components for correct z-order) -->
+        <path data-edge-from="tsk" data-edge-to="mm" data-edge-key="0" data-edge-id="e1" data-composition-points="456,151;200,151;200,288;176,288" d="M 456 151 L 208 151 Q 200 151 200 159 L 200 280 Q 200 288 192 288 L 176 288" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="tsk" data-edge-to="files" data-edge-key="1" data-edge-id="e2" data-composition-points="456,165;416,165;416,288;376,288" d="M 456 165 L 424 165 Q 416 165 416 173 L 416 280 Q 416 288 408 288 L 376 288" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="tsk" data-edge-to="sighand" data-edge-key="2" data-edge-id="e3" data-composition-points="516,188;516,258" d="M 516 188 L 516 258" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="tsk" data-edge-to="cred" data-edge-key="3" data-edge-id="e4" data-composition-points="576,151;616,151;616,288;656,288" d="M 576 151 L 608 151 Q 616 151 616 159 L 616 280 Q 616 288 624 288 L 656 288" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="tsk" data-edge-to="nsproxy" data-edge-key="4" data-edge-id="e5" data-composition-points="576,165;832,165;832,288;856,288" d="M 576 165 L 824 165 Q 832 165 832 173 L 832 280 Q 832 288 840 288 L 856 288" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="mm" data-edge-to="mmstruct" data-edge-label="地址空间在这里，不在 task 里" data-edge-key="5" data-edge-id="e6" data-composition-points="116,318;116,388" d="M 116 318 L 116 388" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+
+        <!-- Components -->
+        <g id="node-tsk" data-node-id="tsk" data-node-label="task_struct" tabindex="0" role="button" aria-label="Focus task_struct, 约 8KB · 155 个字段, Architecture component" aria-pressed="false" data-node-kind="backend" data-node-sublabel="约 8KB · 155 个字段" data-node-context="Architecture component">
+          <title>task_struct · 约 8KB · 155 个字段 · Architecture component</title>
+          <rect x="456" y="128" width="120" height="60" rx="6" class="c-mask"/>
+          <rect x="456" y="128" width="120" height="60" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(462 134) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text data-detail-anchor x="516" y="156" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">task_struct</text>
+        <text data-detail="context" x="516" y="172" class="t-muted" font-size="9" text-anchor="middle">约 8KB · 155 个字段</text>
+        </g>
+
+        <g id="node-mm" data-node-id="mm" data-node-label="mm" tabindex="0" role="button" aria-label="Focus mm, 地址空间, 资源对象 —— 各自独立，各有各的生灭时机" aria-pressed="false" data-node-kind="security" data-node-sublabel="地址空间" data-node-context="资源对象 —— 各自独立，各有各的生灭时机">
+          <title>mm · 地址空间 · 资源对象 —— 各自独立，各有各的生灭时机</title>
+          <rect x="56" y="258" width="120" height="60" rx="6" class="c-mask"/>
+          <rect x="56" y="258" width="120" height="60" rx="6" class="c-security" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="security" class="semantic-sigil s-security" transform="translate(62 264) scale(0.6875)">
+            <path d="M8 2.2 13 4v3.5c0 3.1-1.8 5.4-5 6.5-3.2-1.1-5-3.4-5-6.5V4Z"/>
+            <path d="m5.8 8 1.5 1.5 3-3"/>
+          </g>
+          <text data-detail-anchor x="116" y="286" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">mm</text>
+        <text data-detail="context" x="116" y="302" class="t-muted" font-size="9" text-anchor="middle">地址空间</text>
+        </g>
+
+        <g id="node-files" data-node-id="files" data-node-label="files" tabindex="0" role="button" aria-label="Focus files, 打开文件表, 资源对象 —— 各自独立，各有各的生灭时机" aria-pressed="false" data-node-kind="database" data-node-sublabel="打开文件表" data-node-context="资源对象 —— 各自独立，各有各的生灭时机">
+          <title>files · 打开文件表 · 资源对象 —— 各自独立，各有各的生灭时机</title>
+          <rect x="256" y="258" width="120" height="60" rx="6" class="c-mask"/>
+          <rect x="256" y="258" width="120" height="60" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(262 264) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <text data-detail-anchor x="316" y="286" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">files</text>
+        <text data-detail="context" x="316" y="302" class="t-muted" font-size="9" text-anchor="middle">打开文件表</text>
+        </g>
+
+        <g id="node-sighand" data-node-id="sighand" data-node-label="sighand" tabindex="0" role="button" aria-label="Focus sighand, 信号处置函数表, 资源对象 —— 各自独立，各有各的生灭时机" aria-pressed="false" data-node-kind="database" data-node-sublabel="信号处置函数表" data-node-context="资源对象 —— 各自独立，各有各的生灭时机">
+          <title>sighand · 信号处置函数表 · 资源对象 —— 各自独立，各有各的生灭时机</title>
+          <rect x="456" y="258" width="120" height="60" rx="6" class="c-mask"/>
+          <rect x="456" y="258" width="120" height="60" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(462 264) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <text data-detail-anchor x="516" y="286" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">sighand</text>
+        <text data-detail="context" x="516" y="302" class="t-muted" font-size="9" text-anchor="middle">信号处置函数表</text>
+        </g>
+
+        <g id="node-cred" data-node-id="cred" data-node-label="cred" tabindex="0" role="button" aria-label="Focus cred, uid / gid / 能力, 资源对象 —— 各自独立，各有各的生灭时机" aria-pressed="false" data-node-kind="database" data-node-sublabel="uid / gid / 能力" data-node-context="资源对象 —— 各自独立，各有各的生灭时机">
+          <title>cred · uid / gid / 能力 · 资源对象 —— 各自独立，各有各的生灭时机</title>
+          <rect x="656" y="258" width="120" height="60" rx="6" class="c-mask"/>
+          <rect x="656" y="258" width="120" height="60" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(662 264) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <text data-detail-anchor x="716" y="286" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">cred</text>
+        <text data-detail="context" x="716" y="302" class="t-muted" font-size="9" text-anchor="middle">uid / gid / 能力</text>
+        </g>
+
+        <g id="node-nsproxy" data-node-id="nsproxy" data-node-label="nsproxy" tabindex="0" role="button" aria-label="Focus nsproxy, 命名空间分组, 资源对象 —— 各自独立，各有各的生灭时机" aria-pressed="false" data-node-kind="database" data-node-sublabel="命名空间分组" data-node-context="资源对象 —— 各自独立，各有各的生灭时机">
+          <title>nsproxy · 命名空间分组 · 资源对象 —— 各自独立，各有各的生灭时机</title>
+          <rect x="856" y="258" width="120" height="60" rx="6" class="c-mask"/>
+          <rect x="856" y="258" width="120" height="60" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(862 264) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <text data-detail-anchor x="916" y="286" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">nsproxy</text>
+        <text data-detail="context" x="916" y="302" class="t-muted" font-size="9" text-anchor="middle">命名空间分组</text>
+        </g>
+
+        <g id="node-mmstruct" data-node-id="mmstruct" data-node-label="mm_struct" tabindex="0" role="button" aria-label="Focus mm_struct, 页表 + 各段的 VMA, 真正大块的东西在这一层" aria-pressed="false" data-node-kind="cloud" data-node-sublabel="页表 + 各段的 VMA" data-node-context="真正大块的东西在这一层">
+          <title>mm_struct · 页表 + 各段的 VMA · 真正大块的东西在这一层</title>
+          <rect x="56" y="388" width="120" height="60" rx="6" class="c-mask"/>
+          <rect x="56" y="388" width="120" height="60" rx="6" class="c-cloud" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="cloud" class="semantic-sigil s-cloud" transform="translate(62 394) scale(0.6875)">
+            <path d="M4.3 12.5h7.3a2.4 2.4 0 0 0 .2-4.8 4 4 0 0 0-7.5-1.3A3.1 3.1 0 0 0 4.3 12.5Z"/>
+          </g>
+          <text data-detail-anchor x="116" y="416" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">mm_struct</text>
+        <text data-detail="context" x="116" y="432" class="t-muted" font-size="9" text-anchor="middle">页表 + 各段的 VMA</text>
+        </g>
+
+        <!-- Connection labels -->
+
+
+
+
+
+        <g data-detail="context" data-edge-from="mm" data-edge-to="mmstruct" data-edge-label="地址空间在这里，不在 task 里" data-edge-key="5" data-edge-id="e6">
+          <rect x="43.8" y="324" width="144.4" height="14" rx="3" class="c-mask"/>
+          <text x="116" y="334" class="t-muted" font-size="8" text-anchor="middle">地址空间在这里，不在 task 里</text>
+        </g>
+
+        <!-- Legend -->
+        <g data-legend data-legend-bridge>
+          <text x="40" y="500" class="t-primary" font-size="12" font-weight="650">Legend</text>
+          <g data-legend-semantic-kind="backend" data-legend-kind="backend" data-legend-label="Backend" data-legend-x="40" data-legend-baseline="520" data-legend-width="78">
+            <rect x="40" y="511" width="16" height="10" rx="2.5" class="c-backend" stroke-width="1"/>
+            <text x="62" y="520" class="t-muted" font-size="10" font-weight="500">Backend</text>
+          </g>
+          <g data-legend-semantic-kind="database" data-legend-kind="database" data-legend-label="Database" data-legend-x="140" data-legend-baseline="520" data-legend-width="83">
+            <rect x="140" y="511" width="16" height="10" rx="2.5" class="c-database" stroke-width="1"/>
+            <text x="162" y="520" class="t-muted" font-size="10" font-weight="500">Database</text>
+          </g>
+          <g data-legend-semantic-kind="cloud" data-legend-kind="cloud" data-legend-label="Cloud" data-legend-x="245" data-legend-baseline="520" data-legend-width="68">
+            <rect x="245" y="511" width="16" height="10" rx="2.5" class="c-cloud" stroke-width="1"/>
+            <text x="267" y="520" class="t-muted" font-size="10" font-weight="500">Cloud</text>
+          </g>
+          <g data-legend-semantic-kind="security" data-legend-kind="security" data-legend-label="Security" data-legend-x="335" data-legend-baseline="520" data-legend-width="83">
+            <rect x="335" y="511" width="16" height="10" rx="2.5" class="c-security" stroke-width="1"/>
+            <text x="357" y="520" class="t-muted" font-size="10" font-weight="500">Security</text>
+          </g>
+        </g>
+      </svg>
+      <figcaption>task_struct 自己只有约 8KB，它指向的资源以 MB 计 —— 因为它存的全是指针。</figcaption>
+      <p class="arch-hint">
+        <span class="idle">点头上的任意一个框，只看它和它连出去的关系</span>
+        <span class="focused">再点一次空白处取消</span>
+      </p>
+    </figure><h2 id="为什么必须是索引">为什么必须是索引？</h2>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>理由</th><th>为什么不能内联</th></tr></thead><tbody><tr><th>装不下</th><td data-label="为什么不能内联"><code>task_struct</code> 用 <code>pahole</code> 实测约 <strong>8KB / 155 个字段</strong>，而它指向的地址空间、文件表动辄以 MB 计</td></tr><tr><th>要共享</th><td data-label="为什么不能内联">同进程的多个线程必须指向<strong>同一份</strong>地址空间与文件表 —— 内联模型根本表达不了「两份描述共享一份资源」</td></tr><tr><th>生命周期不同</th><td data-label="为什么不能内联"><span class="tag tone-amber">文件可以提前 <code>close</code>，映射可以 <code>munmap</code> —— 资源的生灭粒度比进程本体细，必须独立成对象</span></td></tr></tbody></table></div><p>第三条最容易被忽略，但它解释了很多事：</p>
+<blockquote>
+<p><strong>文件描述符可以在进程退出之前就被关掉。</strong>
+如果 fd 表内联在 <code>task_struct</code> 里，「提前关掉一个 fd」就变成「修改进程结构体的一部分」——
+而它其实只是<strong>对象图里断掉一个引用</strong>。</p>
+</blockquote>
+<h2 id="一个顺手的类比inode">一个顺手的类比：<code>inode</code></h2>
+<p>这个设计和文件系统是<strong>同一个套路</strong>：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>系统</th><th>元数据放哪</th><th>数据放哪</th><th>共同点</th></tr></thead><tbody><tr><th>文件系统</th><td data-label="元数据放哪"><code>inode</code> 存大小 / 权限 / 时间戳</td><td data-label="数据放哪">指向若干数据块的指针</td><td data-label="共同点">都是<strong>索引节点</strong>，不是容器本体</td></tr><tr><th>Linux 进程</th><td data-label="元数据放哪"><code>task_struct</code> 存 pid / 状态 / 优先级</td><td data-label="数据放哪">指向 <code>mm</code> / <code>files</code> / <code>ns</code> 的指针</td><td data-label="共同点">不内联内容</td></tr></tbody></table></div><p>删除文件只要摘掉元数据与引用，不需要逐一擦除数据块；
+<strong>清算一个进程也一样</strong> —— 摘掉 <code>task_struct</code> 和它的资源引用，就结束了。</p>
+<div class="callout tone-violet">
+      <span class="ic">🗂</span>
+      <div><p><strong>这张对象图有一份现成的只读投射：<code>/proc/&lt;pid&gt;/</code>。</strong></p>
+<table>
+<thead>
+<tr>
+<th>目录/文件</th>
+<th>对应对象图里的哪一根指针</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>/proc/&lt;pid&gt;/maps</code></td>
+<td><code>mm</code> → <code>mm_struct</code> → 各段 VMA</td>
+</tr>
+<tr>
+<td><code>/proc/&lt;pid&gt;/fd/</code></td>
+<td><code>files</code> → 打开文件表</td>
+</tr>
+<tr>
+<td><code>/proc/&lt;pid&gt;/status</code></td>
+<td>身份、状态、凭证、内存占用</td>
+</tr>
+<tr>
+<td><code>/proc/&lt;pid&gt;/ns/</code></td>
+<td><code>nsproxy</code> → 每个命名空间各一个符号链接</td>
+</tr>
+</tbody>
+</table>
+<p><mark class="mk-green">内核访问「当前进程」用的是 <code>current</code> 宏 —— 基于 per-CPU 变量实现、免查表。
+因为 90% 以上的系统调用第一件事就是取当前进程：系统调用天然是「针对调用者的资源」操作。</mark></p>
+</div>
+    </div><hr>
+<h2 id="落到系统调用上fork-和-pthreadcreate-走同一扇门"><span class="num">04</span>落到系统调用上：<code>fork</code> 和 <code>pthread_create</code> 走同一扇门</h2>
+<p>前面说的「逐资源开关」不是比喻，它就是 <code>clone()</code> 的参数表。</p>
+<div class="demo" data-widget="clone-lab" data-config="{&quot;shared&quot;:[&quot;CLONE_VM&quot;,&quot;CLONE_FILES&quot;,&quot;CLONE_FS&quot;,&quot;CLONE_SIGHAND&quot;],&quot;unshared&quot;:[]}">
+      <div class="demo-head">
+        <span class="title">clone() 的开关面板</span>
+        <span class="status" data-status>勾一勾，看「你造出来的」是什么</span>
+        <span class="spacer"></span>
+        
+      </div>
+      <div class="demo-body custom" data-mount></div>
+    </div><p>四个正向开关，每个守一个维度：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>开关</th><th>共享什么</th><th>为什么是它</th></tr></thead><tbody><tr><th><code>CLONE_VM</code></th><td data-label="共享什么">地址空间（页表指针直接复用）</td><td data-label="为什么是它">两个 task 看同一片内存 —— 这是「线程」最核心的那一条</td></tr><tr><th><code>CLONE_FILES</code></th><td data-label="共享什么">打开文件表</td><td data-label="为什么是它">A 打开的 fd，B 立刻看得见，连读写偏移量都共享</td></tr><tr><th><code>CLONE_FS</code></th><td data-label="共享什么">根目录 / 工作目录 / umask</td><td data-label="为什么是它"><code>umask</code> 决定<strong>新文件的默认权限</strong>，属于「文件系统环境」而不是单次调用参数</td></tr><tr><th><code>CLONE_SIGHAND</code></th><td data-label="共享什么">信号处置函数表</td><td data-label="为什么是它">任一线程改 <code>SIGTERM</code> 的处置，全组立即可见 —— 这是「同一进程」应有的语义</td></tr></tbody></table></div><div class="callout tone-green">
+      <span class="ic">🚪</span>
+      <div><p><strong>不带任何 <code>CLONE_*</code> 调用 <code>clone()</code>，等价于 <code>fork()</code>。
+四个全带上，等价于创建线程。</strong></p>
+<p><code>fork()</code> 与 <code>pthread_create()</code> 在 Linux 里 <mark class="mk-blue">走的是同一扇门</mark>，
+区别只在一串标志位。</p>
+<p><mark class="mk-green">这也是为什么 <code>pthread_create</code> 能被实现成一个库调用 ——
+它不需要内核里存在一个叫「thread」的东西。</mark></p>
+</div>
+    </div><h2 id="一个反直觉的推论">一个反直觉的推论</h2>
+<p>既然「线程」不是一种类型，那么<strong>共享一部分、不共享另一部分</strong>也是合法的：</p>
+<blockquote>
+<p>你可以造出一个和父进程共享地址空间、但<strong>自己有一套工作目录</strong>的 task。
+这种组合没有标准名字 —— <mark class="mk-blue">但内核完全允许，因为它只是几个开关的不同组合。</mark></p>
+</blockquote>
+<p>在「两套类」的模型里，这种对象根本表达不出来。</p>
+<hr>
+<h2 id="反向开关容器是从这里长出来的"><span class="num">05</span>反向开关：容器是从这里长出来的</h2>
+<p><code>CLONE_*</code> 里还有一组<strong>方向相反</strong>的开关：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>开关</th><th>它表示</th><th>结果</th></tr></thead><tbody><tr><th><code>CLONE_NEWNS</code></th><td data-label="它表示">不共享 mount 命名空间，另立一个</td><td data-label="结果">自己一套挂载点 —— <strong>容器的文件树从这来</strong></td></tr><tr><th><code>CLONE_NEWPID</code></th><td data-label="它表示">另立 PID 命名空间</td><td data-label="结果">容器里看到的 PID 从 1 开始</td></tr><tr><th><code>CLONE_NEWNET</code></th><td data-label="它表示">另立网络命名空间</td><td data-label="结果">自己的网卡、路由表、端口空间</td></tr></tbody></table></div><p><mark class="mk-blue">注意方向：<code>clone</code> <strong>默认继承</strong>父进程的命名空间，带上 <code>NEW*</code> 反而表示「另立一个」。</mark></p>
+<div class="callout tone-amber">
+      <span class="ic">📦</span>
+      <div><p><strong>同一个机制，能在两个方向上画界。</strong></p>
+<table>
+<thead>
+<tr>
+<th>方向</th>
+<th>做法</th>
+<th>得到</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>往里合</td>
+<td>带正向开关，共享资源</td>
+<td>线程</td>
+</tr>
+<tr>
+<td>往外切</td>
+<td>带反向开关，切出命名空间</td>
+<td><strong>容器</strong></td>
+</tr>
+</tbody>
+</table>
+<p>所以「容器」不是什么新对象 —— 它是<strong>一组不带正向开关、但带了反向开关的 task</strong>，
+内核用 <code>nsproxy</code> 把 IPC、网络、cgroup、mount、PID、时间这些可分区资源分组管理。</p>
+<p><mark class="mk-green">这也解释了容器的「轻」和线程的「轻」为什么不是一回事：
+容器共享的是<strong>内核<strong>，切掉的是命名空间；线程共享的是</strong>进程资源域</strong>。</mark></p>
+</div>
+    </div><hr>
+<h2 id="好处不是概念洁癖是复用"><span class="num">06</span>好处不是概念洁癖，是复用</h2>
+<p>统一模型最直接的收益是<strong>创建成本</strong>：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>动作</th><th>要做什么</th></tr></thead><tbody><tr><th><code>fork()</code></th><td data-label="要做什么"><span class="tag tone-red">复制整套资源结构 + 新建页表 + 复制文件表</span></td></tr><tr><th><code>pthread_create()</code></th><td data-label="要做什么"><span class="tag tone-green">只复制几个指针 + 一个新内核栈</span></td></tr></tbody></table></div><p>这正是 NPTL 时代线程创建能比旧实现<strong>快约 7 倍</strong>的结构基础 ——
+不是因为优化了什么，而是因为<strong>它本来就不需要做那些事</strong>。</p>
+<p>但更重要的收益是间接的：</p>
+<blockquote>
+<p>调度器、同步原语、内存管理都只面对<strong>一种</strong>对象。
+「共享程度」变成 <code>clone</code> 参数里的<strong>连续刻度</strong>，而不是两套割裂的实体。</p>
+</blockquote>
+<div class="callout tone-red">
+      <span class="ic">⚠</span>
+      <div><p><strong>一次真实的翻车：LinuxThreads。</strong></p>
+<p>在 NPTL 之前，Linux 的 <code>LinuxThreads</code> 把每个线程做成了<strong>一个独立的轻量级进程</strong> ——
+也就是说，它在「一种 task」之上又<strong>假装</strong>出了一套线程语义。</p>
+<p>结果 <code>getpid()</code>、信号、<code>wait()</code> 的行为与 POSIX 要求对不齐，
+各处漏风，最终被基于同一 task 模型的 NPTL 取代（内核 2.6 前后落地）。</p>
+<p><mark class="mk-blue">教训是：把线程硬塞进「每个线程是一个进程」的模型里，
+语义裂缝会在每个角落漏出来。</mark></p>
+</div>
+    </div><hr>
+<div class="quiz"><details>
+        <summary>Linux 内核里，「进程」和「线程」在数据结构层面分别是什么？</summary>
+        <div class="a"><p>都不是独立的对象。内核里只有一种结构：task_struct。
+「进程」= 资源不被共享的那群 task；「线程」= 资源被共享的那群 task。
+区别不在类型，而在 task 里那几个指针（mm / files / sighand / nsproxy）
+是指向同一份资源还是各自一份。所以「进程」在内核里其实没有专属对象，
+它只是「恰好不共享资源的那组 task 及其资源域」在应用层的投影。</p>
+</div>
+      </details><details>
+        <summary>fork() 和 pthread_create() 在内核里有什么区别？</summary>
+        <div class="a"><p>走的是同一扇门 clone()，区别只在一串标志位。
+不带任何 CLONE_* 调用 clone() 等价于 fork()；带上
+CLONE_VM / CLONE_FILES / CLONE_FS / CLONE_SIGHAND 等价于创建线程。
+这也意味着「共享一部分」是合法的 —— 共享在这里是一个连续刻度，
+而不是二选一。在「两套类」的内核里，这种对象根本表达不出来。</p>
+</div>
+      </details><details>
+        <summary>为什么 task_struct 不把地址空间、文件表直接内联进去，而要存指针？</summary>
+        <div class="a"><p>三个理由，缺一不可。
+① 装不下：task_struct 实测约 8KB / 155 字段，而它指向的资源以 MB 计。
+② 要共享：同进程的多个线程必须指向同一份资源，内联模型表达不了「两份描述共享一份资源」。
+③ 生命周期不同：文件可以提前 close、映射可以 munmap —— 资源的生灭比进程本体细，
+必须独立成对象。第三条最容易被忽略，但它解释了为什么关一个 fd 只是对象图上断一根指针。</p>
+</div>
+      </details><details>
+        <summary>CLONE_NEWNS 和 CLONE_VM 的方向为什么是反的？</summary>
+        <div class="a"><p>因为 clone() 默认是继承父进程的一切。正向开关（CLONE_VM / FILES / FS / SIGHAND）
+表示「把本来会复制的东西改成共享」；反向开关（CLONE_NEW*）表示
+「把本来会继承的东西改成另立一个」。
+所以同一个 clone() 能在两个方向上画界：往里合得到线程，往外切得到容器。
+容器不是什么新对象，它是一组不带正向开关、但带了反向开关的 task。</p>
+</div>
+      </details></div>
+
+    <footer>
+      <span>内核里没有「进程对象」</span>
+      <span>最后更新 2026-10-07 · 单文件可离线打开</span>
+    </footer>
+  </main>
+</div>
+
+<script src="../../assets/app.js"></script>
+</body>
+</html>

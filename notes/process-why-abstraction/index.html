@@ -1,0 +1,441 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-has-toc="1">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>「进程」不是设计出来的，是被逼出来的</title>
+<meta name="description" content="先别背定义。把进程拿掉，让两个程序直接裸跑在同一块内存上——你会依次撞上四件人祸，而进程的每个零件都是被其中一件逼出来的。" />
+<link rel="stylesheet" href="../../assets/theme.css" />
+  <link rel="stylesheet" href="../../assets/blocks.css" />
+  <link rel="stylesheet" href="../../assets/archify-embed.css" />
+</head>
+<body>
+<div id="progress"></div>
+<div id="tocScrim"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
+    <a class="brand" href="../../index.html"><span class="dot"></span>知识笔记</a>
+    
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="toc" id="toc">
+      <p class="toc-title">目录</p>
+      <a href="../../index.html" class="sub">← 全部笔记</a>
+      <a href="#换个问法不要进程会出什么事">换个问法：不要进程，会出什么事</a>
+      <a href="#每个冲突逼出一个机制">每个冲突，逼出一个机制</a>
+      <a href="#独立地址空间页表既是翻译器也是隔离墙">独立地址空间：页表既是翻译器，也是隔离墙</a>
+      <a href="#受限执行内核大部分时间不在场">「受限执行」：内核大部分时间不在场</a>
+      <a href="#资源边界从说不清杀谁到能单独清算">资源边界：从「说不清杀谁」到「能单独清算」</a>
+      <a href="#三件套合起来就是进程">三件套合起来，就是「进程」</a>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow">● 操作系统 · 进程与线程</span>
+      <h1>「进程」不是设计出来的，是被逼出来的</h1>
+      <p class="lede">先别背定义。把进程拿掉，让两个程序直接裸跑在同一块内存上——你会依次撞上四件人祸，而进程的每个零件都是被其中一件逼出来的。</p>
+    </div>
+
+    <div class="draft-banner">
+    <span>⚠</span>
+    <span>本页状态为 <b>draft</b>：内容尚未人工核对，引用前请自行验证。</span>
+  </div>
+
+    <div class="provenance"><span><b>来源</b> Dive Into Systems — Virtual Memory — https://diveintosystems.org/book/C13-OS/vm.html · OSTEP: cpu-intro — https://pages.wisc.edu/~remzi/OSTEP/cpu-intro.pdf · OSTEP: cpu-mechanisms — https://pages.cs.wisc.edu/~remzi/OSTEP/cpu-mechanisms.pdf · ELF ABI — https://refspecs.linuxfoundation.org/ELF/zSeries/lzsabi0_zSeries/x791.html · Linux Kernel Labs: Processes — https://linux-kernel-labs.github.io/refs/heads/master/lectures/processes.html</span><span><b>生成</b> 2026-10-07</span><span><b>模型</b> claude-opus-4-5</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">操作系统</span> <span class="tag tone-muted">进程</span> <span class="tag tone-muted">地址空间</span> <span class="tag tone-muted">页表</span> <span class="tag tone-muted">PCB</span></span></div>
+
+<h2 id="换个问法不要进程会出什么事"><span class="num">01</span>换个问法：不要进程，会出什么事</h2>
+<p>「进程 = 正在运行的程序」——这句话没错，但它只说了进程<strong>是什么</strong>，
+没说进程<strong>为什么必须存在</strong>。</p>
+<p>反着问一遍就清楚了：如果让两个程序<strong>直接裸跑</strong>在同一台机器上，
+中间没有任何管理方，会出什么事？</p>
+<p><mark class="mk-blue">答案是四件事，而且每一件都躲不掉。</mark></p>
+<div class="cards" data-cols="2"><div class="ccard tone-red">
+          <span class="tag tone-red">人祸 ①</span>
+          <h4>地址冲突</h4>
+          <p>两个程序都从同一个地址开始放</p>
+          <div class="cbody"><p>A 和 B 都从 <code>0x1000</code> 开始放代码和数据 —— 因为写代码的人
+不可能知道别人会占哪儿。</p>
+<p>一加载就<strong>互相覆盖</strong>：后加载的把先加载的盖掉。</p>
+</div>
+          
+        </div><div class="ccard tone-red">
+          <span class="tag tone-red">人祸 ②</span>
+          <h4>越权访问</h4>
+          <p>A 的一条 store 就能写进 B 的数据区</p>
+          <div class="cbody"><p>A 里一条普通的 <code>mov [0x3000], 1</code> 指令，
+如果 <code>0x3000</code> 恰好是 B 的变量 —— 它就直接改掉了。</p>
+<p><strong>没有任何东西拦它</strong>，因为根本不存在「谁的内存」这个概念。</p>
+</div>
+          
+        </div><div class="ccard tone-amber">
+          <span class="tag tone-amber">人祸 ③</span>
+          <h4>长期占用</h4>
+          <p>A 死循环，B 永远轮不到 CPU</p>
+          <div class="cbody"><p>CPU 只有一个。A 进了 <code>while(1)</code> 之后不会主动让出来，
+B 就永远等在那里。</p>
+<p>这不是「B 慢」，是 B <strong>根本没有机会开始</strong>。</p>
+</div>
+          
+        </div><div class="ccard tone-amber">
+          <span class="tag tone-amber">人祸 ④</span>
+          <h4>故障扩散</h4>
+          <p>A 崩了，B 跟着崩，还说不清该杀谁</p>
+          <div class="cbody"><p>A 的野指针写穿内存，正好压在 B 的数据上，B 算出乱七八糟的结果。</p>
+<p>更麻烦的是：<strong>没有一份账</strong>记录谁用了哪些资源，
+所以连「把 A 干掉、留下 B」这个动作都做不到。</p>
+</div>
+          
+        </div></div><p><mark class="mk-amber">这四条不是「进程机制的缺点」，而是「没有进程机制时必然发生的事」。</mark></p>
+<hr>
+<h2 id="每个冲突逼出一个机制"><span class="num">02</span>每个冲突，逼出一个机制</h2>
+<p>关键在这里：这四个机制<strong>不是一起设计出来的</strong>，是各自被一个具体问题逼出来的。
+把它们和四件人祸对上，就能看出每个零件存在的理由：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>人祸</th><th>逼出来的机制</th><th>它新划出的边界</th></tr></thead><tbody><tr><th>地址冲突</th><td data-label="逼出来的机制">虚拟地址空间 + 页表</td><td data-label="它新划出的边界"><mark class="mk-blue">每进程一张表，地址视图私有</mark></td></tr><tr><th>越权访问</th><td data-label="逼出来的机制">特权级（用户态 / 内核态）</td><td data-label="它新划出的边界">系统调用是唯一的门</td></tr><tr><th>长期占用</th><td data-label="逼出来的机制">时钟中断 + 调度器</td><td data-label="它新划出的边界">时间片到期必须让出</td></tr><tr><th>故障扩散</th><td data-label="逼出来的机制">资源记账（PCB 的雏形）</td><td data-label="它新划出的边界">可单独清算、单独回收</td></tr></tbody></table></div><p>注意最后一行和第二行、第一行<strong>有交叉</strong>：虚拟地址空间同时对付「地址冲突」和「故障扩散」
+（因为越权访问被页表拦下时，故障就被关在了一个进程里），
+而资源记账独立解决了「说不清杀谁」。</p>
+<p>所以更准确的说法是三件事，不是一个对一个：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>机制</th><th>它管什么</th></tr></thead><tbody><tr><th>独立地址空间</th><td data-label="它管什么">我有哪些内存，<mark class="mk-blue">且只有我能用</mark></td></tr><tr><th>受控执行</th><td data-label="它管什么">我能跑，<mark class="mk-blue">但进出内核的门和时间片都不归我管</mark></td></tr><tr><th>资源边界</th><td data-label="它管什么">我开过的文件、占过的内存被单独记账，<mark class="mk-blue">可被单独清算</mark></td></tr></tbody></table></div><p>这三条就是后面所有内容的坐标轴。先把第一条展开 —— 它是全部机制里最不像「发明」的那个。</p>
+<hr>
+<h2 id="独立地址空间页表既是翻译器也是隔离墙"><span class="num">03</span>独立地址空间：页表既是翻译器，也是隔离墙</h2>
+<figure class="archfig" data-arch>
+      <svg viewBox="0 0 1018 534" role="img" aria-labelledby="archify-diagram-title archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
+        <title id="archify-diagram-title">同一个虚拟地址，落在两个物理帧里</title>
+        <desc id="archify-diagram-description">A 和 B 跑同一份程序、变量 x 的虚拟地址一模一样；能让它们互不相干的只有页表</desc>
+        <!-- Definitions -->
+        <defs>
+          <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-default" />
+          </marker>
+          <marker id="arrowhead-emphasis" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-emphasis" />
+          </marker>
+          <marker id="arrowhead-security" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-security" />
+          </marker>
+          <marker id="arrowhead-dashed" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-dashed" />
+          </marker>
+          <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+            <path d="M 40 0 L 0 0 0 40" class="c-grid" stroke-width="0.5"/>
+          </pattern>
+        </defs>
+
+        <!-- Background Grid -->
+        <rect width="100%" height="100%" fill="url(#grid)" />
+
+        <!-- Boundaries (behind everything) -->
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="0" x="26" y="96" width="180" height="370" rx="12" class="c-region" stroke-width="1"/>
+        <text x="34" y="114" class="t-cloud" font-size="9" font-weight="600">虚拟地址空间 —— 每进程一份，地址可以完全重合</text>
+
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="1" x="412" y="96" width="180" height="370" rx="12" class="c-region" stroke-width="1"/>
+        <text x="420" y="114" class="t-cloud" font-size="9" font-weight="600">页表 —— 每进程一张</text>
+
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="2" x="798" y="96" width="180" height="370" rx="12" class="c-region" stroke-width="1"/>
+        <text x="806" y="114" class="t-cloud" font-size="9" font-weight="600">物理内存 —— 数据真正住的地方</text>
+
+        <!-- Connection paths (before components for correct z-order) -->
+        <path data-edge-from="ax" data-edge-to="pa" data-edge-key="0" data-edge-id="e1" data-composition-points="176,156;442,156" d="M 176 156 L 442 156" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="pa" data-edge-to="f42" data-edge-key="1" data-edge-id="e2" data-composition-points="562,156;828,156" d="M 562 156 L 828 156" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="bx" data-edge-to="pb" data-edge-key="2" data-edge-id="e3" data-composition-points="176,286;442,286" d="M 176 286 L 442 286" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="pb" data-edge-to="f87" data-edge-key="3" data-edge-id="e4" data-composition-points="562,286;828,286" d="M 562 286 L 828 286" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="tx" data-edge-to="ptx" data-edge-key="4" data-edge-id="e5" data-composition-points="176,416;442,416" d="M 176 416 L 442 416" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="ptx" data-edge-to="f12" data-edge-label="同一个物理帧" data-edge-key="5" data-edge-id="e6" data-composition-points="562,416;828,416" d="M 562 416 L 828 416" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="f42" data-edge-to="f87" data-edge-label="同一行虚拟地址，两个不同的物理帧 —— 隔离就是这么来的" data-edge-key="6" data-edge-id="e7" data-composition-points="888,186;888,256" d="M 888 186 L 888 256" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
+
+        <!-- Components -->
+        <g id="node-ax" data-node-id="ax" data-node-label="进程 A 的变量 x" tabindex="0" role="button" aria-label="Focus 进程 A 的变量 x, VA 0x601000, 虚拟地址空间 —— 每进程一份，地址可以完全重合" aria-pressed="false" data-node-kind="backend" data-node-sublabel="VA 0x601000" data-node-context="虚拟地址空间 —— 每进程一份，地址可以完全重合">
+          <title>进程 A 的变量 x · VA 0x601000 · 虚拟地址空间 —— 每进程一份，地址可以完全重合</title>
+          <rect x="56" y="126" width="120" height="60" rx="6" class="c-mask"/>
+          <rect x="56" y="126" width="120" height="60" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(62 132) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text data-detail-anchor x="116" y="154" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">进程 A 的变量 x</text>
+        <text data-detail="context" x="116" y="170" class="t-muted" font-size="9" text-anchor="middle">VA 0x601000</text>
+        </g>
+
+        <g id="node-pa" data-node-id="pa" data-node-label="页表 A" tabindex="0" role="button" aria-label="Focus 页表 A, PTBR 现在指着它, 页表 —— 每进程一张" aria-pressed="false" data-node-kind="security" data-node-sublabel="PTBR 现在指着它" data-node-context="页表 —— 每进程一张">
+          <title>页表 A · PTBR 现在指着它 · 页表 —— 每进程一张</title>
+          <rect x="442" y="126" width="120" height="60" rx="6" class="c-mask"/>
+          <rect x="442" y="126" width="120" height="60" rx="6" class="c-security" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="security" class="semantic-sigil s-security" transform="translate(448 132) scale(0.6875)">
+            <path d="M8 2.2 13 4v3.5c0 3.1-1.8 5.4-5 6.5-3.2-1.1-5-3.4-5-6.5V4Z"/>
+            <path d="m5.8 8 1.5 1.5 3-3"/>
+          </g>
+          <text data-detail-anchor x="502" y="154" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">页表 A</text>
+        <text data-detail="context" x="502" y="170" class="t-muted" font-size="9" text-anchor="middle">PTBR 现在指着它</text>
+        </g>
+
+        <g id="node-f42" data-node-id="f42" data-node-label="物理帧 42" tabindex="0" role="button" aria-label="Focus 物理帧 42, 里面存着 x = 1, 物理内存 —— 数据真正住的地方" aria-pressed="false" data-node-kind="database" data-node-sublabel="里面存着 x = 1" data-node-context="物理内存 —— 数据真正住的地方">
+          <title>物理帧 42 · 里面存着 x = 1 · 物理内存 —— 数据真正住的地方</title>
+          <rect x="828" y="126" width="120" height="60" rx="6" class="c-mask"/>
+          <rect x="828" y="126" width="120" height="60" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(834 132) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <text data-detail-anchor x="888" y="154" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">物理帧 42</text>
+        <text data-detail="context" x="888" y="170" class="t-muted" font-size="9" text-anchor="middle">里面存着 x = 1</text>
+        </g>
+
+        <g id="node-bx" data-node-id="bx" data-node-label="进程 B 的变量 x" tabindex="0" role="button" aria-label="Focus 进程 B 的变量 x, VA 也是 0x601000, 虚拟地址空间 —— 每进程一份，地址可以完全重合" aria-pressed="false" data-node-kind="backend" data-node-sublabel="VA 也是 0x601000" data-node-context="虚拟地址空间 —— 每进程一份，地址可以完全重合">
+          <title>进程 B 的变量 x · VA 也是 0x601000 · 虚拟地址空间 —— 每进程一份，地址可以完全重合</title>
+          <rect x="56" y="256" width="120" height="60" rx="6" class="c-mask"/>
+          <rect x="56" y="256" width="120" height="60" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(62 262) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text data-detail-anchor x="116" y="284" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">进程 B 的变量 x</text>
+        <text data-detail="context" x="116" y="300" class="t-muted" font-size="9" text-anchor="middle">VA 也是 0x601000</text>
+        </g>
+
+        <g id="node-pb" data-node-id="pb" data-node-label="页表 B" tabindex="0" role="button" aria-label="Focus 页表 B, 另一张，A 看不到, 页表 —— 每进程一张" aria-pressed="false" data-node-kind="security" data-node-sublabel="另一张，A 看不到" data-node-context="页表 —— 每进程一张">
+          <title>页表 B · 另一张，A 看不到 · 页表 —— 每进程一张</title>
+          <rect x="442" y="256" width="120" height="60" rx="6" class="c-mask"/>
+          <rect x="442" y="256" width="120" height="60" rx="6" class="c-security" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="security" class="semantic-sigil s-security" transform="translate(448 262) scale(0.6875)">
+            <path d="M8 2.2 13 4v3.5c0 3.1-1.8 5.4-5 6.5-3.2-1.1-5-3.4-5-6.5V4Z"/>
+            <path d="m5.8 8 1.5 1.5 3-3"/>
+          </g>
+          <text data-detail-anchor x="502" y="284" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">页表 B</text>
+        <text data-detail="context" x="502" y="300" class="t-muted" font-size="9" text-anchor="middle">另一张，A 看不到</text>
+        </g>
+
+        <g id="node-f87" data-node-id="f87" data-node-label="物理帧 87" tabindex="0" role="button" aria-label="Focus 物理帧 87, 里面存着 x = 2, 物理内存 —— 数据真正住的地方" aria-pressed="false" data-node-kind="database" data-node-sublabel="里面存着 x = 2" data-node-context="物理内存 —— 数据真正住的地方">
+          <title>物理帧 87 · 里面存着 x = 2 · 物理内存 —— 数据真正住的地方</title>
+          <rect x="828" y="256" width="120" height="60" rx="6" class="c-mask"/>
+          <rect x="828" y="256" width="120" height="60" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(834 262) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <text data-detail-anchor x="888" y="284" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">物理帧 87</text>
+        <text data-detail="context" x="888" y="300" class="t-muted" font-size="9" text-anchor="middle">里面存着 x = 2</text>
+        </g>
+
+        <g id="node-tx" data-node-id="tx" data-node-label="A、B 的代码段 text" tabindex="0" role="button" aria-label="Focus A、B 的代码段 text, 两边都在 VA 0x400000, 虚拟地址空间 —— 每进程一份，地址可以完全重合" aria-pressed="false" data-node-kind="backend" data-node-sublabel="两边都在 VA 0x400000" data-node-context="虚拟地址空间 —— 每进程一份，地址可以完全重合">
+          <title>A、B 的代码段 text · 两边都在 VA 0x400000 · 虚拟地址空间 —— 每进程一份，地址可以完全重合</title>
+          <rect x="56" y="386" width="120" height="60" rx="6" class="c-mask"/>
+          <rect x="56" y="386" width="120" height="60" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(62 392) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text data-detail-anchor x="116" y="414" class="t-primary" font-size="10.3" font-weight="600" text-anchor="middle">A、B 的代码段 text</text>
+        <text data-detail="context" x="116" y="430" class="t-muted" font-size="9" text-anchor="middle">两边都在 VA 0x400000</text>
+        </g>
+
+        <g id="node-ptx" data-node-id="ptx" data-node-label="两张页表" tabindex="0" role="button" aria-label="Focus 两张页表, 这次指向同一个地方, 页表 —— 每进程一张" aria-pressed="false" data-node-kind="security" data-node-sublabel="这次指向同一个地方" data-node-context="页表 —— 每进程一张">
+          <title>两张页表 · 这次指向同一个地方 · 页表 —— 每进程一张</title>
+          <rect x="442" y="386" width="120" height="60" rx="6" class="c-mask"/>
+          <rect x="442" y="386" width="120" height="60" rx="6" class="c-security" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="security" class="semantic-sigil s-security" transform="translate(448 392) scale(0.6875)">
+            <path d="M8 2.2 13 4v3.5c0 3.1-1.8 5.4-5 6.5-3.2-1.1-5-3.4-5-6.5V4Z"/>
+            <path d="m5.8 8 1.5 1.5 3-3"/>
+          </g>
+          <text data-detail-anchor x="502" y="414" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">两张页表</text>
+        <text data-detail="context" x="502" y="430" class="t-muted" font-size="9" text-anchor="middle">这次指向同一个地方</text>
+        </g>
+
+        <g id="node-f12" data-node-id="f12" data-node-label="物理帧 12" tabindex="0" role="button" aria-label="Focus 物理帧 12, 只读代码，两个进程共用这一份, 物理内存 —— 数据真正住的地方" aria-pressed="false" data-node-kind="database" data-node-sublabel="只读代码，两个进程共用这一份" data-node-context="物理内存 —— 数据真正住的地方">
+          <title>物理帧 12 · 只读代码，两个进程共用这一份 · 物理内存 —— 数据真正住的地方</title>
+          <rect x="828" y="386" width="120" height="60" rx="6" class="c-mask"/>
+          <rect x="828" y="386" width="120" height="60" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(834 392) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <text data-detail-anchor x="888" y="414" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">物理帧 12</text>
+        <text data-detail="context" x="888" y="430" class="t-muted" font-size="6.6" text-anchor="middle">只读代码，两个进程共用这一份</text>
+        </g>
+
+        <!-- Connection labels -->
+
+
+
+
+
+        <g data-detail="context" data-edge-from="ptx" data-edge-to="f12" data-edge-label="同一个物理帧" data-edge-key="5" data-edge-id="e6">
+          <rect x="661.2" y="396" width="67.6" height="14" rx="3" class="c-mask"/>
+          <text x="695" y="406" class="t-muted" font-size="8" text-anchor="middle">同一个物理帧</text>
+        </g>
+        <g data-detail="context" data-edge-from="f42" data-edge-to="f87" data-edge-label="同一行虚拟地址，两个不同的物理帧 —— 隔离就是这么来的" data-edge-key="6" data-edge-id="e7">
+          <rect x="758.2" y="192" width="259.6" height="14" rx="3" class="c-mask"/>
+          <text x="888" y="202" class="t-backend" font-size="8" text-anchor="middle">同一行虚拟地址，两个不同的物理帧 —— 隔离就是这么来的</text>
+        </g>
+
+        <!-- Legend -->
+        <g data-legend data-legend-bridge>
+          <text x="40" y="498" class="t-primary" font-size="12" font-weight="650">Legend</text>
+          <g data-legend-semantic-kind="backend" data-legend-kind="backend" data-legend-label="Backend" data-legend-x="40" data-legend-baseline="518" data-legend-width="78">
+            <rect x="40" y="509" width="16" height="10" rx="2.5" class="c-backend" stroke-width="1"/>
+            <text x="62" y="518" class="t-muted" font-size="10" font-weight="500">Backend</text>
+          </g>
+          <g data-legend-semantic-kind="database" data-legend-kind="database" data-legend-label="Database" data-legend-x="140" data-legend-baseline="518" data-legend-width="83">
+            <rect x="140" y="509" width="16" height="10" rx="2.5" class="c-database" stroke-width="1"/>
+            <text x="162" y="518" class="t-muted" font-size="10" font-weight="500">Database</text>
+          </g>
+          <g data-legend-semantic-kind="security" data-legend-kind="security" data-legend-label="Security" data-legend-x="245" data-legend-baseline="518" data-legend-width="83">
+            <rect x="245" y="509" width="16" height="10" rx="2.5" class="c-security" stroke-width="1"/>
+            <text x="267" y="518" class="t-muted" font-size="10" font-weight="500">Security</text>
+          </g>
+        </g>
+      </svg>
+      <figcaption>两个进程跑同一份程序，变量 x 的虚拟地址一模一样。能让它们互不相干的，只有页表。</figcaption>
+      <p class="arch-hint">
+        <span class="idle">点头上的任意一个框，只看它和它连出去的关系</span>
+        <span class="focused">再点一次空白处取消</span>
+      </p>
+    </figure><p>图里有两组对照，值得分开看：</p>
+<p><strong>前两行（数据 x）是隔离。</strong> A 和 B 的 x 虚拟地址都是 <code>0x601000</code>，
+但页表把它们翻译到了<strong>不同的物理帧</strong>。A 写 <code>1</code>，B 写 <code>2</code>，各自毫不知情。</p>
+<p><mark class="mk-blue">隔离能力不来自布局，而来自翻译。</mark> 进程里的地址全是虚拟地址，
+CPU 每次访存都要过页表；每进程一张页表，寄存器 <code>PTBR</code> 指向当前进程那张。
+<strong>上下文切换时换 <code>PTBR</code>，等于给 CPU 换一个翻译器。</strong></p>
+<p><strong>第三行（代码 text）是共享。</strong> 代码段是只读的 —— 这张图解释了为什么只读：</p>
+<blockquote>
+<p><code>text</code> 只读不是约束，<mark class="mk-blue">而是一种省法</mark>。同一程序的多个实例既然不会改代码，
+就可以让它们的 <code>text</code> 映射到<strong>同一批物理页</strong>。</p>
+</blockquote>
+<p>同一套机制，两个方向：<strong>可写的东西分家，只读的东西合租。</strong></p>
+<div class="callout tone-violet">
+      <span class="ic">🔑</span>
+      <div><p><strong>一个常见的简化要澄清：「线程拥有栈、进程拥有堆」不是结构事实。</strong></p>
+<p>线程的栈同样位于<strong>进程地址空间内部</strong>（无非是 mmap 出来的一块区域）。
+同进程的任何线程，在权限上都能读写别人的栈。</p>
+<p>「私有」只意味着<strong>约定</strong>：由该线程维护、编译器与运行时保证别人不越界。</p>
+<p><mark class="mk-green">这个约定的反面很有意思：一旦被野指针破坏，故障就能跨线程传播 ——
+这恰恰是「线程的故障域比进程大」的根因。第 3 篇会拿它当尺子用。</mark></p>
+</div>
+    </div><blockquote>
+<p>地址空间里从低到高详细长什么样（<code>text</code> / <code>data</code> / <code>bss</code> / <code>heap</code> / <code>mmap</code> / <code>stack</code>，
+带 x86-64 的真实地址和增长方向），在《线程共享什么、独享什么》里已经画过，
+这里不重复。<mark class="mk-blue">这张图只讲「同一个地址为什么会落到两个物理帧」。</mark></p>
+</blockquote>
+<hr>
+<h2 id="受限执行内核大部分时间不在场"><span class="num">04</span>「受限执行」：内核大部分时间不在场</h2>
+<p>前三件人祸对付完了，还剩「长期占用」。但这里藏着一个更根本的张力：</p>
+<blockquote>
+<p>内核要能<strong>随时</strong>收回控制权（否则挡不住死循环），
+但用户程序每跑一条指令都让内核过一遍，<strong>性能会慢到不可用</strong>。</p>
+</blockquote>
+<p>解法叫<strong>受限直接执行<strong>：让用户程序</strong>全速直跑</strong>，内核只守住几个「回收点」。</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-c">while (true) {
+  enter_user_mode(proc-&gt;pc);   // 降特权级，跳回用户态断点，全速执行
+  // 内核此刻是「不在场」的 —— 直到硬件抛回三类事件之一：
+  switch (event) {
+    case TRAP:   syscall_dispatch(proc);  break;  // 系统调用
+    case FAULT:  handle_fault(proc);      break;  // 异常：非法地址 / 除零 / 缺页
+    case TIMER:  schedule_next(proc);     break;  // 时钟中断：时间片到期
+  }
+}
+</code></pre></div>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>回收点</th><th>谁引发</th><th>内核要做什么</th><th>回来之后</th></tr></thead><tbody><tr><th><code>TRAP</code> 系统调用</th><td data-label="谁引发">用户程序<strong>主动</strong>请求服务</td><td data-label="内核要做什么">把请求转给对应的内核代码</td><td data-label="回来之后"><span class="tag tone-green">服务完就放回用户态，不换人</span></td></tr><tr><th><code>FAULT</code> 异常</th><td data-label="谁引发">非法地址 / 除零 / 缺页</td><td data-label="内核要做什么">缺页就补页，段错误就终止该进程</td><td data-label="回来之后"><span class="tag tone-amber">这一步直接决定了「谁能被单独杀掉」</span></td></tr><tr><th><code>TIMER</code> 时钟中断</th><td data-label="谁引发"><span class="tag tone-red">硬件定时器，谁也没请求</span></td><td data-label="内核要做什么">schedule()，挑下一个任务</td><td data-label="回来之后"><span class="tag tone-red">强制换人 —— 这是死循环的唯一破法</span></td></tr></tbody></table></div><p><mark class="mk-blue">「受限」二字限制的不是用户程序能做什么，而是<strong>内核现身的时机</strong>。</mark></p>
+<div class="callout tone-amber">
+      <span class="ic">⚡</span>
+      <div><p><strong>为什么必须让用户程序直跑？</strong></p>
+<p>因为如果每条用户指令都要内核先解释一遍（这叫解释执行 / 陷阱模拟），
+每一次内存访问、每一次算术都要往返内核 —— 性能会掉几个数量级。</p>
+<p><mark class="mk-green">直跑换性能，三个回收点换控制权。这是操作系统里最基础的一笔交易。</mark></p>
+<p>这段伪代码的骨架，就是任何一个现代内核的<strong>调度入口</strong>。</p>
+</div>
+    </div><hr>
+<h2 id="资源边界从说不清杀谁到能单独清算"><span class="num">05</span>资源边界：从「说不清杀谁」到「能单独清算」</h2>
+<p>第四件人祸是最不起眼的那个：<strong>A 崩了，凭什么能留下 B？</strong></p>
+<p>因为内核给每个进程记了一份账。这份账在 Linux 里叫 <code>task_struct</code>，
+在教科书里叫 PCB（进程控制块）。</p>
+<p>它记的东西很朴素：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>账目</th><th>记了什么</th><th>为什么必须有</th></tr></thead><tbody><tr><th>身份与状态</th><td data-label="记了什么">PID、当前状态</td><td data-label="为什么必须有">没有 PID，「杀掉 A」这句话都说不出来</td></tr><tr><th>寄存器现场</th><td data-label="记了什么">被换下 CPU 时的寄存器快照</td><td data-label="为什么必须有">换回来的时候要知道从哪接着跑</td></tr><tr><th>地址空间</th><td data-label="记了什么">页表在哪</td><td data-label="为什么必须有">不然找不回「它的」那些内存</td></tr><tr><th>打开的文件</th><td data-label="记了什么">文件描述符表</td><td data-label="为什么必须有">不然进程退出时有一批 fd 泄漏在外面</td></tr><tr><th>调度信息</th><td data-label="记了什么">优先级、时间片、在哪个队列</td><td data-label="为什么必须有">调度器得能把它挑出来</td></tr></tbody></table></div><p>有了这份账，「清算一个进程」才变成一个<strong>可执行的动作</strong>：
+把它的地址空间还回去、把它的 fd 全关掉、把它占的内存标记为可用。</p>
+<div class="callout tone-violet">
+      <span class="ic">🗂</span>
+      <div><p><strong>这份账本有一个现成的只读视图：<code>/proc/&lt;pid&gt;/</code>。</strong></p>
+<table>
+<thead>
+<tr>
+<th>文件</th>
+<th>里面是什么</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>/proc/&lt;pid&gt;/status</code></td>
+<td>身份、状态、内存占用、凭证</td>
+</tr>
+<tr>
+<td><code>/proc/&lt;pid&gt;/fd/</code></td>
+<td>它现在开着哪些文件（就是账目里那一栏）</td>
+</tr>
+<tr>
+<td><code>/proc/&lt;pid&gt;/maps</code></td>
+<td>地址空间里的每一段映射</td>
+</tr>
+</tbody>
+</table>
+<p><mark class="mk-blue">排查「这个进程到底开了什么、占了什么」，全在这里。</mark></p>
+<p><mark class="mk-green">Linux 里还有个 <code>current</code> 宏，免查表拿到「当前进程」——
+因为 90% 以上的系统调用第一件事就是取它。</mark></p>
+</div>
+    </div><hr>
+<h2 id="三件套合起来就是进程"><span class="num">06</span>三件套合起来，就是「进程」</h2>
+<p>把散落的零件收进一个定义：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>组成部分</th><th>实体是什么</th><th>谁在管</th></tr></thead><tbody><tr><th>独立地址空间</th><td data-label="实体是什么">页表 + 各段的 VMA 描述</td><td data-label="谁在管">每进程一张，换 PTBR 就换世界</td></tr><tr><th>受控执行</th><td data-label="实体是什么">至少一条执行流（主线程）</td><td data-label="谁在管">进出内核靠 trap / 异常 / 时钟中断</td></tr><tr><th>资源边界</th><td data-label="实体是什么">PCB（Linux 里是 <code>task_struct</code>）</td><td data-label="谁在管">可被单独调度、单独阻塞、单独清算</td></tr></tbody></table></div><p><mark class="mk-blue">进程 = 程序 + 运行环境 + 执行流。</mark></p>
+<p>最后一项解释了一件很日常的事：<strong>同一个程序为什么能启动 N 次而互不干扰</strong>。
+因为「运行环境」每个实例独立一份 —— 跑的是同一份代码字节，
+各自的变量、打开的文件、执行进度互不相见。</p>
+<p>这也是 PID 的含义：它标识的是<strong>一次运行实例</strong>，不是程序本身。
+同一个 <code>node</code> 可执行文件可以对应成百上千个 PID。</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>世界</th><th>静态的那份</th><th>实例的那份</th><th>谁把前者变成后者</th></tr></thead><tbody><tr><th>git</th><td data-label="静态的那份">commit 对象 · 不可变，躺在 <code>.git</code> 里</td><td data-label="实例的那份">working tree · 可改、可删、一堆未提交的中间态</td><td data-label="谁把前者变成后者"><code>checkout</code></td></tr><tr><th>进程</th><td data-label="静态的那份">可执行文件 <code>a.out</code> · 静态字节，躺在磁盘上</td><td data-label="实例的那份">进程实例 · 寄存器 / 栈 / 打开文件</td><td data-label="谁把前者变成后者"><code>execve</code> / 加载器</td></tr></tbody></table></div><p>同一个 commit 可以在多个目录 checkout 出互不相干的工作区，
+就像同一个二进制可以拉起互不相干的进程。</p>
+<p><mark class="mk-green">差异只在一处：working tree 的「状态」是文件内容，进程的「状态」是寄存器和栈 ——
+那正是上下文切换要保存的东西。</mark></p>
+<hr>
+<div class="quiz"><details>
+        <summary>「进程」这个抽象里，为什么必须有<strong>页表</strong>，光有虚拟地址不够吗？</summary>
+        <div class="a"><p>不够，而且页表才是关键的一半。虚拟地址本身只是一串数字；
+真正让它变成隔离的是「每次访存都要过页表翻译」这个动作。
+每进程一张页表，两个进程的同一个虚拟地址 0x601000 就能落到不同的物理帧。
+反过来说，同一份只读代码也可以让两个进程的页表都指向同一个帧 —— 复用同一套机制。
+所以页表既是翻译器，也是隔离墙。</p>
+</div>
+      </details><details>
+        <summary>为什么不让内核「每条指令都检查一遍」，这样不是最安全吗？</summary>
+        <div class="a"><p>因为性能会掉几个数量级。每条指令都往返一次内核，等于放弃直接执行。
+实际做法是相反的：让用户程序全速直跑，内核只守住三个回收点 ——
+TRAP（系统调用）、FAULT（异常、缺页）、TIMER（时钟中断）。
+「受限」限制的不是用户程序能做什么，而是内核现身的时机。
+其中 TIMER 是唯一能破掉死循环的，因为它不依赖用户程序配合。</p>
+</div>
+      </details><details>
+        <summary>同事说「进程崩了不影响别人，因为每个进程有自己的内存」。这句话完整吗？</summary>
+        <div class="a"><p>只说到了一半。独立的地址空间确实让越权访问被页表拦下，故障被关在一个进程里。
+但「能留下别人、只清算这一个」还需要第二样东西：资源记账。
+没有 PCB，内核连「A 用过哪些内存和文件」都答不上来，也就没法把它干净地回收。
+两样合起来才成立：地址空间负责「别波及别人」，记账负责「能单独清算」。</p>
+</div>
+      </details><details>
+        <summary>线程的栈「私有」，这句话该怎么理解才不误导人？</summary>
+        <div class="a"><p>它是一种<strong>使用约定</strong>，不是结构事实。线程的栈就在进程地址空间内部，
+无非是 mmap 出来的一块区域；同进程的任何线程在权限上都能读写别人的栈。
+「私有」的意思是编译器与运行时保证不越界，由该线程自己维护。
+这个区别有实际后果：一旦野指针破坏了这个约定，故障可以跨线程传播，
+整个进程一起崩 —— 这正是线程的故障域比进程大的根因。</p>
+</div>
+      </details></div>
+
+    <footer>
+      <span>「进程」不是设计出来的，是被逼出来的</span>
+      <span>最后更新 2026-10-07 · 单文件可离线打开</span>
+    </footer>
+  </main>
+</div>
+
+<script src="../../assets/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-has-toc="1">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>一把尺子：资源域 × 执行流</title>
+<meta name="description" content="进程回答「我拥有什么」，线程回答「我从哪里继续执行」——两个正交维度。把它们当坐标轴，容器/进程/线程/协程就是同一根刻度上的四个位置。" />
+<link rel="stylesheet" href="../../assets/theme.css" />
+  <link rel="stylesheet" href="../../assets/blocks.css" />
+  <link rel="stylesheet" href="../../assets/archify-embed.css" />
+</head>
+<body>
+<div id="progress"></div>
+<div id="tocScrim"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
+    <a class="brand" href="../../index.html"><span class="dot"></span>知识笔记</a>
+    
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="toc" id="toc">
+      <p class="toc-title">目录</p>
+      <a href="../../index.html" class="sub">← 全部笔记</a>
+      <a href="#两种说法都对只是站在不同层">两种说法都对，只是站在不同层</a>
+      <a href="#为什么两个视角都得留着">为什么两个视角都得留着</a>
+      <a href="#两个正交维度">两个正交维度</a>
+      <a href="#把四个概念摆到同一根轴上">把四个概念摆到同一根轴上</a>
+      <a href="#完整对照表">完整对照表</a>
+      <a href="#三条边界真正决定差异的地方">三条边界：真正决定差异的地方</a>
+      <a href="#边界一-故障域" class="sub">边界一 · 故障域</a>
+      <a href="#边界二-数据一致性" class="sub">边界二 · 数据一致性</a>
+      <a href="#边界三-调度成本" class="sub">边界三 · 调度成本</a>
+      <a href="#谱系两端是同一条尺子">谱系：两端是同一条尺子</a>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow">● 操作系统 · 进程与线程</span>
+      <h1>一把尺子：资源域 × 执行流</h1>
+      <p class="lede">进程回答「我拥有什么」，线程回答「我从哪里继续执行」——两个正交维度。把它们当坐标轴，容器/进程/线程/协程就是同一根刻度上的四个位置。</p>
+    </div>
+
+    <div class="draft-banner">
+    <span>⚠</span>
+    <span>本页状态为 <b>draft</b>：内容尚未人工核对，引用前请自行验证。</span>
+  </div>
+
+    <div class="provenance"><span><b>来源</b> Chromium 多进程架构 — https://blog.chromium.org/2008/09/multi-process-architecture.html · man7 pthreads(7) — https://man7.org/linux/man-pages/man7/pthreads.7.html · Eli Bendersky: Measuring context switching — https://eli.thegreenplace.net/2018/measuring-context-switching-and-memory-overheads-for-linux-threads · tsunanet: How long does it take to make a context switch — https://blog.tsunanet.net/2010/11/how-long-does-it-take-to-make-context.html</span><span><b>生成</b> 2026-10-07</span><span><b>模型</b> claude-opus-4-5</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">操作系统</span> <span class="tag tone-muted">进程</span> <span class="tag tone-muted">线程</span> <span class="tag tone-muted">协程</span> <span class="tag tone-muted">容器</span> <span class="tag tone-muted">隔离</span></span></div>
+
+<h2 id="两种说法都对只是站在不同层"><span class="num">01</span>两种说法都对，只是站在不同层</h2>
+<p>问「进程和线程什么关系」，你会听到两种答案：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>说法</th><th>谁在说</th><th>它管用在哪</th></tr></thead><tbody><tr><th>「进程包含线程」</th><td data-label="谁在说">应用层的<strong>嵌套视角</strong></td><td data-label="它管用在哪">资源生命周期挂在进程上：<code>kill</code> 掉进程，它名下所有线程一起消失</td></tr><tr><th>「多个 task 共享一组资源」</th><td data-label="谁在说">内核的<strong>实现视角</strong></td><td data-label="它管用在哪">调度器面前没有进程，只有 task</td></tr></tbody></table></div><p><mark class="mk-blue">两种说法不矛盾。</mark> 应用层的那个「进程」，就是内核里
+<strong>共享同一资源域的那组 task</strong>；「进程」是给这组 task 起的名字。</p>
+<h2 id="为什么两个视角都得留着">为什么两个视角都得留着</h2>
+<div class="callout tone-violet">
+      <span class="ic">👁</span>
+      <div><p><strong>应用层视角好用，是因为资源生命周期真的挂在进程上。</strong></p>
+<p>你 <code>kill</code> 一个 PID，内核去遍历它的线程组、把每一个 task 都收掉 ——
+这个动作只有在「进程是一个整体」的视角下才说得通。</p>
+<p><strong>内核视角才是真相，因为调度器不认识「进程」。</strong></p>
+<p>它手上是一张运行队列，里面是 task。选下一个跑的时候，
+它不会问「这是哪个进程的线程」，只按 task 自己的权重和时间片决定。</p>
+<p><mark class="mk-green">两层同时成立，正是 5.2 节那张坐标图想说的东西。</mark></p>
+</div>
+    </div><hr>
+<h2 id="两个正交维度"><span class="num">02</span>两个正交维度</h2>
+<p>把上面两种说法拆开，会得到两个<strong>互相独立</strong>的问题：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>维度</th><th>它回答什么</th><th>由什么承载</th></tr></thead><tbody><tr><th>资源域</th><td data-label="它回答什么"><mark class="mk-blue">我拥有什么</mark></td><td data-label="由什么承载">地址空间、打开文件、凭证、命名空间</td></tr><tr><th>执行流</th><td data-label="它回答什么"><mark class="mk-blue">我从哪里继续执行</mark></td><td data-label="由什么承载">PC、寄存器、栈</td></tr></tbody></table></div><p>「正交」的意思是：<strong>它们可以任意组合</strong>。</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>组合</th><th>资源域</th><th>执行流</th><th>这是谁</th></tr></thead><tbody><tr><th>各一份</th><td data-label="资源域">一条主栈</td><td data-label="执行流">进程</td></tr><tr><th>共享一份</th><td data-label="资源域">每线程一条</td><td data-label="执行流">线程</td></tr><tr><th>几乎没有</th><td data-label="资源域"><span class="tag tone-amber">只有内核栈</span></td><td data-label="执行流">内核线程</td></tr></tbody></table></div><div class="callout tone-amber">
+      <span class="ic">📐</span>
+      <div><p><strong>两个维度各自的边界也很清楚：</strong></p>
+<table>
+<thead>
+<tr>
+<th>维度</th>
+<th>不只是</th>
+<th>而是</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>资源域</td>
+<td>不只是内存</td>
+<td>凭证决定<strong>你是谁<strong>，namespace 决定</strong>你看到哪片世界</strong> —— 它们是权限与容器机制的接口</td>
+</tr>
+<tr>
+<td>执行流</td>
+<td>不只是「能跑」</td>
+<td><mark class="mk-blue">能被内核<strong>独立调度<strong>、</strong>独立阻塞</strong></mark>，才是它与协程的分界线</td>
+</tr>
+</tbody>
+</table>
+<p><mark class="mk-green">第二行是关键：协程也能跑、也有栈，但内核不认识它 ——
+用户态调度器让它让出，它就得让出。</mark></p>
+</div>
+    </div><hr>
+<h2 id="把四个概念摆到同一根轴上"><span class="num">03</span>把四个概念摆到同一根轴上</h2>
+<div class="demo" data-widget="isolation-spectrum" data-config="{&quot;selected&quot;:&quot;thread&quot;}">
+      <div class="demo-head">
+        <span class="title">一把尺子上的四个位置</span>
+        <span class="status" data-status>点一个，看它的三行账</span>
+        <span class="spacer"></span>
+        
+      </div>
+      <div class="demo-body custom" data-mount></div>
+    </div><p>点一遍你会发现：这四个概念平时是<strong>分开背的</strong>，但它们其实是
+<strong>同一根刻度尺上的四个位置</strong> —— 共享得越来越多，调度得越来越轻。</p>
+<p>而两条最容易记混的推论，看图就能分辨：</p>
+<ul>
+<li><mark class="mk-blue">协程省的是<strong>调度开销</strong>，不是故障域。</mark> 它还是跑在同一个进程里，
+一个协程写坏内存，整个进程陪葬。</li>
+<li><mark class="mk-blue">容器和线程都「轻」，但轻的完全不是一回事。</mark>
+容器共享的是<strong>内核<strong>、切掉的是</strong>命名空间<strong>；线程共享的是</strong>进程资源域</strong>。</li>
+</ul>
+<hr>
+<h2 id="完整对照表"><span class="num">04</span>完整对照表</h2>
+<p>前面零散提到的可以收进一张表：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>项</th><th>进程</th><th>线程</th></tr></thead><tbody><tr><th>地址空间</th><td data-label="进程">独占</td><td data-label="线程">共享</td></tr><tr><th>堆 / 全局数据</th><td data-label="进程">独占</td><td data-label="线程">共享</td></tr><tr><th>栈</th><td data-label="进程">自己的主栈</td><td data-label="线程">每线程私有（但位于共享地址空间内）</td></tr><tr><th>寄存器 / PC</th><td data-label="进程">一组</td><td data-label="线程">每线程一组</td></tr><tr><th>文件描述符</th><td data-label="进程">独立一套</td><td data-label="线程">共享</td></tr><tr><th>信号处置</th><td data-label="进程">独立</td><td data-label="线程">共享</td></tr><tr><th>信号掩码</th><td data-label="进程"><span class="tag tone-amber">进程级</span></td><td data-label="线程"><span class="tag tone-green">每线程私有</span></td></tr><tr><th>调度优先级</th><td data-label="进程"><span class="tag tone-amber">进程级</span></td><td data-label="线程"><span class="tag tone-green">每线程可设</span></td></tr><tr><th>CPU affinity</th><td data-label="进程"><span class="tag tone-amber">进程级</span></td><td data-label="线程"><span class="tag tone-green">Linux 下每线程</span></td></tr><tr><th>TLS</th><td data-label="进程"><span class="tag tone-muted">不适用</span></td><td data-label="线程"><span class="tag tone-green">每线程私有</span></td></tr></tbody></table></div><p>最后四行值得单独说：<strong>「信号掩码」「优先级」「affinity」「TLS」这几项，
+Linux 的粒度是 per-thread 的</strong> —— 这正好是上一段说的
+「内核只认识 task」在接口上的表现。进程级的那个说法是教科书简化。</p>
+<hr>
+<h2 id="三条边界真正决定差异的地方"><span class="num">05</span>三条边界：真正决定差异的地方</h2>
+<p>资源域和执行流的差异，落到工程上就是三条线：</p>
+<h3 id="边界一-故障域">边界一 · 故障域</h3>
+<div class="flowd has-grid has-groups" data-flow data-edges="[{&quot;from&quot;:&quot;pa&quot;,&quot;to&quot;:&quot;pb&quot;,&quot;label&quot;:&quot;不波及&quot;},{&quot;from&quot;:&quot;t1&quot;,&quot;to&quot;:&quot;t2&quot;,&quot;label&quot;:&quot;会波及&quot;}]">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"><div class="fgroup tone-green" data-group-box="mp">
+          <span class="fgroup-label">多进程：A 崩了，B 照跑</span>
+        </div><div class="fgroup tone-red" data-group-box="mt">
+          <span class="fgroup-label">多线程：T1 崩了，可能全进程陪葬</span>
+        </div></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-red" data-id="pa" data-group="mp">
+              
+              
+              <b>进程 A</b>
+              <small>段错误</small>
+            </div><div class="fnode tone-red" data-id="t1" data-group="mt">
+              
+              
+              <b>线程 T1</b>
+              <small>写坏共享堆 / 踩了别人的栈</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="pb" data-group="mp">
+              
+              
+              <b>进程 B</b>
+              <small>完全无感，还能单独重启</small>
+            </div><div class="fnode tone-red" data-id="t2" data-group="mt">
+              
+              
+              <b>线程 T2</b>
+              <small>读到脏数据，或者一起退出</small>
+            </div></div></div>
+      
+    </div><p>进程有独立地址空间，非法访问被页表拦下；线程共享堆与栈区，
+一个线程写坏共享数据，整个进程陪葬。</p>
+<blockquote>
+<p><strong>Chrome 给每个标签页独立进程而不是线程，动机正是这一条。</strong>
+单个渲染器的 bug 或失控脚本，不应该拖垮整个浏览器 —— 隔离优先于开销。</p>
+</blockquote>
+<h3 id="边界二-数据一致性">边界二 · 数据一致性</h3>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>共享方式</th><th>要付出什么</th><th>麻烦在哪</th></tr></thead><tbody><tr><th>进程间 · 走 IPC</th><td data-label="要付出什么">序列化 + 拷贝 + 协议</td><td data-label="麻烦在哪">管道、共享内存、消息队列 —— 但<strong>有显式的消息边界</strong></td></tr><tr><th>线程间 · 直接读写</th><td data-label="要付出什么"><span class="tag tone-red">数据竞争、锁、原子操作、内存序</span></td><td data-label="麻烦在哪">省了拷贝，但<strong>可见性比锁更难缠</strong></td></tr></tbody></table></div><div class="callout tone-red">
+      <span class="ic">👻</span>
+      <div><p><strong>「可见性」为什么比锁更难缠？</strong></p>
+<p>因为线程 B 读到的，<strong>未必是线程 A 刚写的值</strong> ——
+编译优化和 CPU 缓存都可能在中间重排指令。</p>
+<p><mark class="mk-blue">IPC 好歹有显式的消息边界（收到了就是收到了），共享内存没有。</mark></p>
+<p><mark class="mk-green">这就是「加了锁就万事大吉」这句话不成立的原因：
+锁解决互斥，不解决可见性。</mark></p>
+</div>
+    </div><h3 id="边界三-调度成本">边界三 · 调度成本</h3>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>项</th><th>多进程</th><th>多线程</th></tr></thead><tbody><tr><th>地址空间</th><td data-label="多进程">必换页表</td><td data-label="多线程">不换</td></tr><tr><th>TLB</th><td data-label="多进程"><span class="tag tone-green">按 PCID / ASID 可以保留</span></td><td data-label="多线程">直接复用</td></tr><tr><th>缓存工作集</th><td data-label="多进程"><span class="tag tone-red">全部重新热身</span></td><td data-label="多线程"><span class="tag tone-red"><strong>仍然</strong>要重新热身</span></td></tr><tr><th>创建成本</th><td data-label="多进程">高（资源整套）</td><td data-label="多线程">低（只新建执行流）</td></tr></tbody></table></div><div class="callout tone-amber">
+      <span class="ic">🧊</span>
+      <div><p><strong>结论是「线程更省，但省的主要是地址空间切换那一块」。</strong></p>
+<p>缓存污染两头都逃不掉：不同线程的<strong>工作集本来就不同</strong>，
+就算省掉了页表切换，新任务的活还是要把旧任务的缓存挤出去。</p>
+<p><mark class="mk-green">所以「进程切换比线程切换慢几个数量级」是过度简化 ——
+现代 CPU 用 PCID/ASID 给 TLB 项打进程标签，进程切换不必全量刷 TLB，
+两者差距在缩小。量级参考：线程切换约 1.2~1.5 微秒，
+goroutine 切换约 170 纳秒（完全不进内核）。</mark></p>
+</div>
+    </div><hr>
+<h2 id="谱系两端是同一条尺子"><span class="num">06</span>谱系：两端是同一条尺子</h2>
+<p>把坐标拉到底，四个概念排成一条连续的谱：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>位置</th><th>共享什么</th><th>由谁调度</th><th>故障传到哪</th></tr></thead><tbody><tr><th><mark class="mk-blue">容器</mark></th><td data-label="共享什么">切出命名空间，共享内核</td><td data-label="由谁调度">内核</td><td data-label="故障传到哪">容器内，不波及宿主机</td></tr><tr><th><mark class="mk-blue">进程</mark></th><td data-label="共享什么">各一份资源域</td><td data-label="由谁调度">内核</td><td data-label="故障传到哪">进程内</td></tr><tr><th><mark class="mk-blue">线程</mark></th><td data-label="共享什么">共享进程资源域</td><td data-label="由谁调度">内核</td><td data-label="故障传到哪">同进程的线程共担</td></tr><tr><th><mark class="mk-blue">协程</mark></th><td data-label="共享什么"><span class="tag tone-red">共享一切</span></td><td data-label="由谁调度"><span class="tag tone-amber">用户态调度器</span></td><td data-label="故障传到哪"><span class="tag tone-red">整个进程</span></td></tr></tbody></table></div><p><mark class="mk-blue">一眼看穿：从容器到协程,是「共享越来越多、调度越来越轻」的连续谱。</mark></p>
+<div class="callout tone-violet">
+      <span class="ic">🪜</span>
+      <div><p><strong>四个概念，四个问题：</strong></p>
+<table>
+<thead>
+<tr>
+<th>概念</th>
+<th>回答的问题</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>进程</td>
+<td>我<strong>拥有什么</strong></td>
+</tr>
+<tr>
+<td>线程</td>
+<td>我<strong>从哪里继续执行</strong></td>
+</tr>
+<tr>
+<td>协程</td>
+<td>我<strong>等的时候还能干嘛</strong></td>
+</tr>
+<tr>
+<td>容器</td>
+<td><strong>谁和谁</strong>共享一个世界</td>
+</tr>
+</tbody>
+</table>
+<p><mark class="mk-green">四个问题共用同一把刻度尺：<strong>共享与隔离</strong>。</mark></p>
+<p>理解了这把尺子，再学调度器、虚拟内存、容器原理的时候，
+每个新概念都能在谱系上找到自己的位置 —— 而不是当一个孤立的知识点记住。</p>
+</div>
+    </div><hr>
+<div class="quiz"><details>
+        <summary>「进程包含线程」和「多个 task 共享一组资源」，哪句对？</summary>
+        <div class="a"><p>都对，只是站在不同抽象层。
+「进程包含线程」是应用层的嵌套视角，好用是因为资源生命周期真的挂在进程上 ——
+kill 一个 PID，内核会遍历整个线程组把它收掉。
+「多个 task 共享资源」是内核实现视角，才是真相，因为调度器面前根本没有进程，只有 task。
+两者不矛盾：应用层的「进程」，就是内核里共享同一资源域的那组 task。</p>
+</div>
+      </details><details>
+        <summary>协程和线程都能跑、都有栈，分界线在哪？</summary>
+        <div class="a"><p>在「能不能被内核独立调度、独立阻塞」。
+线程是内核认识的对象，能被内核独立调度、独立阻塞、独立抢占；
+协程内核看不见，让不让出由用户态调度器说了算。
+所以要警惕一个常见误解：协程省的是<strong>调度开销</strong>（goroutine 切换约 170 纳秒，
+完全不进内核），不是故障域 —— 它还是跑在同一个进程里，一个协程写坏内存整个进程陪葬。</p>
+</div>
+      </details><details>
+        <summary>「加了锁就万事大吉」这句话哪里不成立？</summary>
+        <div class="a"><p>锁解决互斥，但不解决可见性。
+线程 B 读到的未必是线程 A 刚写的值 —— 编译优化和 CPU 缓存都可能在中间重排指令。
+进程间走 IPC 反而没这个问题，因为消息有显式的边界（收到了就是收到了）；
+共享内存没有边界，所以除了锁还要处理原子操作与内存序。
+这也是「线程共享省了拷贝、却付出了更难的代价」的具体含义。</p>
+</div>
+      </details><details>
+        <summary>为什么说线程切换「省一点」而不是「省一个数量级」？</summary>
+        <div class="a"><p>线程节省的只是地址空间切换那一块（不换页表），缓存工作集照样要重新热身 ——
+因为不同线程的工作集本来就不同，新任务跑起来还是要把旧任务的缓存挤出去。
+而且现代 CPU 用 PCID/ASID 给 TLB 项打进程标签，
+进程切换不必全量刷 TLB，两者的差距还在缩小。
+量级参考：线程切换约 1.2~1.5 微秒，goroutine 切换约 170 纳秒。</p>
+</div>
+      </details><details>
+        <summary>容器和线程都说「轻」，轻的是同一回事吗？</summary>
+        <div class="a"><p>不是，这是最容易混的一句。
+线程轻，是因为它共享进程资源域 —— 不新建地址空间、不重建文件表，只复制几个指针。
+容器轻，是因为它共享宿主机的<strong>内核</strong> —— 不用为每个容器启动一个操作系统。
+两者的隔离手段也完全不同：线程完全不隔离（共享地址空间），
+容器用 namespace 切出进程视图、文件树和网络栈。
+所以容器是「一组进程的包装」，是进程概念的延伸，不是执行流。</p>
+</div>
+      </details></div>
+
+    <footer>
+      <span>一把尺子：资源域 × 执行流</span>
+      <span>最后更新 2026-10-07 · 单文件可离线打开</span>
+    </footer>
+  </main>
+</div>
+
+<script src="../../assets/app.js"></script>
+</body>
+</html>

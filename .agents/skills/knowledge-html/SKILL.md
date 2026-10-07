@@ -911,7 +911,7 @@ text: |
 ==规则表告诉你「并列的概念该用 `cards`」，但真正会犯的错不是选错积木，
 而是**积木挑对了、箭头却多画了**。==
 
-```callout
+````callout
 tone: red
 icon: ↗
 text: |
@@ -937,7 +937,7 @@ text: |
   | 这几个东西**都属于** X | `flow` + 空边 | `tree` |
   | 这几个东西**并列对比** | `flow` + 空边 | `compare` |
   | 这几个东西是**一份清单** | `flow` + 空边 | `cards` |
-```
+````
 
 **自检**：把每条边读一遍，问自己「**这条边代表什么关系**」。
 
@@ -1701,14 +1701,14 @@ text: |
 | `summary` | 小结 |
 | `raw` | 直接写 HTML |
 
-**交互控件 36 个**（在 `assets/app.js` 的 `WIDGETS` 里，供 `demo` 积木引用）：
+**交互控件 39 个**（在 `assets/app.js` 的 `WIDGETS` 里，供 `demo` 积木引用）：
 `polling-vs-cdc` `combination-count` `join-lab` `on-vs-where` `knex-chain`
 `stepper` `tuner` `diff` `stream-modes` `operator-lab` `hashring` `partition-prune`
 `dsl-lab` `null-lab` `config-to-ui` `field-lineage` `count-dedup-lab`
 `row-to-catalog` `sql-inject-lab` `validate-lab` `sched-lab` `switch-cost`
 `io-models` `inode-trace` `link-refcount` `gmp-lab` `handoff-lab` `ipc-flow-lab`
 `runtime-timeline` `ns-view` `cg-limit` `poll-lab`
-`epoll-tables` `lt-vs-et` `thread-audit` `code-and-stacks`
+`epoll-tables` `lt-vs-et` `thread-audit` `code-and-stacks` `clone-lab` `isolation-spectrum` `fork-or-thread`
 
 **已知缺口**（按优先级）：
 

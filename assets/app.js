@@ -5439,6 +5439,388 @@
   };
 
   /* ============================================================
+     控件：clone-lab —— 「进程」和「线程」在 Linux 里差在哪几个开关
+     ------------------------------------------------------------
+     这个控件存在的理由：把「进程 vs 线程」从两个**类**降级成
+     一组**逐资源的开关**。用户自己勾一勾就会看到：
+       · 全不勾       -> fork()，两个独立的资源域（进程）
+       · 四个全勾     -> pthread_create()，共享一份资源（线程）
+       · 勾一部分     -> Linux 允许，而且没有标准名字
+       · 一个不勾但开 NEW* -> 同一套机制造出来的是容器
+     最后一档是关键：共享在 clone 里是**连续刻度**，不是二选一。
+
+     config:
+       shared:   默认勾上的正向开关（数组）
+       unshared: 默认勾上的反向开关（数组）
+  ============================================================ */
+  WIDGETS['clone-lab'] = (root) => {
+    const cfg = cfgOf(root);
+    const box = mountOf(root);
+    const statusEl = root.querySelector('[data-status]');
+
+    const FWD = [
+      { k: 'CLONE_VM', d: '共享地址空间', why: '页表指针直接复用 —— 两个 task 看同一片内存' },
+      { k: 'CLONE_FILES', d: '共享打开文件表', why: 'A 打开的 fd，B 立刻看得见，连偏移量都共享' },
+      { k: 'CLONE_FS', d: '共享文件系统信息', why: '根目录、工作目录、umask 一起共享（chroot/chdir 改这里）' },
+      { k: 'CLONE_SIGHAND', d: '共享信号处理函数表', why: '任一线程改 SIGTERM 的处置，全组立即可见' },
+    ];
+    const REV = [
+      { k: 'CLONE_NEWNS', d: '另立 mount 命名空间', why: '挂载点自己一套 —— 容器的文件树从这来' },
+      { k: 'CLONE_NEWPID', d: '另立 PID 命名空间', why: '容器里看到的 PID 从 1 开始' },
+      { k: 'CLONE_NEWNET', d: '另立网络命名空间', why: '自己的网卡、路由表、端口空间' },
+    ];
+
+    const on = new Set(cfg.shared || ['CLONE_VM', 'CLONE_FILES', 'CLONE_FS', 'CLONE_SIGHAND']);
+    const rev = new Set(cfg.unshared || []);
+
+    const ctl = el('div', 'cl-ctl');
+
+    function group(title, list, set, cls) {
+      const g = el('div', 'cl-group ' + cls);
+      g.append(el('div', 'cl-ghead', title));
+      list.forEach((it) => {
+        const row = el('label', 'cl-row');
+        const cb = el('input', 'cl-cb');
+        cb.type = 'checkbox';
+        cb.checked = set.has(it.k);
+        cb.addEventListener('change', () => {
+          if (cb.checked) set.add(it.k); else set.delete(it.k);
+          draw();
+        });
+        const txt = el('div', 'cl-txt');
+        txt.append(el('code', 'cl-key', it.k));
+        txt.append(el('span', 'cl-desc', it.d));
+        row.append(cb, txt);
+        row.append(el('span', 'cl-why', it.why));
+        g.append(row);
+      });
+      return g;
+    }
+
+    ctl.append(group('clone() 的共享开关 · 正向', FWD, on, 'cl-fwd'));
+    ctl.append(group('反向开关 · 勾上表示「另立一个」', REV, rev, 'cl-rev'));
+
+    const verdict = el('div', 'cl-verdict');
+    const board = el('div', 'cl-board');
+    box.append(ctl, verdict, board);
+
+    /* 一个资源槽：左边 taskA 的指针，右边 taskB 的指针，
+       中间那条线是「指向同一份」还是「各指一份」。 */
+    function slot(name, shared, note) {
+      const row = el('div', 'cl-slot' + (shared ? ' is-shared' : ' is-own'));
+      row.append(el('span', 'cl-sname', name));
+      const left = el('span', 'cl-ptr', 'A');
+      const mid = el('span', 'cl-link', shared ? '※ 同一份' : ' ✕ 各有各的');
+      const right = el('span', 'cl-ptr', 'B');
+      row.append(left, mid, right);
+      if (note) row.append(el('span', 'cl-snote', note));
+      return row;
+    }
+
+    function draw() {
+      const nFwd = FWD.filter((f) => on.has(f.k)).length;
+      const nRev = REV.filter((f) => rev.has(f.k)).length;
+
+      let kind, tone, line1, line2;
+      if (nFwd === 0 && nRev === 0) {
+        kind = 'fork() —— 一个进程';
+        tone = 'violet';
+        line1 = '一个开关都没勾：资源全部各来一份。这正是 fork()。';
+        line2 = '新建的那份要付地址空间、页表、文件表的全套账。';
+      } else if (nFwd === 4 && nRev === 0) {
+        kind = 'pthread_create() —— 一个线程';
+        tone = 'green';
+        line1 = '四个正向开关全勾上：资源一份都不复制，只新建一个执行流。';
+        line2 = '新线程只复制几个指针 + 一个新内核栈 —— 这就是它便宜的全部原因。';
+      } else if (nFwd === 0 && nRev > 0) {
+        kind = '容器 —— 一组进程';
+        tone = 'amber';
+        line1 = '没有共享，但开了反向开关：资源照旧各一份，另外还切出了独立的命名空间。';
+        line2 = '注意容器的「轻」和线程的「轻」不是一回事：容器共享的是**内核**，隔离的是命名空间。';
+      } else if (nFwd > 0 && nRev > 0) {
+        kind = '半共享 + 独立命名空间';
+        tone = 'red';
+        line1 = '共享了一部分、又切出去一部分 —— 这是 Linux 允许的合法组合。';
+        line2 = '容器的实现正是「共享内核 + 切出命名空间」，而线程是「共享全部」。';
+      } else {
+        kind = '半共享的任务 —— 没有标准名字';
+        tone = 'amber';
+        line1 = `勾了 ${nFwd} 个正向开关，剩下的各来一份。`;
+        line2 = '这在别的内核里往往表达不出来 —— 共享在这里是**连续刻度**，不是二选一。';
+      }
+
+      const badge = el('div', 'cl-kind tone-' + tone);
+      badge.append(el('span', 'cl-klabel', '你造出来的是'));
+      badge.append(el('b', '', kind));
+      const p1 = el('p', 'cl-line'); richText(p1, line1);
+      const p2 = el('p', 'cl-line cl-dim'); richText(p2, line2);
+      fill(verdict, [badge, p1, p2]);
+
+      fill(board, [
+        slot('mm_struct · 地址空间', on.has('CLONE_VM'), on.has('CLONE_VM') ? '页表指针复用' : '整套页表要新造'),
+        slot('files_struct · 文件表', on.has('CLONE_FILES'), on.has('CLONE_FILES') ? 'fd 直接互相可见' : 'fd 从零开始'),
+        slot('fs_struct · 根目录/工作目录', on.has('CLONE_FS'), ''),
+        slot('sighand_struct · 信号处置', on.has('CLONE_SIGHAND'), ''),
+        slot('nsproxy · 命名空间', nRev === 0,
+          nRev === 0 ? '继承父进程的那一套' : `另立了 ${nRev} 个`),
+      ]);
+
+      if (statusEl) statusEl.textContent = kind;
+    }
+
+    draw();
+  };
+
+  /* ============================================================
+     控件：isolation-spectrum —— 把「容器/进程/线程/协程」摆在同一根轴上
+     ------------------------------------------------------------
+     这个控件存在的理由：这四个概念平时是分开背的，但它们其实是
+     **同一个刻度尺上的四个位置** —— 共享得越来越多、调度得越来越轻。
+
+     点一个，下面展开它的三行账：隔离什么 / 谁调度 / 故障传到哪。
+     让人自己发现：协程省的是调度，不是故障域；
+     容器和线程虽然都「轻」，轻的完全不是一回事。
+
+     config:
+       selected: 初始选中的项（默认 thread）
+  ============================================================ */
+  WIDGETS['isolation-spectrum'] = (root) => {
+    const cfg = cfgOf(root);
+    const box = mountOf(root);
+    const statusEl = root.querySelector('[data-status]');
+
+    const ITEMS = [
+      {
+        k: 'container', name: '容器', en: 'namespace + cgroup',
+        axis: '切出去',
+        iso: '进程视图 / 文件树 / 网络栈',
+        sched: '内核调度器',
+        fault: '关在容器内，不波及宿主机',
+        light: '共享的是**内核**',
+        q: '谁和谁共享一个世界？',
+      },
+      {
+        k: 'process', name: '进程', en: '资源域',
+        axis: '各一份',
+        iso: '地址空间',
+        sched: '内核调度器',
+        fault: '关在进程内，可单独清算',
+        light: '什么都要重新建一份',
+        q: '我拥有什么？',
+      },
+      {
+        k: 'thread', name: '线程', en: '执行流',
+        axis: '共享一份资源',
+        iso: '无',
+        sched: '内核调度器',
+        fault: '同进程的线程共担',
+        light: '省掉地址空间与文件表',
+        q: '我从哪里继续执行？',
+      },
+      {
+        k: 'coroutine', name: '协程 / goroutine', en: '用户态执行单元',
+        axis: '共享得最多',
+        iso: '无',
+        sched: '用户态调度器',
+        fault: '整个进程陪葬',
+        light: '连内核都不进',
+        q: '等的时候还能干嘛？',
+      },
+    ];
+
+    const axis = el('div', 'is-axis');
+    axis.append(el('span', 'is-axlabel', '共享得少 · 调度得重'));
+    axis.append(el('span', 'is-axline'));
+    axis.append(el('span', 'is-axlabel', '共享得多 · 调度得轻'));
+
+    const strip = el('div', 'is-strip');
+    const detail = el('div', 'is-detail');
+    box.append(axis, strip, detail);
+
+    let cur = cfg.selected || 'thread';
+
+    function draw() {
+      fill(strip, ITEMS.map((it) => {
+        const c = el('button', 'is-card' + (it.k === cur ? ' is-on' : ''));
+        c.type = 'button';
+        c.append(el('b', 'is-name', it.name));
+        c.append(el('span', 'is-en', it.en));
+        c.append(el('span', 'is-axis-tag', it.axis));
+        c.addEventListener('click', () => { cur = it.k; draw(); });
+        return c;
+      }));
+
+      const it = ITEMS.filter((x) => x.k === cur)[0] || ITEMS[2];
+      const rows = [
+        ['隔离什么', it.iso],
+        ['谁调度', it.sched],
+        ['故障传到哪', it.fault],
+        ['它省下的是什么', it.light],
+      ];
+      const head = el('div', 'is-head');
+      head.append(el('b', '', it.name));
+      head.append(el('span', 'is-en', it.en));
+      const q = el('span', 'is-q'); richText(q, '它回答的问题是：' + it.q);
+
+      const tbl = el('div', 'is-tbl');
+      rows.forEach((r) => {
+        const row = el('div', 'is-trow' + (r[0] === '故障传到哪' ? ' is-fault' : ''));
+        row.append(el('span', 'is-tk', r[0]));
+        const tv = el('span', 'is-tv'); richText(tv, r[1]);
+        row.append(tv);
+        tbl.append(row);
+      });
+
+      fill(detail, [head, q, tbl]);
+      if (statusEl) statusEl.textContent = it.name;
+    }
+
+    draw();
+  };
+
+  /* ============================================================
+     控件：fork-or-thread —— 走一遍真实的检查顺序
+     ------------------------------------------------------------
+     这个控件存在的理由：那句口诀「CPU 密集用进程、I/O 密集用线程」
+     把一个多维权衡压成了一维。让人**自己走一遍**检查顺序，
+     比在正文里列七条维度有用 —— 因为走完之后他会发现，
+     阻塞特征（口诀讲的那个）排在第五问，前面还有四问挡着。
+
+     走完后把**路径**也留着：那是「我为什么得到这个结论」的凭据，
+     不是黑箱给的一个答案。
+
+     config:
+       start: 起始节点
+  ============================================================ */
+  WIDGETS['fork-or-thread'] = (root) => {
+    const cfg = cfgOf(root);
+    const box = mountOf(root);
+    const statusEl = root.querySelector('[data-status]');
+
+    const T = {
+      q0: {
+        q: '任务之间需要独立的故障域 / 安全边界吗？',
+        why: '跑不可信代码、崩溃必须隔离时，这一条是硬需求 —— 没有替代方案。',
+        opts: [
+          { label: '需要', to: 'v_isolation', note: '跑用户脚本、渲染不可信内容、高风险计算' },
+          { label: '不需要', to: 'q1' },
+        ],
+      },
+      q1: {
+        q: '任务之间要直接共享同一份内存状态吗？',
+        why: '共享多且读写频繁时，线程的零拷贝优势明显；反过来，高频小消息走 IPC 的序列化成本会吃掉一切。',
+        opts: [
+          { label: '要，而且读写频繁', to: 'v_share' },
+          { label: '不要，或者本来就靠消息通信', to: 'q2' },
+        ],
+      },
+      q2: {
+        q: '任务的主要特征是什么？',
+        why: '到这里才轮到口诀讲的那个维度 —— 它排在第五问，不是第一问。',
+        opts: [
+          { label: '大量等待 I/O', to: 'v_eventloop' },
+          { label: 'CPU 密集', to: 'q3' },
+        ],
+      },
+      q3: {
+        q: '运行时里，线程能不能真并行？',
+        why: '同一个问题，答案随语言运行时改变 —— 这是口诀最坑人的地方。',
+        opts: [
+          { label: '能（C++ / Java / Go）', to: 'v_thread' },
+          { label: '不能（Python 的 GIL）', to: 'v_gil' },
+        ],
+      },
+      v_isolation: {
+        verdict: '进程', tone: 'violet',
+        line: '隔离是硬需求，直接进程化，不用往下问。',
+        cost: '代价：固定开销更高（每个进程一套页表与资源结构），跨进程共享要走 IPC。',
+        ex: '浏览器站点隔离、跑用户脚本的沙箱、第三方编译服务。',
+      },
+      v_share: {
+        verdict: '线程 —— 但要准备好锁', tone: 'green',
+        line: '共享状态直接读写，省掉拷贝和序列化。',
+        cost: '代价：数据竞争、原子操作、内存可见性都要自己扛；故障域也变成整个进程。',
+        ex: '共享只读缓存 + 频繁读写同一份内存状态的计算任务。',
+      },
+      v_eventloop: {
+        verdict: '事件循环 + 小线程池', tone: 'amber',
+        line: '高连接数场景的正确答案通常不是「更多线程」。',
+        cost: '事件循环负责等待，线程池负责会阻塞的活（磁盘、同步库）；线程池规模取核数级别即可。',
+        ex: '十万连接的网关 —— 不靠十万线程，靠 epoll/kqueue 加一个核数级线程池。',
+      },
+      v_thread: {
+        verdict: '线程', tone: 'green',
+        line: 'CPU 密集 + 运行时支持真并行 → 线程最轻。',
+        cost: '代价：缓存工作集互相污染（两头都逃不掉），线程数上限受内核资源限制。',
+        ex: 'C++ / Rust / Go 里的并行计算；Java 的 fork-join。',
+      },
+      v_gil: {
+        verdict: '进程', tone: 'violet',
+        line: 'Python 的 GIL 让线程拿不到真并行，CPU 密集只能靠进程绕过去。',
+        cost: '代价：IPC 复杂度 + 更高的内存开销（每个进程一份解释器状态）。',
+        ex: 'Python 的 multiprocessing / concurrent.futures.ProcessPoolExecutor。',
+      },
+    };
+
+    const trail = el('div', 'ft-trail');
+    const quiz = el('div', 'ft-quiz');
+    const out = el('div', 'ft-out');
+    box.append(trail, quiz, out);
+
+    let path = [];
+    let cur = cfg.start || 'q0';
+
+    function draw() {
+      fill(trail, [el('span', 'ft-tlabel', '你走过的路')].concat(
+        path.length
+          ? path.map((p) => el('span', 'ft-step', p))
+          : [el('span', 'ft-step ft-start', '从第一问开始')]
+      ));
+
+      const node = T[cur];
+      if (node.opts) {
+        const q = el('div', 'ft-q');
+        q.append(el('b', '', node.q));
+        const why = el('p', 'ft-why'); richText(why, node.why);
+        q.append(why);
+        const btns = el('div', 'ft-btns');
+        node.opts.forEach((o) => {
+          const b = el('button', 'ft-opt' + (o.to[0] === 'v' ? ' ft-final' : ''));
+          b.type = 'button';
+          b.append(el('span', 'ft-optlab', o.label));
+          if (o.note) b.append(el('span', 'ft-optnote', o.note));
+          b.addEventListener('click', () => {
+            path = path.concat([o.label]);
+            cur = o.to;
+            draw();
+          });
+          btns.append(b);
+        });
+        fill(quiz, [q, btns]);
+        fill(out, []);
+      } else {
+        fill(quiz, []);
+        const v = el('div', 'ft-verdict tone-' + node.tone);
+        const head = el('div', 'ft-vhead');
+        head.append(el('span', 'ft-vlabel', '结论'));
+        head.append(el('b', '', node.verdict));
+        const l = el('p', 'ft-vline'); richText(l, node.line);
+        const c = el('p', 'ft-vcost'); richText(c, node.cost);
+        const e = el('p', 'ft-vex'); richText(e, '典型：' + node.ex);
+        const again = el('button', 'ft-again', '↺ 换一组条件再走一遍');
+        again.type = 'button';
+        again.addEventListener('click', () => { path = []; cur = cfg.start || 'q0'; draw(); });
+        fill(out, [v, head, l, c, e, again]);
+        v.append(head); v.append(l); v.append(c); v.append(e); v.append(again);
+        fill(out, [v]);
+      }
+      if (statusEl) statusEl.textContent = node.opts ? node.q : node.verdict;
+    }
+
+    draw();
+  };
+
+  /* ============================================================
      控件：thread-audit —— 一连接一线程，亏的到底是什么
      ------------------------------------------------------------
      这个控件存在的唯一理由，是拆掉那个被到处引用的错误论据：
