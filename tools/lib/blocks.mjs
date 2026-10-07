@@ -610,13 +610,39 @@ const KIND_TONE = {
       );
     }
     const svg = fs.readFileSync(file, 'utf8');
-    return `<figure class="archfig" data-arch>
+
+    /* 可选的交互数据。
+       ------------------------------------------------------------
+       图还是 archify 出的（几何、校验、渲染都不归我们），这里加的只是
+       **语义层**：每个零件的说明、几个「我熟悉 ___」的入口、几条导览。
+
+       为什么要加：原则 ②「整体图」说得很清楚 —— 整体图零件多，
+       读者需要一个**入口**（从他本来就懂的那个零件进去），而不是从头看起。
+       而这件事 archify 的 viewer 不做（它做的是聚焦和 Semantic Passport）。
+
+       写成 data-* 属性而不是内联 <script>：属性会被 escapeXml 处理，
+       不用在 markdown 管道里再想办法防止闭合标签被破坏。 */
+    const attrs = [];
+    const put = (k, v) => {
+      if (v === undefined) return;
+      attrs.push(`data-${k}='${JSON.stringify(v).replace(/'/g, '&#39;')}'`);
+    };
+    put('parts', cfg.parts);
+    put('anchors', cfg.anchors);
+    put('tours', cfg.tours);
+
+    const hasUI = cfg.anchors || cfg.tours || cfg.parts;
+    const hint = hasUI
+      ? `<span class="idle">点头上的任意一个框看它的关系；或者从下面的「我熟悉」进去</span>`
+        + `<span class="focused">再点一次空白处取消</span>`
+      : `<span class="idle">点头上的任意一个框，只看它和它连出去的关系</span>`
+        + `<span class="focused">再点一次空白处取消</span>`;
+
+    return `<figure class="archfig" data-arch${hasUI ? ' data-pano' : ''}${attrs.length ? ' ' + attrs.join(' ') : ''}>
       ${svg}
       ${cfg.caption ? `<figcaption>${inline(cfg.caption)}</figcaption>` : ''}
-      <p class="arch-hint">
-        <span class="idle">点头上的任意一个框，只看它和它连出去的关系</span>
-        <span class="focused">再点一次空白处取消</span>
-      </p>
+      ${hasUI ? '<div class="pano-ui"></div>' : ''}
+      <p class="arch-hint">${hint}</p>
     </figure>`;
   }
 

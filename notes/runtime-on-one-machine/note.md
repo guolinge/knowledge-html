@@ -1,3 +1,50 @@
+```arch
+svg: container-machine
+caption: 「容器」不是一个东西，是一个**框** —— 把「一个进程 + 它挂的三样属性」圈起来的那个圈。注意框外面那两样：内核和镜像层不在任何容器里，这才是「容器轻」的答案。
+parts:
+  procA:
+    label: nginx 进程
+    sub: 真实存在的东西
+    detail: ==内核里根本没有「容器」这个对象==。`docker ps` 看到的那一行，在系统眼里就是**这一个普通进程** —— 跟你在本机直接跑一个 nginx 没有区别。
+  nsA:
+    label: 一组 namespace
+    detail: 决定它**能看见什么**：哪些别的进程、哪块网卡、哪棵树。不是「隔离出一块内存」，而是「换一份名字表」。
+  cgA:
+    label: 一个 cgroup
+    detail: 决定它**最多能用多少** CPU、内存、IO。
+  rootA:
+    label: 一个 rootfs
+    detail: 它看到的 `/` 长什么样 —— 由镜像的只读层叠出来，再加一层可写的。
+  procB:
+    label: java 进程
+    sub: 完全同构
+    detail: 第二个容器。它的价值和第一个一样，只是**证明这不是特例**。
+  kernel:
+    label: Linux 内核
+    sub: 全机器就一个
+    detail: ==容器共享的就是它。== 一个内核服务这台机器上所有的容器 —— 这就是「容器轻」的全部原因：不用为每个容器启动一个操作系统。注意它在这个框里，但**不在任何容器框里**。
+  image:
+    label: 镜像只读层
+    sub: 磁盘上只有一份
+    detail: 所有基于同一个镜像的容器，==在磁盘上共用同一份只读层==。多出来的只是各自那层可写的。
+anchors:
+  - { part: procA,  label: "我想看清「一个容器」" }
+  - { part: kernel, label: "我从内核这头看" }
+  - { part: image,  label: "我从镜像这头看" }
+tours:
+  - id: what-is-container
+    label: "「容器」到底是什么"
+    steps:
+      - { at: [procA], text: "先从最实在的东西开始：==一个普通进程==。把你的 `docker ps` 和 `ps aux` 对上，就是这一个。" }
+      - { at: [procA, nsA, cgA, rootA], text: "`docker run nginx` 在系统眼里是：==fork 一个进程，然后给这个进程挂上三样属性==。\n\n注意这三样是**并列挂在进程上**的 —— 不是「进程导致 namespace 导致 cgroup」那种链。" }
+      - { at: [procA, nsA, cgA, rootA], text: "==把「进程 + 它挂的这几样」圈起来，那个圈就是「容器」。==\n\n圈是人画的，不是内核画的 —— 内核里没有这个对象。" }
+      - { at: [kernel], text: "圈外面是==共用的内核==。一个内核服务这台机器上所有容器 —— 容器共享的是它，不是「又一个操作系统」。" }
+      - { at: [kernel, procA, procB], text: "==同一个内核，1 对 N==。这是「容器轻」的全部原因。" }
+      - { at: [image, rootA, rootB], text: "镜像的只读层也一样：==磁盘上一份，N 个容器共用==。每个容器多出来的只是自己那层可写的。" }
+```
+
+---
+
 ## 01 · 那张「分层图」错在哪
 
 你手上那份回答，把这几样东西叠成了一根竖轴：

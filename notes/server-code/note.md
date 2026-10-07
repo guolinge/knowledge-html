@@ -1,3 +1,91 @@
+```arch
+svg: conn-establish
+caption: ==从左到右读，这就是「accept 干的事」的全部。== 注意中间那条往下的线：accept 队列挂在监听 socket 名下；而最右边那格是 accept 真正动过的地方。
+parts:
+  calls:
+    label: socket() bind() listen()
+    sub: 起手三件事
+    detail: ==这三个调用只是让内核里出现一个对象，并给它一个地址。== 它们不产生任何连接，也不收发任何数据。
+  lsock:
+    label: 监听 socket
+    sub: TCP_LISTEN · 没有对端
+    detail: 一个端口一个。==它自己不传数据==，全部工作就是等新连接。从进程启动到进程结束，它一直在那守着。
+  nic:
+    label: 网卡
+    detail: SYN 从这里进来。网卡不认识 socket，它只认识包。
+  tcp:
+    label: TCP 协议栈
+    sub: 拆包 / 完成握手
+    detail: ==三次握手是内核替你完成的，你的程序不需要在场。==
+  conn:
+    label: 连接 socket
+    sub: 握手完成的这一刻就建好了
+    detail: ==它出现的时候，还没有 fd，也不属于任何进程。== 一个完整的、但没有主人的内核对象 —— 这是理解 accept 的关键。
+  accq:
+    label: accept 队列
+    detail: 已经建好、等你去取的连接排在这。长度由 `listen()` 的 `backlog` 决定，上限是 `net.core.somaxconn`。
+  fdtable:
+    label: fd 表
+    sub: accept 在这里开一格
+    detail: ==这才是 accept 真正动过的地方。== 它不在连接 socket 上动任何手脚，只是在你的 fd 表里新建一格，指过去。
+anchors:
+  - { part: conn, label: "我想搞清「一条连接」" }
+  - { part: fdtable, label: "accept 到底动了什么" }
+  - { part: lsock, label: "我从监听 socket 看" }
+tours:
+  - id: establish
+    label: "一条连接的一生"
+    steps:
+      - { at: [calls, lsock], text: "起手三件事，内核里出现==一个监听 socket==。它守着 `0.0.0.0:80`，不传数据，也不知道会跟谁说话。" }
+      - { at: [nic, tcp], text: "浏览器发来 SYN。包从==网卡==进来，被==协议栈==拆开。" }
+      - { at: [tcp, conn], text: "==握手完成的那一刻，内核就把连接 socket 建好了== —— 就在协议栈里。" }
+      - { at: [conn], text: "注意它现在的处境：==对象已经完整存在，但还没有 fd，也不属于任何进程。== 你的代码够不到它。" }
+      - { at: [conn, accq, lsock], text: "它被放进==accept 队列== —— 这条队列挂在监听 socket 名下。" }
+      - { at: [accq, fdtable], text: "==accept 做的事只有一件：在你的 fd 表里开一格，指向那个已经存在的连接 socket。==\n\n所以 accept 干的是**交付**，不是**创建** —— 它不产生任何新的内核对象，只是把一根线接上了。" }
+```
+
+```arch
+svg: conn-wakeup
+caption: 数据来了之后，内核怎么把你那条被冻住的执行流重新捡起来。==全程你的程序只参与了最后一步。==
+parts:
+  nic:
+    label: 网卡
+    detail: 包到达。网卡不认识 socket，它只知道「来了一串字节」。
+  tcp:
+    label: TCP 协议栈
+    detail: 拆开包，看四元组（服务端 IP/端口 + 客户端 IP/端口）。
+  conn:
+    label: 连接 socket
+    detail: ==按四元组找到这是哪条连接，数据落进它的接收缓冲。== 注意这是**每条连接各自一份**的。
+  thread:
+    label: 主线程 · 栈
+    detail: 唤醒之前，这条执行流被冻在这里。==被冻住的是「一条执行流」，不是整个进程。==
+  runq:
+    label: 就绪队列
+    detail: 被唤醒的 task 回到这里，等调度器挑。
+  cpu:
+    label: CPU 核
+    detail: 真正执行你代码的地方。
+  rw:
+    label: read() 返回
+    detail: 数据到了你的手上。
+anchors:
+  - { part: conn, label: "我想搞清「一条连接」" }
+  - { part: thread, label: "我熟悉线程" }
+  - { part: nic, label: "我从网卡这头看" }
+tours:
+  - id: wakeup
+    label: "数据到了，怎么唤醒你的代码"
+    steps:
+      - { at: [nic, tcp], text: "包到达==网卡==，被==协议栈==拆开 —— 协议栈认的是包，不是 socket。" }
+      - { at: [conn], text: "按四元组找到属于哪条连接，数据落进==这条连接自己的接收缓冲==。" }
+      - { at: [thread, conn], text: "数据到了，内核==唤醒==挂在这条连接等待队列上的那条执行流。\n\n唤醒之前，你的线程就在==主线程的栈==上被冻着 —— 冻住的是**一条执行流**，不是整个进程。" }
+      - { at: [runq, cpu], text: "被唤醒的 task 回到==就绪队列==，==调度器==挑中它，==CPU== 开始跑。" }
+      - { at: [rw], text: "`read` 返回，数据到了你手上。\n\n==从网卡到这里，你的程序只参与了最后一步。==" }
+```
+
+---
+
 ## 01 · 先看那段代码
 
 一个最朴素的服务器，核心就这十几行：

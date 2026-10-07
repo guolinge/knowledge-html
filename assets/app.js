@@ -1124,6 +1124,37 @@
     if (document.fonts && document.fonts.ready) document.fonts.ready.then(drawAll);
   })();
 
+  const el = (tag, cls, text) => {
+    const n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text !== undefined) n.textContent = text;
+    return n;
+  };
+  const cfgOf = (root) => {
+    try { return JSON.parse(root.getAttribute('data-config') || '{}'); }
+    catch { return {}; }
+  };
+  const mountOf = (root) => root.querySelector('[data-mount]') || root;
+
+  /* 行内轻量标记 —— 控件这边拼出来的文字要用到和积木一样的强调写法。
+     积木那边是构建期的 tools/lib/blocks.mjs 在做，控件跑在浏览器里拿不到它，
+     所以这里实现一份**最小**的：==强调== / **重音** / `代码`。
+     只处理这三种，别往里加东西 —— 两边逻辑越像，越容易漂移。 */
+  const richText = (host, text) => {
+    const src = String(text == null ? '' : text);
+    const re = /==([^=]+)==|\*\*([^*]+)\*\*|`([^`]+)`/g;
+    let last = 0, m;
+    while ((m = re.exec(src))) {
+      if (m.index > last) host.append(document.createTextNode(src.slice(last, m.index)));
+      if (m[1] !== undefined) host.append(el('span', 'hl-tag', m[1]));
+      else if (m[2] !== undefined) host.append(el('strong', '', m[2]));
+      else host.append(el('code', '', m[3]));
+      last = m.index + m[0].length;
+    }
+    if (last < src.length) host.append(document.createTextNode(src.slice(last)));
+    return host;
+  };
+
   /* ============================================================
      arch 积木的聚焦交互
      ------------------------------------------------------------
@@ -1200,11 +1231,212 @@
 
       // 点图以外的空白 / Esc 取消
       document.addEventListener('click', function (ev) {
-        if (!fig.contains(ev.target)) clear();
+        /* ⚠️ 必须跳过**已经脱离 DOM** 的元素。
+           踩过：锚点按钮的点击处理里会重建按钮条，事件冒泡到这里时
+           ev.target 已经是那个被换掉的旧按钮 —— fig.contains() 返回 false，
+           于是一条「点到图外了」把刚点亮的高亮当场清掉，表现为「点了没反应」。 */
+        if (!ev.target.isConnected) return;
+        if (!fig.contains(ev.target)) { uiClear(); clear(); }
       });
       document.addEventListener('keydown', function (ev) {
-        if (ev.key === 'Escape') clear();
+        if (ev.key === 'Escape') { uiClear(); clear(); }
       });
+
+      /* ============================================================
+         语义层：入口 / 导览 / 面板
+         ------------------------------------------------------------
+         图是 archify 出的（几何、校验、渲染都不归我们）。
+         这里加的只有**语义**：每个零件的说明、几个「我熟悉 ___」的入口、
+         几条导览。原则 ②「整体图」要的就是这三样 ——
+         整体图零件多，读者需要一个入口，而不是从头看起。
+
+         实现上全部复用上面那两个函数（focus / clear）：它们已经在
+         SVG 的属性上做筛选，不需要再解析拓扑。
+         ============================================================ */
+      if (!fig.hasAttribute('data-pano')) return;
+      var mount = fig.querySelector('.pano-ui');
+      if (!mount) return;
+
+      var meta = {};
+      ['parts', 'anchors', 'tours'].forEach(function (k) {
+        try { meta[k] = JSON.parse(fig.getAttribute('data-' + k) || 'null'); }
+        catch (e) { meta[k] = null; }
+      });
+      var partsMeta = meta.parts || {};
+      var anchors = meta.anchors || [];
+      var tours = meta.tours || [];
+      var tourIdx = -1, stepIdx = 0;
+
+      var bar = el('div', 'pano-anchors');
+      var tabs = el('div', 'pano-tabs');
+      var panel = el('div', 'pano-panel');
+      mount.append(bar, tabs, panel);
+      // UI 区里的点击不参与「点空白取消」—— 它和图是两件事
+      mount.addEventListener('click', function (ev) { ev.stopPropagation(); });
+
+      /** 点亮一组节点（导览用）。和 focus 的区别：focus 是「一个 + 它的邻居」，这里是「指定的几个」 */
+      function focusMany(ids) {
+        clear();
+        var want = {};
+        ids.forEach(function (i) { want[i] = true; });
+        nodes.forEach(function (n) {
+          var on = !!want[n.getAttribute('data-node-id')];
+          n.classList.toggle('is-hot', on);
+        });
+        edges.forEach(function (e) {
+          var on = want[e.getAttribute('data-edge-from')] && want[e.getAttribute('data-edge-to')];
+          e.classList.toggle('is-hot', on);
+        });
+        fig.setAttribute('data-focus', 'tour');
+      }
+
+      function uiClear() { tourIdx = -1; stepIdx = 0; }
+
+      function drawBar() {
+        if (!anchors.length) { bar.hidden = true; return; }
+        bar.textContent = '';
+        bar.append(el('span', 'pano-tlabel', '我熟悉'));
+        anchors.forEach(function (a) {
+          var b = el('button', 'pano-anchor');
+          b.type = 'button';
+          b.textContent = a.label;
+          b.addEventListener('click', function () {
+            uiClear();
+            focus(a.part);
+            showPart(a.part);
+            drawBar(); drawTabs();
+          });
+          return bar.append(b);
+        });
+      }
+
+      function relRow(arrow, otherId, label) {
+        var row = el('div', 'pano-relrow');
+        row.append(el('span', 'pano-arrow', arrow));
+        var m = partsMeta[otherId];
+        row.append(el('span', 'pano-relname', (m && m.label) || otherId));
+        var t = el('span', 'pano-rellab');
+        richText(t, label || '（连线）');
+        row.append(t);
+        if (partsMeta[otherId]) {
+          var go = el('button', 'pano-goto', '看它');
+          go.type = 'button';
+          go.addEventListener('click', function () { uiClear(); focus(otherId); showPart(otherId); });
+          row.append(go);
+        }
+        return row;
+      }
+
+      function showPart(id) {
+        var m = partsMeta[id] || {};
+        panel.textContent = '';
+        var head = el('div', 'pano-phead');
+        head.append(el('b', '', m.label || id));
+        if (m.sub) head.append(el('span', 'pano-pen', m.sub));
+        panel.append(head);
+        if (m.detail) {
+          var d = el('p', 'pano-pdetail');
+          richText(d, m.detail);
+          panel.append(d);
+        }
+        /* archify 的 SVG 里，一条边的**标签**是另一个元素，也带着
+           data-edge-from/to —— 直接遍历会把同一条边数两遍（面板里出现两行一样的）。
+           所以按 from|to 去重：一头一尾只算一条关系。 */
+        var outs = [], ins = [], seen = {};
+        var addRel = function (list, other, e) {
+          var k = e.getAttribute('data-edge-from') + '|' + e.getAttribute('data-edge-to');
+          if (seen[k]) return;
+          seen[k] = 1;
+          list.push({ other: other, e: e });
+        };
+        edges.forEach(function (e) {
+          var from = e.getAttribute('data-edge-from'), to = e.getAttribute('data-edge-to');
+          if (from === id) addRel(outs, to, e);
+          else if (to === id) addRel(ins, from, e);
+        });
+        var rel = el('div', 'pano-rel');
+        outs.forEach(function (o) { rel.append(relRow('→', o.other, o.e.getAttribute('data-edge-label'))); });
+        ins.forEach(function (o) { rel.append(relRow('←', o.other, o.e.getAttribute('data-edge-label'))); });
+        if (!outs.length && !ins.length) rel.append(el('p', 'pano-relrow', '它在这张图上没有连线。'));
+        panel.append(rel);
+        var back = el('button', 'pano-clear', '✕ 取消选中，看全图');
+        back.type = 'button';
+        back.addEventListener('click', function () { uiClear(); clear(); drawTabs(); showHint(); });
+        panel.append(back);
+      }
+
+      function showTour() {
+        var t = tours[tourIdx];
+        if (!t) return;
+        var st = t.steps[stepIdx];
+        focusMany(st.at || []);
+        panel.textContent = '';
+        var head = el('div', 'pano-phead');
+        head.append(el('b', '', t.label));
+        head.append(el('span', 'pano-pen', '第 ' + (stepIdx + 1) + ' / ' + t.steps.length + ' 步'));
+        panel.append(head);
+        var d = el('p', 'pano-pdetail');
+        richText(d, st.text);
+        panel.append(d);
+        var nav = el('div', 'pano-nav');
+        var prev = el('button', 'pano-nb', '‹ 上一步');
+        prev.type = 'button';
+        prev.disabled = stepIdx === 0;
+        prev.addEventListener('click', function () { if (stepIdx > 0) { stepIdx--; showTour(); } });
+        var next = el('button', 'pano-nb pano-next',
+          stepIdx >= t.steps.length - 1 ? '走完了，回到自由探索' : '下一步 ›');
+        next.type = 'button';
+        next.addEventListener('click', function () {
+          if (stepIdx < t.steps.length - 1) { stepIdx++; showTour(); }
+          else { tourIdx = -1; clear(); drawTabs(); showHint(); }
+        });
+        nav.append(prev, next);
+        panel.append(nav);
+      }
+
+      function showHint() {
+        panel.textContent = '';
+        var head = el('div', 'pano-phead');
+        head.append(el('b', '', '从你已经知道的那个东西出发'));
+        panel.append(head);
+        var p1 = el('p', 'pano-pdetail');
+        richText(p1, '上面那排「我熟悉」是==入口== —— 挑一个你本来就懂的零件，'
+          + '图会只点亮==它和它直接相关的那几个==，这里同时列出每一根线是什么意思。');
+        panel.append(p1);
+        var p2 = el('p', 'pano-pdetail');
+        richText(p2, '之后 ==点图上任何被点亮的零件，它就变成新的中心==，邻域跟着走 —— '
+          + '你就是这么一步步把不熟的东西接到熟的东西上的。');
+        panel.append(p2);
+        if (tours.length) {
+          var p3 = el('p', 'pano-phint');
+          richText(p3, '要按顺序一次看完，用上面的「导览」。');
+          panel.append(p3);
+        }
+      }
+
+      function drawTabs() {
+        if (!tours.length) { tabs.hidden = true; return; }
+        tabs.textContent = '';
+        tabs.append(el('span', 'pano-tlabel', '导览'));
+        tours.forEach(function (t, i) {
+          var b = el('button', 'pano-tab' + (i === tourIdx ? ' is-on' : ''));
+          b.type = 'button';
+          b.textContent = t.label;
+          b.addEventListener('click', function () {
+            tourIdx = i; stepIdx = 0; showTour(); drawTabs();
+          });
+          tabs.append(b);
+        });
+        var f = el('button', 'pano-tab pano-free' + (tourIdx === -1 ? ' is-on' : ''));
+        f.type = 'button';
+        f.textContent = '自由探索';
+        f.addEventListener('click', function () { uiClear(); clear(); drawTabs(); showHint(); });
+        tabs.append(f);
+      }
+
+      drawBar();
+      drawTabs();
+      showHint();
     });
   })();
 
@@ -1214,37 +1446,6 @@
      约定：控件从 root.dataset.config 读配置，自己渲染 [data-mount] 里的内容。
      这样作者只写 YAML，不用手写 HTML。
   ============================================================ */
-  const el = (tag, cls, text) => {
-    const n = document.createElement(tag);
-    if (cls) n.className = cls;
-    if (text !== undefined) n.textContent = text;
-    return n;
-  };
-  const cfgOf = (root) => {
-    try { return JSON.parse(root.getAttribute('data-config') || '{}'); }
-    catch { return {}; }
-  };
-  const mountOf = (root) => root.querySelector('[data-mount]') || root;
-
-  /* 行内轻量标记 —— 控件这边拼出来的文字要用到和积木一样的强调写法。
-     积木那边是构建期的 tools/lib/blocks.mjs 在做，控件跑在浏览器里拿不到它，
-     所以这里实现一份**最小**的：==强调== / **重音** / `代码`。
-     只处理这三种，别往里加东西 —— 两边逻辑越像，越容易漂移。 */
-  const richText = (host, text) => {
-    const src = String(text == null ? '' : text);
-    const re = /==([^=]+)==|\*\*([^*]+)\*\*|`([^`]+)`/g;
-    let last = 0, m;
-    while ((m = re.exec(src))) {
-      if (m.index > last) host.append(document.createTextNode(src.slice(last, m.index)));
-      if (m[1] !== undefined) host.append(el('span', 'hl-tag', m[1]));
-      else if (m[2] !== undefined) host.append(el('strong', '', m[2]));
-      else host.append(el('code', '', m[3]));
-      last = m.index + m[0].length;
-    }
-    if (last < src.length) host.append(document.createTextNode(src.slice(last)));
-    return host;
-  };
-
   /* —— 控件：逐步执行器 ——
      点下一步，看代码/状态逐行走。适合讲算法、协议、状态机。
      config:
