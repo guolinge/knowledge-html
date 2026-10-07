@@ -1299,6 +1299,58 @@ caption: packages/core 的组成与数据流
 |---|---|
 | `svg` | **必填**。对应 `assets/arch/<名字>.svg`，由 `tools/archify.mjs` 生成 |
 | `caption` | 图注（走行内 Markdown） |
+| `parts` | 可选。每个零件的说明。`{ <零件id>: { label, sub, detail } }`，键要**和 spec 里的组件 id 一致** |
+| `anchors` | 可选。入口按钮。`[{ part, label }]` |
+| `tours` | 可选。导览。`[{ id, label, steps: [{ at: [零件id...], text }] }]` |
+
+后三个是给**整体图**用的（原则 ②）。不写就和原来完全一样 —— 已经有的 40 多张 `arch` 图不受影响。
+
+#### 三个可选字段：给整体图加语义层
+
+```callout
+tone: violet
+icon: 🧭
+text: |
+  图还是 archify 出的（几何、校验、渲染都不归我们），加上的只有**语义**。
+  为什么整体图需要这三样：==它零件多，读者需要一个「入口」，而不是从头看起。==
+
+  这三样 archify 的 viewer **不做** —— 它做的是聚焦和 Semantic Passport。
+```
+
+```compare
+first: 字段
+head: [它给读者什么, 怎么用]
+rows:
+  - "`parts`": ["**面板**：当前零件的说明，和它每一条关系的意思", "点任意被点亮的零件，下面就会列出「它指向谁 / 谁指向它 / 那根线什么意思」"]
+  - "`anchors`": ["**入口**：从你本来就懂的那个零件进去", "一排「我熟悉 ___」按钮，点了点亮那个零件 + 它的直接邻居，其余淡出"]
+  - "`tours`": ["**导览**：按顺序把零件串起来", "一步步走，每步高亮一组零件 + 一句话"]
+```
+
+```yaml
+# 例：一台机器上的全部涉及方（容器那篇）
+svg: container-machine
+parts:
+  conn:
+    label: 连接 socket
+    sub: 握手完成就建好了
+    detail: ==它出现的时候，还没有 fd，也不属于任何进程。==
+anchors:
+  - { part: conn, label: "我想搞清「一条连接」" }
+tours:
+  - id: establish
+    label: "一条连接的一生"
+    steps:
+      - { at: [calls, lsock], text: "起手三件事，内核里出现==一个监听 socket==。" }
+      - { at: [conn], text: "==握手完成的那一刻，内核就把连接 socket 建好了== —— 但还没有 fd。" }
+```
+
+**三个都依赖「零件 id 和 archify spec 里的组件 id 一致」。** 写错的表现是：
+按钮点了没反应、或者面板里显示成 id。
+==所以改图的时候，`archify/*.json` 和 note 里的这三段要一起改。==
+
+**`tours` 的 `at` 是数组**：一步能同时点亮好几个零件（比如「这几样是并列的」）。
+它的高亮和图自带聚焦**不是一回事** —— 聚焦是「一个 + 它的邻居」，
+导览是「指定的这几个」。两套逻辑都在 `assets/app.js` 的 `.archfig` 处理器里。
 
 **生成步骤**：
 
