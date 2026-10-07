@@ -265,6 +265,9 @@ text: |
   然后得出「archify 画不了整体图」的结论。==其实该走的是另一条路。==
 - **组件尺寸是每个显式声明的**（默认 120×60），不随 `layout.cellW` 变。
   标签长了要么裁文案，要么给它加 `size`。
+- **`label` / `sublabel` 里不能写我们的行内标记。** archify 不解析 `==` `**` `++`，
+  它会**原样显示**成 `**它不干活**`。它只认自己的 `meta.legend`。
+  ==写进去之前先把标记去掉。==
 - **跨行的边要显式写 `fromSide: "bottom"` / `toSide: "top"`。**
   上下相邻两行的节点，自动推断可能给出 `fromSide: "left"`，然后报
   `first segment does not honor inferred fromSide "left"` ——

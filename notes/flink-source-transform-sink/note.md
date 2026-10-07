@@ -276,6 +276,45 @@ TaskManager  ⊃  Slot  ⊃  Task  ⊃  Subtask  ⊃  Operator
 （进程）        （资源）   （执行单元） （并行副本）   （逻辑步骤）
 ```
 
+```arch
+svg: flink-five-words
+caption: 上面那张表逐个解释了五个词。这张说的是另一件事：==这五个是**一层套一层**的，不是并列的五个概念。== 每一格都是下一格的容器。
+parts:
+  op:
+    label: Operator
+    detail: 你代码里的 `map` / `filter` / `keyBy`。它是**图纸** —— 一个 Operator 没有并行度可言，因为它是逻辑上的一个步骤。
+  sub:
+    label: Subtask
+    detail: 算子按并行度切出来的副本。`parallelism = 3` 就有 3 个 Subtask。==Operator 和 Subtask 的区别就是「图纸和实例」。==
+  task:
+    label: Task
+    detail: 真正被调度的执行单元。==它通常是一串链起来的算子==（算子链优化干的就是这件事），不是一个算子。
+  slot:
+    label: Slot
+    detail: TaskManager 划出来的一份资源配额。==「1 Slot = 1 算子」是常见的误读== —— 一个 Slot 跑的是一个 Task，而 Task 里可能有好几个算子。
+  tm:
+    label: TaskManager
+    detail: 干活的 JVM 进程。一个 TaskManager 可以跑一个或多个 Task。它**是工作单元**。
+  jm:
+    label: JobManager
+    detail: 管事的那个 —— 调度、检查点、故障恢复。==它不干活==。它和 TaskManager 的区别是「管事的」和「干活的」。
+anchors:
+  - { part: task, label: "Task 到底是什么" }
+  - { part: slot, label: "Slot 和算子是几比几" }
+  - { part: jm, label: "JobManager 为什么不算「一层」" }
+tours:
+  - id: five-layers
+    label: "五个词，从图纸到线程"
+    steps:
+      - { at: [op, sub], text: "起点是你写的那行 `stream.map(...)`。它是一个 **Operator** —— 逻辑上的一个步骤，==本身没有并行度==。" }
+      - { at: [sub, task], text: "按并行度切开，就得到 **Subtask**。`parallelism = 3` 就有 3 个。\n\n它们不会各自单独跑，而是==落进某个 Task 里==。" }
+      - { at: [task, slot], text: "**Task** 才是真正被调度的单元。注意它**不是「一个算子」** —— 算子链优化会把好几个算子串进同一个 Task。" }
+      - { at: [slot, tm], text: "Task 被塞进一个 **Slot**，而 Slot 是 **TaskManager** 划出来的一份配额。\n\n==所以「1 Slot = 1 算子」是错的：一个 Slot 跑一个 Task，一个 Task 里可能有好几个算子。==" }
+      - { at: [jm, tm], text: "最后再看 JobManager。==它不在这条包含链上== —— 它不干活，只调度。它是「管事的」，和「干活的」TaskManager 是分工，不是上下级。" }
+```
+
+---
+
 ## 05 · 九个算子，其实是五类
 
 !!先说清楚：这不是 Flink 官方的严格分类标准，而是一种「按解决什么问题来分」的功能分类。!!
