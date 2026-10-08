@@ -3017,6 +3017,21 @@ npm run status
 它会把你工作区的改动**分类列出来**（临时文件 / 共享产物 / 共享源 / 笔记源），
 并标出每项的修改时间。
 
+!!这一步只说明「开工那一刻」。!! 别的会话可能在你干活期间才开始 ——
+开工时干净不等于全程干净。
+
+```compare
+first: 场景
+head: [怎么办]
+rows:
+  - 短活（一篇笔记，半小时内）: ["直接干。收尾再跑一次 `status` 就够"]
+  - 长活，或要改共享源（`assets/` `tools/` `plans/` `SKILL.md`）: ["开 worktree。==写共享源之前重跑一次 `status`== —— 这一条是真实事故换来的，见下"]
+```
+
+> **真实事故**：改 `plans/insight.yaml` 加完节点几分钟后，同一个文件被另一个会话写回，
+> 我的改动**静默消失**（`git log -S` 查不到，像从没写过）。两个会话都「开工时干净」。
+> 共享源的写入冲突是这样的 —— 不报错、不留痕，只是你写的东西没了。
+
 - 干净 → 直接干活
 - **有别人的改动** → 两种走法：
   - 你在 worktree 里 → 与你无关，但合并时要注意
@@ -3322,7 +3337,8 @@ text: |
 | **`npm run block -- <slug> <n>`** | **只看第 n 个积木**：量高 + 截图，打印截图路径。==默认不开浏览器==（人要看加 `--open`） |
 | `npm run block -- <slug> --list` | 列出这一篇的块（编号 + 行号 + 语言） |
 | `npm run build:standalone` | 重建全部产物（`dist/*.html` + 首页） |
-| `npm run visual-check` | 无头浏览器量每个积木有没有溢出。==读的是 `dist/`==，不是 `notes/` |
+| **`node tools/render.mjs --standalone --only <slug>`** | **只重建这一篇的 `dist/`** —— 量图回路从 ~70s 降到 0.2s，而且**不会动别人的产物**（共用目录里尤其重要）。跑完接 `npm run visual-check <slug>` |
+| `npm run visual-check [slug]` | 无头浏览器量每个积木有没有溢出。==读的是 `dist/`==，不是 `notes/`；给了 slug 就只量那一篇 |
 | `npm run build` | 只重建 `notes/*/index.html` —— **`visual-check` 不看这个** |
 | `npm run skill` | 把这份 skill 渲染到 **`skill/`**（**进仓库**，首页链得到）+ 三个页面互链。默认不开浏览器，加 `--open` |
 | `npm run new -- <slug>` | 新建一篇笔记 |
