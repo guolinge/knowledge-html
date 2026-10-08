@@ -369,6 +369,34 @@ test('live skill navigation and every selected raw range remain complete and bou
   assert(parts8.totalParts > 1, 'Long acceptance checks must paginate, not disappear');
 });
 
+test('step 4 requires source verification before relation modeling and tool validation', () => {
+  const result = createReadResult(ROOT, { mode: 'step', target: '4' });
+  assert.equal(result.title, '第 4 步 · 核实事实与关系，再确定画法');
+  const evidence = result.requiredReads.find(r => r.target === '资料查证');
+  assert(evidence, 'Source verification must remain reachable from step 4');
+  assert.equal(evidence.kind, 'required', 'Source verification is not an optional add-information hint');
+  const source = selectContent(loadDocument(ROOT), 'step', '4').content;
+  const stages = [
+    '#### 4.1 · 核实事实与适用条件',
+    '#### 4.2 · 根据核实后的关系选择图',
+    '#### 4.3 · 验证工具能否完整表达',
+  ];
+  let last = -1;
+  for (const stage of stages) {
+    const at = source.indexOf(stage);
+    assert(at > last, `Required stage missing or out of order: ${stage}`);
+    last = at;
+  }
+  for (const phrase of ['要表达的断言', '当前依据', '适用条件', '核对结果', '对图的影响',
+    '不能作为确定事实进入交付图', '已核实且条件未变', '不要因为流程图好排版',
+    '用 `tree`', '用 `compare`', '用 `cards`', '先验证正确用法再判断能力']) {
+    assert(source.includes(phrase), `Execution detail missing: ${phrase}`);
+  }
+  const finalReview = selectContent(loadDocument(ROOT), 'step', '8').content;
+  assert(finalReview.includes('先对照第 4 步的查证记录'));
+  assert(finalReview.includes('对照第 4 步核实后的对象与关系安排'));
+});
+
 test('emitted continuation commands execute and reassemble all step-8 acceptance checks', () => {
   const first = spawnSync(process.execPath, [CLI, 'step', '8', '--json'], { cwd: ROOT, encoding: 'utf8' });
   assert.equal(first.status, 0, first.stderr);
