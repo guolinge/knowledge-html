@@ -24,7 +24,8 @@ tail -30 "$BOARD"
 .agents/skills/knowledge-html/SKILL.md
 ```
 
-它包含：怎么把一段内容变成图、10 个积木的选择表、以及会踩的坑。
+它包含讲解原则、工作流、积木选择和协作约定。
+收到【图解】后按当前请求区分讨论、审阅、制作和修改，不自动新建页面或扩大范围。
 
 - 积木完整 DSL → `.agents/skills/knowledge-html/references/blocks.md`
 - 积木不够用时怎么加 → `.agents/skills/knowledge-html/references/extend.md`
@@ -63,12 +64,23 @@ tail -30 "$BOARD"
 
 ## 常用命令
 
+在当前会话的 worktree 中操作，不为执行命令切回主仓库。
+
 ```bash
-npm install
-npm run new -- my-note-slug      # 新建一篇
-npm run check                    # 校验（YAML 错误会定位到行）
-npm run view -- my-note-slug     # 构建 + 浏览器打开
-npm run build:standalone         # 产出 dist/*.html（内联全部资源，可直接发人）
+npm run new -- my-note-slug                 # 仅新建，修改已有笔记时不运行
+npm run check                               # 校验语法、约定和文档一致性
+npm run block -- my-note-slug 1             # 单块截图，默认不打开浏览器
+npm run view -- my-note-slug --no-open      # 单篇预览构建
+npm run visual-check -- my-note-slug        # 检查该篇 dist/ 产物
+npm run build:standalone                    # 全量构建，交付前确认依赖与共享资源
+npm run visual-check                        # 全站布局检查
+npm run skill                               # 改 skill 文档后重建页面
 ```
 
-推送即上线；`.githooks/pre-push` 会在推送前重新构建，产物过期时拒绝推送。
+## 交付与发布
+
+交付时提供页面路径、修改范围和验证结果，说明未解决问题或既有工具局限。
+全量构建不等于代提交别人的改动；检查本次相关源文件及重建产物，点名暂存并核对 staged 变更。
+
+推送 `main` 会更新站点。约定包含上线时，推送后确认线上页面更新；只要求本地预览或暂不发布时，遵守已确认范围。
+`.githooks/pre-push` 会在推送前重新构建和检查，不绕过失败的校验。
