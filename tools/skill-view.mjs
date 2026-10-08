@@ -107,11 +107,11 @@ for (const p of PAGES) {
      · 仓库里的笔记 → ../notes/<slug>/
    （不换的话线上点进去是 404 —— 链接检查能查出来，但没人会去查整个 skill。） */
 function relink(html) {
-  /* 拆成多页之后，任何 `references/X.md` 都要指向 `./X.html`。
-     原来只硬编码了 blocks 和 extend 两个，拆完就漏了。 */
+  /* 页面链接按目标文档名映射，兼容 references/X.md 和 ../SKILL.md。
+     保留锚点，避免 reference 页返回总入口时仍然指向 Markdown 文件。 */
   const slugOf = {};
   PAGES.forEach((p) => { slugOf[path.basename(p.file, '.md')] = p.slug; });
-  let out = html.replace(/href="(?:references\/)?([\w-]+)\.md(#[^"]*)?"/g, (m, name, hash) => {
+  let out = html.replace(/href="(?:\.\.\/|\.\/)*(?:references\/)?([\w-]+)\.md(#[^"]*)?"/g, (m, name, hash) => {
     const slug = slugOf[name];
     return slug ? `href="./${slug}.html${hash || ''}"` : m;
   });
