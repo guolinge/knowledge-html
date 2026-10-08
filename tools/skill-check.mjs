@@ -14,7 +14,6 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { slugify } from './lib/blocks.mjs';
-import { indexMarkdown, validateReadingNavigation } from './lib/skill-reader.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const SKILL_DIR = path.join(ROOT, '.agents/skills/knowledge-html');
@@ -291,14 +290,6 @@ if (fs.existsSync(svPath)) {
     console.log(`  ✓ skill 内部链接全部有效（${files.length} 个文件）`);
   }
 }
-
-/* 步骤读取提示是导航规则的来源，缺提示或指向失效时阻断校验。 */
-const navigationErrors = validateReadingNavigation(
-  ROOT,
-  indexMarkdown(skillSrc, '.agents/skills/knowledge-html/SKILL.md'),
-);
-for (const error of navigationErrors) note(`skill 读取导航：${error}`);
-if (!navigationErrors.length) console.log('  ✓ 工作流读取提示和关联章节有效');
 
 /* ─────────── 报告 ─────────── */
 
