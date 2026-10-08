@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-has-toc="1">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>关系为什么一选就长出「+ 添加属性」</title>
+<meta name="description" content="圈选页选中一个关系，那一行会变成三块：关系下拉、选择标的、属性区加一个蓝色按钮。这三块在元数据表里是三行不同的记录 —— 本体、对象、属性，靠 parent_id 认亲、靠 item_role 分流。这篇把那列数字数清楚：按钮的判据不是某一列的值，而是「item_role=2 的子行有几行」。所有行号、行数、操作符清单都从源码和本机实例核过。" />
+<link rel="stylesheet" href="../../assets/theme.css" />
+  <link rel="stylesheet" href="../../assets/blocks.css" />
+  <link rel="stylesheet" href="../../assets/archify-embed.css" />
+</head>
+<body>
+<div id="progress"></div>
+<div id="tocScrim"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
+    <a class="brand" href="../../index.html"><span class="dot"></span>知识笔记</a>
+    
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="toc" id="toc">
+      <p class="toc-title">目录</p>
+      <a href="../../index.html" class="sub">← 全部笔记</a>
+      <a href="#三块界面三行数据">三块界面，三行数据</a>
+      <a href="#关系不是一个字段是一个家族">关系不是一个字段，是一个家族</a>
+      <a href="#后端只做四件事">后端只做四件事</a>
+      <a href="#判据是数行数">判据是数行数</a>
+      <a href="#亲手走一遍">亲手走一遍</a>
+      <a href="#三个容易记错的地方">三个容易记错的地方</a>
+      <a href="#一句话总结" class="sub">一句话总结</a>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow">● 从零理解 · 配置层</span>
+      <h1>关系为什么一选就长出「+ 添加属性」</h1>
+      <p class="lede">圈选页选中一个关系，那一行会变成三块：关系下拉、选择标的、属性区加一个蓝色按钮。这三块在元数据表里是三行不同的记录 —— 本体、对象、属性，靠 parent_id 认亲、靠 item_role 分流。这篇把那列数字数清楚：按钮的判据不是某一列的值，而是「item_role=2 的子行有几行」。所有行号、行数、操作符清单都从源码和本机实例核过。</p>
+    </div>
+
+    <div class="draft-banner">
+    <span>⚠</span>
+    <span>本页状态为 <b>draft</b>：内容尚未人工核对，引用前请自行验证。</span>
+  </div>
+<aside class="needs">
+      <p class="needs-title">读这篇之前，你需要先知道</p>
+      <a class="need" href="../data-admin-schema/">← <b>2. 配置表结构</b><span>7 张表分成哪两条线、6 条引用 0 个外键、同一批表读成三种投影</span></a>
+    </aside>
+    <div class="provenance"><span><b>来源</b> crm-dsl-stru apps/server/src/metadata/project.ts —— 关系投影：190 行筛本体、194-200 行认亲、202-205 行对象唯一性校验、206-222 行属性映射 · crm-dsl-stru packages/combination/src/components/RelationRow.vue —— canFilterProps 在 199 行；两个按钮在 69 行和 141 行；addProp() 在 339 行 · crm-dsl-stru packages/combination/src/messages.ts —— filterProps / addProp / selectObject / exists 的文案；ops.ts:26,28 —— 关系本体那两套操作符 · 本机 MySQL crm_dc 实测：field_type=2 共 2 行（holding id=64、product id=68）、field_type=3 共 5 行（item_role=1 有 2 行、item_role=2 有 3 行）、value_set 79 = market（港股/美股） · 本机 /api/audience/metadata 实测：relations 2 个、features 39 个、domains 6 个；operators 六套（ENUM 6 个、NUMBER 11 个） · crm-dsl-stru apps/server/src/app.ts:25 —— 投影发生在 createApp 里，所以配置错误会让服务起不来</span><span><b>生成</b> 2026-10-09</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">元数据</span> <span class="tag tone-muted">关系</span> <span class="tag tone-muted">item_role</span> <span class="tag tone-muted">圈选</span> <span class="tag tone-muted">Data Admin</span></span></div>
+
+<p>你在圈选页把条件选成「持仓标的」，那一行会从一格变成三块：一个「选择标的」的多选框、一块能加好几行的属性区，还有一个蓝色的「+ 添加属性」。</p>
+<p>奇怪的地方在于：在元数据表里，关系跟「性别」这种画像字段占的是同一个位置，都是 <code>crm_dc_data_field</code> 里的一行。凭什么它一选中就多长出两格控件？</p>
+<div class="callout tone-blue">
+      <span class="ic">🎯</span>
+      <div><p><strong>这篇回答一个问题</strong>：<mark class="mk-blue">「+ 添加属性」是表里哪一列决定的？</mark></p>
+<p>答案先给出来：<mark class="mk-amber">没有哪一列单独决定它</mark>，它看的是一个<strong>行数</strong>。
+下面从界面往回走，一直走到表里的行。</p>
+</div>
+    </div><hr>
+<h2 id="三块界面三行数据"><span class="num">01</span>三块界面，三行数据</h2>
+<p>界面上这三块是挨着的，在表里却是三条互不相干的记录，靠一个自引用的列串起来：</p>
+<div class="flowd" data-flow data-edges="[{&quot;from&quot;:&quot;rel&quot;,&quot;to&quot;:&quot;u_rel&quot;},{&quot;from&quot;:&quot;obj&quot;,&quot;to&quot;:&quot;u_obj&quot;},{&quot;from&quot;:&quot;prop&quot;,&quot;to&quot;:&quot;u_prop&quot;}]">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-violet" data-id="rel">
+              
+              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="8" cy="4.2" rx="5" ry="1.9"/><path d="M3 4.2v7.6c0 1.05 2.24 1.9 5 1.9s5-.85 5-1.9V4.2"/></svg>
+              <b>关系本体那一行</b>
+              <small>field_type = 2</small>
+            </div><div class="fnode tone-blue" data-id="u_rel">
+              
+              
+              <b>关系下拉里的「持仓标的」</b>
+              <small>名字来自本体行</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="obj">
+              
+              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="8" cy="4.2" rx="5" ry="1.9"/><path d="M3 4.2v7.6c0 1.05 2.24 1.9 5 1.9s5-.85 5-1.9V4.2"/></svg>
+              <b>对象那一行</b>
+              <small>item_role = 1</small>
+            </div><div class="fnode tone-blue" data-id="u_obj">
+              
+              
+              <b>「选择标的」多选框</b>
+              <small>候选值来自对象行</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="prop">
+              
+              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="8" cy="4.2" rx="5" ry="1.9"/><path d="M3 4.2v7.6c0 1.05 2.24 1.9 5 1.9s5-.85 5-1.9V4.2"/></svg>
+              <b>属性那两行</b>
+              <small>item_role = 2</small>
+            </div><div class="fnode tone-green" data-id="u_prop">
+              
+              
+              <b>属性区加那个按钮</b>
+              <small>能加几种看这里有几行</small>
+            </div></div></div>
+      
+    </div><p>把这条链拆成「界面上的东西 ← 由什么决定」，就是下面这张表。最后一行是这篇的重点：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>界面上的东西</th><th>由什么决定</th></tr></thead><tbody><tr><th>关系下拉里有没有这一项</th><td data-label="由什么决定">有一行 <code>field_type = 2</code>，并且它是启用的</td></tr><tr><th>关系显示成什么名字</th><td data-label="由什么决定">那一行的 <code>display_name_i18n</code>，按当前语言取</td></tr><tr><th>「选择标的」那个多选框</th><td data-label="由什么决定">它下面<strong>恰好 1 行</strong> <code>item_role = 1</code> 的子行</td></tr><tr><th>属性区能加几行</th><td data-label="由什么决定"><code>item_role = 2</code> 的子行<strong>有几行</strong></td></tr><tr><th>「+ 添加属性」出不出现</th><td data-label="由什么决定"><span class="tag tone-green">上面那个数字大于 0</span></td></tr></tbody></table></div><hr>
+<h2 id="关系不是一个字段是一个家族"><span class="num">02</span>关系不是一个字段，是一个家族</h2>
+<p>画像字段一行就能说完：「用户身上有一个值」。性别、年龄、总资产都是这个形状。</p>
+<p>关系说的不是「有一个值」，而是「有一个集合」，集合里每一项还各带自己的属性（市场、数量、状态）。这个形状塞不进一行，所以拆成本体一行，加上每个子项一行，子行用 <code>parent_id</code> 指回本体。</p>
+<p>拿 demo 里的 <code>holding</code> 举例，家族长这样：</p>
+<div class="tree" data-tree><ul class="tlist"><li class="has-kids">
+            <div class="tnode tone-violet" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>holding</b>
+              <code>id=64 · field_type=2 · parent_id=0</code>
+              <span class="tnote">关系本体。界面上的「持仓标的」就是这一行</span>
+            </div>
+            <ul class="tlist"><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>object_id</b>
+              <code>id=65 · item_role=1</code>
+              <span class="tnote">对象行 →「选择标的」下拉（配的是股票搜索）</span>
+            </div>
+            
+          </li><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>market</b>
+              <code>id=66 · item_role=2</code>
+              <span class="tnote">属性行 → 属性区第 1 格，值来自值集 market</span>
+            </div>
+            
+          </li><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>qty</b>
+              <code>id=67 · item_role=2</code>
+              <span class="tnote">属性行 → 属性区第 2 格，纯数字，没有值集</span>
+            </div>
+            
+          </li></ul>
+          </li></ul></div><p>另一个关系 <code>product</code> 形状一样，只是子行少一行。两个家族摆一起，差别只在数量上：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>这一行</th><th>holding 家族</th><th>product 家族</th></tr></thead><tbody><tr><th>本体</th><td data-label="holding 家族">id=64 · <code>field_type=2</code></td><td data-label="product 家族">id=68 · <code>field_type=2</code></td></tr><tr><th>对象行</th><td data-label="holding 家族">id=65 <code>object_id</code> · STRING · 动态搜股票</td><td data-label="product 家族">id=69 <code>object_id</code> · ENUM · 内联 10 个产品</td></tr><tr><th>属性行 1</th><td data-label="holding 家族">id=66 <code>market</code> · ENUM · 值集</td><td data-label="product 家族">id=70 <code>status</code> · ENUM · 内联（生效 / 已关闭）</td></tr><tr><th>属性行 2</th><td data-label="holding 家族">id=67 <code>qty</code> · NUMBER · 无值集</td><td data-label="product 家族"><span class="tag tone-muted">没有第三行</span></td></tr><tr><th>界面上能加几种属性</th><td data-label="holding 家族"><span class="tag tone-green">2 种</span></td><td data-label="product 家族"><span class="tag tone-amber">1 种</span></td></tr></tbody></table></div><p><code>holding</code> 一共 4 行（1 本体 + 3 子行），<code>product</code> 3 行（1 本体 + 2 子行）。这 7 行就是全库所有的关系数据，其余 40 行都是画像字段。</p>
+<hr>
+<h2 id="后端只做四件事"><span class="num">03</span>后端只做四件事</h2>
+<p>从这些行到前端拿到的 <code>relations[]</code>，中间是 <code>apps/server/src/metadata/project.ts</code> 里的一段投影。它按顺序做四件事：</p>
+<div class="pipe"><div class="lane tone-muted">
+        <div class="lane-meta">
+          <span class="ln">STEP 01</span>
+          <b>读进来</b>
+          <small>停用的行在这里就没了</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>rows.fields</b>
+        <small>status = 1 才进得来</small>
+        <span class="tag tone-muted">project.ts:190</span>
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">认亲 <span class="en">谁属于谁</span><span class="note">靠自引用的 parent_id</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-blue">
+        <div class="lane-meta">
+          
+          <b>认亲</b>
+          <small>本体和它的子行配对</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>本体</b>
+        <small>field_type = 2 → relations[] 的候选</small>
+        
+      </div><div class="pnode">
+        <b>子行</b>
+        <small>field_type = 3 且 parent_id 指回本体</small>
+        
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">分流 <span class="en">子行有两个身份</span><span class="note">靠 item_role 分</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-violet">
+        <div class="lane-meta">
+          
+          <b>分流</b>
+          <small>同一个 parent 下的子行分两堆</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>object</b>
+        <small>item_role = 1 · 只能有 1 行</small>
+        
+      </div><div class="pnode">
+        <b>properties</b>
+        <small>item_role = 2 · 0 到 N 行</small>
+        
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">打包 <span class="en">一堆行变成一个对象</span><span class="note">交给前端</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-green">
+        <div class="lane-meta">
+          
+          <b>打包</b>
+          <small>前端看到的是一个关系对象，不是一堆行</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>relations[] 的一个元素</b>
+        <small>{ name, label, table, object, properties }</small>
+        
+      </div></div>
+      </div></div><p>第二步和第三步是同一段代码里的两个 <code>filter</code>，<code>project.ts</code> 189 到 230 行：</p>
+<div class="cards" data-cols="2"><div class="ccard tone-blue">
+          
+          <h4>认亲：两个 filter 夹住一个 parent_id</h4>
+          <p>全表扫两遍，靠 <code>field_type</code> 和后向的 <code>parent_id</code> 把父子配起来。</p>
+          <div class="cbody"><div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-js">// 本体
+rows.fields.filter((f) =&gt;
+  f.status === ENABLED &amp;&amp; f.fieldType === RELATION)
+
+// 它的子行
+rows.fields.filter((f) =&gt;
+  f.status === ENABLED &amp;&amp;
+  f.fieldType === RELATION_ITEM &amp;&amp;
+  f.parentId === relation.id)
+</code></pre></div>
+</div>
+          
+        </div><div class="ccard tone-violet">
+          
+          <h4>分流：一列决定身份</h4>
+          <p>两堆的差别只有一个 <code>item_role</code>，但后面走的路完全不同。</p>
+          <div class="cbody"><div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-js">const objectItems = children.filter(
+  (c) =&gt; c.itemRole === ItemRole.OBJECT);
+
+const props = children.filter(
+  (c) =&gt; c.itemRole === ItemRole.PROPERTY);
+</code></pre></div>
+<p>对象进入 <code>relation.object</code>，属性进入 <code>relation.properties</code>。
+前端拿到的就不是「子行列表」，而是两个语义明确的字段。</p>
+</div>
+          
+        </div></div><div class="callout tone-amber">
+      <span class="ic">🚨</span>
+      <div><p><strong>对象行写在表里的数量，是有约束的。</strong></p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-js">if (objectItems.length !== 1) {
+  throw new Error(`relation ${relation.fieldKey} has ${objectItems.length} OBJECT items`);
+}
+</code></pre></div>
+<p><code>project.ts:203</code>。0 行的话，「选择标的」没有候选值来源；2 行的话，
+两个 C 端控件抢一个位置。两种都是配置错误，所以它在投影阶段就炸掉。</p>
+<p>这一步发生在 <code>createApp</code> 里（<code>app.ts:25</code>），也就是<strong>服务起不来</strong>，
+而不是等用户在界面上发现不对。</p>
+</div>
+    </div><p>属性那一堆还各自带参数。<code>market</code> 的值域来自值集表，<code>qty</code> 的什么都没有，<code>product</code> 的 <code>status</code> 把选项内嵌在自己行里：</p>
+<div class="spec tone-violet">
+      <div class="spec-head"><b>属性行自己带的三样参数</b><span>每个属性一行，互不共享</span></div>
+      <div class="spec-body"><div class="srow">
+          <div class="sk">能配哪些操作符</div>
+          <div class="sv"><p>按自己的 <code>semantic_type</code> 去后端给的 <code>operators</code> 那张表里取一整套（这张表按语义类型分组）。
+<code>market</code>（ENUM）拿到 6 个：等于 / 不等于 / 属于 / 不属于 / 为空 / 不为空；
+<code>qty</code>（NUMBER）拿到 11 个，多出大小比较和区间。</p>
+</div>
+        </div><div class="srow">
+          <div class="sk">值从哪来</div>
+          <div class="sv"><p><code>value_source_type</code> 定三种来源：<code>1</code> 内嵌在自己这一行、<code>2</code> 去 <code>crm_dc_value_set</code> 取、
+<code>3</code> 动态搜索、<code>0</code> 不要值。
+<code>market</code> 是 <code>2</code>（值集 id 79，港股 / 美股），<code>qty</code> 是 <code>0</code>，<code>product.status</code> 是 <code>1</code>。</p>
+</div>
+        </div><div class="srow">
+          <div class="sk">落在哪一列</div>
+          <div class="sv"><p><code>column_name</code> 和 <code>expr</code> 二选一：直连列填前者，派生填后者。
+两者都空或者都有，投影时报错。</p>
+</div>
+        </div></div>
+    </div><hr>
+<h2 id="判据是数行数"><span class="num">04</span>判据是数行数</h2>
+<p>现在能回答开头那个问题了。前端要的判据只有一行（<code>RelationRow.vue:199</code>）：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-js">const canFilterProps = computed(() =&gt; (relationDef.value?.properties.length ?? 0) &gt; 0);
+</code></pre></div>
+<p>它读的是<strong>数组长度</strong>，不是某一列的某个值。而数组长度等于「<code>parent_id</code> 指回这个关系、<code>item_role = 2</code>、且启用着的行」有几行。三种行数对应三种界面：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>子行数量</th><th>后端给出的 properties</th><th>界面上那一块</th></tr></thead><tbody><tr><th>0 行</th><td data-label="后端给出的 properties"><span class="tag tone-muted">[]</span></td><td data-label="界面上那一块"><span class="tag tone-red">整块不出现，连按钮都没有</span></td></tr><tr><th>1 行</th><td data-label="后端给出的 properties">1 个属性定义</td><td data-label="界面上那一块"><span class="tag tone-green">一个属性行 + 「+ 添加属性」</span></td></tr><tr><th>2 行</th><td data-label="后端给出的 properties">2 个属性定义</td><td data-label="界面上那一块"><span class="tag tone-green">两个属性行 + 「+ 添加属性」</span></td></tr></tbody></table></div><p><mark class="mk-amber">同一个按钮有两个文案，而且位置不一样</mark>，很容易以为是两个功能（<code>RelationRow.vue:69</code> 和 <code>:141</code>）：</p>
+<div class="callout tone-violet">
+      <span class="ic">🔤</span>
+      <div><table>
+<thead>
+<tr>
+<th>什么时候出现</th>
+<th>文案</th>
+<th>位置</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>还没加过属性（<code>propItems.length === 0</code>，<code>propItems</code> 就是属性区已经加出来的行）</td>
+<td><code>+ 属性过滤</code></td>
+<td>主行下面</td>
+</tr>
+<tr>
+<td>已经有属性行了</td>
+<td><code>+ 添加属性</code></td>
+<td>属性列表下面</td>
+</tr>
+</tbody>
+</table>
+<p>属性区已经有行的时候才是「+ 添加属性」；第一次给一个关系加属性，
+看到的其实是「+ 属性过滤」。
+两个按钮点下去跑的是同一个函数（<code>addProp()</code>，<code>RelationRow.vue:339</code>），
+差别只在「要不要先给一个空属性行打头」。</p>
+</div>
+    </div><p>关系行本体还有另外两个下拉，它们跟属性无关，跟这条关系整体有关：公式（<code>怎么比</code>：包含这些 / 持仓只数）和操作符（<code>存在</code> / <code>不存在</code>）。列表来自 <code>ops.ts</code> 里两个常量，跟属性那一套操作符是分开的。</p>
+<hr>
+<h2 id="亲手走一遍"><span class="num">05</span>亲手走一遍</h2>
+<p>左边是 MySQL 里的一行，右边是前端拿到的那个字段。点上面换行，点中间任一条规则看它读了哪些列：</p>
+<div class="demo" data-widget="row-to-catalog" data-config="{&quot;rules&quot;:[{&quot;title&quot;:&quot;① 认亲&quot;,&quot;from&quot;:[&quot;field_type&quot;,&quot;parent_id&quot;],&quot;out&quot;:[&quot;name&quot;,&quot;table&quot;,&quot;properties&quot;,&quot;object&quot;],&quot;note&quot;:&quot;本表自引用：`field_type = 2` 的是本体，`field_type = 3` 且 `parent_id` 指回它的是子行。没有外键，靠这两列认。&quot;,&quot;code&quot;:&quot;rows.fields.filter((f) =&gt;\n  f.fieldType === RELATION_ITEM &amp;&amp;\n  f.parentId === relation.id)&quot;},{&quot;title&quot;:&quot;② 分流&quot;,&quot;from&quot;:[&quot;item_role&quot;],&quot;out&quot;:[&quot;object&quot;,&quot;properties&quot;],&quot;note&quot;:&quot;&lt;b&gt;这一列把子行分成两堆&lt;/b&gt;：`1` 走对象，`2` 走属性。属性几行，界面就能加几种。&quot;,&quot;code&quot;:&quot;children.filter((c) =&gt; c.itemRole === OBJECT)\nchildren.filter((c) =&gt; c.itemRole === PROPERTY)&quot;},{&quot;title&quot;:&quot;③ 对象只能有一行&quot;,&quot;from&quot;:[&quot;item_role&quot;],&quot;out&quot;:[&quot;object&quot;],&quot;note&quot;:&quot;数量不等于 1 就在这里抛错。这个校验在建 app 的时候就跑了，不等界面上出错。&quot;,&quot;code&quot;:&quot;if (objectItems.length !== 1) {\n  throw new Error(`relation x has N OBJECT items`);\n}&quot;},{&quot;title&quot;:&quot;④ 属性各带各的参数&quot;,&quot;from&quot;:[&quot;semantic_type&quot;,&quot;column_name&quot;,&quot;value_source_type&quot;,&quot;value_set_id&quot;,&quot;value_resolver_key&quot;],&quot;out&quot;:[&quot;ops&quot;,&quot;options&quot;,&quot;valueSource&quot;],&quot;note&quot;:&quot;每个属性自己决定：能配哪些操作符（看语义类型）、值从哪来（内嵌 / 值集 / 动态搜索）。&quot;,&quot;code&quot;:&quot;opsFor(operators, prop.semanticType, label)\noptionsOf(mappingOf(prop), locale)&quot;},{&quot;title&quot;:&quot;⑤ 界面那一块&quot;,&quot;from&quot;:[&quot;item_role&quot;],&quot;out&quot;:[&quot;ui&quot;],&quot;note&quot;:&quot;&lt;b&gt;属性数组不为空，属性和按钮一起出现&lt;/b&gt;；数组为空，整块都不出现。&quot;,&quot;code&quot;:&quot;computed(() =&gt; (relationDef.value?.properties.length ?? 0) &gt; 0)&quot;}],&quot;tabs&quot;:[{&quot;key&quot;:&quot;holding · 本体行&quot;,&quot;srcLabel&quot;:&quot;MySQL · crm_dc_data_field 的 holding 那一行&quot;,&quot;outLabel&quot;:&quot;Catalog · relations[holding]&quot;,&quot;src&quot;:[[&quot;id&quot;,&quot;64&quot;],[&quot;field_key&quot;,&quot;holding&quot;],[&quot;field_type&quot;,&quot;2  (RELATION)&quot;],[&quot;parent_id&quot;,&quot;0&quot;],[&quot;data_source_id&quot;,&quot;2&quot;],[&quot;column_name&quot;,null],[&quot;status&quot;,&quot;1  (ENABLED)&quot;]],&quot;out&quot;:[[&quot;name&quot;,&quot;\&quot;holding\&quot;&quot;],[&quot;label&quot;,&quot;\&quot;持仓标的\&quot;&quot;],[&quot;table&quot;,&quot;rel_holding&quot;],[&quot;object&quot;,&quot;{ key: \&quot;object_id\&quot; }&quot;],[&quot;properties&quot;,&quot;[market, qty]&quot;],[&quot;ui&quot;,&quot;关系下拉 + 「选择标的」+ 属性区 + 「+ 添加属性」&quot;]]},{&quot;key&quot;:&quot;object_id · 对象行&quot;,&quot;srcLabel&quot;:&quot;MySQL · 子行 object_id（holding 的对象）&quot;,&quot;outLabel&quot;:&quot;Catalog · relations[holding].object&quot;,&quot;src&quot;:[[&quot;id&quot;,&quot;65&quot;],[&quot;field_key&quot;,&quot;object_id&quot;],[&quot;field_type&quot;,&quot;3  (RELATION_ITEM)&quot;],[&quot;item_role&quot;,&quot;1  (OBJECT)&quot;],[&quot;parent_id&quot;,&quot;64 → holding&quot;],[&quot;semantic_type&quot;,&quot;5  (STRING)&quot;],[&quot;value_source_type&quot;,&quot;3  (DYNAMIC)&quot;],[&quot;value_resolver_key&quot;,&quot;stock_search&quot;]],&quot;out&quot;:[[&quot;object&quot;,&quot;{ key: \&quot;object_id\&quot;, semanticType: \&quot;STRING\&quot; }&quot;],[&quot;valueSource&quot;,&quot;{ type: \&quot;DYNAMIC\&quot;, resolverKey: \&quot;stock_search\&quot; }&quot;],[&quot;ui&quot;,&quot;「选择标的」多选框，输入时远端搜股票&quot;]]},{&quot;key&quot;:&quot;market · 属性行&quot;,&quot;srcLabel&quot;:&quot;MySQL · 子行 market（值集在另一张表）&quot;,&quot;outLabel&quot;:&quot;Catalog · relations[holding].properties[0]&quot;,&quot;src&quot;:[[&quot;id&quot;,&quot;66&quot;],[&quot;field_key&quot;,&quot;market&quot;],[&quot;field_type&quot;,&quot;3  (RELATION_ITEM)&quot;],[&quot;item_role&quot;,&quot;2  (PROPERTY)&quot;],[&quot;parent_id&quot;,&quot;64 → holding&quot;],[&quot;semantic_type&quot;,&quot;1  (ENUM)&quot;],[&quot;value_source_type&quot;,&quot;2  (VALUE_SET)&quot;],[&quot;value_set_id&quot;,&quot;79 → 值集 market&quot;]],&quot;out&quot;:[[&quot;properties&quot;,&quot;market&quot;],[&quot;ops&quot;,&quot;ENUM 那一套：eq neq in not_in is_null is_not_null&quot;],[&quot;options&quot;,&quot;港股 / 美股&quot;],[&quot;ui&quot;,&quot;属性区第 1 格&quot;]]},{&quot;key&quot;:&quot;qty · 属性行&quot;,&quot;srcLabel&quot;:&quot;MySQL · 子行 qty（什么值集都没有）&quot;,&quot;outLabel&quot;:&quot;Catalog · relations[holding].properties[1]&quot;,&quot;src&quot;:[[&quot;id&quot;,&quot;67&quot;],[&quot;field_key&quot;,&quot;qty&quot;],[&quot;field_type&quot;,&quot;3  (RELATION_ITEM)&quot;],[&quot;item_role&quot;,&quot;2  (PROPERTY)&quot;],[&quot;parent_id&quot;,&quot;64 → holding&quot;],[&quot;semantic_type&quot;,&quot;4  (NUMBER)&quot;],[&quot;value_source_type&quot;,&quot;0  (NONE)&quot;],[&quot;value_set_id&quot;,null]],&quot;out&quot;:[[&quot;properties&quot;,&quot;qty&quot;],[&quot;ops&quot;,&quot;NUMBER 那一套：多出 lt lte gt gte between&quot;],[&quot;options&quot;,&quot;NULL，要手输数字&quot;],[&quot;ui&quot;,&quot;属性区第 2 格&quot;]]}]}">
+      <div class="demo-head">
+        <span class="title">从表里的一行，到界面上的一块</span>
+        <span class="status" data-status>点上面切换看的是哪一行，点中间任一条规则，看它读了哪些列、写出了什么。
+</span>
+        <span class="spacer"></span>
+        
+      </div>
+      <div class="demo-body custom" data-mount></div>
+    </div><hr>
+<h2 id="三个容易记错的地方"><span class="num">06</span>三个容易记错的地方</h2>
+<div class="cards" data-cols="3"><div class="ccard tone-amber">
+          
+          <h4>重名只在同一个 parent 内被禁止</h4>
+          <p><code>object_id</code> 在 <code>holding</code> 和 <code>product</code> 下各有一行，语义完全不同：一个搜股票，一个选产品。<code>field_key</code> 只在同一个 parent 内不许重名。</p>
+          
+          
+        </div><div class="ccard tone-red">
+          
+          <h4>停用不是变灰，是消失</h4>
+          <p>投影第一步只留 <code>status = 1</code> 的行。停用一个属性行，属性下拉里直接少一个选项；子行全停用，整块按钮一起不见。</p>
+          
+          
+        </div><div class="ccard tone-muted">
+          
+          <h4>没有属性的关系是合法的</h4>
+          <p>属性数组为空时按钮不出现，这条关系就只剩「存在 / 不存在」和「条数」两种筛法。demo 里两个关系都有属性，所以这条分支看不到。</p>
+          
+          
+        </div></div><div class="quiz"><details>
+        <summary>「+ 添加属性」这个按钮，是 <code>crm_dc_data_field</code> 的哪一列决定的？</summary>
+        <div class="a"><p>没有哪一列单独决定它。定位靠 <code>parent_id</code>（指回关系本体）和 <code>field_type = 3</code>，
+计数靠 <code>item_role = 2</code>，界面上的判据是「这堆子行的<strong>数量</strong>大于 0」。
+所以它是<strong>行数</strong>的结果，不是某个列值的结果。</p>
+</div>
+      </details><details>
+        <summary>把 <code>qty</code> 那行的 <code>item_role</code> 从 2 改成 1，会发生什么？</summary>
+        <div class="a"><p>服务启动就失败，报 <code>relation holding has 2 OBJECT items</code>。
+对象行只能有 1 行（<code>project.ts:203</code>），这个错在建 app 的时候就抛出来了，
+不会等到用户在界面上看到两个「选择标的」。</p>
+</div>
+      </details><details>
+        <summary>把 <code>market</code> 那一行的 <code>status</code> 改成 0，界面上有什么变化？</summary>
+        <div class="a"><p>属性下拉里少掉「市场」这一个选项，属性区还能加行，按钮也还在。
+因为 <code>properties</code> 从 2 个变成 1 个，判据是「个数大于 0」，没被打破。
+想让整块消失，得把所有属性行都停用。</p>
+</div>
+      </details></div><div class="summary">
+      <h3 id="一句话总结">一句话总结</h3>
+      <p><mark class="mk-blue">关系的界面形态不是某一列决定的，是「子行的数量」决定的：</mark>
+本体行给出关系本身，<code>item_role = 1</code> 的那一行变成「选择标的」，
+<code>item_role = 2</code> 的行有几行，属性区就能加几种，大于 0 才长出那个按钮。</p>
+
+    </div>
+
+    <footer>
+      <span>关系为什么一选就长出「+ 添加属性」</span>
+      <span>最后更新 2026-10-09 · 单文件可离线打开</span>
+    </footer>
+  </main>
+</div>
+
+<script src="../../assets/app.js"></script>
+</body>
+</html>
