@@ -6256,6 +6256,104 @@
     render();
   };
 
+  /* ============================================================
+     控件：schema-walk —— 沿着列名在几张表之间走
+     ------------------------------------------------------------
+     中间是「现在这一行」，左边是它用哪些列指着别处，右边是谁指着它。
+     点任意一条邻居 → 那一头变成新的中心，走出来的路径记在面包屑上。
+
+     config:
+       start:   起始记录 id
+       hint:    底部一句话
+       jump:    { <邻居id>: "为什么这个邻居值得跳过去" }   可选
+       records: [{ id, table, title, sub, fields:[[k,v]], note, off }]
+       edges:   [{ from, to, via }]     from 这一行里有一个列指着 to
+     ============================================================ */
+  WIDGETS['schema-walk'] = (root) => {
+    const cfg = cfgOf(root);
+    const box = mountOf(root);
+    const statusEl = root.querySelector('[data-status]');
+    const recs = cfg.records || [];
+    const edges = cfg.edges || [];
+    if (!recs.length) return;
+    const byId = {};
+    recs.forEach((r) => { byId[r.id] = r; });
+    const jump = cfg.jump || {};
+    let path = [cfg.start || recs[0].id];
+
+    const bar = el('div', 'sw-crumbs');
+    const grid = el('div', 'sw-grid');
+    const left = el('div', 'sw-side');
+    const mid = el('div', 'sw-mid');
+    const right = el('div', 'sw-side');
+    grid.append(left, mid, right);
+    const hint = el('p', 'sw-hint', '');
+    box.append(bar, grid, hint);
+
+    function chip(other, via) {
+      const r = byId[other] || { title: other, table: '?', sub: '（这里没放它的内容）' };
+      const c = el('button', 'sw-chip');
+      c.append(el('code', 'sw-chip-title', r.title));
+      c.append(el('span', 'sw-chip-tbl', String(r.table).replace(/^crm_dc_/, '')));
+      c.append(el('span', 'sw-chip-via', via));
+      if (jump[other]) c.append(el('span', 'sw-chip-why', jump[other]));
+      if (r.off) c.classList.add('sw-chip-off');
+      if (!r.fields) c.classList.add('sw-chip-stub');
+      c.addEventListener('click', () => { path.push(other); render(); });
+      return c;
+    }
+
+    function render() {
+      const cur = byId[path[path.length - 1]];
+
+      bar.textContent = '';
+      path.forEach((id, i) => {
+        if (i) bar.append(el('span', 'sw-sep', '›'));
+        const b = el('button', 'sw-crumb' + (i === path.length - 1 ? ' on' : ''), (byId[id] || {}).title || id);
+        b.addEventListener('click', () => { path = path.slice(0, i + 1); render(); });
+        bar.append(b);
+      });
+      if (path.length > 1) {
+        const back = el('button', 'sw-back', '← 退回');
+        back.addEventListener('click', () => { path.pop(); render(); });
+        bar.append(back);
+      }
+
+      left.textContent = '';
+      left.append(el('div', 'sw-head', '这一行里有哪些列指着别处'));
+      const os = edges.filter((e) => e.from === cur.id);
+      if (!os.length) left.append(el('p', 'sw-empty', '没有。'));
+      os.forEach((e) => left.append(chip(e.to, e.via)));
+
+      mid.textContent = '';
+      const h = el('div', 'sw-cur');
+      h.append(el('span', 'sw-cur-tbl', String(cur.table).replace(/^crm_dc_/, '')));
+      h.append(el('b', 'sw-cur-title', cur.title));
+      if (cur.sub) h.append(el('span', 'sw-cur-sub', cur.sub));
+      mid.append(h);
+      const ft = el('div', 'sw-fields');
+      (cur.fields || []).forEach((pair) => {
+        const row = el('div', 'sw-field');
+        row.append(el('code', 'sw-k', String(pair[0])));
+        row.append(el('code', 'sw-v' + (String(pair[1]) === 'NULL' ? ' sw-null' : ''), String(pair[1])));
+        ft.append(row);
+      });
+      mid.append(ft);
+      if (cur.note) { const n = el('p', 'sw-note'); richText(n, cur.note); mid.append(n); }
+
+      right.textContent = '';
+      right.append(el('div', 'sw-head', '谁用列指着这一行'));
+      const is = edges.filter((e) => e.to === cur.id);
+      if (!is.length) right.append(el('p', 'sw-empty', '没有。'));
+      is.forEach((e) => right.append(chip(e.from, e.via)));
+
+      if (statusEl) statusEl.textContent = cur.table + ' · ' + cur.title + '（走了 ' + (path.length - 1) + ' 跳）';
+      hint.textContent = '';
+      richText(hint, cfg.hint || '');
+    }
+    render();
+  };
+
   /* ---------- 挂载 ---------- */
   document.querySelectorAll('[data-widget]').forEach((root) => {
     var name = root.getAttribute('data-widget');

@@ -1227,6 +1227,42 @@ config:
 > 它讲的是一个很通用的形状：**同样是「不够用」，有的资源只能给或不给（死了），
 > 有的可以切分和延后（慢了）。** 内存 vs CPU、连接数 vs 带宽，都是这个区别。
 
+#### `schema-walk` —— 沿着一列在几张表之间走
+
+**讲「表跟表怎么连」**：中间是当前这一行，左边是它用哪些列指着别处，
+右边是谁指着它。点任意一张卡，那一头变成新的中心，路径记在面包屑上。
+
+```demo
+widget: schema-walk
+title: 顺着列名走一遍
+start: city
+hint: |
+  ==点左右两边的卡就接着往下走==，路径记在面包屑里。
+records:
+  - id: city
+    table: crm_dc_data_field
+    title: city
+    fields:
+      - [id, 33]
+      - [value_set_id, 32]
+  - id: vs
+    table: crm_dc_value_set
+    title: city
+    fields:
+      - [id, 32]
+      - [set_key, city]
+edges:
+  - { from: city, to: vs, via: "value_set_id = 32" }
+```
+
+- `records[].fields` 是 `[键, 值]` 数组，值那栏等宽显示；写 `NULL` 会变灰
+- `edges[].via` 是卡片底下那行灰字（写「靠哪一列连的」）
+- `jump` 是可选的一层旁注：给某个邻居加一句「为什么值得点过去」
+- `records[].off: true` 给卡片换一条黄色左条（表达「这一行已停用」这类状态）
+
+> 换领域也能用：只要那个东西是「**一批带主键的记录 + 记录之间互相引用**」——
+> 外键图、模块依赖、组织架构、文件互相 import，都是这个形状。
+
 ### 数据驱动的写法（`config`）
 
 上面三个控件都用 `config`，作者**只写 YAML，不写 HTML**：

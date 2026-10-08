@@ -1914,7 +1914,7 @@ text: |
 | `summary` | 小结 |
 | `raw` | 直接写 HTML |
 
-**交互控件 39 个**（在 `assets/app.js` 的 `WIDGETS` 里，供 `demo` 积木引用）：
+**交互控件 40 个**（在 `assets/app.js` 的 `WIDGETS` 里，供 `demo` 积木引用）：
 `polling-vs-cdc` `combination-count` `join-lab` `on-vs-where` `knex-chain`
 `stepper` `tuner` `diff` `stream-modes` `operator-lab` `hashring` `partition-prune`
 `dsl-lab` `null-lab` `config-to-ui` `field-lineage` `count-dedup-lab`
@@ -1922,6 +1922,7 @@ text: |
 `io-models` `inode-trace` `link-refcount` `gmp-lab` `handoff-lab` `ipc-flow-lab`
 `runtime-timeline` `ns-view` `cg-limit` `poll-lab`
 `epoll-tables` `lt-vs-et` `thread-audit` `code-and-stacks` `clone-lab` `isolation-spectrum` `fork-or-thread`
+`schema-walk`
 
 **已知缺口**（按优先级）：
 
