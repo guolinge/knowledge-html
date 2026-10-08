@@ -259,7 +259,7 @@ config:
     - title: ② 分流
       from: [item_role]
       out: [object, properties]
-      note: "<b>这一列把子行分成两堆</b>：`1` 走对象，`2` 走属性。属性几行，界面就能加几种。"
+      note: "**这一列把子行分成两堆**：`1` 走对象，`2` 走属性。属性几行，界面就能加几种。"
       code: "children.filter((c) => c.itemRole === OBJECT)\nchildren.filter((c) => c.itemRole === PROPERTY)"
     - title: ③ 对象只能有一行
       from: [item_role]
@@ -274,7 +274,7 @@ config:
     - title: ⑤ 界面那一块
       from: [item_role]
       out: [ui]
-      note: "<b>属性数组不为空，属性和按钮一起出现</b>；数组为空，整块都不出现。"
+      note: "**属性数组不为空，属性和按钮一起出现**；数组为空，整块都不出现。"
       code: "computed(() => (relationDef.value?.properties.length ?? 0) > 0)"
   tabs:
     - key: holding · 本体行

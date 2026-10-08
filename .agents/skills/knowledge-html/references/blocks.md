@@ -1273,6 +1273,10 @@ edges:
 
 `config` 会序列化成 JSON 塞进 `data-config`，控件用 `cfgOf(root)` 读。
 
+**控件自己渲染的文本要支持行内标记时，用 `richText(host, text)` 写进节点**，
+别拼 `innerHTML`：`config` 走的是 JSON，构建期不会替你解析 markdown，
+拼进去的 `**加粗**` 会按字面显示（`row-to-catalog` 的规则注释踩过一次）。
+
 ---
 
 ## 15. `arch` —— 内联 archify 生成的图
