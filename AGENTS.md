@@ -27,6 +27,10 @@ tail -30 "$BOARD"
 它包含讲解原则、工作流、积木选择和协作约定。
 收到【图解】后按当前请求区分讨论、审阅、制作和修改，不自动新建页面或扩大范围。
 
+先读 skill 开头的「怎么读取这份 skill」。文档较长，截断后要续读，不能只看原则和流程概览。
+按 `skill-read` 输出的步骤必读章节继续读取，交付前读完第8步所有细则。
+该工具的清单和完成提示只是输出范围，不证明读过关联正文或验收通过；保留实际读取与检查记录。
+
 - 积木完整 DSL → `.agents/skills/knowledge-html/references/blocks.md`
 - 积木不够用时怎么加 → `.agents/skills/knowledge-html/references/extend.md`
 - 可运行的积木示例 → `notes/blocks-cheatsheet/note.md`
@@ -67,6 +71,9 @@ tail -30 "$BOARD"
 在当前会话的 worktree 中操作，不为执行命令切回主仓库。
 
 ```bash
+npm run --silent skill-read -- step 6        # 原文分块和本步读取入口，按下一块命令续读
+npm run --silent skill-read -- section 资料查证
+npm run --silent skill-read -- list          # 当前标题与行号，不是正文
 npm run new -- my-note-slug                 # 仅新建，修改已有笔记时不运行
 npm run check                               # 校验语法、约定和文档一致性
 npm run block -- my-note-slug 1             # 单块截图，默认不打开浏览器
@@ -78,6 +85,9 @@ npm run skill                               # 改 skill 文档后重建页面
 ```
 
 ## 验收与信息保留
+
+制作前读七条原则、写作规范、硬约束和相应工作流，编辑或提交前读多会话协作；其他章节按步骤条件读取。
+直接读文件或使用章节工具都要确认所需范围完整，读取被截断或上下文压缩丢失细节时，先补读再操作。
 
 交付前执行 skill 第8步的各项检查，记录位置、证据、发现的问题、处理办法和复查结果。
 可以共用一轮阅读或截图，但不能用「已自检」代替术语、事实、例子、结构、主线、图解和交互的具体结果。
