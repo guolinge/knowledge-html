@@ -696,6 +696,7 @@ rows:
   - 第 ① 步的输出: ["「输出还是一份 DSL」", { text: "`validate(): void` —— 什么都不返回", tone: red }]
   - 停用字段的错误码: ["语义校验返回 `DISABLED_REF`", { text: "**零处**。这个码在 `packages/dsl` 里一次都没出现", tone: red }]
   - 越权客户范围: ["未单独列错误码", { text: "有 `SCOPE_DENIED`（3 处引用）", tone: amber }]
+  - 关系对象落到哪一列: ["取 Metadata 里 OBJECT 子项的 `column_name`，例子里叫 `symbol`", { text: "**写死 `object_id`**（`compile.ts:356`）—— 这个列名不来自 Catalog", tone: red }]
   - 派生字段: ["`derive_kind` 两种取值：`age_years` / `days_since`", "换成声明式表达式 `expr`，原语 12 个（`div` / `mul` / `years_between` …）"]
   - "`age >= 18` 编成什么": ["`TIMESTAMPDIFF(YEAR, u.birthday, CURRENT_DATE()) >= 18`", "**下推成 `birthday <= '2008-10-09'`**，让条件落在裸列上，Doris 能用分区裁剪和前缀索引"]
   - 今天/现在从哪来: ["SQL 里直接写 `CURRENT_DATE()`", "由调用方传入 `today` / `now`（`CompileOptions` 上的可选字段），SQL 不写 `CURDATE()` / `NOW()`"]
@@ -710,6 +711,24 @@ rows:
 
 **共用的部分仍然一致**：四步的切分、五种叶子形状、三处扭转、IN 子查询而不是 JOIN、
 uid 游标、Knex 的四处补偿、对外只给字符串。这些是 4.3 的骨架，也是上台要讲的主线。
+
+````callout
+tone: amber
+icon: 🔩
+text: |
+  `object_id` 那一行值得单独说一句，因为它是**唯一一行会直接变成硬约束的差异**。
+
+  方案的设计是：对象列名由 Metadata 的 `column_name` 给，所以每个关系可以不一样
+  （持仓叫 `symbol`、产品叫 `product_code` 都行）。
+  实现把 `object_id` 写死在 `compile.ts:356`：
+
+  ```ts
+  query.whereIn(`${rel.table}.object_id`, values)
+  ```
+
+  ==后果：所有关系表的对象列都必须叫 `object_id`==，否则生成的 SQL 找不到列。
+  demo 里两张关系表也都遵守了（`rel_holding.object_id` / `rel_product.object_id`）。
+````
 
 ```callout
 tone: violet
