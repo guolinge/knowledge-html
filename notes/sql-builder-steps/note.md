@@ -75,7 +75,7 @@ rows:
   nodes:
     - { title: 组节点, sub: "AND / OR → 括号", tag: 递归 }
     - { title: 叶子节点, sub: "4 类叶子 → 5 种 SQL 形状", tag: 核心, tone: green }
-  next: "输入一棵树，输出一段 WHERE 片段（SQL 文本 + 绑定值）"
+  next: "输入一棵树，输出一段 WHERE 片段（内部是 { sql, bindings }）"
 - badge: STEP 04
   title: Assemble
   desc: 同一段 WHERE，套四个外层
@@ -88,34 +88,59 @@ rows:
   next: "输入 WHERE 片段，输出四条完整 SQL 文本"
 ```
 
-上台要讲的那张表就是这个，每一层的进和出：
+上台要讲的那张表就是这个。==输入输出列写的是代码里的真实类型==，不是名词缩写，
+因为听众下一个问题一定是「具体长什么样」，而那个答案下面四节各有一份。
 
 ```compare
 first: 步骤
-head: [输入, 输出, 不通过时]
+head: [输入的真实类型, 输出的真实类型, 失败时]
 rows:
-  - "① Validate": ["DSL + Catalog", "**同一份 DSL** —— 它不产出新结构，只是放行或抛错", "抛 `CompileError`，带错误码，编译中止"]
-  - "② Resolve": ["DSL + Catalog", "名字 → 「表名 + 列名」的映射（含派生字段的表达式）", "字段没找到 → `UNKNOWN_FIELD`；停用 → `DISABLED_REF`"]
-  - "③ Compile": ["条件树 + Resolve 的结果", "一段 WHERE 片段（含括号）+ 绑定值列表", "逻辑上不该发生 —— 规则已经在 ①② 查完了"]
-  - "④ Assemble": ["WHERE 片段 + 分页参数 + actor", "四条 SQL 文本 + `usedTables` + `listColumns`", "拼装失败说明前一步的片段不合法"]
+  - "① Validate": ["`InsightQuery` + `Catalog`", "**`void`** —— 成功什么都不返回，只是没抛", "`throw new CompileError(code, message)`"]
+  - "② Resolve": ["`Catalog` + 一个名字（字符串）", "`FieldDef` / `RelationDef` / `RelationPropDef` 对象", "字段没找到 → `UNKNOWN_FIELD`"]
+  - "③ Compile": ["`BoolNode` + `CompileCtx`", "**`Apply | null`** —— 一个函数，不是字符串", "不该发生 —— 规则已经在 ①② 查完了"]
+  - "④ Assemble": ["`Apply` 挂到 builder 上 + `page`", "`CompileResult`：4 个字符串 + 2 个数组", "拼装失败说明前一步的片段不合法"]
+```
+
+真实入口（都是代码里的签名，没改一个字符）：
+
+```ts
+// ① 两段校验，没有返回值 —— 过了就是没抛
+export function validate(query: InsightQuery, catalog: Catalog): void
+
+// ② 没有 resolve 函数。它是三次查表：
+fieldByName(catalog, leaf.field)                  // → FieldDef | undefined
+relationByName(catalog, leaf.relation)            // → RelationDef | undefined
+rel.props.find((c) => c.name === item.field)      // → RelationPropDef | undefined
+
+// ③ 返回的是一个闭包 ——「怎么把这段条件加到某个查询上」
+type Gate  = 'and' | 'or'
+type Apply = (query: Knex.QueryBuilder, gate: Gate) => void
+
+// ④ 唯一对外的那一个
+export function compile(query: InsightQuery, options: CompileOptions): CompileResult
 ```
 
 ==三步的边界很硬：第 ① 步不知道物理列存在，第 ② 步不拼 SQL，第 ③ 步不再做任何判断。==
 
-这个分工有个直接好处：==到 ③ 的时候，所有「查字典」都已经做完了==，编译只是一次纯递归。方案里那句「Resolve 之后，DSL 里每个名字都能直接对应到 Doris 里的一张表和一列」说的就是这件事。
+上面表里有两格会让人意外，兩个都是方案里看不出来的：
 
 ```callout
-tone: amber
-icon: ⚖
+tone: red
+icon: ⚠
 text: |
-  方案把四步里最容易漏的**第 ② 步单列出来了**，而实现里它其实混在两处：
-  一处是校验时顺手取的字段定义，一处是编译时对 `field.table` 的读取。
+  **一、第 ① 步的输出是 `void`，不是「同一份 DSL」。**
 
-  为什么要单列：==因为「名字 → 物理位置」是这个组件的核心承诺==，
-  而它对**派生字段**和**关系子项**这两种情况各有一套说法（04 节）。
+  方案写的是「输出还是一份 DSL」，所以我把那张表的第一行写成了那样。
+  代码里 `validate()` 的返回类型就是 `void` —— 它把 DSL 读一遍、对一遍字典，
+  然后什么都不返回。==不存在一份「改过的 DSL」传给下一步==，下一步用的还是同一个对象。
 
-  上台讲的时候，这一节最容易被听众问到「那你到底怎么知道 age 对应哪一列」。
+  **二、第 ③ 步的输出是一个函数。**
+
+  不是字符串，也不是 `{ sql, bindings }`。前半篇我把它写成了「片段 + 绑定值列表」，
+  把两层的产物混成了一层。真实的层次在 05 节。
 ```
+
+这个分工有个直接好处：==到 ③ 的时候，所有「查字典」都已经做完了==，编译只是一次纯递归。方案里那句「Resolve 之后，DSL 里每个名字都能直接对应到 Doris 里的一张表和一列」说的就是这件事。
 
 ---
 
@@ -150,9 +175,50 @@ rows:
 
 分两段的理由就藏在最后一行：形状校验不依赖任何外部数据，==圈选组件可以在发请求之前先在本地跑一遍==，用户填错结构当场就能提示，不用等一次网络往返。
 
-方案把这条写成了「为什么分两段」—— 这一节值得单列，就是因为这一条。
+方案把这条写成了「为什么分两段」。这一节值得单列，就是因为这一条。
 
 `validate-lab` 那个交互就是照这张表做的：喂几个坏输入，看它在哪一段被拦。
+
+### 真实形态
+
+输入就是那份 DSL 本身，没有任何包装：
+
+```json
+{
+  "version": 1,
+  "scope":   { "type": "scope", "kind": "self" },
+  "include": { "type": "group", "logic": "AND", "children": [
+    { "type": "portrait", "field": "age", "op": "gte", "value": 18 }
+  ]},
+  "exclude": null
+}
+```
+
+输出是 **`void`**。成功就是没抛异常；失败抛出来的东西长这样（真实实例，不是我编的）：
+
+```text
+CompileError {
+  name:    'CompileError'
+  code:    'UNKNOWN_FIELD'
+  message: 'unknown field nope'
+}
+// instanceof Error === true
+// 自有属性：['stack', 'message', 'code', 'name']
+```
+
+所以调用方看到的是两种结果：安静返回，或者一个带 `code` 的 Error。
+后者直接拿去当接口的错误码用，不需要再映射一层。
+
+`code` 是一张**联合类型写死的**表（13 个），不是自由字符串：
+
+```ts
+MISSING_SCOPE  INVALID_SCOPE  EMPTY_TEAM  EMPTY_GROUP  SCOPE_DENIED
+UNSUPPORTED_VERSION  UNKNOWN_FIELD  UNKNOWN_RELATION  UNKNOWN_RELATION_PROP
+OP_NOT_ALLOWED  VALUE_TYPE  INCOMPLETE_LEAF  UNKNOWN_NODE
+```
+
+对照一下方案列的 13 个：代码里有而方案没写的是 `SCOPE_DENIED`；
+方案里有而代码里一个都没有的是 !!`DISABLED_REF`!!（09 节展开）。
 
 ---
 
@@ -193,6 +259,47 @@ edges:
 
 方案里还有一条硬约束：!!一个关系最多配置一个 OBJECT!!。因为 `objects[]` 到底落在哪一列，取决于该关系下哪条子项的 `item_role` 是 `OBJECT`；配了两条就无法确定用哪一条。这条由 Data Admin 在写入时拦截，不会进到编译阶段。
 
+### 真实形态
+
+这一层最能落地：它返回的不是“映射关系”，而是两个真真实实的对象。
+拿 `age` 和 `holding` 去查，回来的就是下面这两个（实际跑出来的，一个字段没改）：
+
+```json
+// fieldByName(catalog, 'age')
+{
+  "name": "age", "label": "年龄",
+  "table": "user_portraits_wide",
+  "expr": { "fn": "years_between", "args": [ { "col": "birthday" }, { "ctx": "today" } ] },
+  "valueType": "int",
+  "ops": ["eq","neq","lt","lte","gt","gte","between","is_null","is_not_null"]
+}
+```
+
+```json
+// relationByName(catalog, 'holding')
+{
+  "name": "holding", "label": "持仓标的",
+  "table": "rel_holding",
+  "objectType": "string",
+  "objectSource": { "kind": "provider", "key": "stock_search" },
+  "props": [
+    { "name": "market", "column": "market", "valueType": "enum",
+      "options": [ { "value": "HK", "label": "港股" }, { "value": "US", "label": "美股" } ] },
+    { "name": "qty", "column": "qty", "valueType": "decimal" },
+    { "name": "market_value", "valueType": "decimal",
+      "expr": { "fn": "div", "args": [ { "col": "market_value_hkd" }, { "lit": 10000 } ] } }
+  ]
+}
+```
+
+两个细节看这两个 JSON 就够了：
+
+- `age` 有 `table` 但**没有 `column`**，它靠 `expr` 算出值；同形状的直连字段有 `column` 没 `expr`。
+  编译器不需要分支，它读的是同一个位置，只是那个位置可能是列名、也可能是一棵表达式。
+- 关系的 `table` 是 `rel_holding`（一张表，不是一个列），
+  而对象本身没有列名，它靠 `objectSource` 说“值从哪里来”：
+  `provider` 是一个搜索服务，所以 `stock_search` 才会被叫成 resolver。
+
 ### 有个东西库里没有对应的列
 
 `age` 就是例子。表里没有 `age` 列，它的值由 `birthday` 算出来。方案用 `derive_kind` 描述这种换算关系：
@@ -210,7 +317,48 @@ days_since  →  DATEDIFF(CURRENT_DATE(), col)
 
 ## 05 · Compile：四类叶子，五种形状
 
-四步里，只有这一步产出条件。规则可以压成一张表：
+### 先看它交出去的是什么形态
+
+这一步最容易被讲错的地方：它**不返回 SQL 字符串**。
+`compileTree()` 返回的是一个闭包，类型的真实定义就三行：
+
+```ts
+type Gate  = 'and' | 'or';
+type Apply = (query: Knex.QueryBuilder, gate: Gate) => void;
+
+function compileTree(tree: BoolNode | null, ctx: CompileCtx): Apply | null
+```
+
+`Apply` 读作==怎么把这段条件加到某个查询上==。它不是值，是一段还没执行的动作：
+拿到它的时侯并不知道要加到哪里，也不知道前面已经有几个条件。
+这么设计是为了解括号：组节点拿到子节点的 `Apply` 后，
+自己决定用 `and` 还是 `or` 把它们串起来，串完再包一层。
+
+!!真正的 `{ sql, bindings }` 出现在更内层，而且只在需要重新包裹时才出现。!!
+`compile()` 里只有 exclude 走了那一步，因为它要把整段条件包进 `NOT COALESCE( ... , FALSE )`：
+
+```ts
+// compile.ts 130 行附近
+builder.whereRaw(`NOT COALESCE((${exclude.sql}), FALSE)`, [...exclude.bindings]);
+```
+
+`exclude` 是从哪儿来的？`whereFragment(apply)`：把 `Apply` 跑在一个空 builder 上，
+再把 `where` 后面的那截字符串和绑定值取出来（实际跑出来的返回值，值都没改）：
+
+```json
+{
+  "sql": "`u`.`gender` = ? and u.uid > ?",
+  "bindings": ["M", 100]
+}
+```
+
+==所以参数绑定确实存在，但它不是这一层的输出、也不是对外的产物==。
+它只活在「拼片段给上层再包一次」这一个环节。include 那段根本不经过 `whereFragment`，
+它是直接 `includeApply(builder, 'and')` 挂到主查询上的。
+
+### 四类叶子编成什么
+
+规则可以压成一张表：
 
 ```compare
 first: 叶子
@@ -324,6 +472,43 @@ rows:
 
 
 四条语句为什么要分开返回，方案说得很直白：因为 DAL 的三个接口需要的东西不同：预览要人数、预览要一页名单、创建快照要全量 uid。
+
+### 真实形态
+
+对外只有这一个对象。拿「年龄≥18 且持有 00700.HK 数量≥100，排除 UID 11/22，第 2 页 10 条」跑一遍，
+`CompileResult` 的六个字段是这些（长度也是量出来的）：
+
+```text
+countSql        string   404 字符
+listSql         string   547 字符
+uidsSql         string   363 字符
+droppedUidsSql  string   184 字符   ← 没点名 UID 时这里是 null
+usedTables      string[] ["rel_holding", "user_portraits_wide"]
+listColumns     object[] [ { key, label, kind, valueType } ]
+```
+
+看得出来的两件事：
+
+- **四个 SQL 字段都是纯字符串**，值已经渲染进去了，旁边没有 `bindings`。方案那句「不是 SQL + 参数数组」在这一层是对的。
+- `usedTables` 是本次查询涉及的物理表（去重、排序后）；`listColumns` 是给前端渲染表头的列定义。
+  两个都不是给 DAL 的，是给调用方自己看的。
+
+`listColumns` 的真实内容（只有一列，因为条件里只用到 `age` 作为展示列）：
+
+```json
+[ { "key": "age", "label": "年龄", "kind": "portrait", "valueType": "int" } ]
+```
+
+而 `droppedUidsSql` 是四条里唯一一条不派生自主查询的：
+它把点名的 uid 当成一张临时表 `v`，再问一遍“这些人里谁不在我的权限内”：
+
+```sql
+SELECT `v`.`uid` FROM (SELECT 11 AS `uid` UNION ALL SELECT 22) AS `v`
+WHERE NOT EXISTS (
+  SELECT 1 FROM `user_portraits_wide` AS `u`
+  WHERE `u`.`uid` = `v`.`uid` AND `u`.`staff_id` = 101
+)
+```
 
 ### countSql 为什么要包一层
 
@@ -466,20 +651,30 @@ rows:
 
 ## 09 · 讲的时候留意：方案和实现现在的差异
 
-4.3 是设计稿，`packages/dsl` 是按它实现的，但那份实现已经往前走了几步。讲方案时如果举例引用了代码，这几处会对不上。
+4.3 是设计稿，`packages/dsl` 是按它实现的。==哪边说了算，按代码。==
+两份对不上的地方列在这里。==前两行不是“实现落后了”，是方案写错了==。
 
 ```compare
 first: 项
-head: [技术方案 4.3, 现在的实现]
+head: [技术方案 4.3, 代码里的事实]
 rows:
-  - 派生字段: ["`derive_kind` 两种取值：`age_years` / `days_since`", "换成声明式表达式 `expr`，原语扩展到 12 个（`div` / `mul` / `years_between` …）"]
-  - "`age >= 18` 编成什么": ["`TIMESTAMPDIFF(YEAR, u.birthday, CURRENT_DATE()) >= 18`", "**下推成 `birthday <= '2007-09-30'`** —— 让条件落在裸列上，Doris 能用分区裁剪和前缀索引"]
-  - 今天/现在从哪来": ["SQL 里直接写 `CURRENT_DATE()`", "由调用方传入 `today` / `now`，SQL 不写 `CURDATE()` / `NOW()`，这样同一条 SQL 可复现、可审计"]
-  - 数值字面量": ["直接写 `1000`", "`CAST('1000' AS DECIMAL(38,10))`，避免参数被当 DOUBLE 丢精度"]
-  - 数字枚举值": ["`objects: ['00700.HK']` 等字符串", "值可以带 `physical`，DSL 传语义值，编译时换成物理编码"]
+  - 第 ① 步的输出: ["「输出还是一份 DSL」", { text: "`validate(): void` —— 什么都不返回", tone: red }]
+  - 停用字段的错误码: ["语义校验返回 `DISABLED_REF`", { text: "**零处**。这个码在 `packages/dsl` 里一次都没出现", tone: red }]
+  - 越权客户范围: ["未单独列错误码", { text: "有 `SCOPE_DENIED`（3 处引用）", tone: amber }]
+  - 派生字段: ["`derive_kind` 两种取值：`age_years` / `days_since`", "换成声明式表达式 `expr`，原语 12 个（`div` / `mul` / `years_between` …）"]
+  - "`age >= 18` 编成什么": ["`TIMESTAMPDIFF(YEAR, u.birthday, CURRENT_DATE()) >= 18`", "**下推成 `birthday <= '2008-10-09'`**，让条件落在裸列上，Doris 能用分区裁剪和前缀索引"]
+  - 今天/现在从哪来: ["SQL 里直接写 `CURRENT_DATE()`", "由调用方传入 `today` / `now`（`CompileOptions` 上的可选字段），SQL 不写 `CURDATE()` / `NOW()`"]
+  - 数值字面量: ["直接写 `1000`", "`CAST('1000' AS DECIMAL(38,10))`，避免参数被当 DOUBLE 丢精度"]
 ```
 
-**共用的部分仍然一致**：四步的分工、五种叶子形状、三处扭转、IN 子查询而不是 JOIN、uid 游标、Knex 的四处补偿。这些是 4.3 的骨架，也是上台要讲的主线。
+前两行合起来看：**`DISABLED_REF` 不存在，正是因为 `validate` 什么都不返回。**
+想说“你引用了一个已停用的字段”，就得拿得到“这个字段曾经存在”这个事实，
+而 Catalog 只收录 ENABLED 的字段（Data Admin 那份投影里只姿势两种状态），
+停用字段在编译器眼里和“从来没写过这个字段”长得一模一样，
+所以它只能报 `UNKNOWN_FIELD`。这不是忘了写，是**这一层拿不到区分两者所需的信息**。
+
+**共用的部分仍然一致**：四步的切分、五种叶子形状、三处扭转、IN 子查询而不是 JOIN、
+uid 游标、Knex 的四处补偿、对外只给字符串。这些是 4.3 的骨架，也是上台要讲的主线。
 
 ```callout
 tone: violet
