@@ -3292,14 +3292,12 @@ text: |
 
   → 在真实页面里跑一遍，并把 `window.onerror` 收上来（否则连报错都看不到）。
 
-  ```bash
-  # ==探针文件必须写在仓库根目录==，再让 python 把 <script> 注入进去。
-  # 放 /tmp 跑的话，相对路径引的 assets/*.css 全断了 ——
-  # 你会测出「样式没生效」的假象，然后去修一个根本不存在的 CSS 问题。（真踩过）
-  cp index.html .probe.html   # 注入探针
-  chrome --headless=new --virtual-time-budget=6000 \
-    --dump-dom "file://$PWD/.probe.html" | grep -o 'class="PROBE">[^<]*'
-  ```
+  ++这条已经收成一条命令了++：==`npm run probe:home`==。
+  17 项：抽屉开关 / 排序是否真的重排 / 遮罩有没有色 / 右缘贴不贴边 /
+  横向溢出 / 焦点进出 / `window.onerror`。失败退出码 1，并把你没过的项逐个打出来。
+
+  它自己也是被验过的 —— 故意注入一个悬空变量，它会报两项失败（历史真发生过这个：
+  重构时把 `var mode` 跟着旧函数一起删了，排序按钮哑了而 `node --check` 是绿的）。
 ````
 
 ````callout
@@ -3331,6 +3329,7 @@ text: |
 | 命令 | 干什么 |
 |---|---|
 | `npm run status` | **开工前 / 提交前先跑这个** —— 把改动分类列出来 |
+| **`npm run probe:home`** | **首页外壳的冒烟探针** —— `check` / `visual-check` 都盖不到首页（内联 JS + 浏览器运行时状态）。改了 `tools/lib/home.mjs` 必跑，见「改了站点外壳」 |
 | **`npm run gaps -- <slug>`** | **图解缺口审计**：把该被逐段审的正文段落列出来（带行号 + 字数），并给出「段落 / 积木」比值。==写完之后必跑，见复盘 ⑦== |
 | `npm run check` | 校验积木语法 + YAML + 约定 + skill 与代码一致 + **skill 文档自己能不能渲染** |
 | `npm run view -- <slug>` | 构建单篇 + 打开（**默认就开**，它的用途就是这个；agent 验证时加 `--no-open`） |
