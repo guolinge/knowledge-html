@@ -1,0 +1,1580 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-has-toc="1">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>对象存储与 S3、OSS：把「往哪放数据」讲到「选哪家」</title>
+<meta name="description" content="从「PB 级非结构化数据往哪放」这个问题出发，推导出对象存储的全部核心设计：为什么放弃目录树和就地修改、为什么一切都是扁平 key、目录怎么用 prefix/delimiter「演」出来、多副本与纠删码怎么容灾、S3 怎么从产品变成协议、签名与临时凭证怎么让前端安全直传、静态托管 + CDN 怎么发版不炸、冷热分层和备份怎么自动省钱。正文 5 章 + 22 条评论里 77 张图的知识点全部展开成图。" />
+<link rel="stylesheet" href="../../assets/theme.css" />
+  <link rel="stylesheet" href="../../assets/blocks.css" />
+  <link rel="stylesheet" href="../../assets/archify-embed.css" />
+</head>
+<body>
+<div id="progress"></div>
+<div id="tocScrim"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
+    <a class="brand" href="../../index.html"><span class="dot"></span>知识笔记</a>
+    
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="toc" id="toc">
+      <p class="toc-title">目录</p>
+      <a href="../../index.html" class="sub">← 全部笔记</a>
+      <a href="#为什么需要对象存储三种存储范式的分工">为什么需要对象存储：三种存储范式的分工</a>
+      <a href="#011-块设备的世界观一排编了号的格子" class="sub">01.1 块设备的世界观：一排编了号的格子</a>
+      <a href="#012-文件系统把编号的格子组织成文件和目录" class="sub">01.2 文件系统：把编号的格子组织成文件和目录</a>
+      <a href="#013-一块云盘只能挂一台机器多机共享怎么办" class="sub">01.3 一块云盘只能挂一台机器：多机共享怎么办</a>
+      <a href="#014-三种范式各守一段生态位" class="sub">01.4 三种范式各守一段生态位</a>
+      <a href="#015-对象存储的取舍用能力换规模" class="sub">01.5 对象存储的取舍：用「能力」换「规模」</a>
+      <a href="#核心模型一张巨型分布式-map">核心模型：一张巨型分布式 Map</a>
+      <a href="#021-一切都是扁平的-key-value" class="sub">02.1 一切都是扁平的 key-value</a>
+      <a href="#目录是幻觉prefix-delimiter-commonprefixes">目录是幻觉：prefix / delimiter / CommonPrefixes</a>
+      <a href="#亲手折叠一遍" class="sub">亲手折叠一遍</a>
+      <a href="#三个直接后果" class="sub">三个直接后果</a>
+      <a href="#为什么这么设计" class="sub">为什么这么设计</a>
+      <a href="#三句话收束这一节" class="sub">三句话收束这一节</a>
+      <a href="#可靠性与不可变为什么改一个字节要重传整个文件">可靠性与不可变：为什么改一个字节要重传整个文件</a>
+      <a href="#041-硬盘一定会坏" class="sub">04.1 硬盘一定会坏</a>
+      <a href="#042-方案一3-副本" class="sub">04.2 方案一：3 副本</a>
+      <a href="#043-方案二ec-纠删码" class="sub">04.3 方案二：EC 纠删码</a>
+      <a href="#点坏几台机器试试" class="sub">点坏几台机器试试</a>
+      <a href="#044-不可变写一致性问题的解法" class="sub">04.4 不可变：写一致性问题的解法</a>
+      <a href="#s3一个产品如何变成事实标准">S3：一个产品如何变成事实标准</a>
+      <a href="#访问与鉴权从明文密钥到预签名-url">访问与鉴权：从明文密钥到预签名 URL</a>
+      <a href="#061-它就是一个-http-服务" class="sub">06.1 它就是一个 HTTP 服务</a>
+      <a href="#062-鉴权演进链每一步堵什么漏洞" class="sub">06.2 鉴权演进链：每一步堵什么漏洞</a>
+      <a href="#063-sts-直传的完整时序" class="sub">06.3 STS 直传的完整时序</a>
+      <a href="#064-预签名-url把一次性授权塞进一个-url" class="sub">06.4 预签名 URL：把一次性授权塞进一个 URL</a>
+      <a href="#065-权限模型acl-bucket-policy-iam-三层叠加" class="sub">06.5 权限模型：ACL / Bucket Policy / IAM 三层叠加</a>
+      <a href="#场景一静态资源托管-cdn-回源">场景一：静态资源托管 + CDN 回源</a>
+      <a href="#071-构建产物为什么天生适合对象存储" class="sub">07.1 构建产物为什么天生适合对象存储</a>
+      <a href="#072-初始配置五步" class="sub">07.2 初始配置：五步</a>
+      <a href="#073-一次用户访问的完整链路" class="sub">07.3 一次用户访问的完整链路</a>
+      <a href="#074-发版时序为什么先传-js最后传-indexhtml" class="sub">07.4 发版时序：为什么先传 JS、最后传 index.html</a>
+      <a href="#075-content-type不设就下载一坨乱码" class="sub">07.5 Content-Type：不设就「下载一坨乱码」</a>
+      <a href="#076-cache-control带-hash-的长缓存不带-hash-的短缓存" class="sub">07.6 Cache-Control：带 hash 的长缓存，不带 hash 的短缓存</a>
+      <a href="#077-cors哪些场景真的需要" class="sub">07.7 CORS：哪些场景真的需要</a>
+      <a href="#078-这套架构里谁有什么权限" class="sub">07.8 这套架构里谁有什么权限</a>
+      <a href="#场景二三冷热分层生命周期规则与备份归档">场景二三：冷热分层、生命周期规则与备份归档</a>
+      <a href="#081-数据有温度" class="sub">08.1 数据有温度</a>
+      <a href="#082-存储类型越便宜的取回越慢取回费越贵" class="sub">08.2 存储类型：越便宜的，取回越慢、取回费越贵</a>
+      <a href="#083-版本控制开关同一份覆盖两种命运" class="sub">08.3 版本控制开关：同一份覆盖，两种命运</a>
+      <a href="#084-生命周期规则设一次永远自动执行" class="sub">08.4 生命周期规则：设一次，永远自动执行</a>
+      <a href="#085-解冻归档数据怎么取回" class="sub">08.5 解冻：归档数据怎么取回</a>
+      <a href="#086-合规三件套不许删不许改异地有" class="sub">08.6 合规三件套：不许删、不许改、异地有</a>
+      <a href="#087-备份全量和增量为什么缺一不可" class="sub">08.7 备份：全量和增量为什么缺一不可</a>
+      <a href="#088-备份上桶的工程细节" class="sub">08.8 备份上桶的工程细节</a>
+      <a href="#选型判据与踩坑清单">选型判据与踩坑清单</a>
+      <a href="#091-选型判据优先级从高到低" class="sub">09.1 选型判据（优先级从高到低）</a>
+      <a href="#092-踩坑清单" class="sub">09.2 踩坑清单</a>
+      <a href="#一句话总结" class="sub">一句话总结</a>
+      <a href="#可追问的钩子" class="sub">可追问的钩子</a>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow">● 从零理解 · 概念</span>
+      <h1>对象存储与 S3、OSS：把「往哪放数据」讲到「选哪家」</h1>
+      <p class="lede">从「PB 级非结构化数据往哪放」这个问题出发，推导出对象存储的全部核心设计：为什么放弃目录树和就地修改、为什么一切都是扁平 key、目录怎么用 prefix/delimiter「演」出来、多副本与纠删码怎么容灾、S3 怎么从产品变成协议、签名与临时凭证怎么让前端安全直传、静态托管 + CDN 怎么发版不炸、冷热分层和备份怎么自动省钱。正文 5 章 + 22 条评论里 77 张图的知识点全部展开成图。</p>
+    </div>
+
+
+    <div class="provenance"><span><b>来源</b> 飞书文档《对象存储与 S3、OSS》（futu.feishu.cn/docx/A9IrdOvTYof6pNxQYHlc3SmOnGg）正文与 22 条评论、77 张配图（本篇知识来源） · AWS 官方 S3 Pricing：GET $0.0004/千次（Standard）、Standard-IA 最小计费对象 128KB、最短存储 30 天：https://aws.amazon.com/s3/pricing/ · AWS 官方文档 · 存储类与取回选项：Glacier Flexible Retrieval 三档（Expedited 1~5 分钟 / Standard 3~5 小时 / Bulk 5~12 小时）、Deep Archive 9~48 小时：https://docs.aws.amazon.com/AmazonS3/latest/userguide/restoring-objects-retrieval-options.html · AWS News Blog · Amazon S3 Update – Strong Read-After-Write Consistency（2020-12-01 强一致）：https://aws.amazon.com/blogs/aws/amazon-s3-update-strong-read-after-write-consistency/</span><span><b>生成</b> 2026-10-09</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">对象存储</span> <span class="tag tone-muted">S3</span> <span class="tag tone-muted">OSS</span> <span class="tag tone-muted">CDN</span> <span class="tag tone-muted">前端工程</span> <span class="tag tone-muted">存储入门</span></span></div>
+
+<h2 id="为什么需要对象存储三种存储范式的分工"><span class="num">01</span>为什么需要对象存储：三种存储范式的分工</h2>
+<p>先摆场景。假设你在为一个内容平台设计存储方案，数据画像是：几亿张用户上传的图片和视频，总量 PB 级；单文件从几 KB 的缩略图到几十 GB 的 4K 原片；全球用户通过浏览器直接下载，峰值 QPS 数十万。</p>
+<p>第一反应大概是「买硬盘挂到服务器上」。但一台机器的本地磁盘几十 TB 就到头了；换 NAS？共享文件系统在百万级文件下目录遍历已经卡顿，跨地域访问延迟不可控。传统方案的问题归为两类：</p>
+<ul>
+<li><mark class="mk-blue">纵向扩展有天花板</mark> —— 单机磁盘、单 NAS 控制器有物理极限；</li>
+<li><mark class="mk-blue">互联网不可直达</mark> —— 块设备和文件系统从来不是为 HTTP 访问设计的，用户没有任何办法直接读到一块远端磁盘上的内容。</li>
+</ul>
+<p>正是这类场景逼出了存储架构的三分天下：块存储、文件存储、对象存储各守一段生态位。</p>
+<h3 id="011-块设备的世界观一排编了号的格子">01.1 块设备的世界观：一排编了号的格子</h3>
+<p>先看最底下那层。块存储（云盘、EBS、SAN LUN）眼里，整个磁盘长这样：</p>
+<div class="oss-blockrow">
+  <div class="oss-blockrow-grid">
+    <div class="oss-cell"><b>块 0</b><span>512B</span></div>
+    <div class="oss-cell"><b>块 1</b><span>512B</span></div>
+    <div class="oss-cell"><b>块 2</b><span>512B</span></div>
+    <div class="oss-cell"><b>块 3</b><span>512B</span></div>
+    <div class="oss-cell"><b>块 4</b><span>512B</span></div>
+    <div class="oss-cell"><b>块 5</b><span>512B</span></div>
+    <div class="oss-cell"><b>块 6</b><span>512B</span></div>
+    <div class="oss-cell"><b>块 7</b><span>512B</span></div>
+  </div>
+  <p class="oss-blockrow-note">接口只有两个：读第 N 块 → 返回这 512 字节；写第 N 块 → 把 512 字节覆盖进去。就这样，没了。</p>
+</div>
+<p>它完全不知道这些东西：什么是「文件」、什么是「文件夹」、什么是「文件名」、哪些块属于同一个文件、哪些块是空闲的。它就是一排编了号的格子，像一面墙上的储物柜 —— <mark class="mk-blue">柜子本身不知道里面放的是什么</mark>。</p>
+<p>为什么叫「块」设备？和另一种设备对比就清楚了：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>设备类型</th><th>典型代表</th><th>读写单位</th></tr></thead><tbody><tr><th>字符设备</th><td data-label="典型代表">键盘、鼠标、串口</td><td data-label="读写单位">一个字节一个字节地流式读写</td></tr><tr><th>块设备</th><td data-label="典型代表">硬盘、SSD、云盘</td><td data-label="读写单位">必须以「一整块」为单位（通常 512B 或 4KB）</td></tr></tbody></table></div><p>你不能说「我只要第 100 块里的第 3 个字节」—— 必须把整个第 100 块读出来，自己从中取第 3 个字节。这个「按整块读写」的约束，决定了它上面必须再套一层软件才能给人用。</p>
+<h3 id="012-文件系统把编号的格子组织成文件和目录">01.2 文件系统：把编号的格子组织成文件和目录</h3>
+<p>文件系统（File System）就是装在块设备之上的一层软件，负责把「一堆编号的块」组织成「文件和目录」：</p>
+<ul>
+<li>没有它，你面对的是块 0、块 1、块 2 …… 块 999999999，根本无从知道「我的照片在哪」；</li>
+<li>有了它，你面对的是 <code>/photos/cat.jpg</code>（2.3MB）这样的树。它负责维护映射：「cat.jpg 的内容存在块 1024~1028」。</li>
+</ul>
+<p>一次「打开 /photos/cat.jpg」在四层里的完整旅程：</p>
+<div class="pipe"><div class="lane tone-muted">
+        <div class="lane-meta">
+          <span class="ln">LAYER 01</span>
+          <b>应用程序</b>
+          <small>你的代码</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>open(&quot;/photos/cat.jpg&quot;)</b>
+        <small>我要这个文件的内容</small>
+        <span class="tag tone-muted">系统调用</span>
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">文件名换块号 <span class="en">lookup</span><span class="note">文件系统查自己的映射</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-violet">
+        <div class="lane-meta">
+          <span class="ln">LAYER 02</span>
+          <b>文件系统（ext4 / NTFS / APFS）</b>
+          <small>块与文件之间的翻译官</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>cat.jpg → 块 1024~1028</b>
+        <small>查元数据，共 5 个块</small>
+        <span class="tag tone-violet">映射表</span>
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">块号换指令 <span class="en">命令队列</span><span class="note">一个块一条</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-blue">
+        <div class="lane-meta">
+          <span class="ln">LAYER 03</span>
+          <b>块设备驱动</b>
+          <small>只认识「读第 N 块 / 写第 N 块」</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>读块 1024 · 1025 · … · 1028</b>
+        <small>按块下发</small>
+        <span class="tag tone-blue">块 I/O</span>
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">电信号/磁信号 <span class="en">物理读写</span><span class="note">到硬件了</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-muted">
+        <div class="lane-meta">
+          <span class="ln">LAYER 04</span>
+          <b>物理硬盘</b>
+          <small>磁头移动 / 闪存芯片读取</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>返回原始字节</b>
+        <small>它不知道自己存的是照片</small>
+        <span class="tag tone-muted">512B × N</span>
+      </div></div>
+      </div></div><p>文件系统要扛的职责，远不止「记个映射」：</p>
+<div class="cards" data-cols="3"><div class="ccard tone-muted">
+          
+          <h4>命名</h4>
+          <p>给数据取名字（文件名、路径）</p>
+          
+          
+        </div><div class="ccard tone-muted">
+          
+          <h4>组织</h4>
+          <p>目录树结构（文件夹嵌套文件夹）</p>
+          
+          
+        </div><div class="ccard tone-muted">
+          
+          <h4>空间分配</h4>
+          <p>记录哪些块空闲、新文件放哪</p>
+          
+          
+        </div><div class="ccard tone-violet">
+          
+          <h4>块 ↔ 文件映射</h4>
+          <p>记录「这个文件的内容分布在哪些块上」</p>
+          
+          
+        </div><div class="ccard tone-violet">
+          
+          <h4>元数据</h4>
+          <p>文件大小、创建/修改时间、权限</p>
+          
+          
+        </div><div class="ccard tone-amber">
+          
+          <h4>一致性 / 日志</h4>
+          <p>断电不丢数据、崩溃后能恢复（journal）</p>
+          
+          
+        </div></div><h3 id="013-一块云盘只能挂一台机器多机共享怎么办">01.3 一块云盘只能挂一台机器：多机共享怎么办</h3>
+<p>对「几亿对象 + 全球下载」的场景，块存储还有一个致命伤：<mark class="mk-blue">一块云盘同一时刻只能挂载到一台机器</mark>（少数支持多挂载，但需要集群文件系统协调）。让多台机器同时读写同一块盘，靠的是集群文件系统 —— 它的核心是分布式锁管理器（DLM）：谁要改数据先举手，拿到锁才能改。</p>
+<div class="seqd has-grid" data-seq data-n="3">
+      <svg class="seqd-svg" aria-hidden="true">
+        <defs>
+          <marker id="s-fill" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+          <marker id="s-open" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10" fill="none" stroke="currentColor" stroke-width="1.4"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="seqd-head"><div class="scell"><div class="spart tone-blue" data-id="a">
+          <b>机器 A</b>
+        </div></div><div class="scell"><div class="spart tone-amber" data-id="dlm">
+          <b>DLM 分布式锁</b>
+        </div></div><div class="scell"><div class="spart tone-violet" data-id="b">
+          <b>机器 B</b>
+        </div></div></div>
+      <div class="seqd-body"><div class="smsg" data-from="a" data-to="dlm" data-kind="sync" data-i="1" data-note="1"><span class="snote">1</span><span class="slabel">我要写 /data/log.txt，申请写锁</span></div><div class="smsg" data-from="dlm" data-to="a" data-kind="reply" data-i="2" data-note="2"><span class="snote">2</span><span class="slabel">没人持有，授予</span></div><div class="smsg is-self" data-from="a" data-to="a" data-kind="self" data-i="3"><span class="slabel">A 开始写入</span></div><div class="smsg" data-from="b" data-to="dlm" data-kind="sync" data-i="4" data-note="4"><span class="snote">4</span><span class="slabel">我也想写，申请写锁</span></div><div class="smsg" data-from="dlm" data-to="b" data-kind="reply" data-i="5" data-tone="red" data-note="5"><span class="snote">5</span><span class="slabel">A 正持有 → 等待</span></div><div class="smsg" data-from="a" data-to="dlm" data-kind="sync" data-i="6" data-note="6"><span class="snote">6</span><span class="slabel">写完，释放锁</span></div><div class="smsg" data-from="dlm" data-to="b" data-kind="reply" data-i="7" data-tone="green" data-note="7"><span class="snote">7</span><span class="slabel">锁可用了</span></div><div class="smsg is-self" data-from="b" data-to="b" data-kind="self" data-i="8"><span class="slabel">B 开始写入</span></div></div>
+    </div><p>两次写入有序进行，不会互相覆盖；因为锁保证了顺序，B 能看到 A 刚写的内容。除了数据本身，元数据（目录结构、空闲块表）也要同步：一台机器建了文件，其他节点的目录缓存要失效重读 —— 靠日志和心跳机制完成。</p>
+<p>集群文件系统容易和分布式文件系统混为一谈，两者的差别是根本性的：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>对比</th><th>集群文件系统（GFS2 / OCFS2）</th><th>分布式文件系统（HDFS / Ceph）</th></tr></thead><tbody><tr><th>存储形态</th><td data-label="集群文件系统（GFS2 / OCFS2）">多台机器共享<strong>同一块物理存储</strong>（SAN / 多重挂载云盘）</td><td data-label="分布式文件系统（HDFS / Ceph）">数据分散存在多台机器<strong>各自的硬盘</strong>上</td></tr><tr><th>核心问题</th><td data-label="集群文件系统（GFS2 / OCFS2）">如何协调多人同时读写同一块盘</td><td data-label="分布式文件系统（HDFS / Ceph）">如何把多台机器的盘拼成一个大文件系统</td></tr><tr><th>关键机制</th><td data-label="集群文件系统（GFS2 / OCFS2）">分布式锁（DLM）</td><td data-label="分布式文件系统（HDFS / Ceph）">数据分片 + 复制</td></tr><tr><th>一句话</th><td data-label="集群文件系统（GFS2 / OCFS2）">「同一块盘」上的交通规则</td><td data-label="分布式文件系统（HDFS / Ceph）">「一堆盘」组成的虚拟大盘</td></tr></tbody></table></div><p>它和数据库集群架构的关系也常被问到：共享存储架构（如 Oracle RAC，多实例挂同一块存储）<mark class="mk-blue">需要</mark>集群文件系统；无共享架构（Shared Nothing，如 TiDB、MySQL 主从，每节点自己的盘 + 网络同步）<mark class="mk-blue">不需要</mark>，普通 ext4 就行。一个是「存储共享」，一个是「数据逻辑管理」—— 一个管字节放哪，一个管数据是什么含义。</p>
+<p>再补一个容易被追问的点：集群文件系统已经有分布式锁了，数据库为什么还要自己实现锁？<mark class="mk-blue">粒度和语义完全不同</mark>。文件系统锁的是「这段字节我在写，别人别碰」，不知道文件里面装的是什么；数据库锁的是「id=1024 这一行我在改」，知道数据的逻辑结构。集群文件系统是仓库管理员（“3 号货架 3 层别人在用”），数据库是会计（“张三的账户正在转账”）—— 会计的账本确实放在仓库里，但会计的工作代替不了仓库管理员，反过来也一样。</p>
+<h3 id="014-三种范式各守一段生态位">01.4 三种范式各守一段生态位</h3>
+<p>有了对底两层的认识，再看三种范式的分工就是一张全景：</p>
+<div class="flowd has-grid has-groups" data-flow data-edges="[{&quot;from&quot;:&quot;block&quot;,&quot;to&quot;:&quot;file&quot;,&quot;label&quot;:&quot;GB~TB&quot;},{&quot;from&quot;:&quot;file&quot;,&quot;to&quot;:&quot;object&quot;,&quot;label&quot;:&quot;TB~PB → EB&quot;}]">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"><div class="fgroup tone-blue" data-group-box="spectrum">
+          <span class="fgroup-label">抽象层级 ↑ · 语义约束 ↓ · 扩展能力 ↑</span>
+        </div></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-muted" data-id="block" data-group="spectrum">
+              
+              
+              <b>块存储</b>
+              <small>EBS / 云盘 / SAN
+裸字节数组 · 低延迟</small>
+            </div><div class="fnode tone-violet" data-id="file" data-group="spectrum">
+              
+              
+              <b>文件存储</b>
+              <small>NFS / CIFS / NAS
+目录树 · POSIX</small>
+            </div><div class="fnode tone-green" data-id="object" data-group="spectrum">
+              
+              
+              <b>对象存储</b>
+              <small>S3 / OSS / R2
+key + blob · HTTP</small>
+            </div></div></div>
+      
+    </div><p>三种范式不是替代关系，而是<mark class="mk-blue">抽象层级递增、扩展能力递增、语义约束递减</mark>的互补格局。落到维度上：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>维度</th><th>块存储</th><th>文件存储</th><th>对象存储</th></tr></thead><tbody><tr><th>访问单位</th><td data-label="块存储">扇区 / 固定块</td><td data-label="文件存储">文件（字节流）</td><td data-label="对象存储">对象（完整 blob）</td></tr><tr><th>命名空间</th><td data-label="块存储">无（靠上层文件系统）</td><td data-label="文件存储">树形目录</td><td data-label="对象存储">扁平 key 空间</td></tr><tr><th>扩展方式</th><td data-label="块存储"><span class="tag tone-red">纵向（加盘 / 换大盘）</span></td><td data-label="文件存储"><span class="tag tone-amber">有限横向（元数据瓶颈）</span></td><td data-label="对象存储"><span class="tag tone-green">近乎无限横向</span></td></tr><tr><th>访问协议</th><td data-label="块存储">iSCSI / NVMe（块协议）</td><td data-label="文件存储">NFS / SMB（POSIX）</td><td data-label="对象存储"><span class="tag tone-green">HTTP REST API</span></td></tr><tr><th>随机写</th><td data-label="块存储">支持</td><td data-label="文件存储">支持</td><td data-label="对象存储"><span class="tag tone-red">不支持（整对象覆盖）</span></td></tr><tr><th>一致性成本</th><td data-label="块存储">单机，低</td><td data-label="文件存储">跨机，高（锁 / rename）</td><td data-label="对象存储"><span class="tag tone-green">极低（对象级原子）</span></td></tr></tbody></table></div><h3 id="015-对象存储的取舍用能力换规模">01.5 对象存储的取舍：用「能力」换「规模」</h3>
+<p>要在 EB 量级做水平扩展，必须放弃层级树结构和 POSIX 语义。对象存储的设计正是对这个结论的兑现 —— 它<strong>显式放弃</strong>了三样东西：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>显式放弃的</th><th>具体含义</th></tr></thead><tbody><tr><th>就地修改</th><td data-label="具体含义">对象不可变。改一个字节 = 重新 PUT 整个对象覆盖</td></tr><tr><th>目录树</th><td data-label="具体含义">命名空间完全扁平，只有 key → object 的映射</td></tr><tr><th>POSIX 语义</th><td data-label="具体含义">没有 lock、没有原子 rename（要靠 copy + delete 模拟）、没有 append（部分厂商提供非标准 append，但不是核心语义）</td></tr></tbody></table></div><p>换来的是三样：</p>
+<div class="cards" data-cols="3"><div class="ccard tone-green">
+          
+          <h4>近乎无限的水平扩展</h4>
+          <p>key 按哈希打散到任意多节点，加机器即加容量与吞吐</p>
+          
+          
+        </div><div class="ccard tone-green">
+          
+          <h4>HTTP 原生可寻址</h4>
+          <p>每个对象天然是一个 URL，浏览器 / CDN 直接可达</p>
+          
+          
+        </div><div class="ccard tone-green">
+          
+          <h4>极低的存储单价</h4>
+          <p>运维复杂度低、硬件利用率高，单 GB 成本远低于块存储</p>
+          
+          
+        </div></div><p>这套取舍和数据库领域的一个经典模式同构：从关系型数据库（强约束、SQL、事务）退化到 KV 存储（只认 key-value、放弃 JOIN 和事务）—— 接口越简单、约束越少，水平扩展的空间就越大。<mark class="mk-blue">对象存储就是存储领域的 KV 化</mark>：用接口的极简换吞吐与规模的极大。</p>
+<div class="callout tone-violet quote">
+      <span class="ic">💡</span>
+      <div><p>对象存储不是「功能不足的文件系统」，而是<strong>为无限规模主动做了架构级 trade-off 的专用存储范式</strong>。</p>
+</div>
+    </div><h2 id="核心模型一张巨型分布式-map"><span class="num">02</span>核心模型：一张巨型分布式 Map</h2>
+<h3 id="021-一切都是扁平的-key-value">02.1 一切都是扁平的 key-value</h3>
+<p>把 01 节的结论拧紧一步，对象存储最精确的心智模型是：</p>
+<div class="callout tone-blue quote">
+      <span class="ic">🗺</span>
+      <div><p>对象存储 ≈ 一个全局的、持久化的、高可用的 <code>Map&lt;string, {bytes, metadata}&gt;</code></p>
+</div>
+    </div><p>这张巨型分布式哈希表有三个核心概念：</p>
+<div class="cards" data-cols="3"><div class="ccard tone-blue">
+          
+          <h4>Bucket（桶）</h4>
+          <p>命名空间。类比 DNS 顶级域名 —— 全局唯一、不可重名，用来隔离租户或业务域；一个桶就是一张独立的哈希表</p>
+          
+          
+        </div><div class="ccard tone-violet">
+          
+          <h4>Key（键）</h4>
+          <p>完整的 UTF-8 字符串，最长通常 1024 字节。它不是「路径」—— <code>photos/2024/a.jpg</code> 就是一个 key 字符串</p>
+          
+          
+        </div><div class="ccard tone-green">
+          
+          <h4>Object（对象）</h4>
+          <p>这张表的值，由三块组成：data blob + system metadata + user metadata</p>
+          
+          
+        </div></div><p>一个对象内部的三段结构：</p>
+<div class="spec tone-violet">
+      <div class="spec-head"><b>one object</b><span>GET /my-app-assets/photos/a.jpg 返回的到底是什么</span></div>
+      <div class="spec-body"><div class="srow">
+          <div class="sk">data blob</div>
+          <div class="sv"><p>原始字节流本体（图片 / 视频 / 任意二进制）。</p>
+</div>
+        </div><div class="srow">
+          <div class="sk">system metadata</div>
+          <div class="sv"><p>系统自动维护：<code>size</code>、<code>ETag</code>、<code>Content-Type</code>、<code>Last-Modified</code> 等。
+<code>Content-Type</code> 决定浏览器是「显示图片」还是「触发下载」（第 07 节有它惹的祸）。
+<code>ETag</code> 用于 HTTP 条件请求（<code>If-None-Match</code>）和去重校验。</p>
+</div>
+        </div><div class="srow">
+          <div class="sk">user metadata</div>
+          <div class="sv"><p>用户自定义键值对，如 <code>x-amz-meta-author: tom</code> —— 业务标记、检索索引用。</p>
+</div>
+        </div></div>
+    </div><p>为什么这个模型天然可分片？因为<mark class="mk-blue">扁平 key 空间可以按哈希无限打散</mark>：key 经过哈希落到某个分片（partition / shard），分片分布在不同存储节点上。增加节点只需要迁移少量分片 —— 没有层级依赖，就没有中心元数据瓶颈。</p>
+<div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;k1&quot;,&quot;to&quot;:&quot;h&quot;},{&quot;from&quot;:&quot;k2&quot;,&quot;to&quot;:&quot;h&quot;},{&quot;from&quot;:&quot;k3&quot;,&quot;to&quot;:&quot;h&quot;},{&quot;from&quot;:&quot;h&quot;,&quot;to&quot;:&quot;shard&quot;},{&quot;from&quot;:&quot;shard&quot;,&quot;to&quot;:&quot;node&quot;}]">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-muted" data-id="k1">
+              
+              
+              <b>photos/a.jpg</b>
+              <small>key</small>
+            </div><div class="fnode tone-muted" data-id="k2">
+              
+              
+              <b>logs/err.log</b>
+              <small>key</small>
+            </div><div class="fnode tone-muted" data-id="k3">
+              
+              
+              <b>avatar.png</b>
+              <small>key</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-amber" data-id="h">
+              
+              
+              <b>一致性哈希</b>
+              <small>hash(key)</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="shard">
+              
+              
+              <b>分片（partition）</b>
+              <small>按哈希均匀散落</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="node">
+              
+              
+              <b>Node A · B · C · D …</b>
+              <small>加机器 = 搬少量分片</small>
+            </div></div></div>
+      
+    </div><p>和 01.2 里文件存储那棵「所有 readdir / rename 压向根」的目录树对比：一边的元数据收敛在少数节点上，一边按哈希均匀散落、无中心瓶颈。这就是「扁平换扩展」的落地形态。</p>
+<p>这套模型下，所有操作都简单到不像话：<code>PUT = map.set(key, object)</code>，<code>GET = map.get(key)</code>，<code>DELETE = map.delete(key)</code>，<code>LIST = map.keys().filter(prefix)</code>。<mark class="mk-blue">正是这种极简接口让它能在 EB 量级上运转。</mark></p>
+<p>Bucket 名是<strong>全局唯一</strong>的（同一服务商内、甚至跨区域），像注册域名 —— 一旦被占就不能重名。它的作用是<mark class="mk-blue">限定 key 的作用域 + 承载桶级别的配置</mark>（权限、生命周期规则、版本控制开关等）。第 08 节会看到这些规则设一次就管住几十亿个对象 —— 这就是桶存在的意义之一。</p>
+<h2 id="目录是幻觉prefix-delimiter-commonprefixes"><span class="num">03</span>目录是幻觉：prefix / delimiter / CommonPrefixes</h2>
+<p>这是前端工程师最容易踩的认知误区。在 S3 / OSS 控制台里你看到的「文件夹」结构：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code>photos/
+  2024/
+    summer/
+      beach.jpg
+      sunset.jpg
+    winter/
+      snow.jpg
+    cover.jpg
+  2025/
+    a.png
+</code></pre></div>
+<p>会让人下意识认为 <code>photos/</code> 和 <code>2024/</code> 是真实存在的目录节点。<mark class="mk-blue">不是的</mark>。底层根本没有目录这个实体，实际存储的是一堆完全扁平的 key：<code>&quot;photos/2024/summer/beach.jpg&quot;</code>、<code>&quot;photos/2024/cover.jpg&quot;</code>、<code>&quot;photos/2025/a.png&quot;</code> …… <mark class="mk-blue">key 里的 <code>/</code> 只是普通字符，不存在目录节点，不占空间。</mark></p>
+<p>那控制台里那棵「树」是怎么来的？靠 ListObjectsV2 接口的 prefix + delimiter 两个参数<strong>在查询期即时聚合</strong>出来的。三个词各管一件事：</p>
+<div class="cards" data-cols="3"><div class="ccard tone-blue">
+          
+          <h4>Prefix —— 过滤</h4>
+          <p>「只返回以这个字符串开头的 key」。<code>Prefix: &quot;photos/2024/&quot;</code> → 不匹配的 key 连看都不看</p>
+          
+          
+        </div><div class="ccard tone-violet">
+          
+          <h4>Delimiter —— 分层（折叠）</h4>
+          <p>「遇到这个字符就别往下展开，折叠起来」。传 <code>&quot;/&quot;</code> 时：去掉前缀后剩余部分里含 <code>/</code> 的，截到第一个 <code>/</code> 归入 CommonPrefixes</p>
+          
+          
+        </div><div class="ccard tone-green">
+          
+          <h4>CommonPrefixes —— 折叠出来的组名</h4>
+          <p>被折叠的那些组的名字。控制台里显示成「文件夹图标」的来源</p>
+          
+          
+        </div></div><p>Delimiter 逐个 key 的判定过程（请求 <code>Prefix: &quot;photos/2024/&quot;</code>、<code>Delimiter: &quot;/&quot;</code>）：</p>
+<div class="demo" data-widget="stepper" data-config="{&quot;steps&quot;:[{&quot;label&quot;:&quot;photos/2024/cover.jpg&quot;,&quot;code&quot;:&quot;去掉前缀 → \&quot;cover.jpg\&quot;\n剩余部分里没有 \&quot;/\&quot;&quot;,&quot;note&quot;:&quot;不折叠 → 放进 **Contents**（当前层级的文件）&quot;},{&quot;label&quot;:&quot;photos/2024/summer/beach.jpg&quot;,&quot;code&quot;:&quot;去掉前缀 → \&quot;summer/beach.jpg\&quot;\n剩余部分里有 \&quot;/\&quot; → 在 \&quot;summer/\&quot; 处折叠&quot;,&quot;note&quot;:&quot;归入 CommonPrefix：**photos/2024/summer/**&quot;},{&quot;label&quot;:&quot;photos/2024/summer/sunset.jpg&quot;,&quot;code&quot;:&quot;去掉前缀 → \&quot;summer/sunset.jpg\&quot;\n同样折叠到 \&quot;summer/\&quot;&quot;,&quot;note&quot;:&quot;和 beach.jpg 共享同一段前缀 → 归入**同一个** CommonPrefix（去重后只有一条）&quot;},{&quot;label&quot;:&quot;photos/2024/winter/snow.jpg&quot;,&quot;code&quot;:&quot;去掉前缀 → \&quot;winter/snow.jpg\&quot;\n在 \&quot;winter/\&quot; 处折叠&quot;,&quot;note&quot;:&quot;归入 CommonPrefix：**photos/2024/winter/**&quot;},{&quot;label&quot;:&quot;响应&quot;,&quot;code&quot;:&quot;Contents: [\&quot;photos/2024/cover.jpg\&quot;]\nCommonPrefixes: [\&quot;photos/2024/summer/\&quot;,\n                \&quot;photos/2024/winter/\&quot;]&quot;,&quot;note&quot;:&quot;控制台把它渲染成「winter/、summer/ 两个文件夹 + cover.jpg 一个文件」—— 树是查询时演出来的&quot;}]}">
+      <div class="demo-head">
+        <span class="title">四个 key，怎么被折叠成「两棵子文件夹 + 一个文件」</span>
+        <span class="status" data-status></span>
+        <span class="spacer"></span>
+        
+      </div>
+      <div class="demo-body custom" data-mount></div>
+    </div><p>CommonPrefixes 不是什么、是什么，值得单独钉一遍：</p>
+<div class="callout tone-amber">
+      <span class="ic">⚠</span>
+      <div><p>CommonPrefixes <mark class="mk-blue">不是一个真实存在的「目录对象」</mark>，不是存储系统里的一个节点，不需要创建也删不掉。
+它是<strong>查询时即时计算出来的聚合结果</strong> —— 「恰好有一批 key 共享了这段前缀」的证据。</p>
+</div>
+    </div><h3 id="亲手折叠一遍">亲手折叠一遍</h3>
+<p>下面这个模拟器左边是「真实存储」的扁平 key 列表，右边是这次请求真正返回的东西。切 Prefix、切 Delimiter，看「文件夹」什么时候出现、什么时候消失；再往里面 PUT 一个以 <code>/</code> 结尾的 key，看「空文件夹」是怎么被造出来的：</p>
+<div class="demo" data-widget="s3-list-lab" data-config="{&quot;keys&quot;:[&quot;photos/2024/summer/beach.jpg&quot;,&quot;photos/2024/summer/sunset.jpg&quot;,&quot;photos/2024/winter/snow.jpg&quot;,&quot;photos/2024/cover.jpg&quot;,&quot;photos/2025/a.png&quot;,&quot;docs/resume.pdf&quot;,&quot;avatar.png&quot;,&quot;logs/2026/08/17/app.log.gz&quot;],&quot;prefixes&quot;:[&quot;&quot;,&quot;photos/&quot;,&quot;photos/2024/&quot;,&quot;logs/&quot;],&quot;defPrefix&quot;:&quot;photos/2024/&quot;,&quot;defDelim&quot;:true}">
+      <div class="demo-head">
+        <span class="title">ListObjectsV2 折叠模拟器</span>
+        <span class="status" data-status></span>
+        <span class="spacer"></span>
+        
+      </div>
+      <div class="demo-body custom" data-mount></div>
+    </div><h3 id="三个直接后果">三个直接后果</h3>
+<p>「目录是幻觉」不是冷知识，它决定了几个日常操作的形态：</p>
+<div class="cards" data-cols="3"><div class="ccard tone-amber">
+          
+          <h4>没有 mv 目录</h4>
+          
+          <div class="cbody"><p>想把 <code>photos/2024/</code> 「重命名」为 <code>images/2024/</code>？只能逐个对象 copy 到新 key + delete 旧 key。百万个文件就是百万次操作。</p>
+</div>
+          
+        </div><div class="ccard tone-amber">
+          
+          <h4>「空目录」不存在</h4>
+          
+          <div class="cbody"><p>除非显式创建一个 key 为 <code>photos/2024/</code> 且 body 为空的对象来「占位」，否则删光文件后「目录」就消失了 —— 上面模拟器里 PUT 进去的那个就是这种占位对象。</p>
+</div>
+          
+        </div><div class="ccard tone-amber">
+          
+          <h4>list 大前缀要分页</h4>
+          
+          <div class="cbody"><p>默认单次最多返回 1000 个 key。亿级前缀下必须用 <code>ContinuationToken</code> 迭代，不能一把拉完。</p>
+</div>
+          
+        </div></div><h3 id="为什么这么设计">为什么这么设计</h3>
+<p>如果真搞目录：要维护目录节点的元数据、创建 / 删除 / 移动文件时要更新父目录、目录一致性要跨节点保证 —— 01 节讲过的「中心元数据瓶颈」原样回来了，扩展性受限。用前缀模拟目录之后：key 就是一个字符串，存在哪台机器只看 hash；没有「父目录」要更新；删一个对象不需要通知任何「目录」；创建对象也不需要「先创建父目录」。<mark class="mk-blue">真正的扁平化，无限扩展；「目录感」只在查询时按需生成 —— 读的体验好，写的开销小。</mark></p>
+<div class="summary">
+      <h3 id="三句话收束这一节">三句话收束这一节</h3>
+      <p><strong>Prefix</strong> = 「我只要以这个字符串开头的 key」（过滤）。
+<strong>Delimiter</strong> = 「遇到这个字符就别往下展开了，折叠起来」（分层）。
+<strong>CommonPrefixes</strong> = 「被折叠的那些组的名字」（模拟出的子文件夹）。
+三者配合 —— 在扁平的 key 空间上，用查询参数「演」出了一棵目录树。</p>
+
+    </div><h2 id="可靠性与不可变为什么改一个字节要重传整个文件"><span class="num">04</span>可靠性与不可变：为什么改一个字节要重传整个文件</h2>
+<h3 id="041-硬盘一定会坏">04.1 硬盘一定会坏</h3>
+<p>一个残酷的现实：一块硬盘的年故障率大约 1%~3%。一万块硬盘（对象存储的典型规模）意味着 <mark class="mk-blue">每天大约坏 1 块、每年坏 100~300 块</mark>。如果数据只存一份，盘一坏数据就永久丢失 —— 所以必须做冗余，同一份数据存多处。</p>
+<h3 id="042-方案一3-副本">04.2 方案一：3 副本</h3>
+<p>一个 1MB 的对象，在三台不同地方的机器上各放一份完整副本：</p>
+<div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-blue">副本 1</span>
+            <span class="name">机器 A · 北京机房</span>
+            <span class="spacer"></span>
+            
+          </div>
+          <div class="rec"><div class="">
+            <b>内容</b><span>完整 1MB</span></div><div class="ok">
+            <b>状态</b><span>随时可读</span></div></div>
+          
+          <p class="jnote">三份副本分布在不同机器、不同机房。</p>
+        </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-violet">副本 2</span>
+            <span class="name">机器 B · 北京另一机房</span>
+            <span class="spacer"></span>
+            
+          </div>
+          <div class="rec"><div class="">
+            <b>内容</b><span>完整 1MB</span></div><div class="ok">
+            <b>状态</b><span>随时可读</span></div></div>
+          
+          <p class="jnote">A 的盘坏了 → 从 B 或 C 读，完全不受影响；系统再自动复制一份到新机器，恢复 3 副本。</p>
+        </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-green">副本 3</span>
+            <span class="name">机器 C · 上海机房</span>
+            <span class="spacer"></span>
+            
+          </div>
+          <div class="rec"><div class="">
+            <b>内容</b><span>完整 1MB</span></div><div class="ok">
+            <b>状态</b><span>随时可读</span></div></div>
+          
+          <p class="jnote">整个北京断电 → 上海这份照样能读。A、B、C 同时坏（三台不同机器同时故障）才丢数据，概率低到可以忽略。</p>
+        </div><p>实际占用 3MB —— 原始数据的 <strong>3 倍</strong>。这是 3 副本的代价。</p>
+<h3 id="043-方案二ec-纠删码">04.3 方案二：EC 纠删码</h3>
+<p>典型方案 EC(4,2)：4 个数据块 + 2 个校验块。三步：</p>
+<ol>
+<li>把 1MB 切成 4 等份（每份 256KB）：D1、D2、D3、D4；</li>
+<li>用数学公式（类似多项式插值）算出 2 个校验块 P1、P2；</li>
+<li>6 个块分别放在 6 台不同的机器上。</li>
+</ol>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>对比</th><th>3 副本</th><th>EC(4,2)</th></tr></thead><tbody><tr><th>存储开销</th><td data-label="3 副本"><span class="tag tone-amber">3 倍</span></td><td data-label="EC(4,2)"><span class="tag tone-green">1.5 倍</span></td></tr><tr><th>可容忍故障数</th><td data-label="3 副本">2 台机器</td><td data-label="EC(4,2)">2 台机器</td></tr><tr><th>读取速度</th><td data-label="3 副本"><span class="tag tone-green">快（直接读副本）</span></td><td data-label="EC(4,2)"><span class="tag tone-amber">稍慢（可能要拼数据块 + 反算）</span></td></tr><tr><th>恢复方式</th><td data-label="3 副本">简单（整体复制）</td><td data-label="EC(4,2)">较复杂（数学计算）</td></tr><tr><th>适用场景</th><td data-label="3 副本">热数据、小文件</td><td data-label="EC(4,2)">冷数据、大文件</td></tr><tr><th>典型用户</th><td data-label="3 副本">Redis、HDFS 默认</td><td data-label="EC(4,2)">S3、Ceph</td></tr></tbody></table></div><p>对象存储通常选 EC：数据量巨大（EB 级），3 倍空间太贵；而且对象存储大多是「写一次读多次」，恢复计算的开销可以接受。</p>
+<h3 id="点坏几台机器试试">点坏几台机器试试</h3>
+<div class="demo" data-widget="ec-lab" data-config="{&quot;mode&quot;:&quot;replica&quot;}">
+      <div class="demo-head">
+        <span class="title">3 副本 vs EC(4,2)：同样是坏 2 台，恢复路径完全不同</span>
+        <span class="status" data-status></span>
+        <span class="spacer"></span>
+        
+      </div>
+      <div class="demo-body custom" data-mount></div>
+    </div><h3 id="044-不可变写一致性问题的解法">04.4 不可变：写一致性问题的解法</h3>
+<p>3 副本 / EC 都意味着同一个对象的数据散在多台机器上。如果允许就地修改某几个字节，系统必须把「部分修改」同步传播到所有副本，并保证过程中任何读者不会拿到半新半旧的数据 —— <mark class="mk-blue">跨副本的部分写一致性问题</mark>，代价极高、实现极复杂。</p>
+<p>对象存储的解法是釜底抽薪：<strong>对象一旦写入，不可修改</strong>。要改？上传一个完整的新版本，旧的不动：</p>
+<div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-muted">时刻 T1</span>
+            <span class="name">旧版本在服务</span>
+            <span class="spacer"></span>
+            
+          </div>
+          <div class="rec"><div class="ok">
+            <b>版本指针</b><span>旧对象</span></div><div class="ok">
+            <b>读者</b><span>读到旧对象（一致）</span></div></div>
+          
+          <p class="jnote">旧副本在机器 A、B、C，完全不动、不改、不碰。</p>
+        </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-amber">时刻 T2</span>
+            <span class="name">新版本写入中</span>
+            <span class="spacer"></span>
+            
+          </div>
+          <div class="rec"><div class="">
+            <b>新对象</b><span>正在写入 D、E、F（未写完）</span></div><div class="ok">
+            <b>版本指针</b><span>旧对象</span></div></div>
+          
+          <p class="jnote">写到一半的新对象<strong>不可见</strong> —— 指针还没切，读者仍然读到完整的旧对象。</p>
+        </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-green">时刻 T3</span>
+            <span class="name">指针原子切换</span>
+            <span class="spacer"></span>
+            
+          </div>
+          <div class="rec"><div class="ok">
+            <b>版本指针</b><span>新对象</span></div><div class="">
+            <b>读者</b><span>从此读到新对象（一致）</span></div></div>
+          
+          <p class="jnote">全程没有任何「部分修改」。旧副本可以异步清理，或留给版本控制。</p>
+        </div><p>写操作退化为「整对象 PUT（覆盖 / 新建）」：要么成功（所有副本写完才返回 200），要么失败，不存在中间态 —— 读者永远拿到完整的旧版或完整的新版，这就是<mark class="mk-blue">对象级的原子性</mark>。用极简的写语义换来分布式场景下极低的一致性成本。</p>
+<div class="callout tone-violet">
+      <span class="ic">💡</span>
+      <div><p>这和 git 的 blob 对象同构：git 里一个 blob 是 content-addressable、不可变的；
+你改了文件内容，git 生成一个<strong>全新的 blob</strong>，而不是 patch 旧的。对象存储对「对象」的处理方式完全一样。</p>
+</div>
+    </div><h2 id="s3一个产品如何变成事实标准"><span class="num">05</span>S3：一个产品如何变成事实标准</h2>
+<p>2006 年，AWS 推出 Amazon S3（Simple Storage Service），业界第一个商用云对象存储服务。它定义了一套基于 HTTP REST 的操作接口（PUT / GET / DELETE Object、ListObjectsV2、CreateBucket ……）和一套签名鉴权协议（Signature V4）。十几年下来，S3 的 API 规范从一个产品的私有接口演变为整个行业的事实标准 —— 不是因为 AWS 推了什么标准化组织，而是<mark class="mk-blue">用户太多、生态太厚、所有人都照着它写</mark>。阿里云 OSS、腾讯云 COS、MinIO、Cloudflare R2、Backblaze B2 等几乎所有后来者都选择提供 S3 兼容接口。</p>
+<div class="timeline"><div class="titem tone-blue">
+          <span class="when">2006</span>
+          <h4>AWS S3 发布</h4>
+          <p>定义核心 API（REST + SigV4）</p>
+        </div><div class="titem tone-muted">
+          <span class="when">2009~2012</span>
+          <h4>阿里云 OSS、OpenStack Swift 跟进</h4>
+          <p>早期各自独立 API</p>
+        </div><div class="titem tone-violet">
+          <span class="when">2014+</span>
+          <h4>S3 兼容成为行业共识</h4>
+          <p>OSS / COS 纷纷提供 S3 兼容端点</p>
+        </div><div class="titem tone-green">
+          <span class="when">2020</span>
+          <h4>S3 宣布强一致性读</h4>
+          <p>12 月 1 日起，PUT 后立即 GET / LIST 一定看到最新数据（此前 list-after-write 是最终一致的）</p>
+        </div><div class="titem tone-amber">
+          <span class="when">2022</span>
+          <h4>Cloudflare R2 入场</h4>
+          <p>「零出网流量费 + S3 兼容」</p>
+        </div></div><p>这里的关键认知：</p>
+<div class="callout tone-blue quote">
+      <span class="ic">🔌</span>
+      <div><p>S3 API 之于对象存储，相当于 HTTP 之于 Web 服务 —— 协议一旦成为标准，实现可以百花齐放，而客户端代码几乎不变。</p>
+</div>
+    </div><p>具体来说：用 AWS SDK 写的上传代码，只要把 endpoint 从 <code>s3.amazonaws.com</code> 换成 OSS 的 S3 兼容端点或 MinIO 地址，代码可以不改一行就跑通。这意味着<strong>降低锁定风险<strong>（迁移时应用层几乎不动）和</strong>生态复用</strong>（rclone、Terraform S3 backend、各种备份工具自动适用于所有兼容实现）。</p>
+<p>但要注意：<mark class="mk-blue">兼容 ≠ 100% 对齐</mark>。OSS 与 S3 在 ACL 粒度、存储类型命名、某些 header 行为、请求风格（path-style vs virtual-hosted）上存在差异；S3 Select、Object Lambda、Intelligent-Tiering 等高级特性往往是 AWS 专有。选型时要验证你实际用到的接口子集是否被目标厂商覆盖。</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>维度</th><th>AWS S3</th><th>阿里云 OSS</th><th>腾讯云 COS</th><th>MinIO（自建）</th><th>Cloudflare R2</th></tr></thead><tbody><tr><th>定位</th><td data-label="AWS S3">行业标杆，功能最全</td><td data-label="阿里云 OSS">国内生态最深</td><td data-label="腾讯云 COS">国内第二，绑定腾讯系</td><td data-label="MinIO（自建）">私有化 / 混合云</td><td data-label="Cloudflare R2">低成本 / 零出网费</td></tr><tr><th>S3 兼容度</th><td data-label="AWS S3">100%（自己就是）</td><td data-label="阿里云 OSS">高（主流接口全覆盖，细节有差异）</td><td data-label="腾讯云 COS">高</td><td data-label="MinIO（自建）">极高（目标就是 S3 替代）</td><td data-label="Cloudflare R2">高（核心接口全覆盖）</td></tr><tr><th>出网流量费</th><td data-label="AWS S3"><span class="tag tone-amber">较高</span></td><td data-label="阿里云 OSS">中</td><td data-label="腾讯云 COS">中</td><td data-label="MinIO（自建）"><span class="tag tone-green">自建无流量费</span></td><td data-label="Cloudflare R2"><span class="tag tone-green">免费（卖点）</span></td></tr><tr><th>生态绑定</th><td data-label="AWS S3">AWS 全家桶</td><td data-label="阿里云 OSS">阿里云全家桶</td><td data-label="腾讯云 COS">腾讯云全家桶</td><td data-label="MinIO（自建）">K8s / 自建设施</td><td data-label="Cloudflare R2">Cloudflare Workers</td></tr><tr><th>适用人群</th><td data-label="AWS S3">全球化业务 / 已在 AWS</td><td data-label="阿里云 OSS">国内业务 / 已在阿里云</td><td data-label="腾讯云 COS">国内 / 已在腾讯云</td><td data-label="MinIO（自建）">合规 / 私有化 / 成本敏感</td><td data-label="Cloudflare R2">出网流量大 / 边缘优先</td></tr></tbody></table></div><p><strong>选型判据一句话</strong>：先看你已在哪朵云（生态绑定成本远高于 API 差异），再看流量账单（出网费往往比存储费贵一个量级），最后看是否有私有化合规要求。</p>
+<p>迁移成本的关键不在代码 —— S3 兼容意味着客户端改个 endpoint 就行。真正的成本在于：<strong>(1) 数据搬运量</strong>（PB 级数据跨厂商传输要数天到数周）和 <strong>(2) 搬运过程中的出网流量费</strong>。所以选型时最重要的不是「哪家便宜 1 分钱」，而是<mark class="mk-blue">选错后搬家要花多少</mark>。</p>
+<h2 id="访问与鉴权从明文密钥到预签名-url"><span class="num">06</span>访问与鉴权：从明文密钥到预签名 URL</h2>
+<h3 id="061-它就是一个-http-服务">06.1 它就是一个 HTTP 服务</h3>
+<p>对象存储的接口就是 <code>Map&lt;key, object&gt;</code> 上的 CRUD，暴露给外部世界的形态是一套标准 HTTP REST API：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>HTTP 动词</th><th>对象操作</th><th>语义</th></tr></thead><tbody><tr><th>PUT</th><td data-label="对象操作">PutObject</td><td data-label="语义">上传 / 覆盖对象</td></tr><tr><th>GET</th><td data-label="对象操作">GetObject</td><td data-label="语义">下载对象</td></tr><tr><th>HEAD</th><td data-label="对象操作">HeadObject</td><td data-label="语义">取元数据（不下载 body）</td></tr><tr><th>GET + ?list-type=2</th><td data-label="对象操作">ListObjectsV2</td><td data-label="语义">列举 key（带分页）</td></tr><tr><th>DELETE</th><td data-label="对象操作">DeleteObject</td><td data-label="语义">删除对象</td></tr></tbody></table></div><p>对前端工程师来说，这意味着对象存储<mark class="mk-blue">就是你每天在调的 HTTP 资源接口</mark>—— 用 fetch 就能操作：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-js">// 方式一：直接用 fetch 下载一个公开对象（无鉴权）
+const res = await fetch('https://my-bucket.s3.amazonaws.com/photos/a.jpg');
+const blob = await res.blob();
+// 这和调任何 REST API 完全一样 —— 因为它本来就是
+
+// 方式二：等价的 SDK 调用
+import { S3Client, GetObjectCommand } from '@aws-sdk/client-s3';
+const client = new S3Client({ region: 'us-east-1' });
+const { Body } = await client.send(new GetObjectCommand({
+  Bucket: 'my-bucket', Key: 'photos/a.jpg',
+}));
+// SDK 帮你做了：签名计算、重试、流式读取、错误解析
+// 底层依然是一个 GET https://my-bucket.s3.us-east-1.amazonaws.com/photos/a.jpg
+</code></pre></div>
+<p>SDK 只是在 HTTP 请求之上做了两件事：帮你算请求签名（见下一节），封装分片上传 / 重试 / 流控等运维逻辑。</p>
+<h3 id="062-鉴权演进链每一步堵什么漏洞">06.2 鉴权演进链：每一步堵什么漏洞</h3>
+<p>既然是 HTTP 服务，怎么防止任何人都能读写你的数据？从朴素到正确，是一条清晰的演进链：</p>
+<div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-red">方案一</span>
+            <span class="name">AK/SK 明文放进请求</span>
+            <span class="spacer"></span>
+            <span class="tag tone-red">否决</span>
+          </div>
+          <div class="rec"><div class="">
+            <b>做法</b><span>请求里带上 AccessKey + SecretKey，服务端查表验证</span></div><div class="warn">
+            <b>缺陷 1</b><span>前端代码 / APK 里内嵌 SK？反编译一下就全拿到</span></div><div class="warn">
+            <b>缺陷 2</b><span>SK 泄露 = 对方拥有全部权限，能删光整个 bucket</span></div><div class="warn">
+            <b>缺陷 3</b><span>无法限定「只许上传某个 key」「5 分钟有效」</span></div></div>
+          
+          <p class="jnote">密钥绝不能出现在请求的明文中。</p>
+        </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-blue">方案二</span>
+            <span class="name">请求签名（Signature V4）</span>
+            <span class="spacer"></span>
+            
+          </div>
+          <div class="rec"><div class="">
+            <b>做法</b><span>用 SK 对「方法 + URL + headers + 时间戳 + payload hash」做 HMAC-SHA256</span></div><div class="">
+            <b>传输</b><span>只传签名结果 + AK（公钥，可暴露）</span></div><div class="ok">
+            <b>堵住</b><span>SK 不上网；请求被篡改则签名不匹配；带时间戳，过期自动失效</span></div></div>
+          
+          <p class="jnote">证明你持有密钥，但不暴露密钥 —— 和 HMAC 的设计哲学一致。服务端用同一个 SK 重算一遍比对即可。</p>
+        </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-violet">方案三</span>
+            <span class="name">STS 临时凭证</span>
+            <span class="spacer"></span>
+            
+          </div>
+          <div class="rec"><div class="">
+            <b>做法</b><span>后端向 STS 申请「短时效 + 最小权限」的临时 AK/SK/Token</span></div><div class="">
+            <b>时效</b><span>15 分钟到 1 小时</span></div><div class="ok">
+            <b>权限</b><span>可限定为「只能 PUT 到 uploads/user-123/*」</span></div></div>
+          
+          <p class="jnote">前端 / 移动端不应持有任何长期密钥。被截获也只能在有限时间内对有限路径做有限操作。</p>
+        </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-green">方案四</span>
+            <span class="name">预签名 URL（Presigned URL）</span>
+            <span class="spacer"></span>
+            
+          </div>
+          <div class="rec"><div class="">
+            <b>做法</b><span>后端提前对一个「指定操作 + 指定 key + 指定时效」的请求签好名，编码进 URL query</span></div><div class="ok">
+            <b>前端</b><span>拿着 URL 直接 PUT，零签名逻辑、零 SDK 依赖</span></div></div>
+          
+          <p class="jnote">签发后在时效内任何拿到它的人都能用 —— 控制时效（建议不超过 15 分钟）和传输通道（HTTPS）。</p>
+        </div><p>这条演进链的每一步都在回答同一个问题 —— <mark class="mk-blue">如何让最不可信的端（浏览器 / 移动端）也能安全地直接操作对象存储</mark>。答案是：密钥永远不出后端，前端只拿短命、受限的临时凭证。</p>
+<h3 id="063-sts-直传的完整时序">06.3 STS 直传的完整时序</h3>
+<div class="seqd has-grid" data-seq data-n="4">
+      <svg class="seqd-svg" aria-hidden="true">
+        <defs>
+          <marker id="s-fill" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+          <marker id="s-open" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10" fill="none" stroke="currentColor" stroke-width="1.4"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="seqd-head"><div class="scell"><div class="spart tone-blue has-icon" data-id="fe">
+          <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="3" width="11" height="8.5" rx="1.5"/><path d="M2.5 6h11"/></svg><b>前端</b>
+        </div></div><div class="scell"><div class="spart tone-violet has-icon" data-id="be">
+          <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5L3 8l3 4.5M10 3.5L13 8l-3 4.5"/></svg><b>业务后端</b>
+        </div></div><div class="scell"><div class="spart tone-amber has-icon" data-id="sts">
+          <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2.2l4.8 1.9v4c0 2.9-2.1 4.8-4.8 5.7-2.7-.9-4.8-2.8-4.8-5.7v-4z"/></svg><b>STS</b>
+        </div></div><div class="scell"><div class="spart tone-green has-icon" data-id="oss">
+          <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="8" cy="4.2" rx="5" ry="1.9"/><path d="M3 4.2v7.6c0 1.05 2.24 1.9 5 1.9s5-.85 5-1.9V4.2"/></svg><b>对象存储</b>
+        </div></div></div>
+      <div class="seqd-body"><div class="smsg" data-from="fe" data-to="be" data-kind="sync" data-i="1" data-note="1"><span class="snote">1</span><span class="slabel">① 登录（账号密码 / OAuth）</span></div><div class="smsg is-self" data-from="be" data-to="be" data-kind="self" data-i="2"><span class="slabel">验证用户身份（你自己的业务逻辑）</span></div><div class="smsg" data-from="fe" data-to="be" data-kind="sync" data-i="3" data-note="3"><span class="snote">3</span><span class="slabel">③ 请求上传凭证（带登录 token）</span></div><div class="smsg" data-from="be" data-to="sts" data-kind="sync" data-i="4" data-note="4"><span class="snote">4</span><span class="slabel">④ 用后端永久 AK/SK 申请临时凭证（限定权限 + 时效）</span></div><div class="smsg" data-from="sts" data-to="be" data-kind="reply" data-i="5" data-note="5"><span class="snote">5</span><span class="slabel">⑤ 临时 AK + SK + Token（15 分钟）</span></div><div class="smsg" data-from="be" data-to="fe" data-kind="reply" data-i="6" data-note="6"><span class="snote">6</span><span class="slabel">⑥ 下发临时凭证</span></div><div class="smsg" data-from="fe" data-to="oss" data-kind="sync" data-i="7" data-note="7"><span class="snote">7</span><span class="slabel">⑦ 用临时凭证签名，直传 PUT</span></div><div class="smsg" data-from="oss" data-to="fe" data-kind="reply" data-i="8" data-note="8"><span class="snote">8</span><span class="slabel">200 OK</span></div></div>
+    </div><p>一个高频疑问值得钉在这里：<strong>用 STS 是不是就不用做登录验证了？</strong> 分两层：</p>
+<ul>
+<li>STS 本身的调用<mark class="mk-blue">不需要</mark>用户登录验证 —— 它只认「调用者的 AK/SK 有没有权限」。你的后端用永久密钥调 STS，STS 验证的是<strong>后端</strong>身份，它根本不知道最终用户是谁；</li>
+<li>但你的后端在调 STS 之前<mark class="mk-blue">应该自己验证用户身份</mark>。因为要回答「这是 user-123 还是 user-456」，才能构造「只能写 <code>uploads/user-123/*</code>」这样的最小权限。不验证的话，任何人都能冒充 user-123 拿到他的上传权限，往你桶里传垃圾或覆盖他的文件。</li>
+</ul>
+<p>例外确实存在但很少见：匿名上传（如反馈表单附件）可以跳过身份验证，但权限要收到极严（只能 PUT、只能写 <code>anonymous/</code>、限文件大小、按 IP 限频、时效压到最短）。</p>
+<h3 id="064-预签名-url把一次性授权塞进一个-url">06.4 预签名 URL：把一次性授权塞进一个 URL</h3>
+<p>STS 路径能让前端直传，但前端要集成 SDK 来算签名。有没有更简单的方式 —— 给前端一个 URL，它拿着直接 PUT，不需要任何签名逻辑？这就是 Presigned URL：</p>
+<div class="spec tone-green">
+      <div class="spec-head"><b>一个预签名 PUT URL 的解剖</b><span>签名参数全部在 query string 里</span></div>
+      <div class="spec-body"><div class="srow">
+          <div class="sk">URL 本体</div>
+          <div class="sv"><div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>https://my-bucket.s3.amazonaws.com/uploads/file-xyz.mp4
+  ?X-Amz-Algorithm=AWS4-HMAC-SHA256
+  &amp;X-Amz-Credential=AKID.../20260812/us-east-1/s3/aws4_request
+  &amp;X-Amz-Date=20260812T100000Z
+  &amp;X-Amz-Expires=900          &lt;- 15 分钟后失效
+  &amp;X-Amz-SignedHeaders=host
+  &amp;X-Amz-Signature=a3b8f...   &lt;- 预计算好的签名
+</pre></div></div>
+        </div><div class="srow">
+          <div class="sk">后端只做一件事</div>
+          <div class="sv"><div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>const url = await getSignedUrl(client, new PutObjectCommand({
+  Bucket: 'my-bucket',
+  Key: `uploads/${userId}/${fileId}.mp4`,
+  ContentType: 'video/mp4',
+}), { expiresIn: 900 });
+// 返回给前端即可
+</pre></div></div>
+        </div><div class="srow">
+          <div class="sk">前端只做一件事</div>
+          <div class="sv"><div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>await fetch(url, {
+  method: 'PUT',
+  headers: { 'Content-Type': 'video/mp4' },
+  body: file,
+});
+// 不 import 任何 SDK、不接触任何密钥
+</pre></div></div>
+        </div></div>
+    </div><p>它解决的核心痛点：大文件上传如果走「前端 → 后端 → 对象存储」，后端要承受全部上行带宽和内存压力。预签名 URL 让前端<mark class="mk-blue">绕开后端直传</mark>，后端只做轻量的「签发 URL」：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>对比</th><th>传统中转（后端扛流量）</th><th>预签名直传</th></tr></thead><tbody><tr><th>文件流经过谁</th><td data-label="传统中转（后端扛流量）">浏览器 → 后端 → 对象存储</td><td data-label="预签名直传">浏览器 → 对象存储（后端零流量）</td></tr><tr><th>后端压力</th><td data-label="传统中转（后端扛流量）"><span class="tag tone-red">承受全部上行带宽 + 内存</span></td><td data-label="预签名直传"><span class="tag tone-green">只做签发，毫秒级轻请求</span></td></tr><tr><th>上传通道</th><td data-label="传统中转（后端扛流量）">多一跳，慢</td><td data-label="预签名直传">直连对象存储</td></tr><tr><th>完成通知</th><td data-label="传统中转（后端扛流量）">后端天然知道传完了</td><td data-label="预签名直传">需要对象存储回调（可选配置）</td></tr><tr><th>限制手段</th><td data-label="传统中转（后端扛流量）">后端代码随便写</td><td data-label="预签名直传">时效 / key / Content-Type 锁在签名里；限大小要配 POST Policy 的 content-length-range</td></tr></tbody></table></div><p>注意事项：URL 一旦签发，时效内任何拿到它的人都能用；签名里锁定了 key 和 Content-Type，前端不能用这个 URL 传到别的路径。</p>
+<h3 id="065-权限模型acl-bucket-policy-iam-三层叠加">06.5 权限模型：ACL / Bucket Policy / IAM 三层叠加</h3>
+<div class="cards" data-cols="3"><div class="ccard tone-amber">
+          
+          <h4>ACL（已过时倾向）</h4>
+          <p>最早期的机制，直接附着在 Bucket 或 Object 上，粒度很粗（private / public-read / public-read-write 几种预设）。AWS 自 2023 年起对新建桶默认关闭 ACL（BucketOwnerEnforced），保留只为向后兼容</p>
+          
+          
+        </div><div class="ccard tone-green">
+          
+          <h4>Bucket Policy（主力）</h4>
+          <p>基于 JSON 声明的桶级策略：Effect（Allow/Deny）+ Principal（谁）+ Action（什么操作）+ Resource（哪些 key）+ Condition（附加条件）。能表达「允许某 IP 段 GET public/ 前缀」「拒绝一切非 HTTPS」</p>
+          
+          
+        </div><div class="ccard tone-blue">
+          
+          <h4>IAM（身份维度）</h4>
+          <p>账号 / 角色维度的权限，附着在「调用者身份」上而不是桶上。比如给某个角色授权「只能访问 bucket-A 的 logs/* 前缀」</p>
+          
+          
+        </div></div><p>三层叠加时谁说了算？判定流程是一条固定顺序的链：</p>
+<div class="flowd has-grid has-groups" data-flow data-edges="[{&quot;from&quot;:&quot;req&quot;,&quot;to&quot;:&quot;iam&quot;},{&quot;from&quot;:&quot;iam&quot;,&quot;to&quot;:&quot;pol&quot;,&quot;label&quot;:&quot;No&quot;},{&quot;from&quot;:&quot;pol&quot;,&quot;to&quot;:&quot;acl&quot;,&quot;label&quot;:&quot;No&quot;},{&quot;from&quot;:&quot;acl&quot;,&quot;to&quot;:&quot;allow&quot;,&quot;label&quot;:&quot;No&quot;},{&quot;from&quot;:&quot;allow&quot;,&quot;to&quot;:&quot;ok&quot;,&quot;label&quot;:&quot;有&quot;,&quot;labelDy&quot;:14},{&quot;from&quot;:&quot;allow&quot;,&quot;to&quot;:&quot;no&quot;,&quot;label&quot;:&quot;没有&quot;,&quot;labelDy&quot;:14}]">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"><div class="fgroup tone-blue" data-group-box="judge">
+          <span class="fgroup-label">一次请求的权限判定</span>
+        </div></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-muted" data-id="req" data-group="judge">
+              
+              
+              <b>请求到达</b>
+              
+            </div></div><div class="flowd-row"><div class="fnode tone-blue" data-id="iam" data-group="judge">
+              
+              
+              <b>IAM 策略</b>
+              <small>有显式 Deny？</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="pol" data-group="judge">
+              
+              
+              <b>Bucket Policy</b>
+              <small>有显式 Deny？</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-amber" data-id="acl" data-group="judge">
+              
+              
+              <b>ACL（若启用）</b>
+              <small>有显式 Deny？</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-muted" data-id="allow" data-group="judge">
+              
+              
+              <b>三层中任一有 Allow？</b>
+              
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="ok">
+              
+              
+              <b>200 放行</b>
+              
+            </div><div class="fnode tone-red" data-id="no">
+              
+              
+              <b>403 拒绝（默认拒绝）</b>
+              
+            </div></div></div>
+      
+    </div><p>图里没画出来的那条规则用文字钉死：<mark class="mk-blue">显式 Deny 优先于一切 Allow</mark>——上面任何一层说 Deny，链条直接进 403，后面的 Allow 救不了它。两条原则合起来：</p>
+<div class="callout tone-green">
+      <span class="ic">✅</span>
+      <div><p><mark class="mk-green">默认私有（没有任何 Allow 也拒绝）：忘了配不会泄露数据，配错了才会。</mark>
+<mark class="mk-green">新项目直接关闭 ACL，用 Bucket Policy + IAM 管权限；ACL 只在极少数遗留场景才需要。</mark></p>
+</div>
+    </div><h2 id="场景一静态资源托管-cdn-回源"><span class="num">07</span>场景一：静态资源托管 + CDN 回源</h2>
+<p>把前端构建产物直接放进 Bucket、CDN 配置回源，是前端工程师最常碰的对象存储用法。先看整体：</p>
+<figure class="archfig" data-arch data-pano data-anchors='[{"part":"users","label":"我想搞清「用户怎么拿到资源」"},{"part":"ci","label":"我想搞清「代码怎么发出去」"}]' data-tours='[{"id":"read","label":"一次静态资源请求","steps":[{"at":["users","cdn"],"text":"浏览器请求 cdn.example.com，DNS 把它解析到==最近的边缘节点==。"},{"at":["cdn"],"text":"节点查本地缓存：命中直接返回（毫秒级），==根本不碰源站==。"},{"at":["cdn","bucket"],"text":"未命中才回源到 Bucket —— 对象存储检查 Bucket Policy 放行 GET，按 key 读出对象返回。"},{"at":["users","bucket"],"text":"用户上传则是另一条路：凭预签名 URL ==直连 Bucket==，不经过后端。"}]},{"id":"deploy","label":"一次发版","steps":[{"at":["ci","bucket"],"text":"CI 用永久 AK/SK 把构建产物传上桶 —— 注意顺序：==先传带 hash 的 JS/CSS，最后传 index.html==（后文细说）。"},{"at":["ci"],"text":"传完刷新 CDN 的 index.html 缓存。"},{"at":["cdn","bucket"],"text":"下一个用户请求到来时，节点缓存已失效，回源拿到新页面。"}]}]'>
+      <svg viewBox="0 0 976 572" role="img" aria-labelledby="archify-diagram-title archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
+        <title id="archify-diagram-title">静态资源托管与浏览器直传：整体图</title>
+        <desc id="archify-diagram-description">A architecture diagram generated by Archify.</desc>
+        <!-- Definitions -->
+        <defs>
+          <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-default" />
+          </marker>
+          <marker id="arrowhead-emphasis" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-emphasis" />
+          </marker>
+          <marker id="arrowhead-security" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-security" />
+          </marker>
+          <marker id="arrowhead-dashed" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-dashed" />
+          </marker>
+          <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+            <path d="M 40 0 L 0 0 0 40" class="c-grid" stroke-width="0.5"/>
+          </pattern>
+        </defs>
+
+        <!-- Background Grid -->
+        <rect width="100%" height="100%" fill="url(#grid)" />
+
+        <!-- Boundaries (behind everything) -->
+
+
+        <!-- Connection paths (before components for correct z-order) -->
+        <path data-edge-from="users" data-edge-to="cdn" data-edge-label="GET 静态资源" data-edge-key="0" data-composition-points="110,240;110,216;226,216;226,112;250,112" d="M 110 240 L 110 224 Q 110 216 118 216 L 218 216 Q 226 216 226 208 L 226 120 Q 226 112 234 112 L 250 112" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
+        <path data-edge-from="cdn" data-edge-to="bucket" data-edge-label="未命中 · 回源" data-edge-key="1" data-composition-points="320,144;320,192;598,192;598,240" d="M 320 144 L 320 184 Q 320 192 328 192 L 590 192 Q 598 192 598 200 L 598 240" class="a-dashed" stroke-width="1.5" marker-end="url(#arrowhead-dashed)"/>
+        <path data-edge-from="users" data-edge-to="bucket" data-edge-label="直传 PUT · 预签名 URL" data-edge-key="2" data-composition-points="180,272;520,272" d="M 180 272 L 520 272" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
+        <path data-edge-from="users" data-edge-to="backend" data-edge-label="要上传凭证" data-edge-key="3" data-composition-points="110,240;110,26;858,26;858,80" d="M 110 240 L 110 34 Q 110 26 118 26 L 850 26 Q 858 26 858 34 L 858 80" class="a-dashed" stroke-width="1.5" marker-end="url(#arrowhead-dashed)"/>
+        <path data-edge-from="backend" data-edge-to="sts" data-edge-label="申请临时凭证" data-edge-key="4" data-composition-points="858,144;858,168;879,168;879,376;863,376;863,400" d="M 858 144 L 858 160 Q 858 168 866 168 L 871 168 Q 879 168 879 176 L 879 368 Q 879 376 871 376 L 871 376 Q 863 376 863 384 L 863 400" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="ci" data-edge-to="bucket" data-edge-label="发版上传 · 永久 AK/SK" data-edge-key="5" data-composition-points="590,440;590,416;614,416;614,328;598,328;598,304" d="M 590 440 L 590 424 Q 590 416 598 416 L 606 416 Q 614 416 614 408 L 614 336 Q 614 328 606 328 L 606 328 Q 598 328 598 320 L 598 304" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+
+        <!-- Components -->
+        <g id="node-users" data-node-id="users" data-node-label="用户浏览器 / App" tabindex="0" role="button" aria-label="Focus 用户浏览器 / App, 全球用户, Architecture component" aria-pressed="false" data-node-kind="external" data-node-sublabel="全球用户" data-node-context="Architecture component">
+          <title>用户浏览器 / App · 全球用户 · Architecture component</title>
+          <rect x="40" y="240" width="140" height="64" rx="6" class="c-mask"/>
+          <rect x="40" y="240" width="140" height="64" rx="6" class="c-external" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="external" class="semantic-sigil s-external" transform="translate(46 246) scale(0.6875)">
+            <rect x="2.5" y="5" width="8.5" height="8" rx="1.5"/>
+            <path d="M8 2.5h5.5V8M13.5 2.5 7.5 8.5"/>
+          </g>
+          <text data-detail-anchor x="110" y="270" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">用户浏览器 / App</text>
+        <text data-detail="context" x="110" y="286" class="t-muted" font-size="9" text-anchor="middle">全球用户</text>
+        </g>
+
+        <g id="node-cdn" data-node-id="cdn" data-node-label="CDN 边缘节点" tabindex="0" role="button" aria-label="Focus CDN 边缘节点, 全球分布 · 缓存, Architecture component" aria-pressed="false" data-node-kind="cloud" data-node-sublabel="全球分布 · 缓存" data-node-tag="云厂商" data-node-context="Architecture component">
+          <title>CDN 边缘节点 · 全球分布 · 缓存 · Architecture component · 云厂商</title>
+          <rect x="250" y="80" width="140" height="64" rx="6" class="c-mask"/>
+          <rect x="250" y="80" width="140" height="64" rx="6" class="c-cloud" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="cloud" class="semantic-sigil s-cloud" transform="translate(256 86) scale(0.6875)">
+            <path d="M4.3 12.5h7.3a2.4 2.4 0 0 0 .2-4.8 4 4 0 0 0-7.5-1.3A3.1 3.1 0 0 0 4.3 12.5Z"/>
+          </g>
+          <text data-detail-anchor x="320" y="110" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">CDN 边缘节点</text>
+        <text data-detail="context" x="320" y="126" class="t-muted" font-size="9" text-anchor="middle">全球分布 · 缓存</text>
+        <text data-detail="fine" x="320" y="136" class="t-cloud" font-size="7" text-anchor="middle">云厂商</text>
+        </g>
+
+        <g id="node-bucket" data-node-id="bucket" data-node-label="对象存储 Bucket" tabindex="0" role="button" aria-label="Focus 对象存储 Bucket, 源站 · 产物 + 用户上传, Architecture component" aria-pressed="false" data-node-kind="database" data-node-sublabel="源站 · 产物 + 用户上传" data-node-tag="云厂商" data-node-context="Architecture component">
+          <title>对象存储 Bucket · 源站 · 产物 + 用户上传 · Architecture component · 云厂商</title>
+          <rect x="520" y="240" width="156" height="64" rx="6" class="c-mask"/>
+          <rect x="520" y="240" width="156" height="64" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(526 246) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <text data-detail-anchor x="598" y="270" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">对象存储 Bucket</text>
+        <text data-detail="context" x="598" y="286" class="t-muted" font-size="9" text-anchor="middle">源站 · 产物 + 用户上传</text>
+        <text data-detail="fine" x="598" y="296" class="t-database" font-size="7" text-anchor="middle">云厂商</text>
+        </g>
+
+        <g id="node-backend" data-node-id="backend" data-node-label="业务后端" tabindex="0" role="button" aria-label="Focus 业务后端, 你的服务器, Architecture component" aria-pressed="false" data-node-kind="backend" data-node-sublabel="你的服务器" data-node-tag="你运维" data-node-context="Architecture component">
+          <title>业务后端 · 你的服务器 · Architecture component · 你运维</title>
+          <rect x="790" y="80" width="136" height="64" rx="6" class="c-mask"/>
+          <rect x="790" y="80" width="136" height="64" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(796 86) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text data-detail-anchor x="858" y="110" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">业务后端</text>
+        <text data-detail="context" x="858" y="126" class="t-muted" font-size="9" text-anchor="middle">你的服务器</text>
+        <text data-detail="fine" x="858" y="136" class="t-backend" font-size="7" text-anchor="middle">你运维</text>
+        </g>
+
+        <g id="node-sts" data-node-id="sts" data-node-label="STS 临时凭证" tabindex="0" role="button" aria-label="Focus STS 临时凭证, 15 分钟 · 最小权限, Architecture component" aria-pressed="false" data-node-kind="security" data-node-sublabel="15 分钟 · 最小权限" data-node-tag="云厂商" data-node-context="Architecture component">
+          <title>STS 临时凭证 · 15 分钟 · 最小权限 · Architecture component · 云厂商</title>
+          <rect x="790" y="400" width="146" height="64" rx="6" class="c-mask"/>
+          <rect x="790" y="400" width="146" height="64" rx="6" class="c-security" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="security" class="semantic-sigil s-security" transform="translate(796 406) scale(0.6875)">
+            <path d="M8 2.2 13 4v3.5c0 3.1-1.8 5.4-5 6.5-3.2-1.1-5-3.4-5-6.5V4Z"/>
+            <path d="m5.8 8 1.5 1.5 3-3"/>
+          </g>
+          <text data-detail-anchor x="863" y="430" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">STS 临时凭证</text>
+        <text data-detail="context" x="863" y="446" class="t-muted" font-size="9" text-anchor="middle">15 分钟 · 最小权限</text>
+        <text data-detail="fine" x="863" y="456" class="t-security" font-size="7" text-anchor="middle">云厂商</text>
+        </g>
+
+        <g id="node-ci" data-node-id="ci" data-node-label="CI/CD 流水线" tabindex="0" role="button" aria-label="Focus CI/CD 流水线, 发版上传, Architecture component" aria-pressed="false" data-node-kind="backend" data-node-sublabel="发版上传" data-node-tag="你运维" data-node-context="Architecture component">
+          <title>CI/CD 流水线 · 发版上传 · Architecture component · 你运维</title>
+          <rect x="520" y="440" width="140" height="64" rx="6" class="c-mask"/>
+          <rect x="520" y="440" width="140" height="64" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(526 446) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text data-detail-anchor x="590" y="470" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">CI/CD 流水线</text>
+        <text data-detail="context" x="590" y="486" class="t-muted" font-size="9" text-anchor="middle">发版上传</text>
+        <text data-detail="fine" x="590" y="496" class="t-backend" font-size="7" text-anchor="middle">你运维</text>
+        </g>
+
+        <!-- Connection labels -->
+        <g data-detail="context" data-edge-from="users" data-edge-to="cdn" data-edge-label="GET 静态资源" data-edge-key="0">
+          <rect x="134.2" y="196" width="67.6" height="14" rx="3" class="c-mask"/>
+          <text x="168" y="206" class="t-backend" font-size="8" text-anchor="middle">GET 静态资源</text>
+        </g>
+        <g data-detail="context" data-edge-from="cdn" data-edge-to="bucket" data-edge-label="未命中 · 回源" data-edge-key="1">
+          <rect x="422.8" y="172" width="72.4" height="14" rx="3" class="c-mask"/>
+          <text x="459" y="182" class="t-messagebus" font-size="8" text-anchor="middle">未命中 · 回源</text>
+        </g>
+        <g data-detail="context" data-edge-from="users" data-edge-to="bucket" data-edge-label="直传 PUT · 预签名 URL" data-edge-key="2">
+          <rect x="294.6" y="252" width="110.8" height="14" rx="3" class="c-mask"/>
+          <text x="350" y="262" class="t-backend" font-size="8" text-anchor="middle">直传 PUT · 预签名 URL</text>
+        </g>
+        <g data-detail="context" data-edge-from="users" data-edge-to="backend" data-edge-label="要上传凭证" data-edge-key="3">
+          <rect x="455" y="6" width="58" height="14" rx="3" class="c-mask"/>
+          <text x="484" y="16" class="t-messagebus" font-size="8" text-anchor="middle">要上传凭证</text>
+        </g>
+        <g data-detail="context" data-edge-from="backend" data-edge-to="sts" data-edge-label="申请临时凭证" data-edge-key="4">
+          <rect x="834.7" y="148" width="67.6" height="14" rx="3" class="c-mask"/>
+          <text x="868.5" y="158" class="t-muted" font-size="8" text-anchor="middle">申请临时凭证</text>
+        </g>
+        <g data-detail="context" data-edge-from="ci" data-edge-to="bucket" data-edge-label="发版上传 · 永久 AK/SK" data-edge-key="5">
+          <rect x="546.6" y="396" width="110.8" height="14" rx="3" class="c-mask"/>
+          <text x="602" y="406" class="t-muted" font-size="8" text-anchor="middle">发版上传 · 永久 AK/SK</text>
+        </g>
+
+        <!-- Legend -->
+        <g data-legend data-legend-bridge>
+          <text x="40" y="536" class="t-primary" font-size="12" font-weight="650">Legend</text>
+          <g data-legend-semantic-kind="backend" data-legend-kind="backend" data-legend-label="Backend" data-legend-x="40" data-legend-baseline="556" data-legend-width="78">
+            <rect x="40" y="547" width="16" height="10" rx="2.5" class="c-backend" stroke-width="1"/>
+            <text x="62" y="556" class="t-muted" font-size="10" font-weight="500">Backend</text>
+          </g>
+          <g data-legend-semantic-kind="database" data-legend-kind="database" data-legend-label="Database" data-legend-x="140" data-legend-baseline="556" data-legend-width="83">
+            <rect x="140" y="547" width="16" height="10" rx="2.5" class="c-database" stroke-width="1"/>
+            <text x="162" y="556" class="t-muted" font-size="10" font-weight="500">Database</text>
+          </g>
+          <g data-legend-semantic-kind="cloud" data-legend-kind="cloud" data-legend-label="Cloud" data-legend-x="245" data-legend-baseline="556" data-legend-width="68">
+            <rect x="245" y="547" width="16" height="10" rx="2.5" class="c-cloud" stroke-width="1"/>
+            <text x="267" y="556" class="t-muted" font-size="10" font-weight="500">Cloud</text>
+          </g>
+          <g data-legend-semantic-kind="security" data-legend-kind="security" data-legend-label="Security" data-legend-x="335" data-legend-baseline="556" data-legend-width="83">
+            <rect x="335" y="547" width="16" height="10" rx="2.5" class="c-security" stroke-width="1"/>
+            <text x="357" y="556" class="t-muted" font-size="10" font-weight="500">Security</text>
+          </g>
+          <g data-legend-semantic-kind="external" data-legend-kind="external" data-legend-label="External" data-legend-x="440" data-legend-baseline="556" data-legend-width="83">
+            <rect x="440" y="547" width="16" height="10" rx="2.5" class="c-external" stroke-width="1"/>
+            <text x="462" y="556" class="t-muted" font-size="10" font-weight="500">External</text>
+          </g>
+        </g>
+      </svg>
+      <figcaption>蓝色的读路径、紫色的发版路径、虚线的是控制面。对象存储当源站，CDN 当全球缓存层，业务后端只碰「签发凭证」这种轻活。</figcaption>
+      <div class="pano-ui"></div>
+      <p class="arch-hint"><span class="idle">点头上的任意一个框看它的关系；或者从下面的「我熟悉」进去</span><span class="focused">再点一次空白处取消</span></p>
+    </figure><h3 id="071-构建产物为什么天生适合对象存储">07.1 构建产物为什么天生适合对象存储</h3>
+<p><code>npm run build</code> 产出的 dist/ 有一组特点，和对象存储的设计哲学严丝合缝：</p>
+<div class="oss-dist">
+  <div class="oss-dist-code">
+<pre>dist/
+├── index.html          <span>入口页面</span>
+├── css/
+│   ├── app.3f2a1b.css  <span>带 hash</span>
+│   └── vendor.8c4d2e.css
+├── js/
+│   ├── app.7b3e9f.js   <span>业务逻辑 · 带 hash</span>
+│   ├── vendor.2a4c8d.js<span>第三方库</span>
+│   └── chunk-login.1f5a3b.js <span>按需加载块</span>
+├── images/logo.png · banner.webp
+└── fonts/iconfont.woff2</pre>
+  </div>
+  <div class="oss-dist-points">
+    <div class="oss-pt tone-blue"><b>纯静态</b><span>不需要服务器「运行」，原样返回给浏览器就行</span></div>
+    <div class="oss-pt tone-green"><b>不变性</b><span>同一个 hash 对应同一个内容 —— app.7b3e9f.js 的内容永远不变</span></div>
+    <div class="oss-pt tone-violet"><b>读多写少</b><span>千万用户读，只有发版时才写</span></div>
+    <div class="oss-pt tone-amber"><b>适合缓存</b><span>内容不变，可以缓存很久</span></div>
+  </div>
+</div>
+<p><mark class="mk-blue">完美契合「写一次，读无数次，不修改」。</mark> 对比传统做法 —— 自己的 Nginx 服务器扛静态资源：带宽压力全在一台机器、距离远的用户延迟 300ms+、服务器挂了网站全挂、要自己运维证书 / 扩容 / 防 DDoS、热点事件流量突增扛不住。换成对象存储 + CDN：几百上千个边缘节点分散全球、就近访问延迟通常 &lt; 50ms、带宽由 CDN 承担、不需要运维服务器、自动扩容扛任意流量，桶本身还有 11 个 9（99.999999999%）的持久性宣称。</p>
+<h3 id="072-初始配置五步">07.2 初始配置：五步</h3>
+<div class="pipe"><div class="lane tone-muted">
+        <div class="lane-meta">
+          <span class="ln">STEP 1</span>
+          <b>创建 Bucket</b>
+          <small>名称全局唯一（像域名）；区域选离主要用户近的</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>my-website-bucket</b>
+        <small>区域：华东</small>
+        <span class="tag tone-muted">控制台 / API</span>
+      </div></div>
+      </div><div class="lane tone-blue">
+        <div class="lane-meta">
+          <span class="ln">STEP 2</span>
+          <b>开启「静态网站托管」</b>
+          <small>让桶表现得像一个 web 服务器</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>访问 / → 返回 index.html</b>
+        <small>默认首页</small>
+        
+      </div><div class="pnode">
+        <b>访问 /about → 先找 about，没有就找 about.html</b>
+        <small>SPA 场景：所有路径回落到 index.html</small>
+        
+      </div><div class="pnode">
+        <b>404 时返回配置的 404.html</b>
+        <small>错误文档</small>
+        
+      </div></div>
+      </div><div class="lane tone-violet">
+        <div class="lane-meta">
+          <span class="ln">STEP 3</span>
+          <b>设置公共读</b>
+          <small>Bucket Policy 只给读</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>Principal: * + Action: s3:GetObject</b>
+        <small>全世界能读；没给 Put/Delete，别人不能改不能删</small>
+        <span class="tag tone-violet">arn:...:bucket/*</span>
+      </div></div>
+      </div><div class="lane tone-amber">
+        <div class="lane-meta">
+          <span class="ln">STEP 4</span>
+          <b>配置 CDN</b>
+          <small>加速域名指向源站</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>源站：my-website-bucket.oss-...aliyuncs.com</b>
+        <small>回源协议 HTTPS</small>
+        
+      </div><div class="pnode">
+        <b>缓存规则：*.html 不缓存/60s · <em>.js/</em>.css 缓存 1 年 · 图片 30 天</b>
+        <small>依据文件名是否带 hash</small>
+        
+      </div></div>
+      </div><div class="lane tone-green">
+        <div class="lane-meta">
+          <span class="ln">STEP 5</span>
+          <b>配 DNS</b>
+          <small>CNAME 指到 CDN 厂商给的地址</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b><a href="http://cdn.example.com">cdn.example.com</a> → <a href="http://cdn.example.com.w.cdnhwc1.com">cdn.example.com.w.cdnhwc1.com</a></b>
+        <small>用户访问域名时 DNS 自动指向最近的 CDN 节点</small>
+        
+      </div></div>
+      </div></div><h3 id="073-一次用户访问的完整链路">07.3 一次用户访问的完整链路</h3>
+<div class="seqd has-grid" data-seq data-n="4" data-segs="[{&quot;from&quot;:1,&quot;to&quot;:2,&quot;label&quot;:&quot;命中缓存（5~30ms）&quot;},{&quot;from&quot;:3,&quot;to&quot;:6,&quot;label&quot;:&quot;未命中 → 回源（首次 500~1500ms）&quot;}]">
+      <svg class="seqd-svg" aria-hidden="true">
+        <defs>
+          <marker id="s-fill" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+          <marker id="s-open" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10" fill="none" stroke="currentColor" stroke-width="1.4"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="seqd-head"><div class="scell"><div class="spart tone-blue has-icon" data-id="br">
+          <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="3" width="11" height="8.5" rx="1.5"/><path d="M2.5 6h11"/></svg><b>浏览器</b>
+        </div></div><div class="scell"><div class="spart tone-muted has-icon" data-id="dns">
+          <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="2.5" width="7.5" height="7.5" rx="1"/><path d="M8.5 9.5l4.5 4.5M13 9.8V13H9.8"/></svg><b>DNS</b>
+        </div></div><div class="scell"><div class="spart tone-amber has-icon" data-id="edge">
+          <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M4.8 12.2a2.6 2.6 0 0 1 .2-5.18 3.6 3.6 0 0 1 6.9-.8 2.5 2.5 0 0 1-.4 5.98z"/></svg><b>CDN 边缘节点</b>
+        </div></div><div class="scell"><div class="spart tone-green has-icon" data-id="src">
+          <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="8" cy="4.2" rx="5" ry="1.9"/><path d="M3 4.2v7.6c0 1.05 2.24 1.9 5 1.9s5-.85 5-1.9V4.2"/></svg><b>对象存储（源站）</b>
+        </div></div></div>
+      <div class="seqd-body"><div class="smsg" data-from="br" data-to="dns" data-kind="sync" data-i="1" data-note="1"><span class="snote">1</span><span class="slabel"><a href="http://cdn.example.com">cdn.example.com</a> 的 IP？</span></div><div class="smsg" data-from="dns" data-to="br" data-kind="reply" data-i="2" data-note="2"><span class="snote">2</span><span class="slabel">按用户位置返回最近节点（北京→1.2.3.4，纽约→5.6.7.8）</span></div><div class="smsg" data-from="br" data-to="edge" data-kind="sync" data-i="3" data-note="3"><span class="snote">3</span><span class="slabel">GET /index.html</span></div><div class="smsg" data-from="edge" data-to="src" data-kind="sync" data-i="4" data-note="4"><span class="snote">4</span><span class="slabel">缓存失效 → 回源 GET /index.html</span></div><div class="smsg" data-from="src" data-to="edge" data-kind="reply" data-i="5" data-note="5"><span class="snote">5</span><span class="slabel">200 OK + body（顺带校验 Policy 放行）</span></div><div class="smsg" data-from="edge" data-to="br" data-kind="reply" data-i="6" data-note="6"><span class="snote">6</span><span class="slabel">返回，并缓存一份（下次不回源）</span></div><div class="smsg" data-from="br" data-to="edge" data-kind="sync" data-i="7" data-note="7"><span class="snote">7</span><span class="slabel">GET /js/app.7b3e9f.js（解析 HTML 后并行请求）</span></div><div class="smsg" data-from="edge" data-to="br" data-kind="reply" data-i="8" data-note="8"><span class="snote">8</span><span class="slabel">带 hash 的资源几乎永远命中缓存</span></div></div>
+    </div><p>典型耗时：CDN 缓存命中全程 100~500ms；首次回源 500~1500ms；对比直接从源站读（无 CDN）的 1000~3000ms+。</p>
+<h3 id="074-发版时序为什么先传-js最后传-indexhtml">07.4 发版时序：为什么先传 JS、最后传 index.html</h3>
+<div class="seqd has-grid" data-seq data-n="5">
+      <svg class="seqd-svg" aria-hidden="true">
+        <defs>
+          <marker id="s-fill" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+          <marker id="s-open" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10" fill="none" stroke="currentColor" stroke-width="1.4"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="seqd-head"><div class="scell"><div class="spart tone-muted has-icon" data-id="dev">
+          <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="2.5" width="7.5" height="7.5" rx="1"/><path d="M8.5 9.5l4.5 4.5M13 9.8V13H9.8"/></svg><b>开发者</b>
+        </div></div><div class="scell"><div class="spart tone-violet has-icon" data-id="ci">
+          <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5L3 8l3 4.5M10 3.5L13 8l-3 4.5"/></svg><b>CI 流水线</b>
+        </div></div><div class="scell"><div class="spart tone-blue has-icon" data-id="oss">
+          <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="8" cy="4.2" rx="5" ry="1.9"/><path d="M3 4.2v7.6c0 1.05 2.24 1.9 5 1.9s5-.85 5-1.9V4.2"/></svg><b>对象存储</b>
+        </div></div><div class="scell"><div class="spart tone-amber has-icon" data-id="cdn">
+          <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M4.8 12.2a2.6 2.6 0 0 1 .2-5.18 3.6 3.6 0 0 1 6.9-.8 2.5 2.5 0 0 1-.4 5.98z"/></svg><b>CDN</b>
+        </div></div><div class="scell"><div class="spart tone-green has-icon" data-id="user">
+          <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="3" width="11" height="8.5" rx="1.5"/><path d="M2.5 6h11"/></svg><b>用户</b>
+        </div></div></div>
+      <div class="seqd-body"><div class="smsg" data-from="dev" data-to="ci" data-kind="sync" data-i="1" data-note="1"><span class="snote">1</span><span class="slabel">push 到 main（T0）</span></div><div class="smsg is-self" data-from="ci" data-to="ci" data-kind="self" data-i="2"><span class="slabel">npm run build → 新 hash 的 JS/CSS + 新 index.html</span></div><div class="smsg" data-from="ci" data-to="oss" data-kind="async" data-i="3" data-note="3"><span class="snote">3</span><span class="slabel">T1：先传 js/app.NEW222.js（旧 js/app.OLD111.js 不删）</span></div><div class="smsg" data-from="ci" data-to="oss" data-kind="sync" data-i="4" data-note="4"><span class="snote">4</span><span class="slabel">T2：最后传 index.html（覆盖旧的，引用 NEW222）</span></div><div class="smsg" data-from="ci" data-to="cdn" data-kind="async" data-i="5" data-note="5"><span class="snote">5</span><span class="slabel">T3：刷新 index.html 的缓存</span></div><div class="smsg" data-from="user" data-to="cdn" data-kind="sync" data-i="6" data-note="6"><span class="snote">6</span><span class="slabel">T4：GET / → 缓存失效 → 回源拿新 index.html</span></div><div class="smsg" data-from="user" data-to="cdn" data-kind="sync" data-i="7" data-note="7"><span class="snote">7</span><span class="slabel">GET app.NEW222.js → 未命中 → 回源 → 返回新版本</span></div><div class="smsg" data-from="ci" data-to="oss" data-kind="async" data-i="8" data-tone="muted" data-note="8"><span class="snote">8</span><span class="slabel">T5（稍后，可选）：清理 app.OLD111.js</span></div></div>
+    </div><p>顺序是刻意设计的（原子发布）。文件名带 hash 的含义：内容变 → hash 变 → 文件名变 → 是一个全新对象，<mark class="mk-blue">新 JS 传上去并不会覆盖旧 JS</mark>。于是任何时刻用户拿到的都是一致的版本：</p>
+<ul>
+<li>只传了 JS、还没传新 index.html：用户拿旧 HTML → 引用旧 JS → 正常工作（新 JS 在桶里躺着没人引用）；</li>
+<li>新 index.html 传完：用户拿新 HTML → 引用新 JS → 正常工作（旧 JS 还在，给那些缓存了旧 HTML 的用户用）。</li>
+</ul>
+<div class="callout tone-red">
+      <span class="ic">⚠</span>
+      <div><p>顺序反过来（先传 index.html 再传 JS）就会出现「新 HTML + 旧 JS 还没传上去」的窗口 ——
+<mark class="mk-blue">用户在 T1~T2 之间打开网站，引用一个不存在的对象，404</mark>。CI 脚本里这两步的顺序不能换。</p>
+</div>
+    </div><h3 id="075-content-type不设就下载一坨乱码">07.5 Content-Type：不设就「下载一坨乱码」</h3>
+<p>对象存储不像 Nginx 会根据扩展名自动判断类型。上传时不设置 Content-Type，可能默认为 <code>application/octet-stream</code>：</p>
+<ul class="check cross"><li>index.html 被标成 octet-stream → 浏览器弹出下载对话框，而不是渲染页面</li><li>app.css 被标成 octet-stream → 浏览器拒绝作为样式表使用，控制台报警告</li><li>字体 / 图片同理 —— 用户看到的是「下载」或空白</li></ul><p><mark class="mk-green">上传时明确指定：</mark> <code>ossutil cp dist/index.html oss://bucket/ --meta Content-Type:text/html</code>；JS → <code>application/javascript</code>，CSS → <code>text/css</code>。大多数 SDK 支持按扩展名自动推断。</p>
+<h3 id="076-cache-control带-hash-的长缓存不带-hash-的短缓存">07.6 Cache-Control：带 hash 的长缓存，不带 hash 的短缓存</h3>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>文件</th><th>Cache-Control 设置</th><th>原因</th></tr></thead><tbody><tr><th>index.html</th><td data-label="Cache-Control 设置">no-cache 或 max-age=60</td><td data-label="原因">入口文件，每次都要检查是否有新版本</td></tr><tr><th>app.7b3e9f.js / app.3f2a1b.css</th><td data-label="Cache-Control 设置">max-age=31536000, immutable（1 年）</td><td data-label="原因">文件名含 hash：内容变→名字变；名字不变 = 内容不变，可以永久缓存</td></tr><tr><th>logo.png（不带 hash 的图片）</th><td data-label="Cache-Control 设置">max-age=2592000（30 天）</td><td data-label="原因">图片不常变；变了就换文件名或加参数</td></tr></tbody></table></div><p><code>no-cache</code> 是常见误解重灾区：</p>
+<div class="callout tone-amber">
+      <span class="ic">⚠</span>
+      <div><p><code>no-cache</code> <mark class="mk-blue">不是「不缓存」</mark>，是「可以缓存，但每次使用前必须向服务器确认」：
+浏览器带 <code>If-None-Match: &quot;&lt;ETag&gt;&quot;</code> 去问，没变 → 304 Not Modified（不传内容，很快）；变了 → 200 + 新内容。
+<mark class="mk-green">「完全不缓存」是 <code>no-store</code>。</mark> <code>immutable</code> 则告诉浏览器「这个 URL 的内容永远不会变，连协商缓存都不用做」，彻底消除请求。</p>
+</div>
+    </div><p>两种文件的一次请求走下来，差别是数量级的：</p>
+<div class="demo" data-widget="stepper" data-config="{&quot;steps&quot;:[{&quot;label&quot;:&quot;index.html（no-cache）&quot;,&quot;code&quot;:&quot;GET /index.html\nIf-None-Match: \&quot;a1b2c3d4\&quot;&quot;,&quot;note&quot;:&quot;入口文件每次都要问一嘴&quot;},{&quot;label&quot;:&quot;服务器对比 ETag&quot;,&quot;code&quot;:&quot;没变 → 304 Not Modified\n（响应只有 header，没有 body）&quot;,&quot;note&quot;:&quot;小但不是零 —— 每个访问者每次进站都要发这一次&quot;},{&quot;label&quot;:&quot;app.7b3e9f.js（max-age=1年, immutable）&quot;,&quot;code&quot;:&quot;不发请求。\n直接用本地缓存的副本。&quot;,&quot;note&quot;:&quot;immutable 让浏览器连「要不要问」都不问 —— 命中即零流量&quot;},{&quot;label&quot;:&quot;结论&quot;,&quot;code&quot;:&quot;入口：每进站一次 → 1 个 304\n静态资源：→ 0 个请求&quot;,&quot;note&quot;:&quot;这就是「带 hash 长缓存 + 入口短缓存」这套组合的意义&quot;}]}">
+      <div class="demo-head">
+        <span class="title">同样是第二次访问，index.html 和 app.js 的请求路径</span>
+        <span class="status" data-status></span>
+        <span class="spacer"></span>
+        
+      </div>
+      <div class="demo-body custom" data-mount></div>
+    </div><h3 id="077-cors哪些场景真的需要">07.7 CORS：哪些场景真的需要</h3>
+<p>你的网站在 <code>www.example.com</code>，资源在 <code>cdn.example.com</code> —— 跨源了，但不是所有跨源都报错：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>场景</th><th>需要 CORS 吗</th><th>为什么</th></tr></thead><tbody><tr><th>&lt;script src=&quot;<a href="https://cdn">https://cdn</a>.../app.js&quot;&gt;</th><td data-label="需要 CORS 吗"><span class="tag tone-green">不需要</span></td><td data-label="为什么">script 标签不受同源策略限制</td></tr><tr><th>&lt;img src=&quot;<a href="https://cdn">https://cdn</a>.../logo.png&quot;&gt;</th><td data-label="需要 CORS 吗"><span class="tag tone-green">不需要</span></td><td data-label="为什么">img 标签同样豁免</td></tr><tr><th>CSS 里 @font-face 引跨域字体</th><td data-label="需要 CORS 吗"><span class="tag tone-red">需要</span></td><td data-label="为什么">字体文件受同源策略限制</td></tr><tr><th>fetch / XHR 拉 JSON</th><td data-label="需要 CORS 吗"><span class="tag tone-red">需要</span></td><td data-label="为什么">XHR / fetch 受同源策略限制</td></tr><tr><th>&lt;canvas&gt; 画跨域图片后想导出</th><td data-label="需要 CORS 吗"><span class="tag tone-red">需要</span></td><td data-label="为什么">不配 CORS 画布会被「污染」，toDataURL 抛异常</td></tr></tbody></table></div><p>CORS 规则配在<strong>对象存储的 Bucket 上</strong>（CDN 要把源站返回的 CORS 头原样透传给浏览器，否则浏览器照样报跨域）：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-json">{
+  &quot;AllowedOrigins&quot;:  [&quot;https://www.example.com&quot;],
+  &quot;AllowedMethods&quot;:  [&quot;GET&quot;, &quot;HEAD&quot;],
+  &quot;AllowedHeaders&quot;:  [&quot;*&quot;],
+  &quot;ExposeHeaders&quot;:   [&quot;ETag&quot;, &quot;Content-Length&quot;],
+  &quot;MaxAgeSeconds&quot;:   86400
+}
+</code></pre></div>
+<h3 id="078-这套架构里谁有什么权限">07.8 这套架构里谁有什么权限</h3>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>谁</th><th>做什么</th><th>需要什么权限</th><th>怎么获得</th></tr></thead><tbody><tr><th>CI 流水线</th><td data-label="做什么">上传构建产物 / 删除旧文件</td><td data-label="需要什么权限">PutObject · DeleteObject</td><td data-label="怎么获得">永久 AK/SK，存在 CI 密钥库（GitHub Secrets 等）</td></tr><tr><th>CDN 回源</th><td data-label="做什么">从桶读文件</td><td data-label="需要什么权限">GetObject</td><td data-label="怎么获得">两种方式：桶设公共读，或回源鉴权（CDN 持专用签名密钥）</td></tr><tr><th>用户浏览器</th><td data-label="做什么">从 CDN 获取资源（不直接访问桶）</td><td data-label="需要什么权限"><span class="tag tone-green">无需任何权限</span></td><td data-label="怎么获得">CDN 直接返回 —— 这就是你打开任何网站从不需要「登录对象存储」的原因</td></tr><tr><th>运维人员</th><td data-label="做什么">管理桶配置（CORS / 生命周期等）</td><td data-label="需要什么权限">Full Control</td><td data-label="怎么获得">控制台 / IAM 角色</td></tr><tr><th>CDN 管理</th><td data-label="做什么">刷新 / 预热缓存</td><td data-label="需要什么权限">CDN 相关权限</td><td data-label="怎么获得">单独的 AK/SK 或 IAM 角色（如 RefreshObjectCaches）</td></tr></tbody></table></div><p>公共读 vs 回源鉴权怎么选：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>方案</th><th>优点</th><th>缺点与缓解</th></tr></thead><tbody><tr><th>A：桶设公共读（简单，常见）</th><td data-label="优点">配置简单</td><td data-label="缺点与缓解">知道桶地址的人可绕过 CDN 直连源站 → 高额流量费。<mark class="mk-green">配 Referer 防盗链缓解：只放行来自你域名的请求</mark></td></tr><tr><th>B：桶私有 + CDN 回源鉴权（更安全）</th><td data-label="优点">即使知道桶地址也访问不了，只有经 CDN 才能拿到内容</td><td data-label="缺点与缓解">配置稍复杂</td></tr></tbody></table></div><p>费用结构上：存储费极便宜（构建产物通常 &lt; 50MB）；对象存储请求费很少（CDN 缓存后极少回源；S3 标准 GET 约 $0.0004/千次，示意价）；<mark class="mk-blue">大头是 CDN 流量费</mark>（约 0.1~0.3 元/GB，示意价）。对比自建服务器（最低配 ECS 约 50 元/月起 + 带宽费），中小网站用对象存储 + CDN 通常更便宜。</p>
+<h2 id="场景二三冷热分层生命周期规则与备份归档"><span class="num">08</span>场景二三：冷热分层、生命周期规则与备份归档</h2>
+<h3 id="081-数据有温度">08.1 数据有温度</h3>
+<p>日志、数据库备份、历史合规数据这类「写完就不怎么读」的数据，占的空间往往比热数据大得多。按访问频率给数据定温度：</p>
+<div class="cards" data-cols="4"><div class="ccard tone-red">
+          
+          <h4>热数据</h4>
+          <p>今天的日志、活跃用户头像、最近订单。频繁读写、要求低延迟。占比通常只有 10%~20%</p>
+          
+          
+        </div><div class="ccard tone-amber">
+          
+          <h4>温数据</h4>
+          <p>上个月的日志、30 天前的订单详情。偶尔读、可接受稍高延迟。约 20%~30%</p>
+          
+          
+        </div><div class="ccard tone-blue">
+          
+          <h4>冷数据</h4>
+          <p>半年前的日志、历史备份。几乎不读但法规要求保留。约 50%~70%</p>
+          
+          
+        </div><div class="ccard tone-muted">
+          
+          <h4>冰冻数据</h4>
+          <p>三年前的合规记录、审计留痕、诉讼证据。可能永远不会读，但万一要必须取得出来</p>
+          
+          
+        </div></div><p>核心矛盾：热数据需要快速存储（贵），冷数据只是占空间 —— 还用贵的存储就是浪费钱，但又不能删（法规 / 业务要求保留）。解法是<mark class="mk-blue">分层存储：不同温度的数据放不同价格的存储里</mark>。</p>
+<h3 id="082-存储类型越便宜的取回越慢取回费越贵">08.2 存储类型：越便宜的，取回越慢、取回费越贵</h3>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>存储类型</th><th>存储费（示意价）</th><th>读取延迟</th><th>取回的代价</th><th>适合</th></tr></thead><tbody><tr><th>标准存储</th><td data-label="存储费（示意价）">¥0.12/GB/月</td><td data-label="读取延迟">毫秒级</td><td data-label="取回的代价">无取回费</td><td data-label="适合">频繁访问</td></tr><tr><th>低频访问（IA）</th><td data-label="存储费（示意价）">¥0.08/GB/月（省 33%）</td><td data-label="读取延迟">毫秒级（和标准一样快）</td><td data-label="取回的代价">读时有取回费；最小计费对象 128KB；最短存 30 天</td><td data-label="适合">偶尔访问</td></tr><tr><th>归档（Archive）</th><td data-label="存储费（示意价）">¥0.033/GB/月（省 72%）</td><td data-label="读取延迟">不能直接读！要先「解冻」</td><td data-label="取回的代价">解冻要等 1 分钟~12 小时（分三档，见 08.5）</td><td data-label="适合">几乎不读</td></tr><tr><th>深度归档</th><td data-label="存储费（示意价）">¥0.01/GB/月（省 92%）</td><td data-label="读取延迟">解冻更久，解冻费更高</td><td data-label="取回的代价">很少取用</td><td data-label="适合">合规留存</td></tr></tbody></table></div><p>（价格为 AWS S3 各档的示意量级，各厂商各区域有差异。）这是一道「存储成本 vs 取回成本」的权衡题，类比很直观：标准存储 = 办公桌上的文件夹（随手可取，桌子贵）；低频 = 办公室柜子（走几步，柜子便宜些）；归档 = 公司仓库的箱子（要等快递送来，租金便宜）；深度归档 = 外包档案库（要预约，几天后拿到，租金极便宜）。</p>
+<h3 id="083-版本控制开关同一份覆盖两种命运">08.3 版本控制开关：同一份覆盖，两种命运</h3>
+<p>桶级配置里的「版本控制」值得单独展开，因为它改变的是每一次 PUT / DELETE 的语义：</p>
+<div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-red">关闭（默认）</span>
+            <span class="name">只有「当前态」，没有历史</span>
+            <span class="spacer"></span>
+            
+          </div>
+          <div class="rec"><div class="ok">
+            <b>PUT cat.jpg（版本 A）</b><span>存入</span></div><div class="warn">
+            <b>PUT cat.jpg（版本 B）</b><span>A 被覆盖，永久丢失</span></div><div class="warn">
+            <b>DELETE cat.jpg</b><span>永久删除，无法恢复</span></div></div>
+          
+          <p class="jnote">时间线上只有一格：B（A 消失）→ 删除（B 消失）。</p>
+        </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-green">开启</span>
+            <span class="name">每个 key 一条版本链</span>
+            <span class="spacer"></span>
+            
+          </div>
+          <div class="rec"><div class="">
+            <b>v001</b><span>版本 A 的完整数据（旧版本）</span></div><div class="">
+            <b>v002</b><span>版本 B 的完整数据（旧版本）</span></div><div class="warn">
+            <b>v003</b><span>删除标记（最新）</span></div></div>
+          
+          <p class="jnote">DELETE 不是真删，只是放一个删除标记：GET 返回 404，但 GET ?versionId=v001 还在！删掉删除标记，文件就「复活」了。</p>
+        </div><p>四个典型场景：防误删（运维手滑 DELETE 备份 → 只是加了删除标记，删掉标记即恢复）；防覆盖（开发者 B 传错 config.json 覆盖了 A 的正确版本 → 回滚即可）；审计与合规（金融要求数据修改有记录、医疗要求病历保留历史 —— 版本控制天然满足「不可篡改历史」）；并发写保护（两个进程同时 PUT 同一个 key，两个版本都保留，事后决定用哪个）。</p>
+<p>代价也要看清：<mark class="mk-blue">每个版本都是一份完整数据</mark>。一个 1GB 文件每天更新一次、保留所有版本，30 天后存了 30GB、付 30GB 的钱。所以它通常和生命周期规则成对出现：</p>
+<div class="callout tone-green">
+      <span class="ic">✅</span>
+      <div><p><mark class="mk-green">版本控制 + 生命周期规则 = 最佳实践：</mark>
+规则设「非当前版本（旧版本）保留 30 天后自动删除」—— 30 天内误操作都能恢复，30 天前历史自动清理。
+兼顾安全性和成本。</p>
+</div>
+    </div><p>顺带钉一遍「桶级配置」的意义：这些规则设置在<strong>桶</strong>上而不是每个对象上。桶 = 一个容器 + 一套规则（版本控制、生命周期、权限），对桶内所有对象生效 —— 几十亿个对象遵守同一套规则，不需要逐个设置。这就是桶作为「配置的作用域」存在的意义。</p>
+<h3 id="084-生命周期规则设一次永远自动执行">08.4 生命周期规则：设一次，永远自动执行</h3>
+<p>生命周期规则支持四类动作：</p>
+<div class="cards" data-cols="2"><div class="ccard tone-blue">
+          
+          <h4>转储存类型（Transition）</h4>
+          <p>「30 天后标准 → 低频」「90 天后低频 → 归档」—— 冷热分离自动化</p>
+          
+          
+        </div><div class="ccard tone-amber">
+          
+          <h4>过期删除（Expiration）</h4>
+          <p>「365 天后自动永久删除」</p>
+          
+          
+        </div><div class="ccard tone-muted">
+          
+          <h4>清理未完成的分片上传</h4>
+          <p>「上传了一半中断的碎片，7 天后自动清理」（AbortIncompleteMultipartUpload）</p>
+          
+          
+        </div><div class="ccard tone-violet">
+          
+          <h4>删除过期的旧版本</h4>
+          <p>配合版本控制用：「非当前版本保留 90 天后自动删除」</p>
+          
+          
+        </div></div><p>规则按前缀匹配，一个生产环境桶可以配一组规则各管各的前缀：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-json">{
+  &quot;Rules&quot;: [
+    { &quot;ID&quot;: &quot;日志自动降级和清理&quot;,
+      &quot;Filter&quot;: { &quot;Prefix&quot;: &quot;logs/&quot; },
+      &quot;Status&quot;: &quot;Enabled&quot;,
+      &quot;Transitions&quot;: [
+        { &quot;Days&quot;: 30, &quot;StorageClass&quot;: &quot;STANDARD_IA&quot; },
+        { &quot;Days&quot;: 90, &quot;StorageClass&quot;: &quot;GLACIER&quot; }
+      ],
+      &quot;Expiration&quot;: { &quot;Days&quot;: 365 } },
+    { &quot;ID&quot;: &quot;临时文件7天后删除&quot;,
+      &quot;Filter&quot;: { &quot;Prefix&quot;: &quot;tmp/&quot; },
+      &quot;Status&quot;: &quot;Enabled&quot;,
+      &quot;Expiration&quot;: { &quot;Days&quot;: 7 } }
+  ]
+}
+</code></pre></div>
+<p>云厂商的调度系统每天在后台扫描执行（通常凌晨低峰期）：对每个对象，按创建时间算出「年龄」，命中哪条规则就转储或删除。有四件事值得知道：执行不是精确到秒的（通常有 1 天误差）；转换对你透明（key 不变、元数据不变，只是底层介质从 SSD → HDD → 磁带）；不需要你的 AK/SK（系统级操作）；小于 128KB 的对象默认不会转入低频档（不够付最低计费）。</p>
+<p>一个日志对象的完整一生：</p>
+<div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-blue">Day 0</span>
+            <span class="name">标准存储</span>
+            <span class="spacer"></span>
+            
+          </div>
+          <div class="rec"><div class="">
+            <b>存储费</b><span>¥0.12/GB/月（示意）</span></div><div class="ok">
+            <b>读取</b><span>毫秒级，随时可读</span></div></div>
+          
+          <p class="jnote">运维排查今天的问题。</p>
+        </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-violet">Day 30</span>
+            <span class="name">自动转低频</span>
+            <span class="spacer"></span>
+            
+          </div>
+          <div class="rec"><div class="">
+            <b>存储费</b><span>¥0.08/GB/月（降 33%）</span></div><div class="warn">
+            <b>读取</b><span>仍是毫秒级！差别在读时收「取回费」+ 最低计费 128KB</span></div></div>
+          
+          <p class="jnote">偶尔要看上个月的日志。</p>
+        </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-muted">Day 90</span>
+            <span class="name">自动转归档</span>
+            <span class="spacer"></span>
+            
+          </div>
+          <div class="rec"><div class="">
+            <b>存储费</b><span>¥0.033/GB/月（降 72%）</span></div><div class="warn">
+            <b>读取</b><span>不能直接读，要先解冻（Restore）</span></div></div>
+          
+          <p class="jnote">几乎不看，除非重大事故要追溯。</p>
+        </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-red">Day 365</span>
+            <span class="name">自动删除</span>
+            <span class="spacer"></span>
+            
+          </div>
+          <div class="rec"><div class="">
+            <b>存储费</b><span>¥0</span></div><div class="">
+            <b>状态</b><span>对象永久删除，空间释放</span></div></div>
+          
+          <p class="jnote">如果开了版本控制，会变成「删除标记」，对象仍可恢复。</p>
+        </div><p>没有生命周期规则的世界：数据只增不减、存储费用无限增长、热冷数据混在最贵的存储里、要写脚本定期扫描删除。有规则的世界：设一次永远自动执行，成本通常能降 60%~80%（评论里给的量级）。</p>
+<h3 id="085-解冻归档数据怎么取回">08.5 解冻：归档数据怎么取回</h3>
+<p>场景：一年后要查某个已经归档的日志。五步走完：</p>
+<div class="demo" data-widget="stepper" data-config="{&quot;steps&quot;:[{&quot;label&quot;:&quot;直接下载 → 失败&quot;,&quot;code&quot;:&quot;ossutil cp oss://bucket/logs/2026/08/17/app.log.gz ./\nError: InvalidObjectState\n\&quot;Object is in ARCHIVE storage. Please restore it first.\&quot;&quot;,&quot;note&quot;:&quot;归档状态的对象不能直接读 —— 它可能躺在离线磁带库或高密度 HDD 上&quot;},{&quot;label&quot;:&quot;发起解冻（Restore）&quot;,&quot;code&quot;:&quot;ossutil restore --type Standard \\\n  oss://bucket/logs/2026/08/17/app.log.gz\n（days=3：解冻后保持可读 3 天）&quot;,&quot;note&quot;:&quot;返回 202 Accepted —— 异步开始处理&quot;},{&quot;label&quot;:&quot;等待（后台在干什么）&quot;,&quot;code&quot;:&quot;机械臂取磁带 → 读数据\n→ 复制到在线存储（SSD/HDD）\n→ 标记「已解冻」&quot;,&quot;note&quot;:&quot;现代实现多是「从低性能高密度介质解压复制到高性能层」；可轮询 x-oss-restore: ongoing-request&quot;},{&quot;label&quot;:&quot;解冻完成 → 正常下载&quot;,&quot;code&quot;:&quot;ossutil cp oss://bucket/logs/...app.log.gz ./\n成功 ✓&quot;,&quot;note&quot;:&quot;这 3 天内它就是普通对象&quot;},{&quot;label&quot;:&quot;3 天后自动回档&quot;,&quot;code&quot;:&quot;对象自动回到「归档」状态\n再读要重新解冻&quot;,&quot;note&quot;:&quot;「已解冻」= 数据复制进了在线存储、占着高性能空间 —— 不能让它永远占着&quot;}]}">
+      <div class="demo-head">
+        <span class="title">logs/2026/08/17/app.log.gz 的解冻取回</span>
+        <span class="status" data-status></span>
+        <span class="spacer"></span>
+        
+      </div>
+      <div class="demo-body custom" data-mount></div>
+    </div><p>解冻分三档速度（S3 Glacier Flexible Retrieval，示意）：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>档位</th><th>时长</th><th>费用</th><th>适合</th></tr></thead><tbody><tr><th>Expedited（快速）</th><td data-label="时长">1~5 分钟</td><td data-label="费用"><span class="tag tone-red">最贵</span></td><td data-label="适合">紧急事故排查</td></tr><tr><th>Standard（标准）</th><td data-label="时长">3~5 小时</td><td data-label="费用">中等</td><td data-label="适合">大多数「想起来要看」的场景</td></tr><tr><th>Bulk（批量）</th><td data-label="时长">5~12 小时</td><td data-label="费用"><span class="tag tone-green">最便宜</span></td><td data-label="适合">大批量演练 / 不着急的追溯</td></tr></tbody></table></div><h3 id="086-合规三件套不许删不许改异地有">08.6 合规三件套：不许删、不许改、异地有</h3>
+<p>某些场景下数据不仅要保留，还要保证不被任何人动：</p>
+<div class="cards" data-cols="3"><div class="ccard tone-red">
+          
+          <h4>对象锁定（Object Lock / WORM）</h4>
+          
+          <div class="cbody"><p>Write Once Read Many —— 写入后不可改、不可删。COMPLIANCE 模式下<mark class="mk-blue">连 root 都不能删</mark>、不能缩短保留期（可延长）。
+用于金融交易流水、医疗病历、审计日志。防「离职员工删库跑路」。</p>
+</div>
+          
+        </div><div class="ccard tone-blue">
+          
+          <h4>版本控制</h4>
+          
+          <div class="cbody"><p>覆盖 / 删除都留旧版本，可恢复任意历史。防误操作的第一道防线（08.3 已展开）。</p>
+</div>
+          
+        </div><div class="ccard tone-green">
+          
+          <h4>跨区域复制（CRR）</h4>
+          
+          <div class="cbody"><p>桶 A（北京）的数据自动同步到桶 B（上海）。容灾（机房炸了另一区还有）+ 合规（法规要求异地备份）。</p>
+</div>
+          
+        </div></div><h3 id="087-备份全量和增量为什么缺一不可">08.7 备份：全量和增量为什么缺一不可</h3>
+<p>先分清两种备份：</p>
+<div class="cards" data-cols="2"><div class="ccard tone-blue">
+          
+          <h4>全量备份（Full Backup）</h4>
+          
+          <div class="cbody"><p>把数据库里<strong>所有数据</strong>完整导出一份 —— 给整个房间拍一张完整照片。
+产物：一个完整的 <code>.sql.gz</code>（比如 5GB）；耗时：长（扫所有表）；体积：大。</p>
+</div>
+          
+        </div><div class="ccard tone-violet">
+          
+          <h4>增量备份（Incremental）</h4>
+          
+          <div class="cbody"><p>只记录<strong>自上次备份以来变化的部分</strong> —— 只拍「房间里移动过的东西」。
+产物：binlog（二进制日志，记录每条 INSERT / UPDATE / DELETE）；耗时：短；体积：小。</p>
+</div>
+          
+        </div></div><p>只做其中一种都会出事：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>方案</th><th>会发生什么</th></tr></thead><tbody><tr><th>只做全量（每天一次）</th><td data-label="会发生什么">凌晨 3:00 备份，下午 14:00 崩库 → 只能恢复到 3:00。<mark class="mk-blue">11 小时的订单 / 转账记录全没</mark> —— 灾难性后果</td><td data-label=""><span class="tag tone-red">最多丢 24 小时</span></td></tr><tr><th>只做增量（每小时）</th><td data-label="会发生什么">binlog 记录的是「变化过程」不是「完整状态」。没有基准状态就没法重放 —— <mark class="mk-blue">像只有修改记录没有原书，还原不出这本书</mark>。且一年不补全量，恢复 = 重放 8760 个增量，几天都跑不完，任何一个文件损坏整条链断掉</td><td data-label=""><span class="tag tone-red">没有起点无法恢复</span></td></tr><tr><th>全量（每天）+ 增量（每小时）</th><td data-label="会发生什么">崩库后：恢复凌晨 3:00 的全量 → 依次重放 4:00~13:00 的增量 → 恢复到 13:00。<mark class="mk-blue">最多丢不到 1 小时</mark>，恢复只需几分钟</td><td data-label=""><span class="tag tone-green">正确方案</span></td></tr></tbody></table></div><p>组合方案的一次完整时间轴：</p>
+<div class="timeline"><div class="titem tone-blue">
+          <span class="when">03:00</span>
+          <h4>全量备份</h4>
+          <p>5GB 基准状态写入桶（db-backup/full/）</p>
+        </div><div class="titem tone-muted">
+          <span class="when">04:00 ~ 13:00</span>
+          <h4>每小时一个增量</h4>
+          <p>binlog 逐小时落桶（db-backup/incr/），每个几 MB</p>
+        </div><div class="titem tone-red">
+          <span class="when">14:00</span>
+          <h4>数据库崩溃</h4>
+          <p>从这里开始抢救</p>
+        </div><div class="titem tone-green">
+          <span class="when">14:05</span>
+          <h4>恢复 = 全量 + 逐个重放增量</h4>
+          <p>拉回 3:00 全量 → 重放 11 个增量 → 数据回到 13:00</p>
+        </div><div class="titem tone-violet">
+          <span class="when">结果</span>
+          <h4>最多丢 13:00 ~ 14:00 之间的一小时</h4>
+          <p>增量越密丢得越少，全量越新恢复链越短</p>
+        </div></div><p><mark class="mk-blue">全量备份的真正作用是「缩短恢复链」</mark>：每做一次全量，之前的增量就不再被依赖。一年只做一次全量 + 每小时增量 → 恢复要重放 8736 个文件、耗时十几小时、任一文件损坏链条断裂；每天全量 + 每小时增量 → 只依赖最近 11 个文件、几分钟恢复。频率越高恢复越快越安全，但成本越高 —— 每天一次全量是常见平衡点（恢复链最长 24 小时，成本可控）。</p>
+<h3 id="088-备份上桶的工程细节">08.8 备份上桶的工程细节</h3>
+<p>三类典型数据源进桶的样子（评论里的完整脚本，摘关键动作）：</p>
+<div class="cards" data-cols="3"><div class="ccard tone-blue">
+          
+          <h4>应用日志：cron + 轮转</h4>
+          
+          <div class="cbody"><p>每天凌晨压缩昨天的 access.log → <code>ossutil cp</code> 到 <code>logs/2026/08/17/nginx-access.log.gz</code>（带 Content-Type: application/gzip）→ 校验退出码，失败告警。
+服务器上的 AK/SK 对应的 IAM 策略<mark class="mk-blue">只允许 PutObject 到 logs/ 前缀</mark>。</p>
+</div>
+          
+        </div><div class="ccard tone-violet">
+          
+          <h4>数据库备份：mysqldump + 元数据</h4>
+          
+          <div class="cbody"><p><code>mysqldump --all-databases --single-transaction | gzip</code> → 计算 md5 → 上传时写进自定义元数据（<code>x-oss-meta-md5</code>、<code>x-oss-meta-db-version</code>）→ 上传后 stat 验证。
+先以标准存储上传再让生命周期降级 —— <mark class="mk-blue">最近的备份随时要用来恢复，不能一上来就归档</mark>。</p>
+</div>
+          
+        </div><div class="ccard tone-green">
+          
+          <h4>50GB 大文件：分片上传</h4>
+          
+          <div class="cbody"><p>单次上传不可靠 → Multipart Upload：InitiateMultipartUpload 拿 upload_id → 逐片 UploadPart（每片 100MB，4 线程并行）→ CompleteMultipartUpload 合并。
+网络中断<mark class="mk-blue">只重传失败的分片</mark>，不用重传整个 50GB；每片独立校验。</p>
+</div>
+          
+        </div></div><p>一个真实桶里按前缀分区的规则组（和 08.4 的 JSON 对上）：</p>
+<div class="tree" data-tree><ul class="tlist"><li class="has-kids">
+            <div class="tnode tone-violet" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>my-backup-bucket</b>
+              
+              <span class="tnote">每个前缀一套生命周期规则</span>
+            </div>
+            <ul class="tlist"><li class="has-kids">
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>logs/</b>
+              
+              <span class="tnote">30 天→低频 · 90 天→归档 · 365 天→删除</span>
+            </div>
+            <ul class="tlist"><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>2026/08/17/nginx-access.log.gz</b>
+              
+              <span class="tnote">今天刚传（标准）</span>
+            </div>
+            
+          </li><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>2026/07/15/nginx-access.log.gz</b>
+              
+              <span class="tnote">33 天前（已自动转低频）</span>
+            </div>
+            
+          </li><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>2026/05/01/nginx-access.log.gz</b>
+              
+              <span class="tnote">108 天前（已自动转归档）</span>
+            </div>
+            
+          </li></ul>
+          </li><li class="has-kids">
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>db-backup/</b>
+              
+              <span class="tnote">7 天→低频 · 60 天→归档 · 730 天→深度归档 · 不删除（合规）</span>
+            </div>
+            <ul class="tlist"><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>full/2026-08-17.sql.gz</b>
+              
+              <span class="tnote">今天全量（标准）</span>
+            </div>
+            
+          </li><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>incr/2026-08-17-13.binlog</b>
+              
+              <span class="tnote">小时级增量</span>
+            </div>
+            
+          </li></ul>
+          </li><li class="has-kids">
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>archive/</b>
+              
+              <span class="tnote">上传即归档 · 5 年后→深度归档 · 永不删除</span>
+            </div>
+            <ul class="tlist"><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>contracts/2024/...</b>
+              
+              <span class="tnote">用户上传的历史合同</span>
+            </div>
+            
+          </li></ul>
+          </li></ul>
+          </li></ul></div><p>最后一个坑，也是最贵的一个：</p>
+<div class="callout tone-red">
+      <span class="ic">⚠</span>
+      <div><p><mark class="mk-blue">备份没有验证过 = 没有备份。</mark>
+备份了 2 年，真要恢复时发现文件是坏的（上传中断不完整 / 脚本 bug 导出坏 SQL / 压缩损坏）—— 这是最经典的备份事故。
+<mark class="mk-green">每月做一次恢复演练：随机挑一个备份 → 下载（归档先解冻）→ 恢复到测试库 → 验证行数。</mark></p>
+</div>
+    </div><h2 id="选型判据与踩坑清单"><span class="num">09</span>选型判据与踩坑清单</h2>
+<h3 id="091-选型判据优先级从高到低">09.1 选型判据（优先级从高到低）</h3>
+<ul class="check"><li>已有云生态 —— 业务已在阿里云，用 OSS 内网传输免流量费、与 CDN / 函数计算零摩擦；跨云反而多一层公网出口</li><li>出网流量成本 —— CDN 回源量大、用户直接下载多的场景，流量费可能占总成本 60%+；R2 免出网费可能是颠覆性选项</li><li>一致性要求 —— S3 已于 2020 年底升级为强一致读写，不再有「PUT 后立即 list 可能看不到」；但部分 S3 兼容实现未必跟进，选型时确认</li><li>私有化 / 合规 —— 数据不出境或私有部署，MinIO 是首选</li></ul><h3 id="092-踩坑清单">09.2 踩坑清单</h3>
+<ul class="check warn"><li>费用结构不只看存储单价 —— 请求次数费（S3 标准 GET 约 $0.0004/千次，示意价；每天几亿次就不是小数）+ 出网流量费往往才是大头。高频小文件场景请求费可能比存储费高</li><li>存储分层取回有代价 —— 归档取回延迟 1 分钟~12 小时；低频有最低计费 128KB 和 30 天最短存储；提前删除照收费</li><li>CORS 与防盗链 —— 浏览器直传必须在桶上配 CORS 允许的 Origin 和 Method，否则预检请求直接 403；Referer 白名单防止别人盗用你的流量账单</li><li>误开公开权限 —— 历史上无数次数据泄露都是桶被配成 public。坚持默认私有，公开路径走 CDN + 签名 URL</li><li>上传没设 Content-Type —— 页面变下载、样式被拒载（07.5）</li><li>发版顺序错了 —— 先传 index.html 后传 JS，会出现「新 HTML 引用还没上传的 JS」的 404 窗口（07.4）</li><li>忘了备份验证 —— 恢复时发现备份是坏的（08.7）</li></ul><div class="summary">
+      <h3 id="一句话总结">一句话总结</h3>
+      <p>对象存储是<strong>为海量非结构化数据做了极致 trade-off 的分布式 KV</strong>（放弃目录树、就地修改和 POSIX，换来近乎无限的横向扩展与 HTTP 直达）；
+<strong>S3 是它的事实标准协议<strong>（换 endpoint 即换厂商）；</strong>鉴权的全部思路是让最不可信的端拿短命、受限的凭证</strong>；
+<strong>选型先看生态绑定，再看流量账单</strong>。</p>
+
+    </div><h3 id="可追问的钩子">可追问的钩子</h3>
+<p>想更深可以继续挖：分片上传与断点续传的实现细节、生命周期规则的状态机、跨区域复制（CRR）的一致性保证、S3 Event Notification + Lambda 的事件驱动架构、S3 Select（在存储侧做 SQL 过滤减少出网量）。</p>
+<div class="quiz"><details>
+        <summary>控制台里的「文件夹」到底是什么？往「空文件夹」里放文件之前，那个文件夹存在吗？</summary>
+        <div class="a"><p>不存在。底层只有扁平的 key 字符串，斜杠是普通字符。「文件夹」是 ListObjectsV2 用 Prefix + Delimiter 在查询期聚合出来的视图 —— CommonPrefixes 是「有一批 key 共享这段前缀」的即时计算结果，不是存储里的节点。想留一个「空目录」，只能创建一个 key 以 / 结尾、body 为 0 字节的占位对象。</p>
+</div>
+      </details><details>
+        <summary>为什么对象存储敢把「改一个字节 = 重传整个对象」做得这么狠？换个角度：它靠这个放弃了什么、换来了什么？</summary>
+        <div class="a"><p>因为对象的数据以 3 副本或 EC 块形式散在多台机器上，就地修改要处理「跨副本部分写一致性」（半新半旧不可见），代价极高。改成整对象 PUT + 写完后原子切版本指针，读者永远看到完整的旧版或完整的新版 —— 对象级原子性，一致性成本极低。它放弃的是细粒度随机写，换来的是多副本下极简的写语义和无限横向扩展。</p>
+</div>
+      </details><details>
+        <summary>浏览器直传大文件，密钥和签名分别在哪？为什么不把 AK/SK 直接给前端？</summary>
+        <div class="a"><p>永久 AK/SK 只在后端（调 STS 申请临时凭证或预签 URL）。前端拿到的要么是 15 分钟有效的临时 AK/SK/Token（配合 SDK 签名），要么是已经签好的预签名 URL（零签名逻辑）。给前端长期密钥 = 反编译即全权沦陷；临时凭证即使被截获，也只能在有限时间内对有限路径做有限操作。</p>
+</div>
+      </details><details>
+        <summary>发版时为什么必须「先传带 hash 的 JS/CSS，最后传 index.html」？</summary>
+        <div class="a"><p>hash 文件名保证新 JS 不会覆盖旧 JS —— 先传新 JS，它只是「躺着没人引用」，旧 HTML 引用旧 JS 照常工作；最后覆盖 index.html，新 HTML 引用的新 JS 已经在了。反过来先传 HTML，就会出现「新 HTML 引用一个还没上传的对象」的 404 窗口。这是用「文件名不变 = 内容不变」做出的原子发布。</p>
+</div>
+      </details></div>
+
+    <footer>
+      <span>对象存储与 S3、OSS：把「往哪放数据」讲到「选哪家」</span>
+      <span>最后更新 2026-10-09 · 单文件可离线打开</span>
+    </footer>
+  </main>
+</div>
+
+<script src="../../assets/app.js"></script>
+</body>
+</html>

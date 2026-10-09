@@ -1288,6 +1288,7 @@ text: |
 | 两个边标签有没有叠在一起 | 叠成乱码（「podmup.pod重建down」） |
 | 有没有真的画出来 | 绘制抛异常 → 空 SVG，而布局检查全绿 |
 | **控件自己拼的几块之间有没有留白** | 没套那层带 `gap` 的 wrapper → 四块**紧贴着**，而所有检查都是绿的 |
+| **app.js 有没有真的跑起来** | 正文单元格里的字面 script 开标签吞掉后续 script 块 → 所有控件空着、所有图不画，而 check 与单块截图全绿（2026-10-09） |
 
 #### ⚠️ `visual-check` 曾经会串页 —— 真凶是共用的临时文件
 
@@ -1955,7 +1956,7 @@ text: |
 | `summary` | 小结 |
 | `raw` | 直接写 HTML |
 
-**交互控件 45 个**（在 `assets/app.js` 的 `WIDGETS` 里，供 `demo` 积木引用）：
+**交互控件 47 个**（在 `assets/app.js` 的 `WIDGETS` 里，供 `demo` 积木引用）：
 `polling-vs-cdc` `combination-count` `join-lab` `on-vs-where` `knex-chain`
 `stepper` `tuner` `diff` `stream-modes` `operator-lab` `hashring` `partition-prune`
 `dsl-lab` `null-lab` `config-to-ui` `field-lineage` `count-dedup-lab`
@@ -1965,6 +1966,7 @@ text: |
 `epoll-tables` `lt-vs-et` `thread-audit` `code-and-stacks` `clone-lab` `isolation-spectrum` `fork-or-thread`
 `schema-walk`
 `tri-logic-lab` `uid-set-lab` `dist-lab` `storage-anatomy` `prune-lab`
+`s3-list-lab` `ec-lab`
 
 **已知缺口**（按优先级）：
 
@@ -3307,6 +3309,7 @@ pre-push 会重建 + 量图。**它拦下来通常不是你的问题。**
 | 图上有文字被压住 | ==字还在、只是读不通，所以最容易滑过去。== `npm run visual-check` 会报「文字压文字」，改完图必须跑 |
 | 把 SQL / 代码粘成一整行 | 一个子句一行，嵌套的缩进。原文本来就在一行时（如编译器输出）要注明「换行只是排版」 |
 | 把语法高亮当成分色 | 笔记里分的是**来源**（权限 / 条件 / 派生）—— 不要连 `SELECT` 都要上色 |
+| 在允许裸 HTML 的单元格 / 字段里写字面 HTML 标签（如展示示例代码） | 它会真的成为元素；script 开标签会吞掉 app.js 全页静默全灭。++展示标签一律写 `&lt;` `&gt;` 实体++ |
 | YAML 裸标量里出现 `: `（冒号+空格） | 加引号，或用 `|-` 块标量 |
 | YAML 裸标量以反引号 `` ` `` 开头 | 加引号 |
 | YAML 裸标量以 `*` `&` `!` `%` `@` 开头 | 加引号（会被当成别名/锚点/标签） |

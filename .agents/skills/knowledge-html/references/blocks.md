@@ -2,6 +2,22 @@
 
 围栏内是 **YAML**。行内支持 Markdown（`**粗体**`、`` `代码` ``）和裸 HTML。
 
+````callout
+tone: red
+icon: ⚠
+text: |
+  ==「支持裸 HTML」意味着：你在单元格 / `desc` / `text` 里写的字面 HTML 标签会真的成为元素。==
+
+  踩过的真实事故（2026-10-09）：compare 单元格里写了字面的
+  `<script src="https://cdn.../app.js">`（本意是展示一段示例代码）——
+  它成了**真标签**，把后面 app.js 的整个 script 块吞掉，
+  ==全页 JS 静默全灭==：所有控件空着、flow/seq 一张都没画，
+  而 `check` 全绿、单块截图全正常（单块预览页不含出事的那个块，掩护了它）。
+
+  ++正文要展示 HTML 标签时，一律写实体（`&lt;` `&gt;`），或改用不含尖括号的措辞。++
+  探针已有兑底：全部 `[data-mount]` 为空时直接报「app.js 没跑」，并指出这个根因。
+````
+
 > 可运行示例：`notes/blocks-cheatsheet/note.md`
 
 ---
