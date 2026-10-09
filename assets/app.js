@@ -3094,6 +3094,270 @@
   };
 
   /* ============================================================
+     控件：storage-anatomy —— 表 / 分区 / 桶 / 副本 四层叠起来
+     3 个日分区 × 4 个桶。点分区或桶，右侧说清它是什么、有多少、
+     落在哪几台 BE；切副本数、或挂掉一台 BE，看数据还在不在。
+     桶号与副本落点都是示意的 —— 真实 Doris 用它自己的哈希和调度。
+  ============================================================ */
+  WIDGETS['storage-anatomy'] = (root) => {
+    const box = mountOf(root);
+    const statusEl = root.querySelector('[data-status]');
+    const PARTS = [
+      { id: 'p20261007', date: '2026-10-07' },
+      { id: 'p20261008', date: '2026-10-08' },
+      { id: 'p20261009', date: '2026-10-09' },
+    ];
+    const BUCKETS = 4;
+    const ROWS_PER_BUCKET = 250;
+    const BES = ['BE-1', 'BE-2', 'BE-3'];
+    const cfg = cfgOf(root);
+    const st = { replicas: cfg.replicas || 3, down: cfg.down || null, sel: { kind: 'table' } };
+    const H = (tag, cls, text) => el(tag, cls, text);
+
+    /* 一个 tablet 的副本落在哪几台 BE（示意规则：按 tablet 编号顺移） */
+    const replBEs = (pi, bi) => {
+      const t = pi * BUCKETS + bi;
+      const out = [];
+      for (let k = 0; k < st.replicas; k += 1) out.push(BES[(t + k) % BES.length]);
+      return out;
+    };
+    const aliveCopies = (pi, bi) => replBEs(pi, bi).filter((b) => b !== st.down).length;
+
+    const wrap = H('div', 'sa-wrap');
+
+    /* 开关 */
+    const ctrl = H('div', 'sa-ctrl');
+    const rg = H('div', 'sa-grp');
+    rg.append(H('h5', null, '每个 tablet 存几份（副本数）'));
+    const rOpts = H('div', 'opts');
+    const rBtns = [1, 2, 3].map((n) => {
+      const b = H('button', null, String(n) + ' 份');
+      b.addEventListener('click', () => { st.replicas = n; draw(); });
+      rOpts.append(b);
+      return { b, v: n };
+    });
+    rg.append(rOpts);
+    const dg = H('div', 'sa-grp');
+    dg.append(H('h5', null, '模拟机器故障'));
+    const dOpts = H('div', 'opts');
+    const dBtn = H('button', null, '挂掉 BE-1');
+    dBtn.addEventListener('click', () => { st.down = st.down ? null : 'BE-1'; draw(); });
+    dOpts.append(dBtn);
+    dg.append(dOpts);
+    ctrl.append(rg, dg);
+    wrap.append(ctrl);
+
+    /* 左：层级 */
+    const body = H('div', 'sa-body');
+    const tree = H('div', 'sa-tree');
+    const detail = H('div', 'sa-detail');
+    body.append(tree, detail);
+    wrap.append(body);
+    box.append(wrap);
+
+    const isSel = (pi, bi) => st.sel.kind === (bi == null ? 'partition' : 'bucket') && st.sel.pi === pi && st.sel.bi === bi;
+
+    function draw() {
+      rBtns.forEach((x) => x.b.classList.toggle('on', x.v === st.replicas));
+      dBtn.classList.toggle('on', !!st.down);
+      dBtn.textContent = st.down ? '修复 BE-1' : '挂掉 BE-1';
+
+      /* 表节点 */
+      const tableNode = H('div', 'sa-table' + (st.sel.kind === 'table' ? ' sel' : ''));
+      tableNode.append(H('b', null, 'crm_dc_audience_snapshot'));
+      tableNode.append(H('small', null, '一张表：' + PARTS.length + ' 个分区 × ' + BUCKETS + ' 个桶'));
+      tableNode.addEventListener('click', () => { st.sel = { kind: 'table' }; draw(); });
+
+      const partNodes = PARTS.map((p, pi) => {
+        const blk = H('div', 'sa-part' + (isSel(pi, null) ? ' sel' : ''));
+        const head = H('div', 'sa-part-head');
+        head.append(H('b', null, p.id));
+        head.append(H('small', null, p.date));
+        head.addEventListener('click', () => { st.sel = { kind: 'partition', pi }; draw(); });
+        blk.append(head);
+        const row = H('div', 'sa-buckets');
+        for (let bi = 0; bi < BUCKETS; bi += 1) {
+          const alive = aliveCopies(pi, bi);
+          const chip = H('button', 'sa-chip' + (isSel(pi, bi) ? ' sel' : '') + (alive === 0 ? ' dead' : ''));
+          chip.append(H('span', 'sa-chip-b', '桶 ' + bi));
+          chip.append(H('span', 'sa-chip-r', alive + '/' + st.replicas + ' 份'));
+          chip.addEventListener('click', () => { st.sel = { kind: 'bucket', pi, bi }; draw(); });
+          row.append(chip);
+        }
+        blk.append(row);
+        return blk;
+      });
+
+      fill(tree, [tableNode].concat(partNodes));
+
+      /* 右侧详情 */
+      const s = st.sel;
+      const blocks = [];
+      function block(title, lines) {
+        const d = H('div', 'sa-note');
+        d.append(H('b', null, title));
+        const ul = H('ul');
+        lines.forEach((t) => ul.append(richText(H('li'), t)));
+        d.append(ul);
+        return d;
+      }
+
+      if (s.kind === 'table') {
+        blocks.push(block('表', [
+          '表是一套约定，磁盘上真正躺着的是它下面那些 **tablet 的文件**。',
+          '分区：' + PARTS.length + ' 个（按 `snapshot_date` 切）',
+          '桶：每个分区 ' + BUCKETS + ' 个（按 `hash(uid) % ' + BUCKETS + '` 切）',
+          'tablet：' + PARTS.length + ' × ' + BUCKETS + ' = ' + PARTS.length * BUCKETS + ' 个',
+          '副本：每个 tablet ' + st.replicas + ' 份 → 磁盘上一共 ' + PARTS.length * BUCKETS * st.replicas + ' 份 tablet 数据（示意）',
+        ]));
+      } else if (s.kind === 'partition') {
+        const p = PARTS[s.pi];
+        blocks.push(block('分区 ' + p.id, [
+          '一个分区 = **一段时间的数据**。建表时用 `PARTITION BY RANGE(snapshot_date)` 按天切。',
+          '这个分区有 ' + BUCKETS + ' 个 tablet，' + BUCKETS * ROWS_PER_BUCKET + ' 行（示意）。',
+          '查询带 `snapshot_date` 时，规划器会把其他分区直接丢掉，这就是**分区裁剪**。',
+        ]));
+      } else {
+        const p = PARTS[s.pi];
+        const bes = replBEs(s.pi, s.bi);
+        const alive = aliveCopies(s.pi, s.bi);
+        blocks.push(block('tablet：' + p.id + ' / 桶 ' + s.bi, [
+          '一个桶 = 分区里按 `hash(uid) % ' + BUCKETS + '` 切出来的一份数据；**每个桶对应一个 tablet**。',
+          'tablet 是复制、调度、并行的最小单位。',
+          '这一份存了 ' + st.replicas + ' 个副本：' + bes.join('、') + (st.down ? '（其中 ' + st.down + ' 已挂）' : '') + '。',
+          '磁盘上它是一个 rowset，里面是若干个 **segment 文件**（列存）。',
+          '≈ ' + ROWS_PER_BUCKET + ' 行（示意）。',
+          alive === 0
+            ? '!!副本全挂了：这个 tablet 现在读不到。!!'
+            : alive < st.replicas
+              ? '少了一份，但还剩 ' + alive + ' 份，查询照常。'
+              : '每一份都在不同机器上，挂一台还有 ' + alive + ' 份。',
+        ]));
+      }
+      fill(detail, blocks);
+
+      /* 状态栏 */
+      if (statusEl) {
+        let t = '副本 ' + st.replicas + ' 份' + (st.down ? ' · ' + st.down + ' 已挂' : '');
+        if (st.sel.kind === 'bucket') {
+          t = t + ' · 选中 ' + PARTS[st.sel.pi].id + ' / 桶 ' + st.sel.bi + '：' + aliveCopies(st.sel.pi, st.sel.bi) + '/' + st.replicas + ' 份可用';
+        }
+        statusEl.textContent = t;
+      }
+    }
+    draw();
+  };
+
+  /* ============================================================
+     控件：prune-lab —— 一次查询到底读了多少
+     同一张表（3 个日分区 × 4 个桶，每个桶 250 行），换几个 WHERE：
+     分区裁剪丢掉整块日期，分桶裁剪只留命中的那个桶。
+     行数是示意的；分区/桶的命中关系是按 Doris 的裁剪规则画出来的。
+  ============================================================ */
+  WIDGETS['prune-lab'] = (root) => {
+    const box = mountOf(root);
+    const statusEl = root.querySelector('[data-status]');
+    const DATES = ['2026-10-07', '2026-10-08', '2026-10-09'];
+    const BUCKETS = 4;
+    const ROWS_PER_BUCKET = 250;
+    const QUERIES = [
+      {
+        id: 'all',
+        label: '不带条件',
+        sql: 'SELECT COUNT(*)\nFROM crm_dc_audience_snapshot;',
+        parts: [0, 1, 2], buckets: null,
+        note: '没有任何过滤条件：3 个分区全读，12 个 tablet 全扫。',
+      },
+      {
+        id: 'date',
+        label: "按日期",
+        sql: "SELECT COUNT(*)\nFROM crm_dc_audience_snapshot\nWHERE snapshot_date = '2026-10-08';",
+        parts: [1], buckets: null,
+        note: '过滤条件命中的是**分区键**：其他两个分区直接不看（分区裁剪）。',
+      },
+      {
+        id: 'date-uid',
+        label: '按日期 + uid',
+        sql: "SELECT COUNT(*)\nFROM crm_dc_audience_snapshot\nWHERE snapshot_date = '2026-10-08'\n  AND encrypt_uid = 'u-1001';",
+        parts: [1], buckets: [2],
+        note: '再按**分桶键**过滤：同一个桶号里只有这个 uid 的数据，4 个桶只扫 1 个。',
+      },
+      {
+        id: 'uid',
+        label: '只按 uid',
+        sql: "SELECT COUNT(*)\nFROM crm_dc_audience_snapshot\nWHERE encrypt_uid = 'u-1001';",
+        parts: [0, 1, 2], buckets: [2],
+        note: '不带分区键时，每个分区里都要去同一个桶号找一次 —— 分桶裁剪管不到分区。',
+      },
+    ];
+    const cfg = cfgOf(root);
+    const st = { q: typeof cfg.q === 'number' ? cfg.q : 1 };
+    const H = (tag, cls, text) => el(tag, cls, text);
+
+    const wrap = H('div', 'pnl-wrap');
+    const ctrl = H('div', 'pnl-q');
+    const qBtns = QUERIES.map((q, i) => {
+      const b = H('button', null, q.label);
+      b.addEventListener('click', () => { st.q = i; draw(); });
+      ctrl.append(b);
+      return { b, v: i };
+    });
+    wrap.append(ctrl);
+
+    const body = H('div', 'pnl-body');
+    const left = H('div', 'pnl-left');
+    const sqlBox = H('pre', 'pnl-sql');
+    left.append(sqlBox);
+    const grid = H('div', 'pnl-grid');
+    left.append(grid);
+    body.append(left);
+
+    const right = H('div', 'pnl-metrics');
+    body.append(right);
+    wrap.append(body);
+    box.append(wrap);
+
+    function draw() {
+      const q = QUERIES[st.q];
+      qBtns.forEach((x) => x.b.classList.toggle('on', x.v === st.q));
+      sqlBox.textContent = q.sql;
+
+      const hitParts = q.parts;
+      const hitBuckets = q.buckets || [0, 1, 2, 3];
+      const cells = [];
+      DATES.forEach((d, pi) => {
+        const row = H('div', 'pnl-row');
+        row.append(H('span', 'pnl-date', d));
+        for (let bi = 0; bi < BUCKETS; bi += 1) {
+          const hit = hitParts.indexOf(pi) >= 0 && hitBuckets.indexOf(bi) >= 0;
+          const c = H('div', 'pnl-cell' + (hit ? ' hit' : ''));
+          c.append(H('span', 'pnl-b', '桶 ' + bi));
+          c.append(H('span', 'pnl-n', hit ? String(ROWS_PER_BUCKET) : '—'));
+          row.append(c);
+        }
+        cells.push(row);
+      });
+      const head = H('div', 'pnl-row pl-head');
+      head.append(H('span', 'pnl-date', '分区 \\ 桶'));
+      for (let bi = 0; bi < BUCKETS; bi += 1) head.append(H('span', 'pnl-hcell', '桶 ' + bi));
+      fill(grid, [head].concat(cells));
+
+      const tablets = hitParts.length * hitBuckets.length;
+      const rows = tablets * ROWS_PER_BUCKET;
+      const explain = 'partitions=' + hitParts.length + '/' + DATES.length + '  tablets=' + hitBuckets.length + '/' + BUCKETS;
+      fill(right, [
+        h('div', 'pnl-metric', [H('small', null, '读的分区'), H('b', null, hitParts.length + ' / ' + DATES.length)]),
+        h('div', 'pnl-metric', [H('small', null, '读的 tablet'), H('b', null, hitBuckets.length + ' / ' + BUCKETS)]),
+        h('div', 'pnl-metric', [H('small', null, '扫的行数（示意）'), H('b', null, String(rows))]),
+        h('div', 'pnl-explain', [H('small', null, 'EXPLAIN 里那两行'), H('code', null, explain)]),
+        richText(H('div', 'pnl-note'), q.note),
+      ]);
+      if (statusEl) statusEl.textContent = '读 ' + hitParts.length + '/' + DATES.length + ' 个分区 · 扫 ' + hitBuckets.length + '/' + BUCKETS + ' 个桶 · ' + rows + ' 行';
+    }
+    draw();
+  };
+
+  /* ============================================================
      控件：config-to-ui —— 配置怎么变成界面
      左边是 MySQL 里的元数据行（可改），右边是照着它渲染出来的界面。
      点任一边，另一边高亮来源/去向。改左边的字，右边当场变。

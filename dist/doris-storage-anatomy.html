@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>让 CRM 项目在本机跑起来：四个部件、两条命令、数据在哪</title>
-<meta name="description" content="本机跑这个项目要同时伺候四个东西 —— 前端、后端、一个装元数据的 MySQL、一个装业务数据的 Doris。这篇只回答三件事：怎么起、怎么停、停完数据还在不在。附一条实测出来的坑：端口在听不等于数据库就绪。" />
+<title>文件、分区、分桶、副本到底是什么</title>
+<meta name="description" content="从「物理表有自己的文件、分区、分桶、副本」这句话出发，把四个词拆成四层：分区按时间切、分桶按人切，切到最小的一块叫 tablet；文件是 tablet 落到磁盘的样子，副本是同一块 tablet 存几份。全篇用 3 个日分区 × 4 个桶的小表走一遍，两个交互分别演示副本与故障、以及一次查询的裁剪账。" />
 <style>
 /* ============================================================
    theme.css — 设计 token 与页面骨架
@@ -5389,427 +5389,285 @@ svg[data-preset="blueprint"] .c-security-group,
   <aside class="toc" id="toc">
       <p class="toc-title">目录</p>
       <a href="../../index.html" class="sub">← 全部笔记</a>
-      <a href="#命令速查">命令速查</a>
-      <a href="#启动" class="sub">启动</a>
-      <a href="#停止" class="sub">停止</a>
-      <a href="#确认环境是好的" class="sub">确认环境是好的</a>
-      <a href="#一次性的两条" class="sub">一次性的两条</a>
-      <a href="#机器上跑着四个东西">机器上跑着四个东西</a>
-      <a href="#两个数据库装的是完全不同的东西" class="sub">两个数据库装的是完全不同的东西</a>
-      <a href="#那条命令的六个动作">那条命令的六个动作</a>
-      <a href="#每一步在干什么" class="sub">每一步在干什么</a>
-      <a href="#为什么要用-until-等-端口在听不等于能用">为什么要用 until 等 —— 端口在听，不等于能用</a>
-      <a href="#让它自己走一遍" class="sub">让它自己走一遍</a>
-      <a href="#实测数字" class="sub">实测数字</a>
-      <a href="#两次失败长什么样" class="sub">两次失败长什么样</a>
-      <a href="#停止down-和-stop-的区别">停止：down 和 stop 的区别</a>
-      <a href="#容器的三种状态" class="sub">容器的三种状态</a>
-      <a href="#一个容易忽略的不对称" class="sub">一个容易忽略的不对称</a>
-      <a href="#数据到底存在哪">数据到底存在哪</a>
-      <a href="#记住这三句就够了" class="sub">记住这三句就够了</a>
+      <a href="#四层叠起来的样子">四层叠起来的样子</a>
+      <a href="#分区按时间切抽屉">分区：按时间切抽屉</a>
+      <a href="#分桶每个抽屉里再切格子">分桶：每个抽屉里再切格子</a>
+      <a href="#文件格子里真正的字节">文件：格子里真正的字节</a>
+      <a href="#副本同一份-tablet-存几份">副本：同一份 tablet 存几份</a>
+      <a href="#叠起来看一次查询">叠起来看一次查询</a>
+      <a href="#回到你圈的那句话">回到你圈的那句话</a>
+      <a href="#一句话" class="sub">一句话</a>
   </aside>
 
   <main>
     <div class="hero">
-      <span class="eyebrow">● 本地环境 · 启动与停止</span>
-      <h1>让 CRM 项目在本机跑起来：四个部件、两条命令、数据在哪</h1>
-      <p class="lede">本机跑这个项目要同时伺候四个东西 —— 前端、后端、一个装元数据的 MySQL、一个装业务数据的 Doris。这篇只回答三件事：怎么起、怎么停、停完数据还在不在。附一条实测出来的坑：端口在听不等于数据库就绪。</p>
+      <span class="eyebrow">● 从零理解 · 概念</span>
+      <h1>文件、分区、分桶、副本到底是什么</h1>
+      <p class="lede">从「物理表有自己的文件、分区、分桶、副本」这句话出发，把四个词拆成四层：分区按时间切、分桶按人切，切到最小的一块叫 tablet；文件是 tablet 落到磁盘的样子，副本是同一块 tablet 存几份。全篇用 3 个日分区 × 4 个桶的小表走一遍，两个交互分别演示副本与故障、以及一次查询的裁剪账。</p>
     </div>
 
 
-    <div class="provenance"><span><b>来源</b> 本仓库 apps/server/src/{index,app,doris}.ts、apps/client/vite.config.ts、metadata/docker-compose.yml 实际代码 · 本机实测：podman 6.1.0 / Doris 4.1.3 / MySQL 8.4.11 / pnpm 12.3.4 · 冷启动计时：podman machine start 后逐秒轮询端口与真实就绪状态</span><span><b>生成</b> 2026-09-29</span></div>
-    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">本地环境</span> <span class="tag tone-muted">podman</span> <span class="tag tone-muted">Doris</span> <span class="tag tone-muted">MySQL</span> <span class="tag tone-muted">排障</span></span></div>
+    <div class="provenance"><span><b>来源</b> Apache Doris 官方文档 · Partitioning and Bucketing：两级切分、Partition/Bucket/Tablet 定义、crc32(col) % N、PruneOlapScanPartition / PruneOlapScanTablet、Table→Partition→Tablet→Rowset→Segment、单分区桶数上限 128：https://doris.apache.org/docs/4.x/key-features/partitioning-and-bucketing/ · Apache Doris 官方文档 · Columnar Storage：Segment/Page/编码/每页 zone map 与 bloom filter、64KB 页、LZ4 默认：https://doris.apache.org/docs/4.x/key-features/columnar-storage/ · Apache Doris 官方文档 · Load High Availability：默认多数派写、3 副本至少 2 份成功、未写成的副本后台异步补：https://doris.apache.org/docs/4.x/data-operate/import/load-best-practices/load-high-availability/ · Apache Doris 官方文档 · Data Bucketing：桶数取 BE 整数倍、尽量少、tablet 压缩后 1GB~20GB（Unique Key 不超过 10GB）、2.0 起自动分桶：https://doris.apache.org/docs/4.x/table-design/data-partitioning/data-bucketing/ · crm-dsl-stru/docs/feishu/客群洞察技术方案.md：crm_dc_audience_snapshot 的日分区 + HASH(encrypt_uid) BUCKETS 8 + dynamic_partition 参数 · crm-dsl-stru/doris/init/schema.sql：demo 表的 HASH(uid) BUCKETS 16 与 replication_num = 1（实测）</span><span><b>生成</b> 2026-10-09</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">Doris</span> <span class="tag tone-muted">分区</span> <span class="tag tone-muted">分桶</span> <span class="tag tone-muted">副本</span> <span class="tag tone-muted">列存</span> <span class="tag tone-muted">数据库入门</span></span></div>
 
-<blockquote>
-<p>本机跑这个项目要同时伺候<strong>四个东西</strong> —— 前端、后端、一个装元数据的 MySQL、一个装业务数据的 Doris。</p>
-<p><mark class="mk-blue">想直接开工 → 看 01 节抄命令。想知道为什么这么写 → 从 02 节开始读。</mark></p>
-<p>所有命令都在本机冷启动实测过。</p>
-</blockquote>
-<h2 id="命令速查"><span class="num">01</span>命令速查</h2>
-<div class="callout tone-blue">
-      <span class="ic">🧭</span>
-      <div><p>这一节是给你<strong>直接抄</strong>的，不讲道理。</p>
-<p><mark class="mk-blue">每条命令的<strong>右上角</strong>悬停会出现「复制」按钮</mark>，点一下就进剪贴板。想看「为什么要这样」，
-从 02 节开始 —— 那里解释了这四样东西怎么协作、命令里的每个动作在干什么。</p>
-<p><mark class="mk-blue">如果只有 30 秒：抄「启动」，跑完开 <code>localhost:5173</code>。</mark></p>
+<p>「真正存数据的表对象，有自己的<strong>文件、分区、分桶、副本</strong>」——一句话里四个名词排在一起，看着像四个并列的东西；但它们回答的是四个不同的问题，而且是叠在一起的。这句话出现在上一页的 §06，也出现在每一次建表时对物理表的描述里。</p>
+<p>这一页从一张小表开始，一层一层往下搭。表结构和字段名取自你项目里那张快照表（<code>crm_dc_audience_snapshot</code>，日分区 + <code>HASH(uid)</code> 分桶），但不需要先懂它。</p>
+<div class="callout tone-muted">
+      <span class="ic">🧱</span>
+      <div><p><strong>读这篇之前</strong>：知道 SQL 里有表、行、列就行。数据库里其他的都不用。</p>
 </div>
-    </div><h3 id="启动">启动</h3>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-bash">podman machine start &gt;/dev/null 2&gt;&amp;1; podman-compose -f metadata/docker-compose.yml up -d &gt;/dev/null 2&gt;&amp;1; podman start doris_fe_1 doris_be_1 &gt;/dev/null 2&gt;&amp;1; printf '等待 元数据 MySQL'; until podman exec crm-dc-mysql mysqladmin ping -uroot -pcrm_meta --silent &gt;/dev/null 2&gt;&amp;1; do printf '.'; sleep 2; done; echo ' ✓'; printf '等待 Doris FE'; until podman exec doris_fe_1 mysql -h127.0.0.1 -P9030 -uroot -e 'SHOW DATABASES' &gt;/dev/null 2&gt;&amp;1; do printf '.'; sleep 2; done; echo ' ✓'; pnpm run dev
+    </div><div class="callout tone-blue">
+      <span class="ic">🎯</span>
+      <div><p>读完你应该能回答四个问题：</p>
+<ul>
+<li>一行数据<strong>被分到哪个抽屉</strong>？（分区）</li>
+<li>同一个抽屉里，它<strong>落在哪个格子</strong>？（分桶）</li>
+<li>格子里<strong>真正的字节</strong>长什么样？（文件）</li>
+<li>这个格子要不要<strong>多复印几份</strong>？（副本）</li>
+</ul>
+<p><mark class="mk-blue">前两个是「切法」，后两个是「切出来的东西怎么存」。</mark></p>
+</div>
+    </div><hr>
+<h2 id="四层叠起来的样子"><span class="num">01</span>四层叠起来的样子</h2>
+<p>先看一张小表长什么样。三天的快照，每天几行：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">snapshot_date   snapshot_id   encrypt_uid
+2026-10-07      1001          u-1001
+2026-10-07      1001          u-1002
+2026-10-07      1002          u-1001
+2026-10-08      1001          u-1002
+2026-10-08      1002          u-1001
+2026-10-09      1002          u-1004
 </code></pre></div>
-<p>期望输出：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">等待 元数据 MySQL... ✓
-等待 Doris FE. ✓
-apps/client dev:  ➜  Local:   http://localhost:5173/
-apps/server dev:  Server listening at http://127.0.0.1:8787
+<p>数据库在磁盘上看不到「表」这个形状，它看到的是文件。表只是把这些行组织起来的一套约定。组织的办法就是往下切两层：</p>
+<div class="tree" data-tree><ul class="tlist"><li class="has-kids">
+            <div class="tnode tone-violet" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>Table（表）</b>
+              <code>crm_dc_audience_snapshot</code>
+              <span class="tnote">一套约定，不是一个文件</span>
+            </div>
+            <ul class="tlist"><li class="has-kids">
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>Partition（分区）</b>
+              <code>p20261008</code>
+              <span class="tnote">按 snapshot_date 切，一个分区 = 一天的行</span>
+            </div>
+            <ul class="tlist"><li class="has-kids">
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>Tablet（桶）</b>
+              <code>桶 2</code>
+              <span class="tnote">分区里再按 hash(uid) % N 切；它是复制、调度、并行的最小单位</span>
+            </div>
+            <ul class="tlist"><li class="has-kids">
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>Rowset</b>
+              <code>一次写入产出的一批</code>
+              
+            </div>
+            <ul class="tlist"><li class="has-kids">
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>Segment</b>
+              <code>列存文件</code>
+              <span class="tnote">磁盘上真正躺着的字节</span>
+            </div>
+            <ul class="tlist"><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>Column</b>
+              <code>每一列单独编码</code>
+              
+            </div>
+            
+          </li><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>Page</b>
+              <code>约 64KB 一页，带 min/max</code>
+              
+            </div>
+            
+          </li></ul>
+          </li></ul>
+          </li></ul>
+          </li></ul>
+          </li></ul>
+          </li></ul></div><p>这张树里有两个位置值得记住：</p>
+<ul>
+<li><strong>分区和分桶是两刀</strong>。第一刀按时间（分区），第二刀按人（分桶）。切完之后，最小的一份可独立存放的数据叫 tablet。</li>
+<li>文件和副本描述的都是 tablet：它落到磁盘上是什么（文件），同一份数据存几遍（副本）。</li>
+</ul>
+<p>先切一刀看第一层。</p>
+<hr>
+<h2 id="分区按时间切抽屉"><span class="num">02</span>分区：按时间切抽屉</h2>
+<p><strong>分区（Partition）</strong> 是把表的行按某个列的值切成互不重叠的几块。最常用的是按日期范围切，官方叫 Range 分区。</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-sql">CREATE TABLE crm_dc_audience_snapshot (
+  snapshot_date DATE         NOT NULL,
+  snapshot_id   BIGINT       NOT NULL,
+  encrypt_uid   CHAR(32)     NOT NULL
+)
+DUPLICATE KEY (snapshot_date, snapshot_id, encrypt_uid)
+PARTITION BY RANGE(snapshot_date) ()          -- 按 snapshot_date 切
+DISTRIBUTED BY HASH(encrypt_uid) BUCKETS 8    -- 分区里再切 8 个桶
 </code></pre></div>
-<p>然后开 <code>http://localhost:5173/</code>。</p>
-<h3 id="停止">停止</h3>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>命令</th><th>停掉什么</th><th>数据还在吗</th><th>下次怎么起</th></tr></thead><tbody><tr><th><code>Ctrl+C</code></th><td data-label="停掉什么">只停 dev（前端 + 后端）</td><td data-label="数据还在吗"><span class="tag tone-green">在</span></td><td data-label="下次怎么起">只要 <code>pnpm run dev</code></td></tr><tr><th><code>podman stop crm-dc-mysql doris_fe_1 doris_be_1</code></th><td data-label="停掉什么">三个容器（容器保留）</td><td data-label="数据还在吗"><span class="tag tone-green">在</span></td><td data-label="下次怎么起">完整那条启动命令</td></tr><tr><th><code>podman-compose -f metadata/docker-compose.yml down</code></th><td data-label="停掉什么">MySQL 容器被<strong>删掉</strong></td><td data-label="数据还在吗"><span class="tag tone-green">在</span></td><td data-label="下次怎么起">同上（走 <code>up</code> 重建）</td></tr><tr><th><code>podman machine stop</code></th><td data-label="停掉什么">整台虚拟机，四个全停</td><td data-label="数据还在吗"><span class="tag tone-green">在</span></td><td data-label="下次怎么起">同上</td></tr></tbody></table></div><p><mark class="mk-blue">四个层次全都不丢数据</mark>，怎么选看你要停多彻底。原理见 05 节。</p>
-<h3 id="确认环境是好的">确认环境是好的</h3>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-bash"># 后端活着吗
-curl -s http://127.0.0.1:8787/api/health
-# → {&quot;ok&quot;:true}
-
-# 元数据读得到吗（这一步证明 MySQL 通了）
-curl -s http://127.0.0.1:8787/api/meta/catalog | head -c 80
-# → {&quot;universeTable&quot;:&quot;user_portraits_wide&quot;,&quot;fields&quot;:[...],&quot;relations&quot;:[...]}
-
-# Doris 通了吗（这一步证明业务数据能查）
-curl -s -X POST http://127.0.0.1:8787/api/preview \
-  -H 'Content-Type: application/json' -H 'X-Staff-Id: 301' \
-  -d '{&quot;query&quot;:{&quot;version&quot;:1,&quot;scope&quot;:{&quot;type&quot;:&quot;scope&quot;,&quot;kind&quot;:&quot;all&quot;},&quot;include&quot;:null,&quot;exclude&quot;:null},&quot;page&quot;:1,&quot;pageSize&quot;:3}'
-# → {&quot;count&quot;:1000000, &quot;rows&quot;:[{&quot;uid&quot;:&quot;10001&quot;,&quot;customerName&quot;:&quot;向治文&quot;,...}]}
+<p>上面那份数据会被切成三块：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">p20261007 → 2026-10-07 的三行
+p20261008 → 2026-10-08 的两行
+p20261009 → 2026-10-09 的一行
 </code></pre></div>
-<p><strong>三条依次通过，说明整条链路都对。</strong> 第三条返回 <code>count: 1000000</code>
-就是你当初灌进去的那个数，对得上说明 Doris 没被动过。</p>
-<div class="callout tone-blue">
-      <span class="ic">🧭</span>
-      <div><p><strong>卡住了按这个顺序查</strong>：</p>
-<ol>
-<li><code>podman ps</code> —— 三个容器都在吗？（<code>crm-dc-mysql</code> 最容易忘）</li>
-<li><code>podman machine start</code> —— 虚拟机在跑吗？</li>
-<li>上面三条 <code>curl</code> —— 卡在哪一条，就是哪个部件的问题</li>
-</ol>
-</div>
-    </div><h3 id="一次性的两条">一次性的两条</h3>
-<p>只有<strong>重装环境</strong>后才需要跑。日常启动不用。</p>
-<ul class="check warn"><li><code>pnpm --filter @insight/server metadata:seed</code> —— 重新灌元数据（3 数据源 / 46 字段 / 18 算子），0.3 秒</li><li><code>pnpm run seed</code> —— 重建 Doris 的 100 万行，很慢，除非数据坏了否则别碰</li></ul><hr>
-<h2 id="机器上跑着四个东西"><span class="num">02</span>机器上跑着四个东西</h2>
-<div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;br&quot;,&quot;to&quot;:&quot;cl&quot;,&quot;label&quot;:&quot;加载页面&quot;},{&quot;from&quot;:&quot;cl&quot;,&quot;to&quot;:&quot;sv&quot;,&quot;label&quot;:&quot;/api 原样转发&quot;,&quot;tone&quot;:&quot;green&quot;},{&quot;from&quot;:&quot;sv&quot;,&quot;to&quot;:&quot;my&quot;,&quot;label&quot;:&quot;读元数据&quot;,&quot;tone&quot;:&quot;violet&quot;},{&quot;from&quot;:&quot;sv&quot;,&quot;to&quot;:&quot;dor&quot;,&quot;label&quot;:&quot;跑圈选 SQL&quot;,&quot;tone&quot;:&quot;violet&quot;}]">
-      <svg class="flowd-svg" aria-hidden="true">
-        <defs>
-          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
-                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
-            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
-          </marker>
-        </defs>
-      </svg>
-      <div class="flowd-groups"></div>
-      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-muted" data-id="br">
-              
-              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="3" width="11" height="8.5" rx="1.5"/><path d="M2.5 6h11"/></svg>
-              <b>浏览器</b>
-              <small>打开 localhost:5173</small>
-            </div></div><div class="flowd-row"><div class="fnode tone-blue" data-id="cl">
-              
-              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="3" width="11" height="8.5" rx="1.5"/><path d="M2.5 6h11"/></svg>
-              <b>前端 vite</b>
-              <small>client · 5173</small>
-            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="sv">
-              
-              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5L3 8l3 4.5M10 3.5L13 8l-3 4.5"/></svg>
-              <b>后端 fastify</b>
-              <small>server · 8787</small>
-            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="my">
-              
-              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="8" cy="4.2" rx="5" ry="1.9"/><path d="M3 4.2v7.6c0 1.05 2.24 1.9 5 1.9s5-.85 5-1.9V4.2"/></svg>
-              <b>MySQL 8</b>
-              <small>crm_dc · 3307</small>
-            </div><div class="fnode tone-violet" data-id="dor">
-              
-              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="8" cy="4.2" rx="5" ry="1.9"/><path d="M3 4.2v7.6c0 1.05 2.24 1.9 5 1.9s5-.85 5-1.9V4.2"/></svg>
-              <b>Doris FE</b>
-              <small>crm_insight · 9030</small>
-            </div></div></div>
-      <div class="flegend"><span class="fleg-item tone-muted">
-                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"
-                     stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="3" width="11" height="8.5" rx="1.5"/><path d="M2.5 6h11"/></svg>
-                frontend <em>2</em></span><span class="fleg-item tone-green">
-                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"
-                     stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5L3 8l3 4.5M10 3.5L13 8l-3 4.5"/></svg>
-                backend <em>1</em></span><span class="fleg-item tone-violet">
-                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"
-                     stroke-linecap="round" stroke-linejoin="round"><ellipse cx="8" cy="4.2" rx="5" ry="1.9"/><path d="M3 4.2v7.6c0 1.05 2.24 1.9 5 1.9s5-.85 5-1.9V4.2"/></svg>
-                database <em>2</em></span></div>
-    </div><p>前端不直接连数据库。它的 <code>/api</code> 请求由 vite <strong>原样转发</strong>给后端：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-js">// apps/client/vite.config.ts
-server: { port: 5173, strictPort: true, proxy: { '/api': 'http://127.0.0.1:8787' } }
+<p><strong>分区为什么值得切</strong>：查询几乎都带时间。<code>WHERE snapshot_date = '2026-10-08'</code> 时，规划器看一眼分区表，把其他两个分区直接丢掉。这叫分区裁剪，<code>EXPLAIN</code> 里会写出来：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">partitions=1/3          -- 3 个分区里只留 1 个
 </code></pre></div>
-<p>所以<strong>浏览器只需要记住 5173 一个端口</strong>。8787 是内部约定，不用手动访问。</p>
-<h3 id="两个数据库装的是完全不同的东西">两个数据库装的是完全不同的东西</h3>
-<p>这是最容易搞混的地方 —— 它们都叫「数据库」，但一个是<strong>配置<strong>，一个是</strong>数据</strong>。</p>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>维度</th><th>metadata MySQL</th><th>Doris</th></tr></thead><tbody><tr><th>端口</th><td data-label="metadata MySQL">3307</td><td data-label="Doris">9030</td></tr><tr><th>库名</th><td data-label="metadata MySQL"><code>crm_dc</code></td><td data-label="Doris"><code>crm_insight</code></td></tr><tr><th>装什么</th><td data-label="metadata MySQL"><strong>能圈什么</strong> —— 有哪些数据源、字段、算子、值集</td><td data-label="Doris"><strong>真有人</strong> —— 一百万条客户画像和关系</td></tr><tr><th>谁来灌</th><td data-label="metadata MySQL"><code>metadata:seed</code>（0.3 秒）</td><td data-label="Doris"><code>npm run seed</code>（很慢）</td></tr><tr><th>表</th><td data-label="metadata MySQL">5 张：data_source / data_field / business_domain / operator / value_set</td><td data-label="Doris">4 张：user_portraits_wide / rel_holding / rel_product / insight_uid_job_meta</td></tr><tr><th>实际行数</th><td data-label="metadata MySQL">3 / 46 / 0 / 18 / 1</td><td data-label="Doris">1000000 / 1328471 / 1138855 / 0</td></tr><tr><th>容器</th><td data-label="metadata MySQL"><code>crm-dc-mysql</code>（mysql:8）</td><td data-label="Doris"><code>doris_fe_1</code> + <code>doris_be_1</code>（4.1.3）</td></tr><tr><th>跑在</th><td data-label="metadata MySQL"><span class="tag tone-muted">podman 虚拟机</span></td><td data-label="Doris"><span class="tag tone-muted">podman 虚拟机</span></td></tr></tbody></table></div><p><strong>两个都必须活着，后端才起得来。</strong> 后端启动时会挨个连：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-ts">// apps/server/src/app.ts
-await getCatalog();        // → MySQL 3307，读元数据
-...
-await ensureSnapshotEnv(); // → Doris 9030，建快照环境
+<p>分区还有两个附带好处：删历史数据变成「丢掉一个分区」（一次元数据操作，不用逐行 <code>DELETE</code>）；过期数据可以按分区设 TTL。</p>
+<p>你项目里那张表用的是动态分区：到点自动建当天的新分区，同时丢掉 14 天前的老分区，不需要人写 DDL。</p>
+<div class="callout tone-amber">
+      <span class="ic">⚠</span>
+      <div><p>分区键要选<strong>查询真的会拿来过滤的列</strong>。</p>
+<p>拿一个只有 5 个取值的列（比如地区）当分区键，规划器没什么可丢的，
+而每个分区都要付元数据成本：抽屉开了很多，里面都没几页纸。</p>
+</div>
+    </div><hr>
+<h2 id="分桶每个抽屉里再切格子"><span class="num">03</span>分桶：每个抽屉里再切格子</h2>
+<p>切完时间，一个分区可能还是很大（一天一千万行）。而且数据要摊到多台机器上才能并行算。所以分区里面再切一刀：按 uid 的哈希值切。</p>
+<p>官方给的规则一句话：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">bucket = crc32(分桶列) % 桶数
 </code></pre></div>
-<p>任何一步连不上，进程直接退出。<strong>缺一个都不行</strong> —— 这也是 01 节那条启动命令里要等两个 <code>until</code> 的原因。</p>
-<h2 id="那条命令的六个动作"><span class="num">03</span>那条命令的六个动作</h2>
-<h3 id="每一步在干什么">每一步在干什么</h3>
-<div class="spec tone-violet">
-      <div class="spec-head"><b>一条命令的六个动作</b><span>每一步都可以单独敲</span></div>
-      <div class="spec-body"><div class="srow">
-          <div class="sk">①</div>
-          <div class="sv"><p><code>podman machine start</code> —— 启动那台跑容器的 Linux 虚拟机。</p>
-<p><strong>约 25 秒</strong>，是整个启动里最慢的一步。已经在跑时会报 <code>already running</code>，
-所以用 <code>&gt;/dev/null 2&gt;&amp;1</code> 把它吞掉。</p>
+<p>上面那张表的 <code>DISTRIBUTED BY HASH(encrypt_uid) BUCKETS 8</code>，就是「按 <code>encrypt_uid</code> 切 8 个桶」。切出来的每一份，就是一个 tablet。</p>
+<p>这里有个容易混的点，值得单独记：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>两刀</th><th>怎么切</th><th>切完的效果</th></tr></thead><tbody><tr><th>分区</th><td data-label="怎么切">按<strong>时间</strong>切：同一天的行在一起</td><td data-label="切完的效果">同一个人会出现在多个分区里（每天都有一行）</td></tr><tr><th>分桶</th><td data-label="怎么切">按<strong>人</strong>切：<code>hash(uid)</code> 相同的行在一起</td><td data-label="切完的效果">同一个 uid 在每个分区里都落到<strong>同一个桶号</strong></td></tr></tbody></table></div><p>第二行就是上一页讲 colocate 和本地 join 的物理基础：同一个 uid 的数据，在每一层分区里都在同一个桶里，只要两张表的桶对齐，join 就不用把数据搬来搬去。</p>
+<p>分桶也能裁剪。<code>WHERE encrypt_uid = 'u-1001'</code> 时，规划器算出这个 uid 落在几号桶，只扫那一个：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">partitions=1/3  tablets=1/8      -- 分区和桶都裁掉了
+</code></pre></div>
+<div class="callout tone-violet">
+      <span class="ic">💡</span>
+      <div><p>桶数怎么定，官方给的是三条：</p>
+<ul>
+<li>取 BE 数量的整数倍，数据分布更均匀</li>
+<li>够用就行，尽量少（桶越多，tablet 越多，元数据和扫描任务越多）</li>
+<li>单个 tablet 压缩后大约 1GB ~ 20GB；单分区最多 128 个桶</li>
+</ul>
+<p>反例和正例都很好记：按<strong>性别</strong>分桶（只有两个值）会让 8 个桶里两个满、六个空；
+按 <strong>uid</strong> 这种高基数列分桶，才切得开。</p>
 </div>
-        </div><div class="srow">
-          <div class="sk">②</div>
-          <div class="sv"><p><code>podman-compose ... up -d</code> —— 起元数据 MySQL。</p>
-<p><mark class="mk-blue">用 <code>up</code> 而不是 <code>podman start</code></mark> —— <code>up</code> 是幂等的：容器在就起、不在就建。
-见 05 节，<code>down</code> 会把容器删掉。</p>
+    </div><hr>
+<h2 id="文件格子里真正的字节"><span class="num">04</span>文件：格子里真正的字节</h2>
+<p>一个 tablet 里到底是什么文件？官方的磁盘层级是：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">Tablet → Rowset → Segment → Column → Page
+</code></pre></div>
+<ul>
+<li>Rowset：一次写入产出的数据批次。写下一次，多一个 rowset。</li>
+<li>Segment：rowset 里的文件本体。</li>
+<li>Column / Page：segment 内部按列组织，每列的值攒成约 64KB 的一页（page），每页独立编码、独立压缩。</li>
+</ul>
+<p>Doris 的表是<strong>列存</strong>：同一列的值在文件里挨着放，而不是同一行的值挨着放。带来的三件事：</p>
+<div class="cards" data-cols="3"><div class="ccard tone-blue">
+          
+          <h4>只读用到的列</h4>
+          <p>查 uid 就不用把年龄、地区那些列读进来</p>
+          
+          
+        </div><div class="ccard tone-green">
+          
+          <h4>每列用自己的编码</h4>
+          <p>数字用 bit-shuffle，低基数字符串用字典，日期用 frame-of-reference</p>
+          
+          
+        </div><div class="ccard tone-violet">
+          
+          <h4>每页带 min/max</h4>
+          <p>还有可选的 bloom filter；扫描时先看这一页的范围，不命中就整页跳过</p>
+          
+          
+        </div></div><div class="callout tone-violet">
+      <span class="ic">📦</span>
+      <div><p><mark class="mk-blue">「文件」不是「一个 uid 一个文件」。</mark></p>
+<p>一批行写一次盘，按列打包成一页页。真正决定一次查询读多少的，
+是前面两刀（分区、桶）把数据切在了哪里，以及每一页贴的那个 min/max 标签。</p>
 </div>
-        </div><div class="srow">
-          <div class="sk">③</div>
-          <div class="sv"><p><code>podman start doris_fe_1 doris_be_1</code> —— 起 Doris。</p>
-<p>理论上不用写（Doris 的 compose 里有 <code>restart: unless-stopped</code>，
-跟着虚拟机自动回来），但写上无害，而且虚拟机第一次启动时更稳。</p>
-</div>
-        </div><div class="srow">
-          <div class="sk">④</div>
-          <div class="sv"><p><strong>等 MySQL 真能回答</strong> —— 不是等端口在听。</p>
-<p><code>mysqladmin ping</code> 是让 MySQL 自己回一句话，回不了就继续等。</p>
-</div>
-        </div><div class="srow">
-          <div class="sk">⑤</div>
-          <div class="sv"><p><strong>等 Doris 真能执行查询</strong> —— 同上。</p>
-<p><code>SHOW DATABASES</code> 会真的走一遍 FE 的查询链路，比只连 TCP 严格。</p>
-</div>
-        </div><div class="srow">
-          <div class="sk">⑥</div>
-          <div class="sv"><div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>pnpm run dev
-# = pnpm --filter @insight/server --filter @insight/client --parallel dev
-# 两个 dev server 并行跑
-</pre></div></div>
-        </div></div>
-    </div><h2 id="为什么要用-until-等-端口在听不等于能用"><span class="num">04</span>为什么要用 <code>until</code> 等 —— 端口在听，不等于能用</h2>
-<p><mark class="mk-amber">这一步不能省。我省过一次，冷启动连撞两次，报的错还各不相同。</mark></p>
-<h3 id="让它自己走一遍">让它自己走一遍</h3>
-<div class="demo" data-widget="stepper" data-config="{&quot;steps&quot;:[{&quot;label&quot;:&quot;0s&quot;,&quot;code&quot;:&quot;podman machine start&quot;,&quot;note&quot;:&quot;虚拟机开始启动。5173 / 3307 / 8787 / 9030 全都没在听。&quot;},{&quot;label&quot;:&quot;23.5s&quot;,&quot;code&quot;:&quot;gvproxy   IPv6  *:3307 (LISTEN)\ngvproxy   IPv6  *:9030 (LISTEN)&quot;,&quot;note&quot;:&quot;端口转发层起来了。lsof 现在说「3307 和 9030 都在听」。但容器里的数据库还没醒。&quot;},{&quot;label&quot;:&quot;24.6s&quot;,&quot;code&quot;:&quot;socket connect 127.0.0.1:9030  →  成功&quot;,&quot;note&quot;:&quot;TCP 层能握手了。看起来一切就绪 —— 但 Doris FE 内部还在加载元数据。&quot;},{&quot;label&quot;:&quot;25s&quot;,&quot;code&quot;:&quot;apps/server dev: Error: Connection lost:\n  The server closed the connection.\n  at execSql (apps/server/src/doris.ts:33)&quot;,&quot;note&quot;:&quot;← 如果此时启动后端，就死在这里。报的错跟「Doris 没起」看不出关系。&quot;},{&quot;label&quot;:&quot;32.2s&quot;,&quot;code&quot;:&quot;SHOW DATABASES  →  __internal_schema\n                     crm_insight\n                     information_schema\n                     mysql&quot;,&quot;note&quot;:&quot;Doris 真就绪。从「端口在听」到这里，中间有 7.6 秒是假的。&quot;}]}">
+    </div><hr>
+<h2 id="副本同一份-tablet-存几份"><span class="num">05</span>副本：同一份 tablet 存几份</h2>
+<p><strong>副本（Replica）</strong> 说的是同一份 tablet 数据存在几台机器上。默认是 3 份，放在不同的 BE 上。</p>
+<p>写入的流程（官方）：数据先发给这个 tablet 的所有副本 → 每台机器各写自己那份 → 回执 → FE 数一下，<strong>写成功的副本超过一半</strong>就算这次写入成功（3 份里至少 2 份）→ 提交 → 没写成的那些，后台再异步补齐。</p>
+<p>所以副本换来的是两件事：一台机器挂了数据不丢，查询还能继续。代价也很直接：磁盘占用乘以副本数，每次写入要等多数派。</p>
+<p>自己切一下看：</p>
+<div class="demo" data-widget="storage-anatomy" data-config="{&quot;replicas&quot;:3}">
       <div class="demo-head">
-        <span class="title">冷启动的 40 秒里，谁什么时候真就绪</span>
+        <span class="title">3 个分区 × 4 个桶，切副本数、挂一台机器</span>
         <span class="status" data-status></span>
         <span class="spacer"></span>
         
       </div>
       <div class="demo-body custom" data-mount></div>
-    </div><h3 id="实测数字">实测数字</h3>
-<table>
-<thead>
-<tr>
-<th>时刻</th>
-<th>事件</th>
-<th>说明</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td><code>23.5s</code></td>
-<td>3307 端口能连上</td>
-<td>转发层就绪，MySQL 还没</td>
-</tr>
-<tr>
-<td><code>24.6s</code></td>
-<td>9030 端口能握手</td>
-<td>转发层就绪，Doris 还没</td>
-</tr>
-<tr>
-<td><code>32.2s</code></td>
-<td><strong>Doris 真能跑查询</strong></td>
-<td><mark class="mk-amber">从「端口在听」到这里 <strong>7.6 秒</strong></mark></td>
-</tr>
-</tbody>
-</table>
-<div class="callout tone-red quote">
-      <span class="ic">⚠</span>
-      <div><p><mark class="mk-blue"><code>lsof</code> 看到端口在听，和「这个数据库能回答问题」，中间隔着 7.6 秒。</mark></p>
-<p>podman 的端口转发层（gvproxy）比容器里的数据库<strong>先起来</strong>。
-它一开就开始 LISTEN，但转发过去的连接会被拒绝或直接断开。</p>
-</div>
-    </div><div class="callout tone-amber">
-      <span class="ic">⚠</span>
-      <div><p><strong>为什么手动敲命令常常没事？</strong></p>
-<p>因为人的节奏天然慢 —— 打完 <code>podman machine start</code>、再打下一步，
-中间那 7 秒你正好在看屏幕。</p>
-<p><mark class="mk-blue">脚本没有这个运气，它是毫秒级连着跑的。</mark>
-所以我们得显式写 <code>until</code> 把「人的等待」补进去。</p>
-</div>
-    </div><h3 id="两次失败长什么样">两次失败长什么样</h3>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>第几次</th><th>后端报的错</th><th>真实原因</th><th>怎么修</th></tr></thead><tbody><tr><th>第一次</th><td data-label="后端报的错"><code>connect ECONNREFUSED 127.0.0.1:3307</code></td><td data-label="真实原因">MySQL 还在初始化</td><td data-label="怎么修">加 <code>mysqladmin ping</code> 的 until</td></tr><tr><th>第二次</th><td data-label="后端报的错"><code>Connection lost: The server closed the connection.</code></td><td data-label="真实原因">换 Doris 没就绪了</td><td data-label="怎么修">加 <code>SHOW DATABASES</code> 的 until</td></tr></tbody></table></div><blockquote>
-<p><strong>第二次那个错更难查</strong> —— 它出现在 <code>apps/server/src/doris.ts</code>，
-看起来像「Doris 挂了」，但 Doris 其实活得好好的，只是慢了 7 秒。</p>
-</blockquote>
-<h2 id="停止down-和-stop-的区别"><span class="num">05</span>停止：<code>down</code> 和 <code>stop</code> 的区别</h2>
-<p>01 节那张表说了「哪条命令停掉什么」。这一节说<strong>为什么它们不一样</strong>。</p>
-<h3 id="容器的三种状态">容器的三种状态</h3>
-<div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;run&quot;,&quot;to&quot;:&quot;stop&quot;,&quot;on&quot;:&quot;podman stop&quot;,&quot;tone&quot;:&quot;amber&quot;},{&quot;from&quot;:&quot;stop&quot;,&quot;to&quot;:&quot;run&quot;,&quot;on&quot;:&quot;podman start&quot;,&quot;tone&quot;:&quot;green&quot;},{&quot;from&quot;:&quot;stop&quot;,&quot;to&quot;:&quot;gone&quot;,&quot;on&quot;:&quot;podman-compose down&quot;,&quot;tone&quot;:&quot;red&quot;},{&quot;from&quot;:&quot;gone&quot;,&quot;to&quot;:&quot;stop&quot;,&quot;on&quot;:&quot;up -d 重建&quot;,&quot;tone&quot;:&quot;green&quot;}]">
-      <svg class="flowd-svg" aria-hidden="true">
-        <defs>
-          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
-                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
-            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
-          </marker>
-        </defs>
-      </svg>
-      <div class="flowd-groups"></div>
-      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-green shape-pill" data-id="run">
-              
-              
-              <b>running</b>
-              <small>容器在跑</small>
-            </div></div><div class="flowd-row"><div class="fnode tone-amber shape-pill" data-id="stop">
-              
-              
-              <b>exited</b>
-              <small>容器还在，只是停了</small>
-            </div></div><div class="flowd-row"><div class="fnode tone-red shape-pill" data-id="gone">
-              
-              
-              <b>removed</b>
-              <small>容器没了，卷还在</small>
-            </div></div></div>
-      
-    </div><p><strong>这就是启动命令里用 <code>up</code> 而不是 <code>start</code> 的原因</strong> —— <code>up</code> 三种状态都能处理：</p>
-<table>
-<thead>
-<tr>
-<th>容器现在</th>
-<th><code>podman start</code></th>
-<th><code>podman-compose up -d</code></th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td>running</td>
-<td>无动作</td>
-<td>无动作</td>
-</tr>
-<tr>
-<td>exited</td>
-<td>起得来</td>
-<td>起得来</td>
-</tr>
-<tr>
-<td>removed</td>
-<td><mark class="mk-amber">失败（找不到容器）</mark></td>
-<td><mark class="mk-green">重建</mark></td>
-</tr>
-</tbody>
-</table>
-<h3 id="一个容易忽略的不对称">一个容易忽略的不对称</h3>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>容器</th><th>重启策略</th><th>虚拟机启动后会怎样</th></tr></thead><tbody><tr><th><code>doris_fe_1</code> / <code>doris_be_1</code></th><td data-label="重启策略"><code>unless-stopped</code></td><td data-label="虚拟机启动后会怎样"><span class="tag tone-green">自动起来</span></td></tr><tr><th><code>crm-dc-mysql</code></th><td data-label="重启策略"><code>no</code></td><td data-label="虚拟机启动后会怎样"><span class="tag tone-red"><strong>不会</strong>自动起，要显式 <code>up -d</code></span></td></tr></tbody></table></div><p>Doris 的 <code>docker-compose.yaml</code> 里写了 <code>restart: unless-stopped</code>，
-而 <code>metadata/docker-compose.yml</code> 的 mysql 服务<strong>没写</strong>。</p>
-<p>所以<strong>每次重启电脑后，MySQL 都需要手动起一次</strong> —— 这就是启动命令第 ② 步存在的原因。</p>
-<div class="callout tone-amber">
-      <span class="ic">⚠</span>
-      <div><p><code>pnpm run metadata:up</code> <strong>在这台机器上用不了</strong>。</p>
-<p>它内部写的是 <code>docker compose -f metadata/docker-compose.yml up -d</code>，
-而这台机器只装了 podman，没有 <code>docker</code> 命令。</p>
-<p><mark class="mk-green">用 <code>podman-compose -f metadata/docker-compose.yml up -d</code> 代替。</mark></p>
-</div>
-    </div><h2 id="数据到底存在哪"><span class="num">06</span>数据到底存在哪</h2>
-<div class="tree" data-tree><ul class="tlist"><li class="has-kids">
-            <div class="tnode tone-violet" data-tree-node>
-              <span class="tcaret" aria-hidden="true"></span>
-              <b>宿主机（你的 Mac）</b>
-              
-              <span class="tnote">这两处都是真实文件，删容器不影响</span>
-            </div>
-            <ul class="tlist"><li class="has-kids">
-            <div class="tnode tone-muted" data-tree-node>
-              <span class="tcaret" aria-hidden="true"></span>
-              <b>~/works/crm/crm-dsl-stru/doris/data/</b>
-              <code>250 MB</code>
-              <span class="tnote">Doris 的数据目录，compose 里 bind mount 进去的</span>
-            </div>
-            <ul class="tlist"><li>
-            <div class="tnode tone-muted" data-tree-node>
-              <span class="tdot" aria-hidden="true"></span>
-              <b>be/</b>
-              
-              <span class="tnote">后端存储（表数据）</span>
-            </div>
-            
-          </li><li>
-            <div class="tnode tone-muted" data-tree-node>
-              <span class="tdot" aria-hidden="true"></span>
-              <b>fe/</b>
-              
-              <span class="tnote">前端元数据（库表定义）</span>
-            </div>
-            
-          </li></ul>
-          </li></ul>
-          </li><li class="has-kids">
-            <div class="tnode tone-violet" data-tree-node>
-              <span class="tcaret" aria-hidden="true"></span>
-              <b>podman 虚拟机内部</b>
-              
-              <span class="tnote">卷活在这里，容器删了它还在</span>
-            </div>
-            <ul class="tlist"><li>
-            <div class="tnode tone-muted" data-tree-node>
-              <span class="tdot" aria-hidden="true"></span>
-              <b>volume: metadata_crm_dc_mysql</b>
-              
-              <span class="tnote">MySQL 的 datadir，被挂到 /var/lib/mysql</span>
-            </div>
-            
-          </li><li>
-            <div class="tnode tone-muted" data-tree-node>
-              <span class="tdot" aria-hidden="true"></span>
-              <b>image: mysql:8</b>
-              
-              <span class="tnote">镜像本体，832 MB</span>
-            </div>
-            
-          </li></ul>
-          </li></ul></div><p><strong>为什么删容器不丢数据<strong>：容器里放的只是</strong>进程和你装的东西</strong>，
-数据落在这两处<strong>容器外部</strong>的地方。<code>podman rm</code> 碰不到它们。</p>
-<div class="callout tone-amber">
-      <span class="ic">⚠</span>
-      <div><p><strong>唯一会真正丢数据的操作</strong>是显式删卷：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-bash">podman volume rm metadata_crm_dc_mysql   # ← 别敲这个
-podman-compose down -v                   # ← -v 也会删卷
-</code></pre></div>
-<p>删了之后 <code>metadata:seed</code> 能重新灌回元数据（0.3 秒），
-但 Doris 那 100 万行要重跑 <code>npm run seed</code>，很慢。</p>
-</div>
-    </div><div class="quiz"><details>
-        <summary>前端页面上的「查询」按钮，数据是经过几个进程才拿到的？</summary>
-        <div class="a"><p>三个：浏览器 → vite（5173，只做 /api 代理转发）→ 后端 fastify（8787）。
-后端再去连两个数据库 —— MySQL 3307 读「能圈什么」，Doris 9030 跑「圈出来谁」。
-所以浏览器只认 5173 一个端口，8787 是内部约定。</p>
-</div>
-      </details><details>
-        <summary>为什么启动命令里要用 <code>until ... ping</code> 等，而不是直接跑 <code>pnpm run dev</code>？</summary>
-        <div class="a"><p>因为 podman 的端口转发层比容器里的数据库先起来 —— 实测有 7.6 秒的窗口，
-lsof 说 9030 在听，但连上去会被断开。</p>
-<p>不等的话后端正好死在这个窗口里，报 <code>Connection lost: The server closed the connection.</code>
-这个错还出现在 doris.ts，看起来像 Doris 挂了，其实它只是慢了几秒。</p>
-</div>
-      </details><details>
-        <summary>跑 <code>podman-compose down</code> 之后，Doris 那 100 万行数据会没了，对吗？</summary>
-        <div class="a"><p>不对。<code>down</code> 只删容器，不删卷，也碰不到 Doris 的数据。</p>
-<p>Doris 的数据是宿主机上的目录 <code>doris/data/</code>（bind mount，248 MB），
-MySQL 的数据在 podman 卷 <code>metadata_crm_dc_mysql</code> 里。两处都在容器外面。</p>
-<p>真正会丢的只有显式删卷（<code>podman volume rm</code> 或 <code>down -v</code>）。
-四个停止层次全都不丢数据。</p>
-</div>
-      </details><details>
-        <summary>重启电脑后，为什么 MySQL 要手动起、Doris 却不用？</summary>
-        <div class="a"><p>因为重启策略不一样：Doris 的两个容器是 <code>restart: unless-stopped</code>，
-虚拟机起来它们就跟着回来；<code>crm-dc-mysql</code> 是 <code>restart: no</code>，不会自动起。</p>
-<p>所以启动命令里必须有 <code>podman-compose ... up -d</code> 这一步。
-顺带：<code>pnpm run metadata:up</code> 在这台机器上用不了，它内部调的是 <code>docker compose</code>。</p>
-</div>
-      </details></div><div class="summary">
-      <h3 id="记住这三句就够了">记住这三句就够了</h3>
-      <p><mark class="mk-blue">一条命令起、四个层次停、数据从来不丢。</mark></p>
+    </div><p>可以试三下：</p>
 <ul>
-<li><strong>起</strong>：<code>machine start</code> → <code>compose up -d</code> → <code>podman start doris</code> → 等两个 until → <code>pnpm run dev</code></li>
-<li><strong>停</strong>：<code>Ctrl+C</code> 最常用；<code>podman machine stop</code> 最彻底。都不丢数据。</li>
-<li><strong>查</strong>：三条 curl 依次过，卡在哪条就是哪个部件的问题。</li>
+<li>副本数切到 <strong>1<strong>，再点「挂掉 BE-1」：有些 tablet 变成了红色，</strong>读不到</strong>。</li>
+<li>切回 <strong>3</strong> 再挂 BE-1：每个 tablet 少一份，但还剩两份，查询照常。</li>
+<li>点任意一个桶：右边会写清它是什么、几份副本、落在哪几台机器上。</li>
 </ul>
-<p><mark class="mk-green">忘了命令长什么样，回 01 节抄。</mark></p>
+<p>你项目 demo 里的表白布的是 <code>replication_num = 1</code>（单机跑起来省事），生产环境的表一般是 3。</p>
+<div class="callout tone-red">
+      <span class="ic">⚖</span>
+      <div><p><mark class="mk-blue">分区和桶是「切成几份不同的数据」，副本是「同一份数据存几遍」。</mark></p>
+<p>前者决定数据放在哪里、怎么并行；后者决定坏了怎么办、占多少磁盘。
+两者都会出现在建表语句里，但解决的问题完全不同。</p>
+</div>
+    </div><hr>
+<h2 id="叠起来看一次查询"><span class="num">06</span>叠起来看一次查询</h2>
+<p>同一个查询，条件不同，读的量差一个数量级。下面用一个 4 个桶的简化模型（真实表是 8 个），切几个 <code>WHERE</code> 看：</p>
+<div class="demo" data-widget="prune-lab" data-config="{&quot;q&quot;:2}">
+      <div class="demo-head">
+        <span class="title">3 个分区 × 4 个桶（每桶 250 行），换条件看命中格</span>
+        <span class="status" data-status></span>
+        <span class="spacer"></span>
+        
+      </div>
+      <div class="demo-body custom" data-mount></div>
+    </div><p><code>EXPLAIN</code> 里那两行就是前面两刀的账：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">partitions=1/3      -- 分区裁剪：3 天里只读 1 天
+tablets=1/4         -- 分桶裁剪：4 个桶里只扫 1 个
+</code></pre></div>
+<p>一句话算账：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">扫的数据量 ≈ 总数据量 × (命中分区 / 总分区) × (命中桶 / 总桶)
+副本数不改变这个乘积 —— 它只决定读哪一份、以及坏了还有没有得读
+</code></pre></div>
+<p>还有一个容易忽略的分工：<strong>桶号在每个分区里是同一套</strong>。所以只按 uid 过滤、不带日期时，每个分区都要去同一个桶号找一次（下面那个「只按 uid」就是这种情况）。分区裁剪管不了它，分桶裁剪也跨不过分区。</p>
+<hr>
+<h2 id="回到你圈的那句话"><span class="num">07</span>回到你圈的那句话</h2>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>词</th><th>它回答什么</th><th>谁决定</th><th>想错了会怎样</th></tr></thead><tbody><tr><th>分区</th><td data-label="它回答什么">行落在哪个时间抽屉里</td><td data-label="谁决定">建表时的 <code>PARTITION BY</code>，通常按日期</td><td data-label="想错了会怎样">不按查询会用的列切，白开一堆抽屉</td></tr><tr><th>分桶</th><td data-label="它回答什么">抽屉里落到哪个格子（tablet）</td><td data-label="谁决定">建表时的 <code>DISTRIBUTED BY HASH(...) BUCKETS N</code></td><td data-label="想错了会怎样">拿低基数列分桶，桶一半空一半挤</td></tr><tr><th>文件</th><td data-label="它回答什么">格子里字节怎么摆</td><td data-label="谁决定">列存格式：Rowset → Segment → Page</td><td data-label="想错了会怎样">以为一个 uid 一个文件，就读不懂为什么扫描是「按页跳」的</td></tr><tr><th>副本</th><td data-label="它回答什么">同一份 tablet 存几遍</td><td data-label="谁决定">建表时的 <code>replication_num</code>，默认 3</td><td data-label="想错了会怎样">以为副本能提升查询速度，实际上那是在拿磁盘和写延迟换可用性</td></tr></tbody></table></div><p>再回看你圈的原文：</p>
+<blockquote>
+<p>真正存数据的表对象，有自己的文件、分区、分桶、副本</p>
+</blockquote>
+<p>现在可以把这句话展开读：<strong>表在物理上是分区 + 桶切出来的一堆 tablet；每个 tablet 由若干文件组成，并且按副本数存了几份。</strong></p>
+<div class="summary">
+      <h3 id="一句话">一句话</h3>
+      <p>分区按时间切，分桶按人切，切到最小的一块叫 tablet；
+文件是 tablet 落到磁盘的样子，副本是同一块 tablet 存了几份。
+<mark class="mk-blue">前两个决定「读多少」，后两个决定「坏不坏、占多少」。</mark></p>
 
-    </div>
+    </div><div class="quiz"><details>
+        <summary>分区和分桶都在「切数据」，它们切的方向有什么不同？</summary>
+        <div class="a"><p>分区按列值（通常是日期）切成互不重叠的几块，同一天的行在一起；
+分桶在分区内部按 hash(分桶列) % 桶数 切成 N 份 tablet。
+同一个人会出现在多个分区里，但在每个分区里都落到同一个桶号。</p>
+</div>
+      </details><details>
+        <summary>把「副本数从 1 改成 3」，一次查询扫描的数据量会变成三倍吗？</summary>
+        <div class="a"><p>不会。查询每个 tablet 只读一份副本，扫描量不变。
+变的是磁盘占用（乘三）、写入要等多数派确认，以及一台 BE 挂掉时数据还在不在。</p>
+</div>
+      </details><details>
+        <summary><code>EXPLAIN</code> 里的 <code>partitions=1/3  tablets=1/8</code> 分别在说什么？</summary>
+        <div class="a"><p>分区裁剪：3 个分区里只有 1 个可能包含要查的数据，另外两个不读。
+分桶裁剪：这个分区里 8 个桶只有 1 个可能命中（过滤条件里有分桶键的等值条件）。</p>
+</div>
+      </details></div>
 
     <footer>
-      <span>让 CRM 项目在本机跑起来：四个部件、两条命令、数据在哪</span>
-      <span>最后更新 2026-09-29 · 单文件可离线打开</span>
+      <span>文件、分区、分桶、副本到底是什么</span>
+      <span>最后更新 2026-10-09 · 单文件可离线打开</span>
     </footer>
   </main>
 </div>

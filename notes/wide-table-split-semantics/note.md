@@ -411,7 +411,7 @@ PROPERTIES ("replication_num" = "1");
 uid = 1001  ──hash──▶  bucket = hash(1001) % 16  ──▶  桶里的数据（tablet）  ──▶  落在一台 BE
 ```
 
-BE 是 Doris 的存储与计算节点。桶号由 Doris 自己算，桶的数量建表时定。Apache Doris 官方文档对「几个桶」的建议：
+BE 是 Doris 的存储与计算节点。桶号由 Doris 自己算，桶的数量建表时定。这四层（文件、分区、分桶、副本）的入门图解见 [`文件、分区、分桶、副本到底是什么`](../doris-storage-anatomy/)。Apache Doris 官方文档对「几个桶」的建议：
 
 ```cards
 cols: 2

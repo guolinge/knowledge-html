@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-has-toc="1">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>文件、分区、分桶、副本到底是什么</title>
+<meta name="description" content="从「物理表有自己的文件、分区、分桶、副本」这句话出发，把四个词拆成四层：分区按时间切、分桶按人切，切到最小的一块叫 tablet；文件是 tablet 落到磁盘的样子，副本是同一块 tablet 存几份。全篇用 3 个日分区 × 4 个桶的小表走一遍，两个交互分别演示副本与故障、以及一次查询的裁剪账。" />
+<link rel="stylesheet" href="../../assets/theme.css" />
+  <link rel="stylesheet" href="../../assets/blocks.css" />
+  <link rel="stylesheet" href="../../assets/archify-embed.css" />
+</head>
+<body>
+<div id="progress"></div>
+<div id="tocScrim"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
+    <a class="brand" href="../../index.html"><span class="dot"></span>知识笔记</a>
+    
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="toc" id="toc">
+      <p class="toc-title">目录</p>
+      <a href="../../index.html" class="sub">← 全部笔记</a>
+      <a href="#四层叠起来的样子">四层叠起来的样子</a>
+      <a href="#分区按时间切抽屉">分区：按时间切抽屉</a>
+      <a href="#分桶每个抽屉里再切格子">分桶：每个抽屉里再切格子</a>
+      <a href="#文件格子里真正的字节">文件：格子里真正的字节</a>
+      <a href="#副本同一份-tablet-存几份">副本：同一份 tablet 存几份</a>
+      <a href="#叠起来看一次查询">叠起来看一次查询</a>
+      <a href="#回到你圈的那句话">回到你圈的那句话</a>
+      <a href="#一句话" class="sub">一句话</a>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow">● 从零理解 · 概念</span>
+      <h1>文件、分区、分桶、副本到底是什么</h1>
+      <p class="lede">从「物理表有自己的文件、分区、分桶、副本」这句话出发，把四个词拆成四层：分区按时间切、分桶按人切，切到最小的一块叫 tablet；文件是 tablet 落到磁盘的样子，副本是同一块 tablet 存几份。全篇用 3 个日分区 × 4 个桶的小表走一遍，两个交互分别演示副本与故障、以及一次查询的裁剪账。</p>
+    </div>
+
+
+    <div class="provenance"><span><b>来源</b> Apache Doris 官方文档 · Partitioning and Bucketing：两级切分、Partition/Bucket/Tablet 定义、crc32(col) % N、PruneOlapScanPartition / PruneOlapScanTablet、Table→Partition→Tablet→Rowset→Segment、单分区桶数上限 128：https://doris.apache.org/docs/4.x/key-features/partitioning-and-bucketing/ · Apache Doris 官方文档 · Columnar Storage：Segment/Page/编码/每页 zone map 与 bloom filter、64KB 页、LZ4 默认：https://doris.apache.org/docs/4.x/key-features/columnar-storage/ · Apache Doris 官方文档 · Load High Availability：默认多数派写、3 副本至少 2 份成功、未写成的副本后台异步补：https://doris.apache.org/docs/4.x/data-operate/import/load-best-practices/load-high-availability/ · Apache Doris 官方文档 · Data Bucketing：桶数取 BE 整数倍、尽量少、tablet 压缩后 1GB~20GB（Unique Key 不超过 10GB）、2.0 起自动分桶：https://doris.apache.org/docs/4.x/table-design/data-partitioning/data-bucketing/ · crm-dsl-stru/docs/feishu/客群洞察技术方案.md：crm_dc_audience_snapshot 的日分区 + HASH(encrypt_uid) BUCKETS 8 + dynamic_partition 参数 · crm-dsl-stru/doris/init/schema.sql：demo 表的 HASH(uid) BUCKETS 16 与 replication_num = 1（实测）</span><span><b>生成</b> 2026-10-09</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">Doris</span> <span class="tag tone-muted">分区</span> <span class="tag tone-muted">分桶</span> <span class="tag tone-muted">副本</span> <span class="tag tone-muted">列存</span> <span class="tag tone-muted">数据库入门</span></span></div>
+
+<p>「真正存数据的表对象，有自己的<strong>文件、分区、分桶、副本</strong>」——一句话里四个名词排在一起，看着像四个并列的东西；但它们回答的是四个不同的问题，而且是叠在一起的。这句话出现在上一页的 §06，也出现在每一次建表时对物理表的描述里。</p>
+<p>这一页从一张小表开始，一层一层往下搭。表结构和字段名取自你项目里那张快照表（<code>crm_dc_audience_snapshot</code>，日分区 + <code>HASH(uid)</code> 分桶），但不需要先懂它。</p>
+<div class="callout tone-muted">
+      <span class="ic">🧱</span>
+      <div><p><strong>读这篇之前</strong>：知道 SQL 里有表、行、列就行。数据库里其他的都不用。</p>
+</div>
+    </div><div class="callout tone-blue">
+      <span class="ic">🎯</span>
+      <div><p>读完你应该能回答四个问题：</p>
+<ul>
+<li>一行数据<strong>被分到哪个抽屉</strong>？（分区）</li>
+<li>同一个抽屉里，它<strong>落在哪个格子</strong>？（分桶）</li>
+<li>格子里<strong>真正的字节</strong>长什么样？（文件）</li>
+<li>这个格子要不要<strong>多复印几份</strong>？（副本）</li>
+</ul>
+<p><mark class="mk-blue">前两个是「切法」，后两个是「切出来的东西怎么存」。</mark></p>
+</div>
+    </div><hr>
+<h2 id="四层叠起来的样子"><span class="num">01</span>四层叠起来的样子</h2>
+<p>先看一张小表长什么样。三天的快照，每天几行：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">snapshot_date   snapshot_id   encrypt_uid
+2026-10-07      1001          u-1001
+2026-10-07      1001          u-1002
+2026-10-07      1002          u-1001
+2026-10-08      1001          u-1002
+2026-10-08      1002          u-1001
+2026-10-09      1002          u-1004
+</code></pre></div>
+<p>数据库在磁盘上看不到「表」这个形状，它看到的是文件。表只是把这些行组织起来的一套约定。组织的办法就是往下切两层：</p>
+<div class="tree" data-tree><ul class="tlist"><li class="has-kids">
+            <div class="tnode tone-violet" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>Table（表）</b>
+              <code>crm_dc_audience_snapshot</code>
+              <span class="tnote">一套约定，不是一个文件</span>
+            </div>
+            <ul class="tlist"><li class="has-kids">
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>Partition（分区）</b>
+              <code>p20261008</code>
+              <span class="tnote">按 snapshot_date 切，一个分区 = 一天的行</span>
+            </div>
+            <ul class="tlist"><li class="has-kids">
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>Tablet（桶）</b>
+              <code>桶 2</code>
+              <span class="tnote">分区里再按 hash(uid) % N 切；它是复制、调度、并行的最小单位</span>
+            </div>
+            <ul class="tlist"><li class="has-kids">
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>Rowset</b>
+              <code>一次写入产出的一批</code>
+              
+            </div>
+            <ul class="tlist"><li class="has-kids">
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>Segment</b>
+              <code>列存文件</code>
+              <span class="tnote">磁盘上真正躺着的字节</span>
+            </div>
+            <ul class="tlist"><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>Column</b>
+              <code>每一列单独编码</code>
+              
+            </div>
+            
+          </li><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>Page</b>
+              <code>约 64KB 一页，带 min/max</code>
+              
+            </div>
+            
+          </li></ul>
+          </li></ul>
+          </li></ul>
+          </li></ul>
+          </li></ul>
+          </li></ul></div><p>这张树里有两个位置值得记住：</p>
+<ul>
+<li><strong>分区和分桶是两刀</strong>。第一刀按时间（分区），第二刀按人（分桶）。切完之后，最小的一份可独立存放的数据叫 tablet。</li>
+<li>文件和副本描述的都是 tablet：它落到磁盘上是什么（文件），同一份数据存几遍（副本）。</li>
+</ul>
+<p>先切一刀看第一层。</p>
+<hr>
+<h2 id="分区按时间切抽屉"><span class="num">02</span>分区：按时间切抽屉</h2>
+<p><strong>分区（Partition）</strong> 是把表的行按某个列的值切成互不重叠的几块。最常用的是按日期范围切，官方叫 Range 分区。</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-sql">CREATE TABLE crm_dc_audience_snapshot (
+  snapshot_date DATE         NOT NULL,
+  snapshot_id   BIGINT       NOT NULL,
+  encrypt_uid   CHAR(32)     NOT NULL
+)
+DUPLICATE KEY (snapshot_date, snapshot_id, encrypt_uid)
+PARTITION BY RANGE(snapshot_date) ()          -- 按 snapshot_date 切
+DISTRIBUTED BY HASH(encrypt_uid) BUCKETS 8    -- 分区里再切 8 个桶
+</code></pre></div>
+<p>上面那份数据会被切成三块：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">p20261007 → 2026-10-07 的三行
+p20261008 → 2026-10-08 的两行
+p20261009 → 2026-10-09 的一行
+</code></pre></div>
+<p><strong>分区为什么值得切</strong>：查询几乎都带时间。<code>WHERE snapshot_date = '2026-10-08'</code> 时，规划器看一眼分区表，把其他两个分区直接丢掉。这叫分区裁剪，<code>EXPLAIN</code> 里会写出来：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">partitions=1/3          -- 3 个分区里只留 1 个
+</code></pre></div>
+<p>分区还有两个附带好处：删历史数据变成「丢掉一个分区」（一次元数据操作，不用逐行 <code>DELETE</code>）；过期数据可以按分区设 TTL。</p>
+<p>你项目里那张表用的是动态分区：到点自动建当天的新分区，同时丢掉 14 天前的老分区，不需要人写 DDL。</p>
+<div class="callout tone-amber">
+      <span class="ic">⚠</span>
+      <div><p>分区键要选<strong>查询真的会拿来过滤的列</strong>。</p>
+<p>拿一个只有 5 个取值的列（比如地区）当分区键，规划器没什么可丢的，
+而每个分区都要付元数据成本：抽屉开了很多，里面都没几页纸。</p>
+</div>
+    </div><hr>
+<h2 id="分桶每个抽屉里再切格子"><span class="num">03</span>分桶：每个抽屉里再切格子</h2>
+<p>切完时间，一个分区可能还是很大（一天一千万行）。而且数据要摊到多台机器上才能并行算。所以分区里面再切一刀：按 uid 的哈希值切。</p>
+<p>官方给的规则一句话：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">bucket = crc32(分桶列) % 桶数
+</code></pre></div>
+<p>上面那张表的 <code>DISTRIBUTED BY HASH(encrypt_uid) BUCKETS 8</code>，就是「按 <code>encrypt_uid</code> 切 8 个桶」。切出来的每一份，就是一个 tablet。</p>
+<p>这里有个容易混的点，值得单独记：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>两刀</th><th>怎么切</th><th>切完的效果</th></tr></thead><tbody><tr><th>分区</th><td data-label="怎么切">按<strong>时间</strong>切：同一天的行在一起</td><td data-label="切完的效果">同一个人会出现在多个分区里（每天都有一行）</td></tr><tr><th>分桶</th><td data-label="怎么切">按<strong>人</strong>切：<code>hash(uid)</code> 相同的行在一起</td><td data-label="切完的效果">同一个 uid 在每个分区里都落到<strong>同一个桶号</strong></td></tr></tbody></table></div><p>第二行就是上一页讲 colocate 和本地 join 的物理基础：同一个 uid 的数据，在每一层分区里都在同一个桶里，只要两张表的桶对齐，join 就不用把数据搬来搬去。</p>
+<p>分桶也能裁剪。<code>WHERE encrypt_uid = 'u-1001'</code> 时，规划器算出这个 uid 落在几号桶，只扫那一个：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">partitions=1/3  tablets=1/8      -- 分区和桶都裁掉了
+</code></pre></div>
+<div class="callout tone-violet">
+      <span class="ic">💡</span>
+      <div><p>桶数怎么定，官方给的是三条：</p>
+<ul>
+<li>取 BE 数量的整数倍，数据分布更均匀</li>
+<li>够用就行，尽量少（桶越多，tablet 越多，元数据和扫描任务越多）</li>
+<li>单个 tablet 压缩后大约 1GB ~ 20GB；单分区最多 128 个桶</li>
+</ul>
+<p>反例和正例都很好记：按<strong>性别</strong>分桶（只有两个值）会让 8 个桶里两个满、六个空；
+按 <strong>uid</strong> 这种高基数列分桶，才切得开。</p>
+</div>
+    </div><hr>
+<h2 id="文件格子里真正的字节"><span class="num">04</span>文件：格子里真正的字节</h2>
+<p>一个 tablet 里到底是什么文件？官方的磁盘层级是：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">Tablet → Rowset → Segment → Column → Page
+</code></pre></div>
+<ul>
+<li>Rowset：一次写入产出的数据批次。写下一次，多一个 rowset。</li>
+<li>Segment：rowset 里的文件本体。</li>
+<li>Column / Page：segment 内部按列组织，每列的值攒成约 64KB 的一页（page），每页独立编码、独立压缩。</li>
+</ul>
+<p>Doris 的表是<strong>列存</strong>：同一列的值在文件里挨着放，而不是同一行的值挨着放。带来的三件事：</p>
+<div class="cards" data-cols="3"><div class="ccard tone-blue">
+          
+          <h4>只读用到的列</h4>
+          <p>查 uid 就不用把年龄、地区那些列读进来</p>
+          
+          
+        </div><div class="ccard tone-green">
+          
+          <h4>每列用自己的编码</h4>
+          <p>数字用 bit-shuffle，低基数字符串用字典，日期用 frame-of-reference</p>
+          
+          
+        </div><div class="ccard tone-violet">
+          
+          <h4>每页带 min/max</h4>
+          <p>还有可选的 bloom filter；扫描时先看这一页的范围，不命中就整页跳过</p>
+          
+          
+        </div></div><div class="callout tone-violet">
+      <span class="ic">📦</span>
+      <div><p><mark class="mk-blue">「文件」不是「一个 uid 一个文件」。</mark></p>
+<p>一批行写一次盘，按列打包成一页页。真正决定一次查询读多少的，
+是前面两刀（分区、桶）把数据切在了哪里，以及每一页贴的那个 min/max 标签。</p>
+</div>
+    </div><hr>
+<h2 id="副本同一份-tablet-存几份"><span class="num">05</span>副本：同一份 tablet 存几份</h2>
+<p><strong>副本（Replica）</strong> 说的是同一份 tablet 数据存在几台机器上。默认是 3 份，放在不同的 BE 上。</p>
+<p>写入的流程（官方）：数据先发给这个 tablet 的所有副本 → 每台机器各写自己那份 → 回执 → FE 数一下，<strong>写成功的副本超过一半</strong>就算这次写入成功（3 份里至少 2 份）→ 提交 → 没写成的那些，后台再异步补齐。</p>
+<p>所以副本换来的是两件事：一台机器挂了数据不丢，查询还能继续。代价也很直接：磁盘占用乘以副本数，每次写入要等多数派。</p>
+<p>自己切一下看：</p>
+<div class="demo" data-widget="storage-anatomy" data-config="{&quot;replicas&quot;:3}">
+      <div class="demo-head">
+        <span class="title">3 个分区 × 4 个桶，切副本数、挂一台机器</span>
+        <span class="status" data-status></span>
+        <span class="spacer"></span>
+        
+      </div>
+      <div class="demo-body custom" data-mount></div>
+    </div><p>可以试三下：</p>
+<ul>
+<li>副本数切到 <strong>1<strong>，再点「挂掉 BE-1」：有些 tablet 变成了红色，</strong>读不到</strong>。</li>
+<li>切回 <strong>3</strong> 再挂 BE-1：每个 tablet 少一份，但还剩两份，查询照常。</li>
+<li>点任意一个桶：右边会写清它是什么、几份副本、落在哪几台机器上。</li>
+</ul>
+<p>你项目 demo 里的表白布的是 <code>replication_num = 1</code>（单机跑起来省事），生产环境的表一般是 3。</p>
+<div class="callout tone-red">
+      <span class="ic">⚖</span>
+      <div><p><mark class="mk-blue">分区和桶是「切成几份不同的数据」，副本是「同一份数据存几遍」。</mark></p>
+<p>前者决定数据放在哪里、怎么并行；后者决定坏了怎么办、占多少磁盘。
+两者都会出现在建表语句里，但解决的问题完全不同。</p>
+</div>
+    </div><hr>
+<h2 id="叠起来看一次查询"><span class="num">06</span>叠起来看一次查询</h2>
+<p>同一个查询，条件不同，读的量差一个数量级。下面用一个 4 个桶的简化模型（真实表是 8 个），切几个 <code>WHERE</code> 看：</p>
+<div class="demo" data-widget="prune-lab" data-config="{&quot;q&quot;:2}">
+      <div class="demo-head">
+        <span class="title">3 个分区 × 4 个桶（每桶 250 行），换条件看命中格</span>
+        <span class="status" data-status></span>
+        <span class="spacer"></span>
+        
+      </div>
+      <div class="demo-body custom" data-mount></div>
+    </div><p><code>EXPLAIN</code> 里那两行就是前面两刀的账：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">partitions=1/3      -- 分区裁剪：3 天里只读 1 天
+tablets=1/4         -- 分桶裁剪：4 个桶里只扫 1 个
+</code></pre></div>
+<p>一句话算账：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">扫的数据量 ≈ 总数据量 × (命中分区 / 总分区) × (命中桶 / 总桶)
+副本数不改变这个乘积 —— 它只决定读哪一份、以及坏了还有没有得读
+</code></pre></div>
+<p>还有一个容易忽略的分工：<strong>桶号在每个分区里是同一套</strong>。所以只按 uid 过滤、不带日期时，每个分区都要去同一个桶号找一次（下面那个「只按 uid」就是这种情况）。分区裁剪管不了它，分桶裁剪也跨不过分区。</p>
+<hr>
+<h2 id="回到你圈的那句话"><span class="num">07</span>回到你圈的那句话</h2>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>词</th><th>它回答什么</th><th>谁决定</th><th>想错了会怎样</th></tr></thead><tbody><tr><th>分区</th><td data-label="它回答什么">行落在哪个时间抽屉里</td><td data-label="谁决定">建表时的 <code>PARTITION BY</code>，通常按日期</td><td data-label="想错了会怎样">不按查询会用的列切，白开一堆抽屉</td></tr><tr><th>分桶</th><td data-label="它回答什么">抽屉里落到哪个格子（tablet）</td><td data-label="谁决定">建表时的 <code>DISTRIBUTED BY HASH(...) BUCKETS N</code></td><td data-label="想错了会怎样">拿低基数列分桶，桶一半空一半挤</td></tr><tr><th>文件</th><td data-label="它回答什么">格子里字节怎么摆</td><td data-label="谁决定">列存格式：Rowset → Segment → Page</td><td data-label="想错了会怎样">以为一个 uid 一个文件，就读不懂为什么扫描是「按页跳」的</td></tr><tr><th>副本</th><td data-label="它回答什么">同一份 tablet 存几遍</td><td data-label="谁决定">建表时的 <code>replication_num</code>，默认 3</td><td data-label="想错了会怎样">以为副本能提升查询速度，实际上那是在拿磁盘和写延迟换可用性</td></tr></tbody></table></div><p>再回看你圈的原文：</p>
+<blockquote>
+<p>真正存数据的表对象，有自己的文件、分区、分桶、副本</p>
+</blockquote>
+<p>现在可以把这句话展开读：<strong>表在物理上是分区 + 桶切出来的一堆 tablet；每个 tablet 由若干文件组成，并且按副本数存了几份。</strong></p>
+<div class="summary">
+      <h3 id="一句话">一句话</h3>
+      <p>分区按时间切，分桶按人切，切到最小的一块叫 tablet；
+文件是 tablet 落到磁盘的样子，副本是同一块 tablet 存了几份。
+<mark class="mk-blue">前两个决定「读多少」，后两个决定「坏不坏、占多少」。</mark></p>
+
+    </div><div class="quiz"><details>
+        <summary>分区和分桶都在「切数据」，它们切的方向有什么不同？</summary>
+        <div class="a"><p>分区按列值（通常是日期）切成互不重叠的几块，同一天的行在一起；
+分桶在分区内部按 hash(分桶列) % 桶数 切成 N 份 tablet。
+同一个人会出现在多个分区里，但在每个分区里都落到同一个桶号。</p>
+</div>
+      </details><details>
+        <summary>把「副本数从 1 改成 3」，一次查询扫描的数据量会变成三倍吗？</summary>
+        <div class="a"><p>不会。查询每个 tablet 只读一份副本，扫描量不变。
+变的是磁盘占用（乘三）、写入要等多数派确认，以及一台 BE 挂掉时数据还在不在。</p>
+</div>
+      </details><details>
+        <summary><code>EXPLAIN</code> 里的 <code>partitions=1/3  tablets=1/8</code> 分别在说什么？</summary>
+        <div class="a"><p>分区裁剪：3 个分区里只有 1 个可能包含要查的数据，另外两个不读。
+分桶裁剪：这个分区里 8 个桶只有 1 个可能命中（过滤条件里有分桶键的等值条件）。</p>
+</div>
+      </details></div>
+
+    <footer>
+      <span>文件、分区、分桶、副本到底是什么</span>
+      <span>最后更新 2026-10-09 · 单文件可离线打开</span>
+    </footer>
+  </main>
+</div>
+
+<script src="../../assets/app.js"></script>
+</body>
+</html>
