@@ -120,6 +120,41 @@ type Apply = (query: Knex.QueryBuilder, gate: Gate) => void
 export function compile(query: InsightQuery, options: CompileOptions): CompileResult
 ```
 
+### 两样输入都是 JSON，第二样长这样
+
+第一样是那份 DSL（03 节有真实例子）。第二样是 **`Catalog`**：
+它只有三个键，整个类型就三行：
+
+```ts
+type Catalog = {
+  universeTable: string;      // 主表：SQL 的 FROM 哪张表
+  fields:    FieldDef[];      // 画像字段
+  relations: RelationDef[];   // 关系
+};
+```
+
+真实的那一份（测试用的）是 3722 字节：12 个字段、2 个关系。骨架：
+
+```json
+{
+  "universeTable": "user_portraits_wide",
+  "fields":    [ { "name": "age", "table": "user_portraits_wide", "expr": { … } }, …, 共 12 个 ],
+  "relations": [ { "name": "holding", "table": "rel_holding", "props": [ … ] }, …, 共 2 个 ]
+}
+```
+
+从这个骨架能读出两件事：
+
+- **`universeTable` 决定 `FROM` 哪张表。** 那 12 个字段的 `table` 全部是它，
+  所以生成的 SQL 从头到尾只有一张主表 —— 对比 06 节的 `uidsSql`，`FROM` 后确实只有 `user_portraits_wide`。
+- 每个字段都带 `table`，!!但在这份数据里它从不发挥作用!!。编译器里留着
+  「字段在别的表上就 LEFT JOIN 过来」的分支，而这 12 个字段没有一例外。
+  ==所以那段 JOIN 逻辑在这份 catalog 下永远不会跑==，读代码时容易误以为真的会联表。
+
+`Catalog` 不是手写的，是从 Data Admin 那批配置表里投影出来的，
+只收录 `ENABLED` 的字段与关系，对应接口 `GET /api/meta/catalog`。
+那批表长什么样、怎么映射到这份 JSON，在「Data Admin 的 7 张配置表」那篇里。
+
 ==三步的边界很硬：第 ① 步不知道物理列存在，第 ② 步不拼 SQL，第 ③ 步不再做任何判断。==
 
 上面表里有两格会让人意外，兩个都是方案里看不出来的：
