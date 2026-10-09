@@ -2620,7 +2620,7 @@
     const rows = cfg.rows || [];
     if (!rows.length) return;
 
-    const st = { side: 'include', coalesce: true };
+    const st = { side: cfg.side || 'include', coalesce: cfg.coalesce !== false };
     const H = (tag, cls, text) => el(tag, cls, text);
 
     const wrap = H('div', 'nt-wrap');
@@ -2641,7 +2641,7 @@
       ctrl.append(g);
       return { btns, get };
     }
-    const sideG = grp('把 `gender = \'M\'` 放进',
+    const sideG = grp("把 `" + COL + " = '" + MATCH + "'` 放进",
       [{ v: 'include', t: 'include' }, { v: 'exclude', t: 'exclude' }],
       () => st.side, (v) => { st.side = v; });
     const coG = grp('exclude 写法',
@@ -2732,9 +2732,9 @@
         h('div', {}, [h('small', { text: '其中 NULL 行' }), h('b', { cls: nullKept === nulls ? 'bad' : 'good', text: nullKept + ' / ' + nulls })]),
         h('div', {}, [h('span', { cls: 'verdict', text: st.side === 'exclude'
           ? (st.coalesce
-            ? '排除了 M，但 NULL 行留下了 —— 它们既不「是 M」也不「不是 M」。'
+            ? '排除了 ' + MATCH + '，但 NULL 行留下了 —— 它们既不「是 ' + MATCH + '」也不「不是 ' + MATCH + '」。'
             : '这个写法会把 NULL 行一起弄丢 —— 它们被当成「是 M」排掉了。')
-          : '命中 M 的才留下。NULL 行不命中，自然丢掉 —— 这是 include 该有的行为。' })]),
+          : '命中 ' + MATCH + ' 的才留下。NULL 行不命中，自然丢掉 —— 这是 include 该有的行为。' })]),
       ]);
       if (statusEl) {
         statusEl.textContent = st.side + (st.side === 'exclude' ? ' · ' + (st.coalesce ? 'NOT COALESCE(expr, FALSE)' : 'NOT (expr)') : '') + ' · 留下 ' + kept + '/' + rows.length;
@@ -2743,6 +2743,355 @@
     draw();
   };
 
+
+  /* ============================================================
+     控件：tri-logic-lab —— 三值逻辑真值表
+     点 A / B 的取值（TRUE / FALSE / UNKNOWN），看 AND / OR / NOT 各得到什么。
+     要讲的三件事：
+       · FALSE AND x 一定是 FALSE、TRUE OR x 一定是 TRUE —— 一票定胜负
+       · 其余组合里只要出现 UNKNOWN，结果就还是 UNKNOWN
+       · NOT UNKNOWN 仍是 UNKNOWN，所以 WHERE 会把它丢掉
+  ============================================================ */
+  WIDGETS['tri-logic-lab'] = (root) => {
+    const box = mountOf(root);
+    const cfg = cfgOf(root);
+    const statusEl = root.querySelector('[data-status]');
+    const VALUES = [
+      { v: 'T', name: 'TRUE' },
+      { v: 'F', name: 'FALSE' },
+      { v: 'U', name: 'UNKNOWN' },
+    ];
+    const st = { a: cfg.a || 'T', b: cfg.b || 'U' };
+    const H = (tag, cls, text) => el(tag, cls, text);
+
+    const and = (a, b) => (a === 'F' || b === 'F' ? 'F' : a === 'U' || b === 'U' ? 'U' : 'T');
+    const or = (a, b) => (a === 'T' || b === 'T' ? 'T' : a === 'U' || b === 'U' ? 'U' : 'F');
+    const not = (a) => (a === 'U' ? 'U' : a === 'T' ? 'F' : 'T');
+    const nameOf = (v) => VALUES.filter((x) => x.v === v)[0].name;
+    const toneOf = (v) => (v === 'T' ? 'ok' : v === 'F' ? 'no' : 'un');
+
+    const wrap = H('div', 'tl-wrap');
+
+    /* 两个取值选择器 */
+    const picks = H('div', 'tl-picks');
+    const groups = [];
+    function pick(exprHtml, sub, key) {
+      const g = H('div', 'tl-pick');
+      g.append(richText(H('h5'), exprHtml));
+      g.append(H('small', null, sub));
+      const opts = H('div', 'opts');
+      const btns = VALUES.map((x) => {
+        const b = H('button', null, x.name);
+        b.addEventListener('click', () => { st[key] = x.v; draw(); });
+        opts.append(b);
+        return { b, v: x.v };
+      });
+      g.append(opts);
+      picks.append(g);
+      groups.push({ key, btns });
+    }
+    pick('A：`age >= 18`', '把 A 当成一个已经算完的比较', 'a');
+    pick("B：`region IN ('CN', 'HK')`", '两个条件之间再用 AND / OR 连起来', 'b');
+    wrap.append(picks);
+
+    /* 真值表 */
+    const tbl = H('div', 'tl-tbl');
+    const table = document.createElement('table');
+    const thead = document.createElement('thead');
+    const trh = document.createElement('tr');
+    ['表达式', '结果', '为什么'].forEach((t) => trh.append(H('th', null, t)));
+    thead.append(trh);
+    const tbody = document.createElement('tbody');
+    table.append(thead, tbody);
+    tbl.append(table);
+    wrap.append(tbl);
+
+    const verdict = H('div', 'tl-verdict');
+    wrap.append(verdict);
+    box.append(wrap);
+
+    function row(label, val, why, hot) {
+      const tr = H('tr');
+      if (hot) tr.className = 'tl-hot';
+      tr.append(H('td', 'tl-expr', label));
+      const td = H('td', 'tl-res');
+      td.append(H('span', 'tl-badge tl-' + toneOf(val), nameOf(val)));
+      tr.append(td);
+      tr.append(H('td', 'tl-why', why));
+      return tr;
+    }
+
+    function draw() {
+      groups.forEach((g) => g.btns.forEach((x) => x.b.classList.toggle('on', x.v === st[g.key])));
+      const a = st.a;
+      const b = st.b;
+      fill(tbody, [
+        row('A AND B', and(a, b),
+          a === 'F' || b === 'F' ? '有一个是 FALSE，AND 已经定了'
+            : a === 'U' || b === 'U' ? '两边都没定，AND 也定不了'
+              : '两边都真'),
+        row('A OR B', or(a, b),
+          a === 'T' || b === 'T' ? '有一个是 TRUE，OR 已经定了'
+            : a === 'U' || b === 'U' ? '没人能定，OR 也定不了'
+              : '两边都假'),
+        row('NOT A', not(a),
+          a === 'U' ? 'UNKNOWN 取反还是 UNKNOWN —— 它没有反面' : 'TRUE 与 FALSE 正常翻转'),
+      ]);
+      const r = and(a, b);
+      fill(verdict, []);
+      richText(verdict,
+        'A = ' + nameOf(a) + '、B = ' + nameOf(b) + ' 时，`A AND B` = ' + nameOf(r) +
+        '；放进 `WHERE`，这一行' + (r === 'T' ? '==留下==' : '==丢掉==') + '。' +
+        (r === 'U'
+          ? ' UNKNOWN 和 FALSE 一样不出现，原因不同：一个是「不满足」，一个是「不知道」。'
+          : ''));
+      if (statusEl) statusEl.textContent = 'A = ' + nameOf(a) + ' · B = ' + nameOf(b) + ' · WHERE 只留下 TRUE';
+    }
+    draw();
+  };
+
+  /* ============================================================
+     控件：uid-set-lab —— 「字段取反」和「集合取反」差在哪
+     同一批用户、同一个条件 `trade_count > 0`，只换取反方式：
+       · 行级：SELECT uid FROM portrait_trade WHERE NOT (trade_count > 0)
+       · 集合：U − Match(trade_count > 0)，绕一圈用 NOT EXISTS
+     稀疏表里 1002 的值是 NULL、1004 根本没有行 —— 行级写法两个都丢，
+     集合写法两个都留。
+  ============================================================ */
+  WIDGETS['uid-set-lab'] = (root) => {
+    const box = mountOf(root);
+    const cfg = cfgOf(root);
+    const statusEl = root.querySelector('[data-status]');
+    const ROWS = [
+      { uid: '1001', has: true, v: 12 },
+      { uid: '1002', has: true, v: 0 },
+      { uid: '1003', has: true, v: 3 },
+      { uid: '1004', has: false, v: null },
+      { uid: '1005', has: true, v: null },
+    ];
+    const st = { mode: cfg.mode || 'row' };
+    const H = (tag, cls, text) => el(tag, cls, text);
+
+    const truth = (r) => (r.has ? (r.v === null ? 'U' : r.v > 0 ? 'T' : 'F') : null);
+    const not = (t) => (t === 'U' ? 'U' : t === 'T' ? 'F' : t === 'F' ? 'T' : null);
+    const nameOf = (t) => (t === null ? '扫不到' : t === 'T' ? 'TRUE' : t === 'F' ? 'FALSE' : 'UNKNOWN');
+    const MATCH = ROWS.filter((r) => r.has && r.v > 0).map((r) => r.uid);
+    const rowKeeps = (r) => not(truth(r)) === 'T';
+    const setKeeps = (r) => MATCH.indexOf(r.uid) < 0;
+    const keeps = (r) => (st.mode === 'row' ? rowKeeps(r) : setKeeps(r));
+
+    const wrap = H('div', 'us-wrap');
+
+    /* 模式开关 */
+    const ctrl = H('div', 'us-ctrl');
+    const g = H('div', 'us-grp');
+    g.append(H('h5', null, '这次问的是「谁不满足」，两种问法'));
+    const opts = H('div', 'opts');
+    const btns = [
+      { v: 'row', t: '① 行级取反：NOT (trade_count > 0)' },
+      { v: 'set', t: '② 集合取反：U − Match(trade_count > 0)' },
+    ].map((x) => {
+      const b = H('button', null, x.t);
+      b.addEventListener('click', () => { st.mode = x.v; draw(); });
+      opts.append(b);
+      return { b, v: x.v };
+    });
+    g.append(opts);
+    ctrl.append(g);
+    wrap.append(ctrl);
+
+    /* SQL */
+    const sqlRow = H('div', 'us-sql');
+    wrap.append(sqlRow);
+
+    /* 数据表 */
+    const tbl = H('div', 'us-tbl');
+    const table = document.createElement('table');
+    const thead = document.createElement('thead');
+    const trh = document.createElement('tr');
+    ['uid', 'portrait_trade', 'trade_count', '> 0 的判定', '① 行级取反', '② 集合取反'].forEach((t) => trh.append(H('th', null, t)));
+    thead.append(trh);
+    const tbody = document.createElement('tbody');
+    table.append(thead, tbody);
+    tbl.append(table);
+    wrap.append(tbl);
+
+    /* 汇总 */
+    const sum = H('div', 'us-sum');
+    wrap.append(sum);
+    box.append(wrap);
+
+    function chips(list, tone) {
+      const box2 = H('div', 'us-chips');
+      list.forEach((u) => box2.append(H('span', 'us-chip us-' + tone, u)));
+      return box2;
+    }
+
+    function sqlBlock(title, code, on) {
+      const d = H('div', 'us-code' + (on ? ' on' : ''));
+      d.append(H('b', null, title));
+      d.append(H('pre', null, code));
+      return d;
+    }
+
+    function tdLabel(label, text, cls) {
+      const td = H('td', cls || null, text);
+      td.setAttribute('data-label', label);
+      return td;
+    }
+
+    function draw() {
+      btns.forEach((x) => x.b.classList.toggle('on', x.v === st.mode));
+      fill(sqlRow, [
+        sqlBlock('① 行级取反',
+          'SELECT uid\nFROM portrait_trade\nWHERE NOT (trade_count > 0);',
+          st.mode === 'row'),
+        sqlBlock('② 集合取反',
+          'SELECT u.uid\nFROM user_universe u\nWHERE NOT EXISTS (\n  SELECT 1 FROM matched t\n  WHERE t.uid = u.uid\n);',
+          st.mode === 'set'),
+      ]);
+
+      fill(tbody, ROWS.map((r) => {
+        const t = truth(r);
+        const tr = H('tr');
+        if (!keeps(r)) tr.className = 'us-drop';
+        tr.append(tdLabel('uid', r.uid, 'us-uid'));
+        tr.append(tdLabel('行', r.has ? '有行' : '缺行'));
+        const vd = H('td', 'us-v', r.has ? (r.v === null ? 'NULL' : String(r.v)) : '—');
+        vd.setAttribute('data-label', 'trade_count');
+        if (!r.has || r.v === null) vd.classList.add('us-null');
+        tr.append(vd);
+        tr.append(tdLabel('> 0 判定', nameOf(t), 'us-t'));
+        const c1 = H('td', 'us-r');
+        c1.setAttribute('data-label', '① 行级取反');
+        c1.append(H('span', 'us-verdict ' + (rowKeeps(r) ? 'us-keep' : 'us-loss'), rowKeeps(r) ? '留下' : '丢掉'));
+        tr.append(c1);
+        const c2 = H('td', 'us-r');
+        c2.setAttribute('data-label', '② 集合取反');
+        c2.append(H('span', 'us-verdict ' + (setKeeps(r) ? 'us-keep' : 'us-loss'), setKeeps(r) ? '留下' : '丢掉'));
+        tr.append(c2);
+        return tr;
+      }));
+
+      const rowSet = ROWS.filter(rowKeeps).map((r) => r.uid);
+      const setSet = ROWS.filter(setKeeps).map((r) => r.uid);
+      const lost = ROWS.filter((r) => !rowKeeps(r) && setKeeps(r)).map((r) => r.uid);
+      const lostLine = H('div', 'us-line');
+      lostLine.append(H('small', null, '差集（行级漏掉）'));
+      lostLine.append(chips(lost, 'loss'));
+      const noteLine = H('div', 'us-note2');
+      richText(noteLine,
+        '这两个人一个是 `NULL` 值（判定 `UNKNOWN`），一个在子表里没有行；行级写法两个都收不到。');
+      fill(sum, [
+        h('div', 'us-line', [H('small', null, '① 行级取反得到'), chips(rowSet, 'row')]),
+        h('div', 'us-line', [H('small', null, '② 集合取反得到'), chips(setSet, 'set')]),
+        lostLine,
+        noteLine,
+      ]);
+      if (statusEl) statusEl.textContent = st.mode === 'row' ? '行级取反 · 留下 ' + rowSet.length + ' 人' : '集合取反 · 留下 ' + setSet.length + ' 人';
+    }
+    draw();
+  };
+
+  /* ============================================================
+     控件：dist-lab —— 分桶 + colocate，同一个 uid 的两张表在哪台机器上
+     4 个桶、4 个 BE。同一个桶号落哪台机器，两张表可以对齐（colocate），
+     也可以错开（普通分布）。错开时 join 要先搬数据。
+     桶号是示意的 —— 真实 Doris 用它自己的 hash，这里只讲「对应关系」。
+  ============================================================ */
+  WIDGETS['dist-lab'] = (root) => {
+    const box = mountOf(root);
+    const cfg = cfgOf(root);
+    const statusEl = root.querySelector('[data-status]');
+    const BES = ['BE-1', 'BE-2', 'BE-3', 'BE-4'];
+    const USERS = [
+      { uid: '1001', bucket: 0 },
+      { uid: '1002', bucket: 1 },
+      { uid: '1003', bucket: 2 },
+      { uid: '1004', bucket: 3 },
+    ];
+    const st = { colocate: cfg.colocate !== false, uid: cfg.uid || '1001' };
+    const H = (tag, cls, text) => el(tag, cls, text);
+    const baseBE = (b) => b;
+    const tradeBE = (b) => (st.colocate ? b : (b + 1) % BES.length);
+    const byUid = (uid) => USERS.filter((u) => u.uid === uid)[0];
+
+    const wrap = H('div', 'dst-wrap');
+
+    /* 开关 */
+    const ctrl = H('div', 'dst-ctrl');
+    const g = H('div', 'dst-grp');
+    g.append(H('h5', null, 'portrait_base 和 portrait_trade 的分布'));
+    const opts = H('div', 'opts');
+    const btns = [
+      { v: false, t: '两张表各分各的' },
+      { v: true, t: 'colocate：同一桶号 → 同一台 BE' },
+    ].map((x) => {
+      const b = H('button', null, x.t);
+      b.addEventListener('click', () => { st.colocate = x.v; draw(); });
+      opts.append(b);
+      return { b, v: x.v };
+    });
+    g.append(opts);
+    ctrl.append(g);
+    wrap.append(ctrl);
+
+    /* 四台 BE */
+    const bes = H('div', 'dst-bes');
+    wrap.append(bes);
+
+    /* 选一个 uid 看它 */
+    const picks = H('div', 'dst-picks');
+    const uidBtns = USERS.map((u) => {
+      const b = H('button', 'us-chip', u.uid);
+      b.addEventListener('click', () => { st.uid = u.uid; draw(); });
+      picks.append(b);
+      return { b, v: u.uid };
+    });
+    wrap.append(picks);
+
+    const verdict = H('div', 'dst-verdict');
+    wrap.append(verdict);
+    box.append(wrap);
+
+    function draw() {
+      btns.forEach((x) => x.b.classList.toggle('on', x.v === st.colocate));
+      uidBtns.forEach((x) => x.b.classList.toggle('on', x.v === st.uid));
+
+      const cur = byUid(st.uid);
+      fill(bes, BES.map((name, i) => {
+        const card = H('div', 'dst-be');
+        card.append(H('b', null, name));
+        card.append(H('small', null, '桶 ' + i));
+        const base = USERS.filter((u) => baseBE(u.bucket) === i);
+        const trade = USERS.filter((u) => tradeBE(u.bucket) === i);
+        const bl = H('div', 'dst-line');
+        bl.append(H('span', 'dst-tag dst-base', 'base'));
+        const bb = H('div', 'dst-chips');
+        base.forEach((u) => bb.append(H('span', 'us-chip' + (u.uid === st.uid ? ' on' : ''), u.uid)));
+        bl.append(bb);
+        const tl = H('div', 'dst-line');
+        tl.append(H('span', 'dst-tag dst-trade', 'trade'));
+        const tb = H('div', 'dst-chips');
+        trade.forEach((u) => tb.append(H('span', 'us-chip' + (u.uid === st.uid ? ' on' : ''), u.uid)));
+        tl.append(tb);
+        card.append(bl, tl);
+        return card;
+      }));
+
+      const b1 = baseBE(cur.bucket);
+      const b2 = tradeBE(cur.bucket);
+      fill(verdict, []);
+      const same = b1 === b2;
+      richText(verdict,
+        '`uid = ' + cur.uid + '`（桶 ' + cur.bucket + '）：base 在 ' + BES[b1] + '，trade 在 ' + BES[b2] + ' → ' +
+        (same
+          ? '==本地 join==，两台表的数据就在同一台机器上。'
+          : '==要跨节点搬一次数据==：把一侧按 uid 重新分发到另一侧所在的机器。'));
+      if (statusEl) statusEl.textContent = (st.colocate ? 'colocate 开' : 'colocate 关') + ' · ' + cur.uid + '：' + (same ? '同节点' : '跨节点');
+    }
+    draw();
+  };
 
   /* ============================================================
      控件：config-to-ui —— 配置怎么变成界面

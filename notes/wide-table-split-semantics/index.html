@@ -1,0 +1,647 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-has-toc="1">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>拆表之后：那六个词到底在说什么</title>
+<meta name="description" content="从《宽表垂直拆分-NULL语义与查询契约》里卡住的六个概念出发：跨表执行、三值逻辑、UID 集合计算决定「圈到谁」；物理表与分桶、colocate、Join Hint 决定「多快」。全篇用同一份 5 个用户的数据贯穿，前三个词配可点的真值表和集合演示，后三个词配分桶与 colocate 的分布对照。" />
+<link rel="stylesheet" href="../../assets/theme.css" />
+  <link rel="stylesheet" href="../../assets/blocks.css" />
+  <link rel="stylesheet" href="../../assets/archify-embed.css" />
+</head>
+<body>
+<div id="progress"></div>
+<div id="tocScrim"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
+    <a class="brand" href="../../index.html"><span class="dot"></span>知识笔记</a>
+    
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="toc" id="toc">
+      <p class="toc-title">目录</p>
+      <a href="../../index.html" class="sub">← 全部笔记</a>
+      <a href="#六个词先分成两组">六个词，先分成两组</a>
+      <a href="#起点一行数据被拆到几张表里">起点：一行数据，被拆到几张表里</a>
+      <a href="#跨表执行条件分散在多张表里怎么算">跨表执行：条件分散在多张表里，怎么算</a>
+      <a href="#三值逻辑sql-里多出来的-unknown">三值逻辑：SQL 里多出来的 UNKNOWN</a>
+      <a href="#按-uid-集合计算把条件树当集合代数">按 UID 集合计算：把条件树当集合代数</a>
+      <a href="#物理表分区分桶">物理表、分区、分桶</a>
+      <a href="#colocate让同一个-uid-的数据待在同一台机器上">colocate：让同一个 uid 的数据待在同一台机器上</a>
+      <a href="#join-hint人工指定执行方式">Join Hint：人工指定执行方式</a>
+      <a href="#回到这份文档六个词各落在哪">回到这份文档：六个词各落在哪</a>
+      <a href="#一句话" class="sub">一句话</a>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow">● 从零理解 · 概念</span>
+      <h1>拆表之后：那六个词到底在说什么</h1>
+      <p class="lede">从《宽表垂直拆分-NULL语义与查询契约》里卡住的六个概念出发：跨表执行、三值逻辑、UID 集合计算决定「圈到谁」；物理表与分桶、colocate、Join Hint 决定「多快」。全篇用同一份 5 个用户的数据贯穿，前三个词配可点的真值表和集合演示，后三个词配分桶与 colocate 的分布对照。</p>
+    </div>
+
+
+    <div class="provenance"><span><b>来源</b> crm-dsl-stru/docs/宽表垂直拆分-NULL语义与查询契约.md（全文，含 §5 待确认项、§6 四种状态、§7 操作符契约、§8 UID 集合、§12 表设计约束） · crm-dsl-stru/adr/0001-客群洞察-圈选.md（NULL 不当 0、比较未知两侧都不命中、结果 = (U ∩ M) − E） · crm-dsl-stru/doris/init/schema.sql（user_portraits_wide 45 列 / BUCKETS 16 / replication_num 1，实测） · Apache Doris 官方文档 · Colocation Join（同组约束、IsStable、降级）：https://doris.apache.org/docs/4.x/query-acceleration/colocation-join/ · Apache Doris 官方文档 · Distribute Hint（join[broadcast] / [shuffle]、best-effort、EXPLAIN 判定）：https://doris.apache.org/docs/4.x/query-acceleration/hints/distribute-hint/ · Apache Doris 官方文档 · Data Bucketing（桶数建议、tablet 1G~10G、2.0 自动分桶）：https://doris.apache.org/docs/4.x/table-design/data-partitioning/data-bucketing/</span><span><b>生成</b> 2026-10-09</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">SQL</span> <span class="tag tone-muted">NULL</span> <span class="tag tone-muted">三值逻辑</span> <span class="tag tone-muted">圈选</span> <span class="tag tone-muted">Doris</span> <span class="tag tone-muted">分桶</span> <span class="tag tone-muted">colocate</span></span></div>
+
+<p><code>docs/宽表垂直拆分-NULL语义与查询契约.md</code> 讨论一件具体的事：把用户画像宽表拆成几张子表之后，同一批圈选条件算出来的<strong>人</strong>会不会变。</p>
+<p>圈选的过程是：运营在页面上配条件，前端把条件存成一棵 JSON 条件树，SQL Builder 把它翻译成 SQL，Doris 执行后返回 UID 列表或人数。拆表之前，年龄、地区、交易次数是同一行上的列，条件直接写在一起；拆表之后，一个用户的信息分布在多张表里，SQL 要跨表算。</p>
+<p>你卡住的六个词就散在这份文档里。这一页用同一份数据把它们串起来。</p>
+<div class="callout tone-blue">
+      <span class="ic">🎯</span>
+      <div><p>六个词回答两个不同的问题：</p>
+<ul>
+<li><strong>算得对不对</strong>：跨表执行、三值逻辑、UID 集合计算</li>
+<li><strong>算得快不快</strong>：物理表与分桶、colocate、Join Hint</li>
+</ul>
+<p><mark class="mk-blue">前三个决定圈到谁，后三个决定多快。</mark> 分界线是先定语义，再谈物理。</p>
+</div>
+    </div><hr>
+<h2 id="六个词先分成两组"><span class="num">01</span>六个词，先分成两组</h2>
+<div class="cards" data-cols="2"><div class="ccard tone-blue">
+          <span class="tag tone-blue">语义</span>
+          <h4>决定「圈到谁」的三个词</h4>
+          
+          <div class="cbody"><p><strong>跨表执行</strong>：条件分散在多张表里，怎么算成同一批 UID。</p>
+<p><strong>三值逻辑</strong>：<code>NULL</code> 参与比较会得到 <code>UNKNOWN</code>，而 <code>WHERE</code> 只保留 <code>TRUE</code>。</p>
+<p><strong>UID 集合计算</strong>：<code>AND</code> / <code>OR</code> / <code>NOT</code> 当成集合的交、并、补来算。</p>
+</div>
+          
+        </div><div class="ccard tone-violet">
+          <span class="tag tone-violet">物理</span>
+          <h4>决定「多快」的三个词</h4>
+          
+          <div class="cbody"><p><strong>物理表与分桶</strong>：数据实际存在哪张表、哪个桶里。</p>
+<p><strong>colocate</strong>：让同一个 uid 在不同表里的数据待在同一台机器上。</p>
+<p><strong>Join Hint</strong>：绕开优化器，人工指定 join 时数据怎么分发。</p>
+</div>
+          
+        </div></div><p>这两组不是并列关系，是一条链路的前后段。文档里那张图画的正是它：</p>
+<div class="pipe"><div class="lane tone-blue">
+        <div class="lane-meta">
+          <span class="ln">接入</span>
+          <b>页面与条件树</b>
+          <small>运营点出来的条件，序列化成一棵树</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>页面配置</b>
+        <small>画像 / 关系 / 事件</small>
+        <span class="tag tone-blue">前端</span>
+      </div><div class="pnode">
+        <b>JSON 条件树</b>
+        <small>AND / OR / NOT</small>
+        <span class="tag tone-blue">协议</span>
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">序列化<span class="note">选项和值都来自元数据</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-amber">
+        <div class="lane-meta">
+          
+          <b>查询契约</b>
+          <small>只规定「缺行算什么」「NULL 算什么」，不写 SQL，也不执行</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>缺行与 NULL 语义</b>
+        <small>包含 / 排除各自怎么算</small>
+        <span class="tag tone-amber">这篇的主角</span>
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">语义明确<span class="note">编译器照着它生成 SQL</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-green">
+        <div class="lane-meta">
+          
+          <b>编译与执行</b>
+          <small>契约定了，才轮到「怎么算出来」</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>SQL Builder</b>
+        <small>条件树 → SQL</small>
+        <span class="tag tone-green">编译</span>
+      </div><div class="pnode">
+        <b>Doris</b>
+        <small>执行查询</small>
+        <span class="tag tone-green">执行</span>
+      </div><div class="pnode">
+        <b>UID 列表 / 人数</b>
+        <small>最终结果</small>
+        <span class="tag tone-green">结果</span>
+      </div></div>
+      </div></div><p>契约夹在中间：它不写 SQL，也不执行，只规定「缺行算什么」「NULL 算什么」。两头的组件都照着它做。六个词里，前三个是契约要回答的问题，后三个是契约定完之后才轮到的优化空间。</p>
+<hr>
+<h2 id="起点一行数据被拆到几张表里"><span class="num">02</span>起点：一行数据，被拆到几张表里</h2>
+<p>这一页后面所有例子都用同一份数据：5 个可圈选用户，一张宽表拆成两张子表。</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">user_universe（本次可圈选的 UID；后面所有「不满足」「排除」都以它为边界）
+  1001  1002  1003  1004  1005
+
+user_portrait（拆表前：一行一个 uid）
+uid    age    region   trade_count
+1001   26     HK       12
+1002   NULL   CN       0
+1003   41     NULL     3
+1004   NULL   NULL     NULL
+1005   35     CN       NULL
+
+拆表后
+portrait_base(uid, age, region)        portrait_trade(uid, trade_count)
+1001   26   HK                          1001   12
+1002   NULL CN                          1002   0
+1003   41   NULL                        1003   3
+1005   35   CN                          1005   NULL
+                                        （1004 两张表里都没有行）
+</code></pre></div>
+<p>（<code>user_universe</code> 是这份文档给全集 <code>U</code> 起的占位表名，落地时要换成权威的全量 UID 表或等价查询。）</p>
+<p>拆表前，1004 有一行，只是三个字段都为空。拆表后，1004 在两张子表里都没有行。</p>
+<p>这两件事在 SQL 里长得几乎一样：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>物理形态</th><th>业务上可能是什么</th><th>SQL 里怎么表现</th></tr></thead><tbody><tr><th>有行，字段是 NULL</th><td data-label="业务上可能是什么">特征值为空 / 不适用 / 尚未填写</td><td data-label="SQL 里怎么表现"><code>field IS NULL</code> 为真</td></tr><tr><th>整行缺失</th><td data-label="业务上可能是什么">没有这个特征 / 数据还没写入</td><td data-label="SQL 里怎么表现"><code>LEFT JOIN</code> 之后右表字段也是 NULL</td></tr></tbody></table></div><p>SQL 只看得见 NULL，看不见「为什么是 NULL」。文档 §6 专门把这两种拆成两个不同的状态（<code>VALUE_NULL</code> 和 <code>ROW_MISSING</code>），就是为了让契约能分别规定它们的去向。</p>
+<hr>
+<h2 id="跨表执行条件分散在多张表里怎么算"><span class="num">03</span>跨表执行：条件分散在多张表里，怎么算</h2>
+<p>拆表前，「年龄 ≥ 18 且交易次数 &gt; 0」是同一行上的两个列：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-sql">SELECT uid
+FROM user_portrait
+WHERE age &gt;= 18
+  AND trade_count &gt; 0;
+</code></pre></div>
+<p>拆表后，<code>age</code> 在 <code>portrait_base</code>，<code>trade_count</code> 在 <code>portrait_trade</code>，一条 <code>WHERE</code> 同时说不了这两件事。跨表执行就是解决这个：把分散在多张表里的条件算成同一个人的集合。</p>
+<p>逻辑上分五步：</p>
+<div class="demo" data-widget="stepper" data-config="{&quot;steps&quot;:[{&quot;label&quot;:&quot;① 定全集&quot;,&quot;code&quot;:&quot;U = {1001, 1002, 1003, 1004, 1005}\n-- 本次可圈选的 UID&quot;,&quot;note&quot;:&quot;后面所有「不满足」「排除」都以它为边界，换一个 U，补集就换一批人&quot;},{&quot;label&quot;:&quot;② base 表算 A&quot;,&quot;code&quot;:&quot;SELECT uid\nFROM portrait_base\nWHERE age &gt;= 18;&quot;,&quot;note&quot;:&quot;A = {1001, 1003, 1005}：1002 的值是 NULL，判定 UNKNOWN；1004 在这张表里没有行&quot;},{&quot;label&quot;:&quot;③ trade 表算 B&quot;,&quot;code&quot;:&quot;SELECT uid\nFROM portrait_trade\nWHERE trade_count &gt; 0;&quot;,&quot;note&quot;:&quot;B = {1001, 1003}：1002 是 0（FALSE），1005 是 NULL（UNKNOWN）&quot;},{&quot;label&quot;:&quot;④ 合并&quot;,&quot;code&quot;:&quot;A AND B  →  A ∩ B\n{1001,1003,1005} ∩ {1001,1003}&quot;,&quot;note&quot;:&quot;结果是 {1001, 1003}&quot;},{&quot;label&quot;:&quot;⑤ 返回&quot;,&quot;code&quot;:&quot;列表：一页 uid，按 uid 游标翻页\n人数：COUNT&quot;,&quot;note&quot;:&quot;参与计数的 uid 要唯一，不然同一个人有多条关系记录会多算；本仓库用 UNIQUE KEY(uid) 保证这一点&quot;}]}">
+      <div class="demo-head">
+        <span class="title">跨表算「年龄 ≥ 18 且交易次数 &gt; 0」</span>
+        <span class="status" data-status></span>
+        <span class="spacer"></span>
+        
+      </div>
+      <div class="demo-body custom" data-mount></div>
+    </div><p>数据库真正执行时，还有一套物理步骤：</p>
+<div class="pipe"><div class="lane tone-muted">
+        <div class="lane-meta">
+          <span class="ln">物理执行</span>
+          <b>扫描</b>
+          <small>只读这次用得到的列</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>读 portrait_base</b>
+        <small>uid, age</small>
+        <span class="tag tone-muted">列裁剪</span>
+      </div><div class="pnode">
+        <b>读 portrait_trade</b>
+        <small>uid, trade_count</small>
+        <span class="tag tone-muted">列裁剪</span>
+      </div></div>
+      </div><div class="lane tone-blue">
+        <div class="lane-meta">
+          
+          <b>下推过滤</b>
+          <small>尽早把不满足的行丢掉</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>age &gt;= 18</b>
+        <small>在扫描阶段就执行</small>
+        <span class="tag tone-blue">下推</span>
+      </div><div class="pnode">
+        <b>trade_count &gt; 0</b>
+        <small>同上</small>
+        <span class="tag tone-blue">下推</span>
+      </div></div>
+      </div><div class="lane tone-violet">
+        <div class="lane-meta">
+          
+          <b>重分布</b>
+          <small>让同一个 uid 的两边数据碰上</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>按 uid 分发</b>
+        <small>哈希到同一台机器</small>
+        <span class="tag tone-violet">网络</span>
+      </div></div>
+      </div><div class="lane tone-amber">
+        <div class="lane-meta">
+          
+          <b>Join / 集合运算</b>
+          <small>这里是两种路线的分叉点</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>交集</b>
+        <small>A ∩ B</small>
+        <span class="tag tone-amber">结果集</span>
+      </div></div>
+      </div><div class="lane tone-green">
+        <div class="lane-meta">
+          
+          <b>聚合与返回</b>
+          <small>算人数或翻页</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>COUNT</b>
+        <small>uid 唯一，直接计数</small>
+        <span class="tag tone-green">人数</span>
+      </div><div class="pnode">
+        <b>ORDER BY uid</b>
+        <small>游标翻页</small>
+        <span class="tag tone-green">名单</span>
+      </div></div>
+      </div></div><div class="callout tone-amber">
+      <span class="ic">🧱</span>
+      <div><p><mark class="mk-blue">SQL 的书写顺序不是执行顺序。</mark></p>
+<p>你写的是 <code>FROM → JOIN → WHERE</code>，优化器可能先把两张表各自过滤一遍，再按 uid 关联。
+同一段 SQL 文字，换一个执行计划，结果不变、耗时能差很多。后面三个物理词处理的都是这一段。</p>
+</div>
+    </div><p>跨表这件事有两条实现路线，这份文档选了第二条：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>路线</th><th>怎么做</th><th>代价</th></tr></thead><tbody><tr><th>先拼成一张宽表再过滤</th><td data-label="怎么做">把多张子表按 uid <code>JOIN</code> 起来，再写一条宽表 <code>WHERE</code></td><td data-label="代价">要拼临时宽表；稀疏子表的缺行会被 NULL 填满</td></tr><tr><th>每个条件各算一个 UID 集合，再做集合运算</th><td data-label="怎么做"><code>age &gt;= 18</code> 查 base 得到一个集合，<code>trade_count &gt; 0</code> 查 trade 得到另一个，两个集合求交</td><td data-label="代价">缺行不会被 join 悄悄改写；文档 §8 选的就是这条</td></tr></tbody></table></div><p>第二条路线为什么更稳，要看下一节和第五节。</p>
+<hr>
+<h2 id="三值逻辑sql-里多出来的-unknown"><span class="num">04</span>三值逻辑：SQL 里多出来的 UNKNOWN</h2>
+<p>SQL 里的 <code>NULL</code> 不是 0，也不是空字符串。它表示「不知道」。任何和它做的比较，结果既不是真也不是假，而是第三种值 <code>UNKNOWN</code>。</p>
+<p>所以一个条件的取值有三种，<code>AND</code> / <code>OR</code> 也不再是「真假」两个变量的表：</p>
+<table>
+<thead>
+<tr>
+<th><code>A AND B</code></th>
+<th>TRUE</th>
+<th>FALSE</th>
+<th>UNKNOWN</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>TRUE</strong></td>
+<td>TRUE</td>
+<td>FALSE</td>
+<td>UNKNOWN</td>
+</tr>
+<tr>
+<td><strong>FALSE</strong></td>
+<td>FALSE</td>
+<td>FALSE</td>
+<td>FALSE</td>
+</tr>
+<tr>
+<td><strong>UNKNOWN</strong></td>
+<td>UNKNOWN</td>
+<td>FALSE</td>
+<td>UNKNOWN</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th><code>A OR B</code></th>
+<th>TRUE</th>
+<th>FALSE</th>
+<th>UNKNOWN</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>TRUE</strong></td>
+<td>TRUE</td>
+<td>TRUE</td>
+<td>TRUE</td>
+</tr>
+<tr>
+<td><strong>FALSE</strong></td>
+<td>TRUE</td>
+<td>FALSE</td>
+<td>UNKNOWN</td>
+</tr>
+<tr>
+<td><strong>UNKNOWN</strong></td>
+<td>TRUE</td>
+<td>UNKNOWN</td>
+<td>UNKNOWN</td>
+</tr>
+</tbody>
+</table>
+<p>再加一条：<code>NOT UNKNOWN</code> 还是 <code>UNKNOWN</code>。</p>
+<p>自己点一遍看规则：</p>
+<div class="demo" data-widget="tri-logic-lab" data-config="{&quot;a&quot;:&quot;T&quot;,&quot;b&quot;:&quot;U&quot;}">
+      <div class="demo-head">
+        <span class="title">A、B 取不同值，AND / OR / NOT 各得到什么</span>
+        <span class="status" data-status></span>
+        <span class="spacer"></span>
+        
+      </div>
+      <div class="demo-body custom" data-mount></div>
+    </div><p>落到这份数据上，有两个具体的人值得看：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">1002：age = NULL
+      age &gt;= 18            →  UNKNOWN
+      包含条件里不命中
+
+1003：age = 41，region = NULL
+      age &gt;= 18            →  TRUE
+      region IN ('CN','HK') →  UNKNOWN
+      TRUE AND UNKNOWN      →  UNKNOWN
+      包含条件里也不出现
+</code></pre></div>
+<div class="callout tone-violet">
+      <span class="ic">💡</span>
+      <div><p><code>WHERE</code> 只保留条件为 <code>TRUE</code> 的行。<code>FALSE</code> 和 <code>UNKNOWN</code> 都会被丢掉。</p>
+<p>两者结果一样、原因不一样：一个是「确实不满足」，一个是「不知道满不满足」。
+这一页后面要讲的「排除」，就靠这个区别活着。</p>
+</div>
+    </div><p>这也是 ADR 里那句「<code>NULL</code> 不当 0」的来处：如果把 NULL 当成 0，上面两个人都变成了「不满足」，看起来结果一样；但一旦做成排除条件，他们就会被错误地排除掉。</p>
+<p>拆表之后，这个问题变得更值得较真，因为两种物理形态在 SQL 里会表现成同一个 NULL：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">有行、字段为 NULL   →  field IS NULL 为真
+整行缺失（缺行）     →  LEFT JOIN 之后右表字段也是 NULL
+</code></pre></div>
+<p>SQL 分不出这两种，业务上却可能是两回事。文档 §6 的做法是把它们在契约里分开登记，而不是让 SQL 去猜。</p>
+<hr>
+<h2 id="按-uid-集合计算把条件树当集合代数"><span class="num">05</span>按 UID 集合计算：把条件树当集合代数</h2>
+<p>圈选只关心「哪些 UID 命中」，所以每个叶子条件都可以先算出一个 UID 集合，条件树再对这些集合做运算：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">Match(A AND B) = Match(A) ∩ Match(B)     -- 交
+Match(A OR B)  = Match(A) ∪ Match(B)     -- 并
+Match(NOT A)   = U − Match(A)            -- 补，相对全集 U
+</code></pre></div>
+<p>拿这份数据试一遍：A = 年龄 ≥ 18 = <code>{1001, 1003, 1005}</code>，B = 交易次数 &gt; 0 = <code>{1001, 1003}</code>，<code>A AND B = {1001, 1003}</code>，和上一节的答案一致。</p>
+<p>集合写法真正解决的是「取反」。看两种问法：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>问题</th><th>问的是</th><th>得到谁</th></tr></thead><tbody><tr><th>字段比较取反</th><td data-label="问的是"><code>trade_count</code> 有值，且那个值不大于 0</td><td data-label="得到谁">只有 1002</td></tr><tr><th>集合取反</th><td data-label="问的是"><code>U</code> 里不属于「交易次数 &gt; 0」的人</td><td data-label="得到谁">1002、1004、1005</td></tr></tbody></table></div><p>差的两个人正是前面那两种物理状态：1004 在子表里没有行（行级写法根本扫不到它），1005 的值是 NULL（<code>NOT UNKNOWN</code> 仍是 <code>UNKNOWN</code>，被 <code>WHERE</code> 丢掉）。</p>
+<p>自己跑一遍：</p>
+<div class="demo" data-widget="uid-set-lab" data-config="{&quot;mode&quot;:&quot;row&quot;}">
+      <div class="demo-head">
+        <span class="title">同一个条件，两种取反，结果差两个人</span>
+        <span class="status" data-status></span>
+        <span class="spacer"></span>
+        
+      </div>
+      <div class="demo-body custom" data-mount></div>
+    </div><p>用 SQL 写出来就是两种形状。左边只在子表里做字段比较；右边先算出命中集合，再拿全集去减：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-sql">-- ① 行级取反：问「有值但不 &gt; 0」
+SELECT uid
+FROM portrait_trade
+WHERE NOT (trade_count &gt; 0);
+
+-- ② 集合取反：问「不属于命中集合」
+SELECT u.uid
+FROM user_universe u
+WHERE NOT EXISTS (
+  SELECT 1
+  FROM matched t
+  WHERE t.uid = u.uid
+);
+</code></pre></div>
+<p>文档 §7.2 把这件事说成「不等于不是逻辑补集」，并给出「不等于」在产品上的三种可能含义：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>含义</th><th>包含谁</th><th>对应什么形状</th></tr></thead><tbody><tr><th>已知值不等于</th><td data-label="包含谁">有行、有值、值 ≠ x</td><td data-label="对应什么形状"><code>field != x</code></td></tr><tr><th>不满足「等于 x」</th><td data-label="包含谁">值不等于 + 值 NULL + 缺行</td><td data-label="对应什么形状">集合差 <code>U − Match(field = x)</code></td></tr><tr><th>缺失值先映射为默认值再比较</th><td data-label="包含谁">缺行和 NULL 先按字段契约换成默认值，再参与比较</td><td data-label="对应什么形状">字段适配器里做 <code>COALESCE</code> 或等价处理</td></tr></tbody></table></div><p>三种结果不一样，所以文档建议在 DSL 里把它们分成两个操作：<code>NotEq</code> 保留原义，真正的补集用独立的 <code>NOT</code> 节点或集合排除节点。</p>
+<p><code>NOT IN</code> 的坑也在这里。写</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-sql">WHERE uid NOT IN (1001, 1003, NULL)
+</code></pre></div>
+<p>时，<code>uid != NULL</code> 是 <code>UNKNOWN</code>，整条条件可能一行都留不下。所以逻辑 <code>NOT</code> 要用集合差表达，而不是往列表里塞一个取反。文档补了一句边界：如果两侧 UID 都被保证非空，<code>NOT IN</code>、<code>NOT EXISTS</code> 和 Anti Join 结果相同，优化器甚至可能生成同一个计划。前提是「保证非空」，不是语法偏好。</p>
+<p>这一步在本项目里已经是既成口径。ADR 0001 写的公式是：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">U = U_perm ∩ scope
+结果 = (U ∩ M) − E
+</code></pre></div>
+<p><code>U_perm</code> 是操作人的数据权限上限，<code>scope</code> 是客户范围，<code>M</code> 是包含条件命中的集合，<code>E</code> 是排除条件命中的集合。全部相对 <code>U</code> 计算。</p>
+<hr>
+<h2 id="物理表分区分桶"><span class="num">06</span>物理表、分区、分桶</h2>
+<p>先区分三个容易混的东西：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>东西</th><th>它是什么</th><th>例子</th></tr></thead><tbody><tr><th>物理表</th><td data-label="它是什么">真正存数据的表对象，有自己的文件、分区、分桶、副本</td><td data-label="例子"><code>portrait_base</code>、<code>portrait_trade</code></td></tr><tr><th>视图</th><td data-label="它是什么">通常只存查询定义，不存数据</td><td data-label="例子"><code>CREATE VIEW ... AS SELECT ...</code></td></tr><tr><th>逻辑模型 / 语义层</th><td data-label="它是什么">面向业务的定义，一个逻辑字段可能对应好几张物理表</td><td data-label="例子">「年龄」映射到 <code>birthday</code> 这一列</td></tr></tbody></table></div><p>分区和分桶也是两件事，文档里把它们的名字放在一起，但解决的问题不同：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>维度</th><th>分区（Partition）</th><th>分桶（Bucket）</th></tr></thead><tbody><tr><th>解决什么</th><td data-label="分区（Partition）">数据属于哪一段时间</td><td data-label="分桶（Bucket）">同一范围内的数据怎么切、放到哪台机器</td></tr><tr><th>怎么切</th><td data-label="分区（Partition）">按范围，例如日期、月份、租户</td><td data-label="分桶（Bucket）">按 <code>hash(分桶键) % 桶数</code></td></tr><tr><th>查询时的效果</th><td data-label="分区（Partition）">按分区裁剪，少读几天的数据</td><td data-label="分桶（Bucket）">同一个键永远进同一个桶，join 时可能不用搬数据</td></tr></tbody></table></div><p>本仓库 demo 的建表语句（列数和桶数都是实测）：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-sql">CREATE TABLE crm_insight.user_portraits_wide (
+  uid BIGINT NOT NULL,
+  ...                       -- 一共 45 列
+)
+UNIQUE KEY(uid)
+DISTRIBUTED BY HASH(uid) BUCKETS 16
+PROPERTIES (&quot;replication_num&quot; = &quot;1&quot;);
+
+-- 关系表用同一个分桶键、同一个桶数
+-- rel_holding / rel_product：DISTRIBUTED BY HASH(uid) BUCKETS 16
+</code></pre></div>
+<p>分桶的规则本身只有一句话：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">uid = 1001  ──hash──▶  bucket = hash(1001) % 16  ──▶  桶里的数据（tablet）  ──▶  落在一台 BE
+</code></pre></div>
+<p>BE 是 Doris 的存储与计算节点。桶号由 Doris 自己算，桶的数量建表时定。Apache Doris 官方文档对「几个桶」的建议：</p>
+<div class="cards" data-cols="2"><div class="ccard tone-blue">
+          
+          <h4>桶数取 BE 数量的整数倍</h4>
+          <p>数据分布更均匀，不容易倾斜</p>
+          
+          
+        </div><div class="ccard tone-green">
+          
+          <h4>够用就行，尽量少</h4>
+          <p>桶越多 tablet 越多，元数据和扫描任务也跟着多</p>
+          
+          
+        </div><div class="ccard tone-amber">
+          
+          <h4>单个 tablet 压缩后 1GB ~ 20GB</h4>
+          <p>Unique Key 表不超过 10GB；太小会有小数据聚合的开销</p>
+          
+          
+        </div><div class="ccard tone-violet">
+          
+          <h4>2.0 起可以自动分桶</h4>
+          <p>按机器资源和集群信息，给每个分区自动定桶数</p>
+          
+          
+        </div></div><div class="callout tone-violet">
+      <span class="ic">🧭</span>
+      <div><p>分桶不改变「谁命中条件」，它改变的是「要不要搬数据、搬多少」。</p>
+<p>会改变圈选结果的是另一件事：<mark class="mk-blue">拿哪张表当全集 U</mark>。文档 §5.1 专门写了这一条：
+不能任选一张画像子表当 <code>U</code>。稀疏子表只保存有该特征的用户，以它为全集，缺行的人会整批消失，而且换一张子表结果还会跟着变。</p>
+</div>
+    </div><hr>
+<h2 id="colocate让同一个-uid-的数据待在同一台机器上"><span class="num">07</span>colocate：让同一个 uid 的数据待在同一台机器上</h2>
+<p>上一节说，同一个 uid 在两张表里都会进「各自的同一个桶」。但这两张表的<strong>同一个桶号</strong>未必在同一台机器上。</p>
+<ul>
+<li>分属不同机器的数据要 join，得有一侧先按 uid 重新分发过去，这段网络开销叫 shuffle。</li>
+<li>colocate 就是把两张表按相同的分桶规则放进同一个 Colocation Group，让同一个桶号落在同一台 BE 上，join 在本地就能完成。</li>
+</ul>
+<p>切一下开关，看同一个 uid 的两张表数据在哪里：</p>
+<div class="demo" data-widget="dist-lab" data-config="{&quot;colocate&quot;:true,&quot;uid&quot;:&quot;1001&quot;}">
+      <div class="demo-head">
+        <span class="title">4 个桶、4 台 BE，base 和 trade 怎么落</span>
+        <span class="status" data-status></span>
+        <span class="spacer"></span>
+        
+      </div>
+      <div class="demo-body custom" data-mount></div>
+    </div><p>（桶号的对应关系是示意的，真实 Doris 用它自己的哈希；这里要看的只是「两张表的同一个桶是否对齐」。）</p>
+<p>要让它成立，得同时满足四条（Apache Doris 官方文档）：</p>
+<ul class="check"><li>参与 join 的表在同一个 Colocation Group（建表时 <code>&quot;colocate_with&quot; = &quot;group_x&quot;</code>）</li><li>join key 与分桶列一致（这里是 uid）</li><li>桶数一致、副本数一致</li><li>组处于稳定状态（<code>IsStable = true</code>）</li></ul><div class="callout tone-violet">
+      <span class="ic">💡</span>
+      <div><p><mark class="mk-blue">同一个组里的表，不要求分区数、分区范围、分区列类型一致。</mark></p>
+<p>官方文档里明确写了这一条。要一致的是分桶列、桶数、副本数。
+分区管的是「哪段时间的数据」，它不一致，不影响「同一个 uid 落在哪台机器」。</p>
+</div>
+    </div><p>确认有没有生效，看这两处：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-sql">-- 看组和它的分布
+SHOW PROC '/colocation_group';
+-- GroupName / BucketsNum / ReplicationNum / DistCols / IsStable
+
+-- 看计划里 Hash Join 节点是不是 colocate: true
+EXPLAIN SHAPE PLAN SELECT ...;
+</code></pre></div>
+<p>组不稳定的时候（比如某台 BE 挂了正在修复），查询会自己降级成普通 join，计划里会写 <code>colocate: false, reason: group is not stable</code>。所以「建表时写了 colocate_with」只是一个前提，跑起来要看计划。</p>
+<p>本仓库 demo 的建表语句里只有 <code>HASH(uid) BUCKETS 16</code> 和 <code>replication_num = 1</code>，没有 colocate。要不要上，是文档 §12 那句话决定的事：</p>
+<div class="callout tone-amber">
+      <span class="ic">⚖</span>
+      <div><p>「按 UID 使用一致分布」是可以作为候选方案的，但 <mark class="mk-blue">没有执行计划和压测数据之前，不能把它写成既定收益</mark>。</p>
+<p>文档列了至少要对比的查询：单字段等值和范围、同表多字段 AND、跨表两条件、高命中率和低命中率 OR、
+基于全集的 NOT、画像与事件/关系/用户群混合。每类记录扫描行数、数据交换量、内存、耗时和执行计划。</p>
+</div>
+    </div><hr>
+<h2 id="join-hint人工指定执行方式"><span class="num">08</span>Join Hint：人工指定执行方式</h2>
+<p>join 时右表怎么分发（广播还是按 key 打散），正常由优化器根据统计信息决定。Hint 就是在 SQL 里把这件事写死。</p>
+<p>Doris 的写法是写在 join 右侧表的前面，方括号里选分发方式：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-sql">-- 强制 broadcast：把右表复制到所有 BE
+SELECT count(*)
+FROM t2 JOIN[broadcast] t1
+  ON t1.c1 = t2.c2;
+
+-- 也可以用 shuffle，并和 leading hint 一起逐条指定
+SELECT /*+ leading(orders shuffle {lineitem shuffle part} shuffle partsupp) */
+  ...
+</code></pre></div>
+<p>计划里能看出它到底用了哪种分发：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">DistributionSpecReplicated  → broadcast，右表复制到每个 BE
+DistributionSpecHash        → shuffle，按 hash key 分发
+</code></pre></div>
+<p>Hint 是 best-effort 的：写错、或者系统没法生成对应的计划，它不报错，能做多少做多少。所以「写了 hint」不等于「hint 生效」，要看 <code>EXPLAIN</code>。官方文档对两种分发方式给的建议也很直白：右表小、复制成本低于 shuffle 时用 broadcast；两边都大、按 key 重分布更划算时用 shuffle。</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>谁在决定分发</th><th>好处</th><th>风险</th></tr></thead><tbody><tr><th>优化器</th><td data-label="好处">数据量、过滤条件、统计信息一变，它重新选</td><td data-label="风险">偶尔选错，要人看计划才发现</td></tr><tr><th>Hint</th><td data-label="好处">把某一次压测出来的最优冻结下来</td><td data-label="风险">数据量涨 100 倍后，今天的 broadcast 会变成全量复制的灾难</td></tr></tbody></table></div><p>推荐的顺序是：</p>
+<ul class="check"><li>先把表设计、分桶、统计信息弄对</li><li>用 <code>EXPLAIN</code> / Profile 看真实计划和数据分布</li><li>确认优化器在同一类查询上稳定选错，再写 hint</li><li>把「为什么写它、基于什么数据量、什么条件下回滚」写进设计文档</li></ul><p>这份文档对它的定位也是最后一位：「物理表如何分桶、是否使用 colocate、具体采用哪种 Join Hint，需要结合 Doris 版本和压测结果另行决定」。三个物理词里，hint 排在最末。</p>
+<hr>
+<h2 id="回到这份文档六个词各落在哪"><span class="num">09</span>回到这份文档：六个词各落在哪</h2>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>词</th><th>文档里在哪</th><th>它规定了什么</th></tr></thead><tbody><tr><th>跨表执行</th><td data-label="文档里在哪">§2、§4、§13</td><td data-label="它规定了什么">画像条件先按字段所在表拆成 UID 子查询，再交给集合组合层；同一张表内的条件仍可以合并成一段 <code>WHERE</code></td></tr><tr><th>三值逻辑</th><td data-label="文档里在哪">§6、§7.1</td><td data-label="它规定了什么"><code>=</code>、<code>&gt;</code>、<code>IN</code> 只匹配有确定值且结果为真的 UID；显式 NULL 和缺行都不命中</td></tr><tr><th>UID 集合计算</th><td data-label="文档里在哪">§8</td><td data-label="它规定了什么"><code>AND</code> 是交、<code>OR</code> 是并、<code>NOT</code> 是 <code>U − Match(P)</code>；补集用集合差或 Anti Join，不用字段取反</td></tr><tr><th>物理表与分桶</th><td data-label="文档里在哪">§12</td><td data-label="它规定了什么">UID 非空、同一版本内唯一、明确密集表还是稀疏表；分区/分桶/副本/colocate 等压测</td></tr><tr><th>colocate</th><td data-label="文档里在哪">§12</td><td data-label="它规定了什么">「按 UID 使用一致分布」是候选方案，不是既定收益</td></tr><tr><th>Join Hint</th><td data-label="文档里在哪">§12</td><td data-label="它规定了什么">是否用、用哪种，以执行计划和压测结果为准</td></tr></tbody></table></div><p>文档 §6 的那棵判定树，就是前面这些规则合起来的形状：</p>
+<div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;u&quot;,&quot;to&quot;:&quot;has&quot;},{&quot;from&quot;:&quot;has&quot;,&quot;to&quot;:&quot;missing&quot;,&quot;label&quot;:&quot;无行&quot;},{&quot;from&quot;:&quot;has&quot;,&quot;to&quot;:&quot;have&quot;,&quot;label&quot;:&quot;有行&quot;},{&quot;from&quot;:&quot;missing&quot;,&quot;to&quot;:&quot;batch&quot;,&quot;label&quot;:&quot;批次完整&quot;},{&quot;from&quot;:&quot;have&quot;,&quot;to&quot;:&quot;isnull&quot;},{&quot;from&quot;:&quot;isnull&quot;,&quot;to&quot;:&quot;vnull&quot;,&quot;label&quot;:&quot;是&quot;},{&quot;from&quot;:&quot;isnull&quot;,&quot;to&quot;:&quot;cmp&quot;,&quot;label&quot;:&quot;否&quot;},{&quot;from&quot;:&quot;cmp&quot;,&quot;to&quot;:&quot;match&quot;,&quot;label&quot;:&quot;是&quot;},{&quot;from&quot;:&quot;cmp&quot;,&quot;to&quot;:&quot;notmatch&quot;,&quot;label&quot;:&quot;否&quot;}]">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-violet" data-id="u">
+              
+              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="8" cy="4.2" rx="5" ry="1.9"/><path d="M3 4.2v7.6c0 1.05 2.24 1.9 5 1.9s5-.85 5-1.9V4.2"/></svg>
+              <b>用户全集 U</b>
+              <small>逐个 UID 判断</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-muted shape-note" data-id="has">
+              
+              
+              <b>子表里有行吗？</b>
+              <small>缺行 / 有行</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="missing">
+              
+              
+              <b>ROW_MISSING</b>
+              <small>整行不存在</small>
+            </div><div class="fnode tone-muted" data-id="have">
+              
+              
+              <b>有行</b>
+              <small>字段是否为空</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-amber" data-id="batch">
+              
+              
+              <b>业务缺失</b>
+              <small>按字段契约处理；批次不完整则暂不可判定</small>
+            </div><div class="fnode tone-muted shape-note" data-id="isnull">
+              
+              
+              <b>字段是 NULL 吗？</b>
+              <small>VALUE_NULL / 继续比较</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="vnull">
+              
+              
+              <b>VALUE_NULL</b>
+              <small>有行但值为空</small>
+            </div><div class="fnode tone-muted shape-note" data-id="cmp">
+              
+              
+              <b>满足比较条件吗？</b>
+              <small>字段有值</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="match">
+              
+              
+              <b>VALUE_MATCH</b>
+              <small>有值且命中</small>
+            </div><div class="fnode tone-red" data-id="notmatch">
+              
+              
+              <b>VALUE_NOT_MATCH</b>
+              <small>有值但未命中</small>
+            </div></div></div>
+      
+    </div><p>ADR 0001 已经把三条口径定下来了：</p>
+<div class="callout tone-green">
+      <span class="ic">✅</span>
+      <div><ul>
+<li><code>NULL</code> 不当 0</li>
+<li>比较未知时，包含不命中，排除也不命中，人留在结果里</li>
+<li>缺行同样不当 0，也不因此把人从 <code>U</code> 里拿掉</li>
+</ul>
+<p><mark class="mk-blue">这三条就是后面所有 SQL 的验收标准。</mark></p>
+</div>
+    </div><p>第三条规则用现成的交互再看一遍：同一个条件放进包含和排除，NULL 行分别会怎样。</p>
+<div class="demo" data-widget="null-lab" data-config="{&quot;col&quot;:&quot;region&quot;,&quot;matchVal&quot;:&quot;HK&quot;,&quot;rows&quot;:[{&quot;id&quot;:1001,&quot;name&quot;:&quot;常驻 HK&quot;,&quot;v&quot;:&quot;HK&quot;},{&quot;id&quot;:1002,&quot;name&quot;:&quot;常驻 CN&quot;,&quot;v&quot;:&quot;CN&quot;},{&quot;id&quot;:1003,&quot;name&quot;:&quot;地区未知&quot;,&quot;v&quot;:null},{&quot;id&quot;:1005,&quot;name&quot;:&quot;常驻 CN&quot;,&quot;v&quot;:&quot;CN&quot;}]}">
+      <div class="demo-head">
+        <span class="title">把 region = 'HK' 放进包含、或者放进排除</span>
+        <span class="status" data-status></span>
+        <span class="spacer"></span>
+        
+      </div>
+      <div class="demo-body custom" data-mount></div>
+    </div><p>还有几件事文档列进了待确认清单（§5.1、§5.2、§16），它们不再属于「概念」而是决定实现的东西：</p>
+<div class="cards" data-cols="3"><div class="ccard tone-amber">
+          
+          <h4>U 从哪来</h4>
+          <p>哪张表或哪条查询？注销、冻结、未完成的用户算不算？</p>
+          
+          
+        </div><div class="ccard tone-amber">
+          
+          <h4>子表是密集还是稀疏</h4>
+          <p>缺行是数据异常，还是本身就有业务含义？</p>
+          
+          
+        </div><div class="ccard tone-amber">
+          
+          <h4>「不等于」含不含 NULL</h4>
+          <p>以及缺行、默认值怎么映射、实时用户群「为假」是哪种补集</p>
+          
+          
+        </div></div><div class="summary">
+      <h3 id="一句话">一句话</h3>
+      <p>前三个词决定「圈到谁」，写进查询契约；后三个词决定「多快」，写进物理设计并等压测。
+顺序不能颠倒：<mark class="mk-blue">语义没定，性能优化没有验收标准</mark>。</p>
+
+    </div><div class="quiz"><details>
+        <summary>「交易次数不等于 0」用 <code>WHERE trade_count &lt;&gt; 0</code> 写，为什么会丢人？</summary>
+        <div class="a"><p>两种人都收不到：子表里没有行的（根本扫不到），和值为 <code>NULL</code> 的
+（<code>NULL &lt;&gt; 0</code> 是 <code>UNKNOWN</code>，<code>WHERE</code> 只留 <code>TRUE</code>）。
+要按「不属于交易次数大于 0 的集合」来算，就得用全集做集合差，例如 <code>NOT EXISTS</code>。</p>
+</div>
+      </details><details>
+        <summary>colocate 的两张表，分区数必须一致吗？</summary>
+        <div class="a"><p>不要求。官方要求的是同一个 Colocation Group、join key 与分桶列一致、
+桶数和副本数一致、组稳定。分区数、分区范围、分区列类型可以不同。</p>
+</div>
+      </details><details>
+        <summary>SQL 里写了 join hint，就一定会按它执行吗？</summary>
+        <div class="a"><p>不一定。Hint 是 best-effort：写错或生成不了对应计划时不报错，
+实际用哪种分发要看 <code>EXPLAIN</code> 里的 <code>DistributionSpecReplicated</code> / <code>DistributionSpecHash</code>。</p>
+</div>
+      </details></div>
+
+    <footer>
+      <span>拆表之后：那六个词到底在说什么</span>
+      <span>最后更新 2026-10-09 · 单文件可离线打开</span>
+    </footer>
+  </main>
+</div>
+
+<script src="../../assets/app.js"></script>
+</body>
+</html>
