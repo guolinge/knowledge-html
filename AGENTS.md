@@ -5,16 +5,19 @@
 ## 开工第一件事：读会话板
 
 ```bash
-BOARD="$(dirname "$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")")/.kh-board.md"
-tail -30 "$BOARD"
+npm run board                                  # 读：最近 30 条（旧的单文件 + 每人一个文件，按时间合并）
+npm run board -- --tail 60                     # 要看更多
+npm run board -- --post 进行中 "在做…; 会动…; 需要…"
 ```
 
 ==这个仓库会被多个 AI 会话同时编辑，那是它们之间唯一的通信渠道。==
 谁在改什么、谁要推了、谁给你留了话，都在上面。
 
 - 完整协议：`.agents/skills/knowledge-html/references/multi-session-board.md`
-- 一句话版：**看 `tail -30`；发 `printf '...\n' >> "$BOARD"`；永远不要重写整个文件**
+- 一句话版：**读 `npm run board`；发 `npm run board -- --post <状态> "…"`。
+  一人一个文件 —— 你只写得着自己那一份，重写也伤不到别人。**
 - **动共享源之前、推送之前，各读一次**
+- 收工把工作区也收掉：`npm run worktree-audit`（只读；标 `wip` 的先问人）
 
 ## 你要做的第二件事
 

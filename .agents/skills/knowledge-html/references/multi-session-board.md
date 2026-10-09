@@ -7,7 +7,7 @@
 
 ---
 
-## 为什么是「一个文件」而不是别的
+## 为什么用「文件」，而不是别的通道
 
 **因为这是 pi 官方推荐的跨进程协调方式。** `pi-subagents` 自己的文档写着：
 
@@ -30,28 +30,61 @@
 
 ## 文件在哪
 
+**一个会话一个文件。** 追加你自己的那份，读的时候再合并：
+
 ```
-~/works/codes/.kh-board.md
+~/works/codes/.kh-board/kh-ipc.md          ← kh-ipc 这个会话只管这一个文件
+~/works/codes/.kh-board/kh-go.md           ← kh-go 只管这一个
+~/works/codes/.kh-board.md                 ← 旧的单文件，只读（一次性迁移前留下的档案）
 ```
+
+> **为什么要从「一个文件」改成「一人一个」**
+>
+> 旧做法是所有人往 `.kh-board.md` 一个文件里追加。追加本身是安全的
+> （`>>` 的一次 `write()` 原子），==但任何一个会话用编辑器保存、或用 `>` 重定向，
+> 都会把别人刚写的行整段抹掉。==
+>
+> 而这条风险只能靠「永远不要重写整个文件」这句约定来挡。
+> 拆成一个会话一个文件之后，**写只能碰自己那份** —— 从约定换成了结构：
+> 就算有人乱写，破坏半径也只有他自己。
 
 推导方式（**在任何 worktree 里结果都一样**）：
 
 ```bash
-BOARD="$(dirname "$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")")/.kh-board.md"
+COMMON="$(dirname "$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")")"
+BOARD="$COMMON/.kh-board"
 ```
 
 `--git-common-dir` 是所有 worktree **共享的那一个** `.git`，所以从它往上退两级
 就落在所有 worktree 的共同父目录。这一步是整个协议能成立的关键：
 
 ```
-~/works/codes/knowledge-html/     ← 主仓库
-~/works/codes/kh-ipc/             ← worktree
-~/works/codes/kh-go/              ← worktree
-~/works/codes/.kh-board.md        ← 板子在这里，三个都看得见
+~/works/codes/knowledge-html/         ← 主仓库
+~/works/codes/kh-ipc/                 ← worktree
+~/works/codes/kh-go/                  ← worktree
+~/works/codes/.kh-board/kh-ipc.md     ← 板子在这里，三个都看得见
 ```
 
 > ⚠️ **方案文件**（`plans/*.yaml`）放在仓库里是对的，但**通信**不能放在仓库里 ——
 > 各 worktree 是各自独立的目录，仓库里的文件互相看不见。
+
+### 不用记命令：`tools/board.mjs`
+
+```bash
+npm run board                            # 读：最近 30 条（旧单文件 + 每人一个文件，按时间合并）
+npm run board -- --tail 60               # 看更多
+npm run board -- --path                  # 只打印板子位置
+npm run board -- --post 进行中 "在做…; 会动…; 需要…"
+```
+
+发只发到自己那份（会话名 = worktree 目录名），读会把所有文件合起来按时间排。
+==合并发生在读的那一头 —— 写的那一头就再也不需要协同了。==
+
+### 旧的那个单文件
+
+**不再往里写，但一直读。** 它是历史，里面那些行格式和新的一样，
+合并排序时天然落在前面。不要把它搬进 `.kh-board/`、也不要重写它 ——
+搬一次就多一个可能写坏的地方，而它已经没有新内容了。
 
 ---
 
@@ -80,24 +113,29 @@ BOARD="$(dirname "$(dirname "$(git rev-parse --path-format=absolute --git-common
 
 ## 五条规则
 
-### ① 一条消息一次 `printf >>` 追加
+### ① 一条消息一次写完 —— 只写自己那份
 
 ```bash
-printf '%s\n' "[$NAME | $(date '+%m-%d %H:%M') | 进行中] ..." >> "$BOARD"
+npm run board -- --post 进行中 "在做 IPC 对比 6 篇; 会动 notes/ipc-compare-*; 需要 无"
 ```
 
-`>>`（`O_APPEND`）的一次 `write()` 是原子的。只要**一条消息在一次调用里写完**，
-就不会和别人的写交错。
+它做的事就一句：往 `.kh-board/<你的会话名>.md` 追加**一行**。
+`>>`（`O_APPEND`）的一次 `write()` 是原子的，而且这个文件只有你在写 ——
+所以既不会和别人的写交错，也不会被别人盖掉。
 
-### ② 永远不要重写整个文件
+### ② 不重写整个文件（自己那份也不重写）
 
 **不要**用编辑器打开改，**不要**用 `>`（那是截断）。
 
 ```bash
-printf '...' >  "$BOARD"     # ❌ 别人刚写的全没了
-vim "$BOARD"                 # ❌ 保存时会覆盖掉这期间的写入
-printf '...' >> "$BOARD"     # ✅
+printf '...' >  "$BOARD/kh-ipc.md"     # ❌ 你的历史没了；读者也就看不到你先说了什么
+vim "$BOARD/kh-ipc.md"                 # ❌ 保存时会覆盖掉这期间的写入
+npm run board -- --post …              # ✅
 ```
+
+拆成一人一个文件之后，==重写最多只伤到你自己 —— 但它仍然是错的==：
+板子是**流水账**，不是文档。读者需要看到「先说了什么、后改成了什么」，
+而不是一个被改干净的现状。
 
 ### ③ 不编辑别人的消息
 
@@ -125,6 +163,10 @@ printf '...' >> "$BOARD"     # ✅
 | **推送之前** | 有没有人和你撞在同一批文件上；有没有人给你留了话 |
 | 收到别人的求助 / 冲突消息后 | 回一句 |
 
+```bash
+npm run board
+```
+
 ---
 
 ## 它解决不了什么
@@ -141,6 +183,7 @@ rows:
   - "`index.html` 冲突": ["——", "它是生成的，**别手动 merge**：随便选一边，重建，再提交"]
   - "`visual-check` 报出并不存在的问题": ["——", "==并行会话也在跑无头浏览器时会假阳性==。等负载降下来重跑"]
   - 两个会话都在等对方: ["规则 ④ 就是为了防这个", "声明完就干，不要阻塞"]
+  - 堆着的 worktree 没人敢删: ["——", "`npm run worktree-audit` 分类；`wip:N` 先问人；钉住的不进候选"]
 ```
 
 **一句话**：板子解决的是**信息不对称**，不解决**资源争用**。

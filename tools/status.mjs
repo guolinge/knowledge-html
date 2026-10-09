@@ -44,6 +44,7 @@ const RULES = [
     test: (p) =>
       p === 'index.html' ||
       p.startsWith('dist/') ||
+      p.startsWith('skill/') ||
       /^notes\/[^/]+\/index\.html$/.test(p),
   },
   {
@@ -54,6 +55,7 @@ const RULES = [
       p.startsWith('assets/') ||
       p.startsWith('tools/') ||
       p === 'package.json' ||
+      p === 'AGENTS.md' ||
       p.startsWith('.agents/') ||
       p.startsWith('.githooks/') ||
       p === '.gitignore',
@@ -122,7 +124,6 @@ for (const e of entries) {
 /* ── 报告 ───────────────────────────────────────────────── */
 
 const CODE_LABEL = { M: '改', A: '新', '?': '新', D: '删', R: '移', C: '拷', U: '冲', '!!': '冲' };
-const cwd = process.cwd();
 const ago = (f) => {
   try {
     const m = fs.statSync(path.join(ROOT, f)).mtimeMs;
