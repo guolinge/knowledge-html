@@ -4,7 +4,7 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>SQL Builder 的四步：每层吃什么、吐什么</title>
-<meta name="description" content="《技术方案》4.3 那节，按四个步骤拆成可讲的形状：Validate 分两段是因为一段不需要字段字典；Resolve 把名字换成物理位置，关系子项要查两次；Compile 把四类叶子编成五种 SQL 形状；Assemble 拿同一段 WHERE 套出四条语句。另收三处最容易被挑的扭转，以及扩展时各要改哪里。" />
+<meta name="description" content="《技术方案》4.3 那节，按四个步骤拆成可讲的形状：Validate 分两段是因为一段不需要字段字典；Resolve 把名字换成物理位置，关系子项要查两次；Compile 把三类叶子编成五种 SQL 形状；Assemble 拿同一段 WHERE 套出四条语句。另收三处最容易被挑的扭转，以及扩展时各要改哪里。" />
 <style>
 /* ============================================================
    theme.css — 设计 token 与页面骨架
@@ -5075,10 +5075,13 @@ svg[data-preset="blueprint"] .c-security-group,
       <a href="#resolve把名字换成物理位置">Resolve：把名字换成物理位置</a>
       <a href="#真实形态-2" class="sub">真实形态</a>
       <a href="#有个东西库里没有对应的列" class="sub">有个东西库里没有对应的列</a>
-      <a href="#compile四类叶子五种形状">Compile：四类叶子，五种形状</a>
-      <a href="#先看它交出去的是什么形态" class="sub">先看它交出去的是什么形态</a>
-      <a href="#四类叶子编成什么" class="sub">四类叶子编成什么</a>
-      <a href="#组节点递归-括号" class="sub">组节点：递归 + 括号</a>
+      <a href="#compile一棵树怎么变成一段-where">Compile：一棵树怎么变成一段 WHERE</a>
+      <a href="#先看这一步要交什么货" class="sub">先看这一步要交什么货</a>
+      <a href="#如果让每个节点返回一个字符串" class="sub">如果让每个节点返回一个字符串</a>
+      <a href="#那就不返回值返回一个动作" class="sub">那就不返回值，返回一个动作</a>
+      <a href="#括号究竟是谁加的" class="sub">括号究竟是谁加的</a>
+      <a href="#三类叶子五种形状">三类叶子，五种形状</a>
+      <a href="#一个例外-sql-bindings-只在-exclude-时出现" class="sub">一个例外：{ sql, bindings } 只在 exclude 时出现</a>
       <a href="#权限谓词写在所有条件之前" class="sub">权限谓词，写在所有条件之前</a>
       <a href="#assemble同一段-where四条语句">Assemble：同一段 WHERE，四条语句</a>
       <a href="#真实形态-3" class="sub">真实形态</a>
@@ -5097,7 +5100,7 @@ svg[data-preset="blueprint"] .c-security-group,
     <div class="hero">
       <span class="eyebrow">● 从零理解 · 编译层</span>
       <h1>SQL Builder 的四步：每层吃什么、吐什么</h1>
-      <p class="lede">《技术方案》4.3 那节，按四个步骤拆成可讲的形状：Validate 分两段是因为一段不需要字段字典；Resolve 把名字换成物理位置，关系子项要查两次；Compile 把四类叶子编成五种 SQL 形状；Assemble 拿同一段 WHERE 套出四条语句。另收三处最容易被挑的扭转，以及扩展时各要改哪里。</p>
+      <p class="lede">《技术方案》4.3 那节，按四个步骤拆成可讲的形状：Validate 分两段是因为一段不需要字段字典；Resolve 把名字换成物理位置，关系子项要查两次；Compile 把三类叶子编成五种 SQL 形状；Assemble 拿同一段 WHERE 套出四条语句。另收三处最容易被挑的扭转，以及扩展时各要改哪里。</p>
     </div>
 
 
@@ -5126,7 +5129,7 @@ svg[data-preset="blueprint"] .c-security-group,
 <h2 id="先划线它做什么不做什么"><span class="num">01</span>先划线：它做什么、不做什么</h2>
 <p>划这条线很重要，因为它决定了「输入输出」怎么定义。</p>
 <div class="compare-wrap"><table class="compare"><thead><tr><th>维度</th><th>SQL Builder 做</th><th>SQL Builder 不做</th></tr></thead><tbody><tr><th>编译</th><td data-label="SQL Builder 做">把 DSL 里的名字换成物理列名，拼出一条完整 SQL</td><td data-label="SQL Builder 不做">决定跑到哪张表、要不要分区裁剪 —— 那是 Doris 的事</td></tr><tr><th>连接</th><td data-label="SQL Builder 做"><span class="tag tone-green">不连接任何数据库</span></td><td data-label="SQL Builder 不做"><span class="tag tone-red">连库、执行、拿结果</span></td></tr><tr><th>权限</th><td data-label="SQL Builder 做">按调用方传进来的 actor 拼出 <code>u.staff_id = 101</code> 这一句</td><td data-label="SQL Builder 不做">决定 actor 是谁 —— 那是 BFF 的事，前端说的不算</td></tr><tr><th>字段语义</th><td data-label="SQL Builder 做">按传进来的 Catalog 解析字段</td><td data-label="SQL Builder 不做">维护 Catalog —— 那是 Data Admin 的事</td></tr><tr><th>值</th><td data-label="SQL Builder 做">把 DSL 值按语义类型转成 SQL 字面量</td><td data-label="SQL Builder 不做">查候选值对不对 —— 枚举校验只对着 Catalog 里那一份</td></tr></tbody></table></div><p>因为它不连库，所以它的<strong>产出是文本</strong>，不是 result set。方案里专门写了一条：编译对外返回一条完整 SQL 文本，不是「SQL + 参数数组」。</p>
-<p>这一条决定了后面所有形状：值是拼进语句里的字面量，那就必须自己保证转义正确（06 节）。</p>
+<p>这一条决定了后面所有形状：值是拼进语句里的字面量，那就必须自己保证转义正确（07 节）。</p>
 <hr>
 <h2 id="四步的输入输出"><span class="num">02</span>四步的输入输出</h2>
 <div class="pipe"><div class="lane tone-amber">
@@ -5254,7 +5257,7 @@ export function compile(query: InsightQuery, options: CompileOptions): CompileRe
 <p>从这个骨架能读出两件事：</p>
 <ul>
 <li><strong><code>universeTable</code> 决定 <code>FROM</code> 哪张表。</strong> 那 12 个字段的 <code>table</code> 全部是它，
-所以生成的 SQL 从头到尾只有一张主表 —— 对比 06 节的 <code>uidsSql</code>，<code>FROM</code> 后确实只有 <code>user_portraits_wide</code>。</li>
+所以生成的 SQL 从头到尾只有一张主表 —— 对比 07 节的 <code>uidsSql</code>，<code>FROM</code> 后确实只有 <code>user_portraits_wide</code>。</li>
 <li>每个字段都带 <code>table</code>，<mark class="mk-amber">但在这份数据里它从不发挥作用</mark>。编译器里留着
 「字段在别的表上就 LEFT JOIN 过来」的分支，而这 12 个字段没有一例外。
 <mark class="mk-blue">所以那段 JOIN 逻辑在这份 catalog 下永远不会跑</mark>，读代码时容易误以为真的会联表。</li>
@@ -5342,7 +5345,7 @@ UNSUPPORTED_VERSION  UNKNOWN_FIELD  UNKNOWN_RELATION  UNKNOWN_RELATION_PROP
 OP_NOT_ALLOWED  VALUE_TYPE  INCOMPLETE_LEAF  UNKNOWN_NODE
 </code></pre></div>
 <p>对照一下方案列的 13 个：代码里有而方案没写的是 <code>SCOPE_DENIED</code>；
-方案里有而代码里一个都没有的是 <mark class="mk-amber"><code>DISABLED_REF</code></mark>（09 节展开）。</p>
+方案里有而代码里一个都没有的是 <mark class="mk-amber"><code>DISABLED_REF</code></mark>（10 节展开）。</p>
 <hr>
 <h2 id="resolve把名字换成物理位置"><span class="num">04</span>Resolve：把名字换成物理位置</h2>
 <p>四种解析，三种查法：</p>
@@ -5434,37 +5437,155 @@ days_since  →  DATEDIFF(CURRENT_DATE(), col)
 <p><code>derive_kind</code> 的取值<strong>写死在代码里</strong>，Metadata 只能从里面挑，不能自己新增。理由是很直接的一条：每增加一种派生方式，编译器就要多一个对应的 SQL 模板。也就是说，<mark class="mk-blue">这一列看起来是数据，改它就是在改代码</mark>。</p>
 <p>本条还有一句限定：派生方式决定的是「<code>column_name</code> 这个位置填什么」。<code>column_name</code> 和 <code>derive_kind</code> 的关系是「填了列名就不再填派生」。</p>
 <hr>
-<h2 id="compile四类叶子五种形状"><span class="num">05</span>Compile：四类叶子，五种形状</h2>
-<h3 id="先看它交出去的是什么形态">先看它交出去的是什么形态</h3>
-<p>这一步最容易被讲错的地方：它<strong>不返回 SQL 字符串</strong>。
-<code>compileTree()</code> 返回的是一个闭包，类型的真实定义就三行：</p>
+<h2 id="compile一棵树怎么变成一段-where"><span class="num">05</span>Compile：一棵树怎么变成一段 WHERE</h2>
+<h3 id="先看这一步要交什么货">先看这一步要交什么货</h3>
+<p>输入是一棵条件树，输出是 <code>WHERE</code> 里的一段条件。拿一棵最小的真树走一遍，
+条件读作「年龄 ≥ 18」且「地区是美国或中国香港」：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-json">{ &quot;type&quot;: &quot;group&quot;, &quot;logic&quot;: &quot;AND&quot;, &quot;children&quot;: [
+  { &quot;type&quot;: &quot;portrait&quot;, &quot;field&quot;: &quot;age&quot;, &quot;op&quot;: &quot;gte&quot;, &quot;value&quot;: 18 },
+  { &quot;type&quot;: &quot;group&quot;, &quot;logic&quot;: &quot;OR&quot;, &quot;children&quot;: [
+    { &quot;type&quot;: &quot;portrait&quot;, &quot;field&quot;: &quot;region&quot;, &quot;op&quot;: &quot;eq&quot;, &quot;value&quot;: &quot;US&quot; },
+    { &quot;type&quot;: &quot;portrait&quot;, &quot;field&quot;: &quot;region&quot;, &quot;op&quot;: &quot;eq&quot;, &quot;value&quot;: &quot;HK&quot; }
+  ]}
+]}
+</code></pre></div>
+<p>真实编译出来的那一段（<code>uidsSql</code> 的 WHERE 部分；<code>staff_id = 101</code> 是权限谓词，
+由服务端按调用方身份加上，02 节讲过）：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-sql">WHERE `u`.`staff_id` = 101
+  AND (`u`.`birthday` &lt;= '2008-10-09'
+  AND (`u`.`region` = 'US' OR `u`.`region` = 'HK'))
+</code></pre></div>
+<p>树的嵌套结构，原样变成了括号的嵌套。这一步的难点全在括号上，其余部分是照着类型往下抄。</p>
+<h3 id="如果让每个节点返回一个字符串">如果让每个节点返回一个字符串</h3>
+<p>最省事的做法是：每个节点把自己那截 SQL 拼成字符串返回，父节点拿 <code>AND</code> 或 <code>OR</code> 连起来。</p>
+<p>内层那个 OR 组会返回：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-sql">`u`.`region` = 'US' OR `u`.`region` = 'HK'
+</code></pre></div>
+<p>外层 AND 组把两个孩子连起来，再让权限谓词接在前面，拿到的是：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-sql">WHERE `u`.`staff_id` = 101 AND `u`.`birthday` &lt;= '2008-10-09' AND `u`.`region` = 'US' OR `u`.`region` = 'HK'
+</code></pre></div>
+<p>这行是错的，而且错得危险。SQL 的规矩是 <code>AND</code> 比 <code>OR</code> 先算，所以它实际等于：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-sql">WHERE (`u`.`staff_id` = 101 AND `u`.`birthday` &lt;= '2008-10-09' AND `u`.`region` = 'US')
+   OR (`u`.`region` = 'HK')
+</code></pre></div>
+<p>最后那一截独立出去了。<mark class="mk-blue">它把权限和年龄条件全甩掉</mark>：只要地区是中国香港，
+不管是不是这位员工名下的客户、不管年龄多大，都会被选出来。</p>
+<p>这个优先级可以拿数据库直接验，把 <code>0</code> 换成假条件、<code>1</code> 换成真条件就是上面那件事：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-bash">$ mysql -e &quot;SELECT 1 WHERE 0=1 AND 0=1 OR 1=1&quot;
+1 row      # 前面那两个假条件没拦住它
+$ mysql -e &quot;SELECT 1 WHERE 0=1 AND (0=1 OR 1=1)&quot;
+0 rows     # 加上括号才拦得住
+</code></pre></div>
+<p>那让父节点自己补括号行不行？也不行。父节点手上只有一截字符串，
+<mark class="mk-blue">它看不出这截字符串里有没有 <code>OR</code></mark>，也就不知道要不要包。
+想判断就得把字符串再解析回树，等于把刚做完的活倒着做一遍。</p>
+<h3 id="那就不返回值返回一个动作">那就不返回值，返回一个动作</h3>
+<p>既然括号是父节点猜不出来的，就换个方向：把「加到哪」和「用哪个连接词」交给子节点，
+让它当场把自己加上去。于是这一步的产物不是字符串，是一段还没执行的动作：</p>
 <div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-ts">type Gate  = 'and' | 'or';
 type Apply = (query: Knex.QueryBuilder, gate: Gate) =&gt; void;
 
-function compileTree(tree: BoolNode | null, ctx: CompileCtx): Apply | null
+function compileNode(node: BoolNode, ctx: CompileCtx): Apply | null
 </code></pre></div>
-<p><code>Apply</code> 读作<mark class="mk-blue">怎么把这段条件加到某个查询上</mark>。它不是值，是一段还没执行的动作：
-拿到它的时侯并不知道要加到哪里，也不知道前面已经有几个条件。
-这么设计是为了解括号：组节点拿到子节点的 <code>Apply</code> 后，
-自己决定用 <code>and</code> 还是 <code>or</code> 把它们串起来，串完再包一层。</p>
-<p><mark class="mk-amber">真正的 <code>{ sql, bindings }</code> 出现在更内层，而且只在需要重新包裹时才出现。</mark>
-<code>compile()</code> 里只有 exclude 走了那一步，因为它要把整段条件包进 <code>NOT COALESCE( ... , FALSE )</code>：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-ts">// compile.ts 130 行附近
-builder.whereRaw(`NOT COALESCE((${exclude.sql}), FALSE)`, [...exclude.bindings]);
+<p><code>Apply</code> 读作<mark class="mk-blue">怎么把这段条件加到某个查询上</mark>。两个参数各管一件事：</p>
+<table>
+<thead>
+<tr>
+<th>参数</th>
+<th>管什么</th>
+<th>值从哪来</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>query</code></td>
+<td>加到哪个查询上</td>
+<td>组节点把自己括号里那个 builder 传下来，子节点的条件就落在括号内</td>
+</tr>
+<tr>
+<td><code>gate</code></td>
+<td>用 <code>and</code> 还是 <code>or</code></td>
+<td>父节点按 <code>logic</code> 决定后传下来</td>
+</tr>
+</tbody>
+</table>
+<p><code>gate</code> 为什么非得当参数传？因为 <mark class="mk-blue">Knex 把连接词写进了方法名</mark>，没有「加一个条件、连接词另外指定」这种写法：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-ts">// compile.ts 261 行附近：同一个子查询，按 gate 挑不同方法
+if (gate === 'or') query.orWhereIn(`${UNIVERSE_ALIAS}.uid`, inner);
+else               query.whereIn(`${UNIVERSE_ALIAS}.uid`, inner);
 </code></pre></div>
-<p><code>exclude</code> 是从哪儿来的？<code>whereFragment(apply)</code>：把 <code>Apply</code> 跑在一个空 builder 上，
-再把 <code>where</code> 后面的那截字符串和绑定值取出来（实际跑出来的返回值，值都没改）：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-json">{
-  &quot;sql&quot;: &quot;`u`.`gender` = ? and u.uid &gt; ?&quot;,
-  &quot;bindings&quot;: [&quot;M&quot;, 100]
-}
+<p>所以 <code>gate</code> 不是可有可无的提示，它决定调哪个方法。</p>
+<h3 id="括号究竟是谁加的">括号究竟是谁加的</h3>
+<p>组节点的真实代码（<code>compileNode</code> 开头，226 行附近）：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-ts">const grouped = function (this: Knex.QueryBuilder) {
+  children.forEach((child, index) =&gt; {
+    child(this, index === 0 ? 'and' : logic === 'OR' ? 'or' : 'and');
+  });
+};
+if (gate === 'or') query.orWhere(grouped);
+else               query.where(grouped);
 </code></pre></div>
-<p><mark class="mk-blue">所以参数绑定确实存在，但它不是这一层的输出、也不是对外的产物</mark>。
-它只活在「拼片段给上层再包一次」这一个环节。include 那段根本不经过 <code>whereFragment</code>，
-它是直接 <code>includeApply(builder, 'and')</code> 挂到主查询上的。</p>
-<h3 id="四类叶子编成什么">四类叶子编成什么</h3>
-<p>规则可以压成一张表：</p>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>叶子</th><th>编译成什么形状</th><th>真实 SQL（简化）</th></tr></thead><tbody><tr><th><code>portrait</code></th><td data-label="编译成什么形状"><code>col op 值</code></td><td data-label="真实 SQL（简化）"><code>u</code>.<code>birthday</code> &gt;= ?</td></tr><tr><th><code>relation</code> + <code>detail</code> + <code>in</code></th><td data-label="编译成什么形状"><code>uid IN ( 子查询 )</code></td><td data-label="真实 SQL（简化）"><code>u.uid IN (SELECT uid FROM rel_holding WHERE object_id IN (...))</code></td></tr><tr><th><code>relation</code> + <code>detail</code> + <code>not_in</code></th><td data-label="编译成什么形状"><span class="tag tone-amber"><code>NOT EXISTS ( 相关子查询 )</code></span></td><td data-label="真实 SQL（简化）"><code>NOT EXISTS (SELECT 1 FROM rel_holding WHERE rel_holding.uid = u.uid AND ...)</code></td></tr><tr><th><code>relation</code> + <code>times</code></th><td data-label="编译成什么形状"><code>uid IN ( 子查询 GROUP BY uid HAVING COUNT(*) op 值 )</code></td><td data-label="真实 SQL（简化）"><code>u.uid IN (SELECT uid FROM rel_trade WHERE ... GROUP BY uid HAVING COUNT(*) &gt;= 3)</code></td></tr><tr><th><code>uid</code></th><td data-label="编译成什么形状"><code>u.uid IN ( 一串字面量 )</code></td><td data-label="真实 SQL（简化）"><code>u.uid IN (11, 22)</code></td></tr></tbody></table></div><p><mark class="mk-blue">相同的一批数据，换一个 <code>op</code> 就换一种形状</mark>，这是 4.3 里最该讲清楚的一处扭转。看实测出来的两条：</p>
+<p>三件事值得读出来：</p>
+<ol>
+<li><code>query.where(函数)</code> 里传的是函数，Knex 会把它整个用括号包起来。括号是这么来的，全文没有一处手写 <code>(</code>。</li>
+<li><code>forEach</code> 里第一个孩子拿 <code>'and'</code>。它前面还没有条件，连接词用不上，但参数总得给一个。</li>
+<li>后面每个孩子按 <code>logic</code> 拿 <code>'or'</code> 或 <code>'and'</code>。连接词由父节点定，方法名由孩子自己挑。</li>
+</ol>
+<p>树的形状和产物对应起来是这样（最下面一行是各叶子那段 SQL）：</p>
+<div class="tree" data-tree><ul class="tlist"><li class="has-kids">
+            <div class="tnode tone-violet" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>组节点 · AND</b>
+              <code>logic=AND</code>
+              <span class="tnote">query.where( grouped )，整体自带一层括号</span>
+            </div>
+            <ul class="tlist"><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>portrait 叶子</b>
+              <code>age gte 18</code>
+              <span class="tnote">→ <code>u</code>.<code>birthday</code> &lt;= '2008-10-09'</span>
+            </div>
+            
+          </li><li class="has-kids">
+            <div class="tnode tone-violet" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>组节点 · OR</b>
+              <code>logic=OR</code>
+              <span class="tnote">query.orWhere( grouped )，再包一层括号</span>
+            </div>
+            <ul class="tlist"><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>portrait 叶子</b>
+              <code>region eq US</code>
+              <span class="tnote">→ <code>u</code>.<code>region</code> = 'US'</span>
+            </div>
+            
+          </li><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>portrait 叶子</b>
+              <code>region eq HK</code>
+              <span class="tnote">→ <code>u</code>.<code>region</code> = 'HK'</span>
+            </div>
+            
+          </li></ul>
+          </li></ul>
+          </li></ul></div><p>方案里「技术选型：Knex」讲的三件事之一就是括号嵌套：条件树是嵌套的，手拼括号要自己数层数。</p>
+<hr>
+<h2 id="三类叶子五种形状"><span class="num">06</span>三类叶子，五种形状</h2>
+<p>前面讲的是「怎么算出来」，这一节讲「算出来有几种」。<code>WHERE</code> 里能出现的条件形状一共五种，
+任何一个叶子节点编出来都落在这五种里。</p>
+<p>能进这棵树的节点，<code>schema.ts</code> 里只有四种：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-ts">type BoolNode = BoolTree | PortraitLeaf | RelationLeaf | UidLeaf;
+</code></pre></div>
+<p><code>BoolTree</code> 是上面讲完的组节点，另外三种是叶子：画像字段、关系、点名的 uid。</p>
+<p>三种叶子按 <code>formula</code> 和 <code>op</code> 再分，落到 SQL 上是五种形状：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>叶子</th><th>编译成什么形状</th><th>真实 SQL（简化）</th></tr></thead><tbody><tr><th><code>portrait</code></th><td data-label="编译成什么形状"><code>col op 值</code></td><td data-label="真实 SQL（简化）"><code>u</code>.<code>birthday</code> &gt;= ?</td></tr><tr><th><code>relation</code> + <code>detail</code> + <code>in</code></th><td data-label="编译成什么形状"><code>uid IN ( 子查询 )</code></td><td data-label="真实 SQL（简化）"><code>u.uid IN (SELECT uid FROM rel_holding WHERE object_id IN (...))</code></td></tr><tr><th><code>relation</code> + <code>detail</code> + <code>not_in</code></th><td data-label="编译成什么形状"><span class="tag tone-amber"><code>NOT EXISTS ( 相关子查询 )</code></span></td><td data-label="真实 SQL（简化）"><code>NOT EXISTS (SELECT 1 FROM rel_holding WHERE rel_holding.uid = u.uid AND ...)</code></td></tr><tr><th><code>relation</code> + <code>times</code></th><td data-label="编译成什么形状"><code>uid IN ( 子查询 GROUP BY uid HAVING COUNT(*) op 值 )</code></td><td data-label="真实 SQL（简化）"><code>u.uid IN (SELECT uid FROM rel_trade WHERE ... GROUP BY uid HAVING COUNT(*) &gt;= 3)</code></td></tr><tr><th><code>uid</code></th><td data-label="编译成什么形状"><code>u.uid IN ( 一串字面量 )</code></td><td data-label="真实 SQL（简化）"><code>u.uid IN (11, 22)</code></td></tr></tbody></table></div><p>关系的三行是这么来的：<code>formula</code> 有两种（<code>detail</code> 看有没有、<code>times</code> 数几条），
+<code>detail</code> 又按 <code>op</code> 分成正向和 <code>not_in</code> 反向，加起来三种，和画像、uid 一起就是五种。
+分支点就在 compileRelation 的开头两行判断上。</p>
+<p><mark class="mk-blue">同一批数据换一个 <code>op</code> 就换一种形状</mark>，这是 4.3 里最该讲清楚的一处扭转。看实测出来的两条：</p>
 <div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-sql">-- detail + in：存在一条匹配的关系记录
 SELECT `u`.`uid` AS `uid`
 FROM `user_portraits_wide` AS `u`
@@ -5487,71 +5608,30 @@ WHERE `u`.`staff_id` = 101
         HAVING COUNT(*) &gt;= 2
       ))
 </code></pre></div>
-<p>同一张 <code>rel_holding</code>，同一批 <code>objects</code>，差别只在<mark class="mk-blue">把「存在」换成「数一数」</mark>。于是子查询从「查有哪些 uid」变成「按 uid 分组再筛」。</p>
-<h3 id="组节点递归-括号">组节点：递归 + 括号</h3>
-<p>方案那句「遇到组节点就递归它的子节点，遇到叶子节点就生成一段条件，再用 AND 或 OR 把子节点的片段连起来」，落到代码里是一个很短的函数：组节点的编译结果就是「把子节点依次挂到同一个 where 上」，第一个子节点不带连接词，后面的按 <code>logic</code> 决定用 <code>and</code> 还是 <code>or</code>。</p>
-<div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;g&quot;,&quot;to&quot;:&quot;a&quot;},{&quot;from&quot;:&quot;g&quot;,&quot;to&quot;:&quot;b&quot;},{&quot;from&quot;:&quot;b&quot;,&quot;to&quot;:&quot;c&quot;},{&quot;from&quot;:&quot;a&quot;,&quot;to&quot;:&quot;fa&quot;},{&quot;from&quot;:&quot;c&quot;,&quot;to&quot;:&quot;fc&quot;},{&quot;from&quot;:&quot;fa&quot;,&quot;to&quot;:&quot;out&quot;},{&quot;from&quot;:&quot;fc&quot;,&quot;to&quot;:&quot;out&quot;}]">
-      <svg class="flowd-svg" aria-hidden="true">
-        <defs>
-          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
-                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
-            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
-          </marker>
-        </defs>
-      </svg>
-      <div class="flowd-groups"></div>
-      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-violet" data-id="g">
-              
-              
-              <b>组节点 · AND</b>
-              <small>logic=AND，两个孩子</small>
-            </div></div><div class="flowd-row"><div class="fnode tone-blue" data-id="a">
-              
-              
-              <b>孩子① · 画像叶子</b>
-              <small>age gte 18</small>
-            </div><div class="fnode tone-violet" data-id="b">
-              
-              
-              <b>孩子② · 组节点 · OR</b>
-              <small>再往下递归一层</small>
-            </div></div><div class="flowd-row"><div class="fnode tone-blue" data-id="c">
-              
-              
-              <b>孩子②的两个叶子</b>
-              <small>region=US OR region=SG</small>
-            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="fa">
-              
-              
-              <b>片段 A</b>
-              <small><code>u</code>.<code>birthday</code> &lt;= ?</small>
-            </div><div class="fnode tone-green" data-id="fc">
-              
-              
-              <b>片段 C</b>
-              <small><code>u</code>.<code>region</code> = 'US' OR <code>u</code>.<code>region</code> = 'SG'</small>
-            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="out">
-              
-              
-              <b>整棵树的 WHERE 片段</b>
-              <small>( 片段A AND ( 片段C ) )</small>
-            </div></div></div>
-      
-    </div><p>这里出现了一个会让人踩坑的细节：<mark class="mk-amber"><code>where(a).orWhere(b)</code> 与 <code>whereRaw('a OR b')</code> 不等价</mark>。前者在已经有别的条件时会变成 <code>x AND a OR b</code>（<code>OR</code> 的优先级把前面的条件整个吞掉）。所以组节点必须整体包一层括号，方案举的例子也正是带括号的：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-sql">-- 条件为「年龄 ≥ 18 且地区 = US」
-WHERE `u`.`staff_id` = 101
-  AND (
-    TIMESTAMPDIFF(YEAR, `u`.`birthday`, CURRENT_DATE()) &gt;= 18
-    AND `u`.`region` = 'US'
-  )
+<p>同一张 <code>rel_holding</code>，同一批 <code>objects</code>，差别只在把「存在」换成「数一数」。于是子查询从「查有哪些 uid」变成「按 uid 分组再筛」。</p>
+<h3 id="一个例外-sql-bindings-只在-exclude-时出现">一个例外：<code>{ sql, bindings }</code> 只在 exclude 时出现</h3>
+<p>前面一直说这一步不返回字符串。<code>compile()</code> 内部确实有一处把 <code>Apply</code> 变成了字符串，
+只有 exclude 走这道手续，因为它要把整段条件塞进 <code>NOT COALESCE( ... , FALSE )</code>：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-ts">// compile.ts 130 行附近
+builder.whereRaw(`NOT COALESCE((${exclude.sql}), FALSE)`, [...exclude.bindings]);
 </code></pre></div>
-<p>方案里「技术选型：Knex」讲的三件事之一就是括号嵌套：条件树是嵌套的，手拼括号要自己数层数。</p>
+<p><code>exclude.sql</code> 是 <code>whereFragment(apply)</code> 的返回值：把 <code>Apply</code> 在一个空 builder 上跑一遍，
+再取 <code>where</code> 后面那截字符串。真实跑出来的值：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-json">{
+  &quot;sql&quot;: &quot;`u`.`gender` = ? and u.uid &gt; ?&quot;,
+  &quot;bindings&quot;: [&quot;M&quot;, 100]
+}
+</code></pre></div>
+<p>参数绑定确实存在，但它不是这一层的产物，也不对外。它只活在「把片段拼成字符串再包一次」这一个环节里。
+include 那段根本不经过 <code>whereFragment</code>，它是直接 <code>includeApply(builder, 'and')</code> 挂到主查询上的。</p>
 <h3 id="权限谓词写在所有条件之前">权限谓词，写在所有条件之前</h3>
-<p><code>scope</code> 描述的「客户范围」不由 DSL 决定，而是<strong>由服务端按调用方身份补上</strong>的一小段条件：</p>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>actor 与 scope</th><th>追加的谓词</th></tr></thead><tbody><tr><th><code>dataLevel = self</code></th><td data-label="追加的谓词"><code>u.staff_id = 101</code>（当前登录人的 staffId）</td></tr><tr><th><code>dataLevel = team</code></th><td data-label="追加的谓词"><code>u.group_id IN (1, 2, 3)</code>（当前登录人可见的 groupId）</td></tr><tr><th><code>scope.kind = team</code> 且调用方是组长</th><td data-label="追加的谓词">两者取交集，越权的 groupId 被过滤掉</td></tr></tbody></table></div><p>它和业务条件是 AND 关系，写在 WHERE 的哪个位置语义上都一样。方案给了「为什么放最前面」的理由：让生成的语句有<mark class="mk-blue">一个固定形状</mark>：任何身份、任何条件下，都是先限权限、再谈业务。排查问题时一眼就能找到权限那一段。</p>
-<p>顺带一句边界：<code>scope</code> 越权（比如只有「本人」权限却传了 <code>team</code>）<mark class="mk-blue">整次查询拒绝</mark>，不做「默默裁剪成权限内」。</p>
+<p>上面那些条件都还没算权限时，<code>WHERE</code> 的第一段已经固定下来了。
+<code>scope</code> 描述的「客户范围」不由 DSL 决定，而是由服务端按调用方身份补上的一小段条件：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>actor 与 scope</th><th>追加的谓词</th></tr></thead><tbody><tr><th><code>dataLevel = self</code></th><td data-label="追加的谓词"><code>u.staff_id = 101</code>（当前登录人的 staffId）</td></tr><tr><th><code>dataLevel = team</code></th><td data-label="追加的谓词"><code>u.group_id IN (1, 2, 3)</code>（当前登录人可见的 groupId）</td></tr><tr><th><code>scope.kind = team</code> 且调用方是组长</th><td data-label="追加的谓词">两者取交集，越权的 groupId 被过滤掉</td></tr></tbody></table></div><p>它和业务条件是 AND 关系，写在 WHERE 的哪个位置语义上都一样。方案给了「为什么放最前面」的理由：让生成的语句有一个固定形状：任何身份、任何条件下，都是先限权限、再谈业务。排查问题时一眼就能找到权限那一段。</p>
+<p>顺带一句边界：<code>scope</code> 越权（比如只有「本人」权限却传了 <code>team</code>）整次查询拒绝，不做「默默裁剪成权限内」。</p>
 <hr>
-<h2 id="assemble同一段-where四条语句"><span class="num">06</span>Assemble：同一段 WHERE，四条语句</h2>
+<hr>
+<h2 id="assemble同一段-where四条语句"><span class="num">07</span>Assemble：同一段 WHERE，四条语句</h2>
 <div class="compare-wrap"><table class="compare"><thead><tr><th>语句</th><th>外层长什么样</th><th>分页，四条的共用部分</th><th>谁在用</th></tr></thead><tbody><tr><th>uidsSql</th><td data-label="外层长什么样">SELECT uid FROM 宽表 WHERE 片段</td><td data-label="分页，四条的共用部分">不分页，全量</td><td data-label="谁在用">创建快照 —— 交给 DAL 做 INSERT SELECT</td></tr><tr><th>countSql</th><td data-label="外层长什么样">SELECT COUNT(*) FROM ( uidsSql ) AS t</td><td data-label="分页，四条的共用部分">不分页</td><td data-label="谁在用">预览页显示「共 N 条」</td></tr><tr><th>listSql</th><td data-label="外层长什么样">SELECT 展示列 + ORDER BY uid LIMIT n</td><td data-label="分页，四条的共用部分">uid 游标翻页</td><td data-label="谁在用">预览页的表格</td></tr><tr><th>droppedUidsSql</th><td data-label="外层长什么样">SELECT v.uid FROM ( 点名的 uid ) AS v WHERE NOT EXISTS ( ... )</td><td data-label="分页，四条的共用部分">只在点名了 UID 时才有值，其余是 null</td><td data-label="谁在用">提示「点名的 N 人里有 M 人不在你的数据范围内」</td></tr></tbody></table></div><p>四条语句为什么要分开返回，方案说得很直白：因为 DAL 的三个接口需要的东西不同：预览要人数、预览要一页名单、创建快照要全量 uid。</p>
 <h3 id="真实形态-3">真实形态</h3>
 <p>对外只有这一个对象。拿「年龄≥18 且持有 <a href="http://00700.HK">00700.HK</a> 数量≥100，排除 UID 11/22，第 2 页 10 条」跑一遍，
@@ -5589,7 +5669,7 @@ FROM (
 ) AS `t`
 </code></pre></div>
 <p>包一层是为了<mark class="mk-blue">数人不数行</mark>：主查询里如果有 JOIN 或关系子查询，外层直接 <code>COUNT(*)</code> 数到的可能不是人数。<code>uidsSql</code> 那一层只 <code>SELECT uid</code>，所以它数出来的人数和名单长度天然对得上。</p>
-<p><mark class="mk-amber">但这里有个坑：包一层本身不去重。</mark> 如果 <code>uidsSql</code> 真的出现了重复 uid，这个 <code>COUNT(*)</code> 会照样把它数成两个人。去重靠的是语句形状，关系条件走 <code>IN</code> 子查询而不是 JOIN，就是为了不产生重复行。这一点在 07 节。</p>
+<p><mark class="mk-amber">但这里有个坑：包一层本身不去重。</mark> 如果 <code>uidsSql</code> 真的出现了重复 uid，这个 <code>COUNT(*)</code> 会照样把它数成两个人。去重靠的是语句形状，关系条件走 <code>IN</code> 子查询而不是 JOIN，就是为了不产生重复行。这一点在 08 节。</p>
 <h3 id="listsql-用-uid-游标不用-offset">listSql 用 uid 游标，不用 OFFSET</h3>
 <div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-sql">SELECT
   `u`.`uid`           AS `uid`,
@@ -5616,7 +5696,7 @@ LIMIT 10
 <p>方案选 Knex 做 SQL 构造器（括号、别名、引号转义这三件事手写容易错），但它的默认行为和 Doris、和这份契约对不上。四处补偿：</p>
 <div class="compare-wrap"><table class="compare"><thead><tr><th>Knex 的默认行为</th><th>怎么办</th><th>为什么</th></tr></thead><tbody><tr><th>字符串用反斜杠转义：<code>'O\\'Brien'</code>&quot;</th><td data-label="怎么办">覆盖转义函数，改成单引号翻倍 <code>'O''Brien'</code></td><td data-label="为什么">Doris 走 ANSI 语法</td></tr><tr><th>布尔值输出小写 <code>true</code> / <code>false</code>&quot;</th><td data-label="怎么办">改成 <code>TRUE</code> / <code>FALSE</code></td><td data-label="为什么">Doris 要大写</td></tr><tr><th><code>offset</code> 为 0 时省略 <code>OFFSET</code> 子句</th><td data-label="怎么办">显式补一个 <code>OFFSET 0</code></td><td data-label="为什么">让分页语句的形状保持固定，不随参数变</td></tr><tr><th>关键字输出小写&quot;</th><td data-label="怎么办">渲染之后统一转成大写</td><td data-label="为什么">fixture 和调用方看的是大写形态</td></tr></tbody></table></div><p>方案还限定了一件界外的事：<strong>只把 Knex 当 SQL 构造器用</strong>：不用它的 model、migration、seed 和连接池。因为本包不连数据库，只生成文本。</p>
 <hr>
-<h2 id="三处扭转"><span class="num">07</span>三处扭转</h2>
+<h2 id="三处扭转"><span class="num">08</span>三处扭转</h2>
 <p>这三处是评审时最容易被挑的地方，也是方案专门用「实现约定」一节写的。</p>
 <h3 id="扭转一关系条件用-in-子查询不用-left-join">扭转一：关系条件用 <code>IN</code> 子查询，不用 LEFT JOIN</h3>
 <div class="compare-wrap"><table class="compare"><thead><tr><th>写法</th><th>一个人持 5 个标的会怎样</th><th>结论</th></tr></thead><tbody><tr><th>LEFT JOIN</th><td data-label="一个人持 5 个标的会怎样"><span class="tag tone-red">JOIN 之后这个人变成 5 行，<code>COUNT(*)</code> 把 1 个人数成 5 个人</span></td><td data-label="结论">不能用</td></tr><tr><th><code>IN</code> 子查询</th><td data-label="一个人持 5 个标的会怎样">只回答「这个 uid 在不在结果集里」，一行对应一个人</td><td data-label="结论">采用</td></tr></tbody></table></div><p>方案在这里补了一句容易被忽略的话：<mark class="mk-blue">子查询里只写 <code>SELECT uid</code> 不会去重</mark>，去重需要 <code>DISTINCT</code> 或 <code>GROUP BY</code>。而本设计是<mark class="mk-blue">从语句形状上避免重复行的产生</mark>，不是在统计时去重。 这正是 countSql 那一层不写 <code>DISTINCT</code> 的前提。</p>
@@ -5640,11 +5720,11 @@ exclude  →  NOT COALESCE((cond1 AND cond2), FALSE)
 <p>方案给的机制解释是：SQL 里 <code>NOT UNKNOWN</code> 的结果<strong>仍是 <code>UNKNOWN</code></strong>，在 WHERE 中按 false 处理，于是「是男性」和「不是男性」两个集合都没收留它。</p>
 <p>这三处扭转让「同一段 WHERE」这句描述变得不准确。准确的说法是：<mark class="mk-blue">include 和 exclude 共用一套叶子编译规则，但最外层包法不同。</mark></p>
 <hr>
-<h2 id="扩展点常见改动各要动哪里"><span class="num">08</span>扩展点：常见改动各要动哪里</h2>
+<h2 id="扩展点常见改动各要动哪里"><span class="num">09</span>扩展点：常见改动各要动哪里</h2>
 <p>方案专门列了这一张表，它回答的是「这个组件的可演进性在哪」。改动分两边：数据在 Data Admin 里配，配完即生效；代码改完要重新发布。</p>
 <div class="compare-wrap"><table class="compare"><thead><tr><th>需要新增</th><th>改哪里</th><th>说明</th></tr></thead><tbody><tr><th>一个数据源</th><td data-label="改哪里"><code>crm_dc_data_source</code> 与 <code>crm_dc_data_field</code> 增加记录</td><td data-label="说明">SQL Builder 不感知有几个数据源，只认传进来的字段字典</td></tr><tr><th>一个操作符</th><td data-label="改哪里"><code>schema.ts</code> 加定义；<code>compile.ts</code> 加编译分支；<code>crm_dc_operator</code> 加记录</td><td data-label="说明"><strong>前三处缺一不可</strong> —— 前两处决定它怎么变成 SQL，第三处决定哪些字段能用它</td></tr><tr><th>一个叶子类型</th><td data-label="改哪里"><code>schema.ts</code> 加类型和类型判断；<code>validate.ts</code> 与 <code>compile.ts</code> 各加分支</td><td data-label="说明">叶子类型是 DSL 结构的一部分，校验和编译都要认识它</td></tr><tr><th>一种派生方式</th><td data-label="改哪里"><code>metadata.ts</code> 的 <code>FieldDerive</code> 加取值与 SQL 模板；<code>crm_dc_data_field</code> 补取值</td><td data-label="说明">可选取值写死在代码里，Metadata 只能从中挑</td></tr></tbody></table></div><p>这张表值得在讲解时点一句：<mark class="mk-blue">四行里只有第一行是纯配置</mark>。加字段不加代码，加操作符和加叶子要发版。这是设计上刻意的取舍，不是疏漏。</p>
 <hr>
-<h2 id="讲的时候留意方案和实现现在的差异"><span class="num">09</span>讲的时候留意：方案和实现现在的差异</h2>
+<h2 id="讲的时候留意方案和实现现在的差异"><span class="num">10</span>讲的时候留意：方案和实现现在的差异</h2>
 <p>4.3 是设计稿，<code>packages/dsl</code> 是按它实现的。<mark class="mk-blue">哪边说了算，按代码。</mark>
 两份对不上的地方列在这里。<mark class="mk-blue">前两行不是“实现落后了”，是方案写错了</mark>。</p>
 <div class="compare-wrap"><table class="compare"><thead><tr><th>项</th><th>技术方案 4.3</th><th>代码里的事实</th></tr></thead><tbody><tr><th>第 ① 步的输出</th><td data-label="技术方案 4.3">「输出还是一份 DSL」</td><td data-label="代码里的事实"><span class="tag tone-red"><code>validate(): void</code> —— 什么都不返回</span></td></tr><tr><th>停用字段的错误码</th><td data-label="技术方案 4.3">语义校验返回 <code>DISABLED_REF</code></td><td data-label="代码里的事实"><span class="tag tone-red"><strong>零处</strong>。这个码在 <code>packages/dsl</code> 里一次都没出现</span></td></tr><tr><th>越权客户范围</th><td data-label="技术方案 4.3">未单独列错误码</td><td data-label="代码里的事实"><span class="tag tone-amber">有 <code>SCOPE_DENIED</code>（3 处引用）</span></td></tr><tr><th>关系对象落到哪一列</th><td data-label="技术方案 4.3">取 Metadata 里 OBJECT 子项的 <code>column_name</code>，例子里叫 <code>symbol</code></td><td data-label="代码里的事实"><span class="tag tone-red"><strong>写死 <code>object_id</code></strong>（<code>compile.ts:356</code>）—— 这个列名不来自 Catalog</span></td></tr><tr><th>派生字段</th><td data-label="技术方案 4.3"><code>derive_kind</code> 两种取值：<code>age_years</code> / <code>days_since</code></td><td data-label="代码里的事实">换成声明式表达式 <code>expr</code>，原语 12 个（<code>div</code> / <code>mul</code> / <code>years_between</code> …）</td></tr><tr><th><code>age &gt;= 18</code> 编成什么</th><td data-label="技术方案 4.3"><code>TIMESTAMPDIFF(YEAR, u.birthday, CURRENT_DATE()) &gt;= 18</code></td><td data-label="代码里的事实"><strong>下推成 <code>birthday &lt;= '2008-10-09'</code></strong>，让条件落在裸列上，Doris 能用分区裁剪和前缀索引</td></tr><tr><th>今天/现在从哪来</th><td data-label="技术方案 4.3">SQL 里直接写 <code>CURRENT_DATE()</code></td><td data-label="代码里的事实">由调用方传入 <code>today</code> / <code>now</code>（<code>CompileOptions</code> 上的可选字段），SQL 不写 <code>CURDATE()</code> / <code>NOW()</code></td></tr><tr><th>数值字面量</th><td data-label="技术方案 4.3">直接写 <code>1000</code></td><td data-label="代码里的事实"><code>CAST('1000' AS DECIMAL(38,10))</code>，避免参数被当 DOUBLE 丢精度</td></tr></tbody></table></div><p>前两行合起来看：<strong><code>DISABLED_REF</code> 不存在，正是因为 <code>validate</code> 什么都不返回。</strong>

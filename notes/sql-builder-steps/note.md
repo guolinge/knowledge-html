@@ -44,7 +44,7 @@ rows:
 
 因为它不连库，所以它的**产出是文本**，不是 result set。方案里专门写了一条：编译对外返回一条完整 SQL 文本，不是「SQL + 参数数组」。
 
-这一条决定了后面所有形状：值是拼进语句里的字面量，那就必须自己保证转义正确（06 节）。
+这一条决定了后面所有形状：值是拼进语句里的字面量，那就必须自己保证转义正确（07 节）。
 
 ---
 
@@ -146,7 +146,7 @@ type Catalog = {
 从这个骨架能读出两件事：
 
 - **`universeTable` 决定 `FROM` 哪张表。** 那 12 个字段的 `table` 全部是它，
-  所以生成的 SQL 从头到尾只有一张主表 —— 对比 06 节的 `uidsSql`，`FROM` 后确实只有 `user_portraits_wide`。
+  所以生成的 SQL 从头到尾只有一张主表 —— 对比 07 节的 `uidsSql`，`FROM` 后确实只有 `user_portraits_wide`。
 - 每个字段都带 `table`，!!但在这份数据里它从不发挥作用!!。编译器里留着
   「字段在别的表上就 LEFT JOIN 过来」的分支，而这 12 个字段没有一例外。
   ==所以那段 JOIN 逻辑在这份 catalog 下永远不会跑==，读代码时容易误以为真的会联表。
@@ -253,7 +253,7 @@ OP_NOT_ALLOWED  VALUE_TYPE  INCOMPLETE_LEAF  UNKNOWN_NODE
 ```
 
 对照一下方案列的 13 个：代码里有而方案没写的是 `SCOPE_DENIED`；
-方案里有而代码里一个都没有的是 !!`DISABLED_REF`!!（09 节展开）。
+方案里有而代码里一个都没有的是 !!`DISABLED_REF`!!（10 节展开）。
 
 ---
 
@@ -350,50 +350,160 @@ days_since  →  DATEDIFF(CURRENT_DATE(), col)
 
 ---
 
-## 05 · Compile：四类叶子，五种形状
+## 05 · Compile：一棵树怎么变成一段 WHERE
 
-### 先看它交出去的是什么形态
+### 先看这一步要交什么货
 
-这一步最容易被讲错的地方：它**不返回 SQL 字符串**。
-`compileTree()` 返回的是一个闭包，类型的真实定义就三行：
+输入是一棵条件树，输出是 `WHERE` 里的一段条件。拿一棵最小的真树走一遍，
+条件读作「年龄 ≥ 18」且「地区是美国或中国香港」：
+
+```json
+{ "type": "group", "logic": "AND", "children": [
+  { "type": "portrait", "field": "age", "op": "gte", "value": 18 },
+  { "type": "group", "logic": "OR", "children": [
+    { "type": "portrait", "field": "region", "op": "eq", "value": "US" },
+    { "type": "portrait", "field": "region", "op": "eq", "value": "HK" }
+  ]}
+]}
+```
+
+真实编译出来的那一段（`uidsSql` 的 WHERE 部分；`staff_id = 101` 是权限谓词，
+由服务端按调用方身份加上，02 节讲过）：
+
+```sql
+WHERE `u`.`staff_id` = 101
+  AND (`u`.`birthday` <= '2008-10-09'
+  AND (`u`.`region` = 'US' OR `u`.`region` = 'HK'))
+```
+
+树的嵌套结构，原样变成了括号的嵌套。这一步的难点全在括号上，其余部分是照着类型往下抄。
+
+### 如果让每个节点返回一个字符串
+
+最省事的做法是：每个节点把自己那截 SQL 拼成字符串返回，父节点拿 `AND` 或 `OR` 连起来。
+
+内层那个 OR 组会返回：
+
+```sql
+`u`.`region` = 'US' OR `u`.`region` = 'HK'
+```
+
+外层 AND 组把两个孩子连起来，再让权限谓词接在前面，拿到的是：
+
+```sql
+WHERE `u`.`staff_id` = 101 AND `u`.`birthday` <= '2008-10-09' AND `u`.`region` = 'US' OR `u`.`region` = 'HK'
+```
+
+这行是错的，而且错得危险。SQL 的规矩是 `AND` 比 `OR` 先算，所以它实际等于：
+
+```sql
+WHERE (`u`.`staff_id` = 101 AND `u`.`birthday` <= '2008-10-09' AND `u`.`region` = 'US')
+   OR (`u`.`region` = 'HK')
+```
+
+最后那一截独立出去了。==它把权限和年龄条件全甩掉==：只要地区是中国香港，
+不管是不是这位员工名下的客户、不管年龄多大，都会被选出来。
+
+这个优先级可以拿数据库直接验，把 `0` 换成假条件、`1` 换成真条件就是上面那件事：
+
+```bash
+$ mysql -e "SELECT 1 WHERE 0=1 AND 0=1 OR 1=1"
+1 row      # 前面那两个假条件没拦住它
+$ mysql -e "SELECT 1 WHERE 0=1 AND (0=1 OR 1=1)"
+0 rows     # 加上括号才拦得住
+```
+
+那让父节点自己补括号行不行？也不行。父节点手上只有一截字符串，
+==它看不出这截字符串里有没有 `OR`==，也就不知道要不要包。
+想判断就得把字符串再解析回树，等于把刚做完的活倒着做一遍。
+
+### 那就不返回值，返回一个动作
+
+既然括号是父节点猜不出来的，就换个方向：把「加到哪」和「用哪个连接词」交给子节点，
+让它当场把自己加上去。于是这一步的产物不是字符串，是一段还没执行的动作：
 
 ```ts
 type Gate  = 'and' | 'or';
 type Apply = (query: Knex.QueryBuilder, gate: Gate) => void;
 
-function compileTree(tree: BoolNode | null, ctx: CompileCtx): Apply | null
+function compileNode(node: BoolNode, ctx: CompileCtx): Apply | null
 ```
 
-`Apply` 读作==怎么把这段条件加到某个查询上==。它不是值，是一段还没执行的动作：
-拿到它的时侯并不知道要加到哪里，也不知道前面已经有几个条件。
-这么设计是为了解括号：组节点拿到子节点的 `Apply` 后，
-自己决定用 `and` 还是 `or` 把它们串起来，串完再包一层。
+`Apply` 读作==怎么把这段条件加到某个查询上==。两个参数各管一件事：
 
-!!真正的 `{ sql, bindings }` 出现在更内层，而且只在需要重新包裹时才出现。!!
-`compile()` 里只有 exclude 走了那一步，因为它要把整段条件包进 `NOT COALESCE( ... , FALSE )`：
+| 参数 | 管什么 | 值从哪来 |
+|---|---|---|
+| `query` | 加到哪个查询上 | 组节点把自己括号里那个 builder 传下来，子节点的条件就落在括号内 |
+| `gate` | 用 `and` 还是 `or` | 父节点按 `logic` 决定后传下来 |
+
+`gate` 为什么非得当参数传？因为 ==Knex 把连接词写进了方法名==，没有「加一个条件、连接词另外指定」这种写法：
 
 ```ts
-// compile.ts 130 行附近
-builder.whereRaw(`NOT COALESCE((${exclude.sql}), FALSE)`, [...exclude.bindings]);
+// compile.ts 261 行附近：同一个子查询，按 gate 挑不同方法
+if (gate === 'or') query.orWhereIn(`${UNIVERSE_ALIAS}.uid`, inner);
+else               query.whereIn(`${UNIVERSE_ALIAS}.uid`, inner);
 ```
 
-`exclude` 是从哪儿来的？`whereFragment(apply)`：把 `Apply` 跑在一个空 builder 上，
-再把 `where` 后面的那截字符串和绑定值取出来（实际跑出来的返回值，值都没改）：
+所以 `gate` 不是可有可无的提示，它决定调哪个方法。
 
-```json
-{
-  "sql": "`u`.`gender` = ? and u.uid > ?",
-  "bindings": ["M", 100]
-}
+### 括号究竟是谁加的
+
+组节点的真实代码（`compileNode` 开头，226 行附近）：
+
+```ts
+const grouped = function (this: Knex.QueryBuilder) {
+  children.forEach((child, index) => {
+    child(this, index === 0 ? 'and' : logic === 'OR' ? 'or' : 'and');
+  });
+};
+if (gate === 'or') query.orWhere(grouped);
+else               query.where(grouped);
 ```
 
-==所以参数绑定确实存在，但它不是这一层的输出、也不是对外的产物==。
-它只活在「拼片段给上层再包一次」这一个环节。include 那段根本不经过 `whereFragment`，
-它是直接 `includeApply(builder, 'and')` 挂到主查询上的。
+三件事值得读出来：
 
-### 四类叶子编成什么
+1. `query.where(函数)` 里传的是函数，Knex 会把它整个用括号包起来。括号是这么来的，全文没有一处手写 `(`。
+2. `forEach` 里第一个孩子拿 `'and'`。它前面还没有条件，连接词用不上，但参数总得给一个。
+3. 后面每个孩子按 `logic` 拿 `'or'` 或 `'and'`。连接词由父节点定，方法名由孩子自己挑。
 
-规则可以压成一张表：
+树的形状和产物对应起来是这样（最下面一行是各叶子那段 SQL）：
+
+```tree
+- label: 组节点 · AND
+  tone: violet
+  sub: "logic=AND"
+  note: "query.where( grouped )，整体自带一层括号"
+  children:
+    - label: portrait 叶子
+      sub: "age gte 18"
+      note: "→ `u`.`birthday` <= '2008-10-09'"
+    - label: 组节点 · OR
+      tone: violet
+      sub: "logic=OR"
+      note: "query.orWhere( grouped )，再包一层括号"
+      children:
+        - { label: portrait 叶子, sub: "region eq US", note: "→ `u`.`region` = 'US'" }
+        - { label: portrait 叶子, sub: "region eq HK", note: "→ `u`.`region` = 'HK'" }
+```
+
+方案里「技术选型：Knex」讲的三件事之一就是括号嵌套：条件树是嵌套的，手拼括号要自己数层数。
+
+---
+
+## 06 · 三类叶子，五种形状
+
+前面讲的是「怎么算出来」，这一节讲「算出来有几种」。`WHERE` 里能出现的条件形状一共五种，
+任何一个叶子节点编出来都落在这五种里。
+
+能进这棵树的节点，`schema.ts` 里只有四种：
+
+```ts
+type BoolNode = BoolTree | PortraitLeaf | RelationLeaf | UidLeaf;
+```
+
+`BoolTree` 是上面讲完的组节点，另外三种是叶子：画像字段、关系、点名的 uid。
+
+三种叶子按 `formula` 和 `op` 再分，落到 SQL 上是五种形状：
 
 ```compare
 first: 叶子
@@ -406,7 +516,11 @@ rows:
   - "`uid`": ["`u.uid IN ( 一串字面量 )`", "`u.uid IN (11, 22)`"]
 ```
 
-==相同的一批数据，换一个 `op` 就换一种形状==，这是 4.3 里最该讲清楚的一处扭转。看实测出来的两条：
+关系的三行是这么来的：`formula` 有两种（`detail` 看有没有、`times` 数几条），
+`detail` 又按 `op` 分成正向和 `not_in` 反向，加起来三种，和画像、uid 一起就是五种。
+分支点就在 compileRelation 的开头两行判断上。
+
+==同一批数据换一个 `op` 就换一种形状==，这是 4.3 里最该讲清楚的一处扭转。看实测出来的两条：
 
 ```sql
 -- detail + in：存在一条匹配的关系记录
@@ -434,49 +548,35 @@ WHERE `u`.`staff_id` = 101
       ))
 ```
 
-同一张 `rel_holding`，同一批 `objects`，差别只在==把「存在」换成「数一数」==。于是子查询从「查有哪些 uid」变成「按 uid 分组再筛」。
+同一张 `rel_holding`，同一批 `objects`，差别只在把「存在」换成「数一数」。于是子查询从「查有哪些 uid」变成「按 uid 分组再筛」。
 
-### 组节点：递归 + 括号
+### 一个例外：`{ sql, bindings }` 只在 exclude 时出现
 
-方案那句「遇到组节点就递归它的子节点，遇到叶子节点就生成一段条件，再用 AND 或 OR 把子节点的片段连起来」，落到代码里是一个很短的函数：组节点的编译结果就是「把子节点依次挂到同一个 where 上」，第一个子节点不带连接词，后面的按 `logic` 决定用 `and` 还是 `or`。
+前面一直说这一步不返回字符串。`compile()` 内部确实有一处把 `Apply` 变成了字符串，
+只有 exclude 走这道手续，因为它要把整段条件塞进 `NOT COALESCE( ... , FALSE )`：
 
-```flow
-grid: true
-nodes:
-  - { id: g, label: "组节点 · AND", sub: "logic=AND，两个孩子", row: 0, tone: violet }
-  - { id: a, label: "孩子① · 画像叶子", sub: "age gte 18", row: 1, tone: blue }
-  - { id: b, label: "孩子② · 组节点 · OR", sub: "再往下递归一层", row: 1, tone: violet }
-  - { id: c, label: "孩子②的两个叶子", sub: "region=US OR region=SG", row: 2, tone: blue }
-  - { id: fa, label: "片段 A", sub: "`u`.`birthday` <= ?", row: 3, tone: green }
-  - { id: fc, label: "片段 C", sub: "`u`.`region` = 'US' OR `u`.`region` = 'SG'", row: 3, tone: green }
-  - { id: out, label: "整棵树的 WHERE 片段", sub: "( 片段A AND ( 片段C ) )", row: 4, tone: green }
-edges:
-  - { from: g, to: a }
-  - { from: g, to: b }
-  - { from: b, to: c }
-  - { from: a, to: fa }
-  - { from: c, to: fc }
-  - { from: fa, to: out }
-  - { from: fc, to: out }
-caption: 组节点的产物是「把子节点的片段连起来」，括号由组节点自己包 —— 它不知道里面是什么。
+```ts
+// compile.ts 130 行附近
+builder.whereRaw(`NOT COALESCE((${exclude.sql}), FALSE)`, [...exclude.bindings]);
 ```
 
-这里出现了一个会让人踩坑的细节：!!`where(a).orWhere(b)` 与 `whereRaw('a OR b')` 不等价!!。前者在已经有别的条件时会变成 `x AND a OR b`（`OR` 的优先级把前面的条件整个吞掉）。所以组节点必须整体包一层括号，方案举的例子也正是带括号的：
+`exclude.sql` 是 `whereFragment(apply)` 的返回值：把 `Apply` 在一个空 builder 上跑一遍，
+再取 `where` 后面那截字符串。真实跑出来的值：
 
-```sql
--- 条件为「年龄 ≥ 18 且地区 = US」
-WHERE `u`.`staff_id` = 101
-  AND (
-    TIMESTAMPDIFF(YEAR, `u`.`birthday`, CURRENT_DATE()) >= 18
-    AND `u`.`region` = 'US'
-  )
+```json
+{
+  "sql": "`u`.`gender` = ? and u.uid > ?",
+  "bindings": ["M", 100]
+}
 ```
 
-方案里「技术选型：Knex」讲的三件事之一就是括号嵌套：条件树是嵌套的，手拼括号要自己数层数。
+参数绑定确实存在，但它不是这一层的产物，也不对外。它只活在「把片段拼成字符串再包一次」这一个环节里。
+include 那段根本不经过 `whereFragment`，它是直接 `includeApply(builder, 'and')` 挂到主查询上的。
 
 ### 权限谓词，写在所有条件之前
 
-`scope` 描述的「客户范围」不由 DSL 决定，而是**由服务端按调用方身份补上**的一小段条件：
+上面那些条件都还没算权限时，`WHERE` 的第一段已经固定下来了。
+`scope` 描述的「客户范围」不由 DSL 决定，而是由服务端按调用方身份补上的一小段条件：
 
 ```compare
 first: actor 与 scope
@@ -487,13 +587,15 @@ rows:
   - "`scope.kind = team` 且调用方是组长": ["两者取交集，越权的 groupId 被过滤掉"]
 ```
 
-它和业务条件是 AND 关系，写在 WHERE 的哪个位置语义上都一样。方案给了「为什么放最前面」的理由：让生成的语句有==一个固定形状==：任何身份、任何条件下，都是先限权限、再谈业务。排查问题时一眼就能找到权限那一段。
+它和业务条件是 AND 关系，写在 WHERE 的哪个位置语义上都一样。方案给了「为什么放最前面」的理由：让生成的语句有一个固定形状：任何身份、任何条件下，都是先限权限、再谈业务。排查问题时一眼就能找到权限那一段。
 
-顺带一句边界：`scope` 越权（比如只有「本人」权限却传了 `team`）==整次查询拒绝==，不做「默默裁剪成权限内」。
+顺带一句边界：`scope` 越权（比如只有「本人」权限却传了 `team`）整次查询拒绝，不做「默默裁剪成权限内」。
 
 ---
 
-## 06 · Assemble：同一段 WHERE，四条语句
+---
+
+## 07 · Assemble：同一段 WHERE，四条语句
 
 ```compare
 first: 语句
@@ -558,7 +660,7 @@ FROM (
 
 包一层是为了==数人不数行==：主查询里如果有 JOIN 或关系子查询，外层直接 `COUNT(*)` 数到的可能不是人数。`uidsSql` 那一层只 `SELECT uid`，所以它数出来的人数和名单长度天然对得上。
 
-!!但这里有个坑：包一层本身不去重。!! 如果 `uidsSql` 真的出现了重复 uid，这个 `COUNT(*)` 会照样把它数成两个人。去重靠的是语句形状，关系条件走 `IN` 子查询而不是 JOIN，就是为了不产生重复行。这一点在 07 节。
+!!但这里有个坑：包一层本身不去重。!! 如果 `uidsSql` 真的出现了重复 uid，这个 `COUNT(*)` 会照样把它数成两个人。去重靠的是语句形状，关系条件走 `IN` 子查询而不是 JOIN，就是为了不产生重复行。这一点在 08 节。
 
 ### listSql 用 uid 游标，不用 OFFSET
 
@@ -608,7 +710,7 @@ rows:
 
 ---
 
-## 07 · 三处扭转
+## 08 · 三处扭转
 
 这三处是评审时最容易被挑的地方，也是方案专门用「实现约定」一节写的。
 
@@ -666,7 +768,7 @@ exclude  →  NOT COALESCE((cond1 AND cond2), FALSE)
 
 ---
 
-## 08 · 扩展点：常见改动各要动哪里
+## 09 · 扩展点：常见改动各要动哪里
 
 方案专门列了这一张表，它回答的是「这个组件的可演进性在哪」。改动分两边：数据在 Data Admin 里配，配完即生效；代码改完要重新发布。
 
@@ -684,7 +786,7 @@ rows:
 
 ---
 
-## 09 · 讲的时候留意：方案和实现现在的差异
+## 10 · 讲的时候留意：方案和实现现在的差异
 
 4.3 是设计稿，`packages/dsl` 是按它实现的。==哪边说了算，按代码。==
 两份对不上的地方列在这里。==前两行不是“实现落后了”，是方案写错了==。
