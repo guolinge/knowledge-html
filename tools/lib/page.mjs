@@ -32,13 +32,15 @@ function provenance(meta) {
   return bits.length ? `<div class="provenance">${bits.join('')}</div>` : '';
 }
 
-function draftBanner(meta) {
-  if (meta.status !== 'draft') return '';
-  return `<div class="draft-banner">
-    <span>⚠</span>
-    <span>本页状态为 <b>draft</b>：内容尚未人工核对，引用前请自行验证。</span>
-  </div>`;
-}
+/* 以前这里有个 draftBanner()：status=draft 时在每页顶部挂一条琥珀色横幅，
+   提醒「内容尚未人工核对」。2026-10-09 删掉。
+
+   原因不是它写得不对，是它没有区分度：63 篇里 62 篇都是 draft，
+   于是这条警告出现在 98% 的页面上 —— 一个永远亮着的信号等于没有信号，
+   只剩页顶每页一条的噪音。人工核对这件事仍然有地方看：
+   ==顶部那条溯源条里的「核对 <日期>」==（meta.verified 有值才出现）。
+
+   要恢复的话：把函数加回来，并在下面的模板里回 ${'${draftBanner(meta)}'}。 */
 
 function tocHtml(toc, backHref) {
   if (!toc.length) return '';
@@ -116,7 +118,6 @@ ${head}
       ${meta.summary ? `<p class="lede">${esc(meta.summary)}</p>` : ''}
     </div>
 
-    ${draftBanner(meta)}
 ${needs}
     ${provenance(meta)}
     ${tags}

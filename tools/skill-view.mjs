@@ -133,7 +133,7 @@ const issues = [...lintFences(anchored2, src), ...lintLinkifyStars(anchored2, sr
       eyebrow: 'skill 文档',
       title: p.title,
       summary: p.summary,
-      status: 'reference', // 不是笔记，不显示 draft 横幅
+      status: 'reference', // 不是笔记：不写 sources/generated，顶部那条溯源条就不会出现
     },
     body: anchored2,
     toc,
