@@ -2468,6 +2468,22 @@ rows:
 
 加新积木时**必须看一眼 400px 宽和深色模式** —— 这是最容易崩的两个地方。
 
+````callout
+tone: amber
+icon: 📐
+text: |
+  ==在 macOS 上，`--window-size=400,900` 量出来的 `window.innerWidth` 是 **500**。==
+
+  Chrome 的窗口有最小宽度，无头模式也一样。所以「看 400px」这一步，
+  用 `--headless --screenshot` 是**看不到 400 的** —— 量出来是 500，断点却按 400 写，
+  两边对不上。实测：探针打印的 `vw` 是 500，而截图被裁在 400。
+
+  两个可行的做法：
+
+  - 断点设在 **≤760px** 这一档，接受 500px 这个近似（这页现在就是这么做的）
+  - 真要 400：用 CDP 或 playwright 的 device metrics 覆盖，别用 `--window-size`
+````
+
 ### 改样式之后必须量图
 
 ```bash
@@ -2951,6 +2967,7 @@ ln -s ~/works/codes/knowledge-html/node_modules node_modules
 | `node_modules` 不跟着 worktree 来 | 软链过去（上面那条），或各自 `npm install` |
 | 软链显示成 `?? node_modules` | `.gitignore` 里写的是 `node_modules/`（带斜杠 = 目录），**匹配不上软链** —— 改成 `node_modules` |
 | skill 的符号链接固定在主目录 | worktree 里改 skill **不生效**。skill 只有一份，这是好事 |
+| **习惯性 `cd` 回主仓库** | 开了 worktree 之后，每条命令都要从 worktree 目录起。==习惯性的 `cd ~/works/codes/knowledge-html` 会把改动全写回共享目录==，而自己的 worktree 干净得可疑 —— `git status` 一片空白就是信号 |
 
 ````callout
 tone: amber
