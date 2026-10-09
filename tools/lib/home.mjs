@@ -167,6 +167,24 @@ export function renderHome(entries, { site, assetPrefix = '', plans = [] }) {
     text: [e.title, e.summary, (e.tags || []).join(' '), e.plain || ''].join(' ').toLowerCase(),
   }));
 
+  // 抽屉里的全部文章 —— 构建期就按「最近修改在前」排好，再用 JS 重排
+  const byDateDesc = entries.slice().sort((a, b) => {
+    const da = a.updated || a.generated || '';
+    const db = b.updated || b.generated || '';
+    if (da !== db) return da < db ? 1 : -1;
+    return String(a.title || '').localeCompare(String(b.title || ''), 'zh');
+  });
+  const drawerRows = byDateDesc
+    .map(
+      (e) => `<li data-date="${esc(e.updated || e.generated || '')}" data-title="${esc(e.title || '')}">
+      <a class="drow" href="notes/${esc(e.slug)}/">
+        <span class="d-date">${esc(e.updated || e.generated || '—')}</span>
+        <span class="d-title">${esc(e.title)}</span>
+        <span class="d-eyebrow">${esc(e.eyebrow || e.topic || '')}</span>
+      </a></li>`,
+    )
+    .join('\n');
+
   return `<!DOCTYPE html>
 <html lang="zh-CN" data-theme="light">
 <head>
@@ -315,6 +333,66 @@ export function renderHome(entries, { site, assetPrefix = '', plans = [] }) {
 .ncard-tags { display: flex; flex-wrap: wrap; gap: 6px; }
 .empty { color: var(--muted); font-size: 14.5px; padding: 40px 0; text-align: center; }
 
+/* ── 全部文章抽屉 ──────────────────────────────────────
+   按时间排的全部笔记。列表行是**构建期**就写好的，JS 只负责重排 ——
+   所以没 JS 时也能看，只是切不了排序方向。
+   图标用 CSS 画三条线：☰ / ≡ 这类字符在这套字体栈里会退化（caret 踩过同款）。 */
+.bars {
+  display: block; width: 15px; height: 9px; margin: 0 auto;
+  background: repeating-linear-gradient(
+    to bottom, currentColor 0 1.5px, transparent 1.5px 3.67px);
+}
+body.drawer-on { overflow: hidden; }
+.drawer-veil {
+  position: fixed; inset: 0; z-index: 60;
+  background: color-mix(in srgb, var(--text) 34%, transparent);
+  backdrop-filter: blur(1px);
+}
+.drawer {
+  position: fixed; top: 0; right: 0; bottom: 0; z-index: 61;
+  width: min(430px, 92vw); display: flex; flex-direction: column;
+  background: var(--bg); border-left: 1px solid var(--border);
+  box-shadow: -18px 0 48px color-mix(in srgb, var(--text) 16%, transparent);
+}
+/* 这里本来有个 190ms 的滑入动画。去掉了：
+   无头环境（visual-check / 探针）下 CSS 动画的时间线不推进 ——
+   playState 是 running、currentTime 永远是 0，元素卡在 translateX(18px)，
+   于是抽屉被顶出视口 18px，而这是量出来的事实、不是猜测。
+   代价是每次量到的位置都失真，改一次得猜一次。一个工具面板换 190ms 的
+   滑入不划算 —— ==能量到的正确位置比好看重要==。 */
+.drawer-h {
+  display: flex; align-items: center; gap: 10px;
+  padding: 18px 16px 14px 22px; border-bottom: 1px solid var(--border);
+}
+.drawer-h h2 { margin: 0; font-size: 16px; letter-spacing: -.01em; }
+.drawer-h .dn { margin-left: 7px; font: 400 11.5px/1 var(--mono); color: var(--muted); }
+.drawer-h .icon-btn { margin-left: auto; }
+.drawer-sort { padding: 12px 22px 10px; }
+.drawer-sort .seg { display: inline-flex; gap: 4px; align-items: center; }
+.drawer-sort .seg::before {
+  content: attr(data-label); margin-right: 5px;
+  font: 600 11px/1 var(--sans); color: var(--muted); letter-spacing: .06em;
+}
+.drawer-sort button {
+  font: 550 12px/1 var(--sans); color: var(--text-2);
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 100px; padding: 6px 11px; cursor: pointer; transition: .15s;
+}
+.drawer-sort button:hover { border-color: var(--border-strong); color: var(--text); }
+.drawer-sort button.on { background: var(--blue-soft); border-color: var(--blue); color: var(--blue); }
+.dlist { overflow-y: auto; overscroll-behavior: contain; margin: 0; padding: 4px 10px 22px; list-style: none; }
+.drow {
+  display: grid; grid-template-columns: auto 1fr; column-gap: 12px; row-gap: 2px;
+  align-items: baseline; text-decoration: none; color: inherit;
+  padding: 10px 12px; border-radius: 9px; border-left: 2px solid transparent;
+  transition: background .15s, border-color .15s;
+}
+.drow:hover { background: var(--surface); border-left-color: var(--blue); }
+.drow:hover .d-title { color: var(--blue); }
+.d-date { font: 400 11.5px/1 var(--mono); color: var(--muted); white-space: nowrap; }
+.d-title { font-size: 14px; font-weight: 600; letter-spacing: -.01em; line-height: 1.45; }
+.d-eyebrow { grid-column: 2; font-size: 11.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
 @media (max-width: 720px) {
   .tnode { grid-template-columns: 22px 1fr auto; gap: 8px; padding-left: 10px; }
   .tnode-layer, .tnode-blurb, .tnode-date { display: none; }
@@ -335,6 +413,8 @@ export function renderHome(entries, { site, assetPrefix = '', plans = [] }) {
 
   <div class="searchbar">
     <input id="q" type="search" placeholder="搜索标题、标签或正文…" autocomplete="off" />
+    <button class="icon-btn" id="listBtn" title="全部文章" aria-label="全部文章"
+        aria-haspopup="dialog" aria-expanded="false" aria-controls="drawer"><span class="bars" aria-hidden="true"></span></button>
     <button class="icon-btn" id="themeBtn" title="切换主题">◐</button>
   </div>
   <div class="chips" id="chips">${chips}</div>
@@ -371,6 +451,24 @@ ${trees}</div>
   }
   <div class="empty" id="empty" hidden>没有匹配的笔记</div>
 </div>
+
+<div class="drawer-veil" id="drawerVeil" hidden></div>
+<aside class="drawer" id="drawer" role="dialog" aria-modal="true"
+    aria-labelledby="drawerT" hidden>
+  <div class="drawer-h">
+    <h2 id="drawerT">全部文章<span class="dn">${entries.length} 篇</span></h2>
+    <button class="icon-btn" id="drawerClose" title="关闭" aria-label="关闭">✕</button>
+  </div>
+  <div class="drawer-sort" id="drawerSort">
+    <span class="seg" data-ctrl="dsort" data-label="排序">
+      <button data-v="new" class="on">最新在前</button>
+      <button data-v="old">最早在前</button>
+    </span>
+  </div>
+  <ol class="dlist" id="dlist">
+${drawerRows}
+  </ol>
+</aside>
 
 <script id="search-index" type="application/json">${JSON.stringify(index).replace(
     /</g,
@@ -633,6 +731,90 @@ ${trees}</div>
     });
 
     rebuild();
+  })();
+
+  /* ── 全部文章抽屉 ──────────────────────────────────────
+     排序状态和树的 mode **分开**：树那套是「看知识地图」的轴，
+     这个是「找最近那篇」的轴，两个开关各自独立。
+     声明在这一层而不是内层函数里 —— 放进内层会变成跨作用域引用。
+     （首页就因为把 var mode 跟着旧函数一起删掉，排序按钮哑过一次。） */
+  var drawerSort = 'new';
+
+  (function drawer() {
+    var box = document.getElementById('drawer');
+    var veil = document.getElementById('drawerVeil');
+    var btn = document.getElementById('listBtn');
+    var closeBtn = document.getElementById('drawerClose');
+    var list = document.getElementById('dlist');
+    if (!box || !veil || !btn || !list) return;
+
+    var lastFocus = null;
+
+    function isOpen() { return !box.hidden; }
+
+    function open() {
+      lastFocus = document.activeElement;
+      box.hidden = false;
+      veil.hidden = false;
+      document.body.classList.add('drawer-on');
+      btn.setAttribute('aria-expanded', 'true');
+      // 焦点给第一行，不是关闭按钮 —— 打开这个面板十次有九次是为了点一篇。
+      // （这里不能写 querySelector('a.drow, button')：那个选择器按 DOM 次序命中，
+      //  关闭按钮在标题栏里，排在列表前面。）
+      var first = box.querySelector('a.drow') || box.querySelector('button');
+      if (first && first.focus) first.focus();
+    }
+
+    function close() {
+      box.hidden = true;
+      veil.hidden = true;
+      document.body.classList.remove('drawer-on');
+      btn.setAttribute('aria-expanded', 'false');
+      if (lastFocus && lastFocus.focus) lastFocus.focus();
+    }
+
+    /* 重排而不是重建：行是构建期写好的（带转义），
+       重建 HTML 反而要担一次转义责任。同天的按标题定序 ——
+       否则顺序取决于文件系统的目录次序，每次构建都可能变。 */
+    function order() {
+      var items = [].slice.call(list.children);
+      var dir = drawerSort === 'new' ? -1 : 1;
+      items.sort(function (a, b) {
+        var da = a.getAttribute('data-date') || '';
+        var db = b.getAttribute('data-date') || '';
+        if (!da && !db) return 0;
+        if (!da) return 1;
+        if (!db) return -1;
+        if (da !== db) return (da < db ? -1 : 1) * dir;
+        return (a.getAttribute('data-title') || '').localeCompare(
+          b.getAttribute('data-title') || '', 'zh');
+      });
+      var frag = document.createDocumentFragment();
+      items.forEach(function (n) { frag.appendChild(n); });
+      list.appendChild(frag);
+    }
+
+    btn.addEventListener('click', function () { isOpen() ? close() : open(); });
+    if (closeBtn) closeBtn.addEventListener('click', close);
+    veil.addEventListener('click', close);
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape' && isOpen()) close();
+    });
+
+    var sortCtl = document.getElementById('drawerSort');
+    if (sortCtl) {
+      sortCtl.addEventListener('click', function (e) {
+        var b = e.target.closest('button');
+        if (!b) return;
+        drawerSort = b.getAttribute('data-v');
+        [].slice.call(sortCtl.querySelectorAll('button')).forEach(function (o) {
+          o.classList.toggle('on', o === b);
+        });
+        order();
+      });
+    }
+
+    order();   // 构建期已经是「最新在前」，这里跑一遍是为了同天次的标题定序
   })();
 
   // 复用页面级的主题偏好
