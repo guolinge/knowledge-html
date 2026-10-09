@@ -888,36 +888,73 @@ rows:
 
 ## 10 · 讲的时候留意：方案和实现现在的差异
 
-4.3 是设计稿，`packages/dsl` 是按它实现的。==哪边说了算，按代码。==
-两份对不上的地方列在这里。==前两行不是“实现落后了”，是方案写错了==。
+技术方案 4.2 / 4.3 是设计稿，`packages/dsl` 和圈选组件是按它实现的。==哪边说了算，按代码。==
+对不上的地方分三类：名字对不上、同样输入产出不同、方案写了代码里没有。
+
+### 名字对不上
+
+读文档写代码时会直接撞上的一批。改的是叫法，语义基本没变。
+
+```compare
+first: 文档里写的
+head: [代码里实际是, 出现在]
+rows:
+  - "`semantic_type`": ["拆成五个列：`variable_type` / `data_type` / `content_type` / `value_encoding` / `enum_type`", "4.1 三张表、4.2 解析规则、4.3 语义校验"]
+  - "`crm_dc_relation.field_key`": ["`relation_key`", "4.2 设计目标、4.3 解析表"]
+  - "`object_field_key`": ["`object_name`（客体类别标识）", "4.2 设计目标"]
+  - "`valueSource: 'INLINE'`": ["`'CUSTOM'`，一样带 `items[]`", "4.2 数据来源表"]
+  - "组件侧的 `fields`": ["`features`；顶层还有 `revision`", "4.2 数据来源表"]
+  - "`BuildResult`": ["`CompileResult`", "4.3 编译过程流程图"]
+  - "`compile(DSL, Metadata)`": ["`compile(query, options)`", "4.3 时序图与流程图"]
+  - "`CompileOptions` 只有三个键": ["还有 `today` / `now`，相对时间的基准就是它们", "4.3 对外接口"]
+  - "`FieldDerive` / `expr`": ["都不存在，换算规则见下面 `PAGE_CONVERT`", "4.3 扩展点表"]
+  - "「四类叶子」": ["三类叶子（portrait / relation / uid）加组节点，才是四类**节点**", "4.3 Compile 表"]
+```
+
+### 同样输入，产出不同
+
+这一组要小心：上层说「按方案来的」，实际编出来的 SQL 不是那个样子。
 
 ```compare
 first: 项
-head: [技术方案 4.3, 代码里的事实]
+head: [技术方案, 代码里的事实]
 rows:
-  - 第 ① 步的输出: ["「输出还是一份 DSL」", { text: "`validate(): void` —— 什么都不返回", tone: red }]
-  - 停用字段的错误码: ["语义校验返回 `DISABLED_REF`", { text: "码表里有（14 个码之一），但==没有任何一处抛它==，实际抛的是 `UNKNOWN_FIELD`", tone: red }]
-  - 越权客户范围: ["未单独列错误码", { text: "有 `SCOPE_DENIED`（3 处引用）", tone: amber }]
-  - 派生字段的换算规则: ["`derive_kind` 存在 Metadata 里，两种取值：`age_years` / `days_since`", { text: "挪进代码：`pageValue.ts` 里一张==按字段名查==的 `PAGE_CONVERT` 表（`age` / `register_days` / `holding.market_value` …）", tone: red }]
+  - 第 ① 步的输出: ["「输出还是一份 DSL」", { text: "`validate(): void`，什么都不返回", tone: red }]
+  - 越权客户范围: ["「越权的 `groupId` 被过滤掉」", { text: "**整次查询拒绝**，抛 `SCOPE_DENIED`。过滤是圈选组件里 `clampScope` 的事，不是编译器", tone: red }]
+  - 派生字段的换算规则: ["`derive_kind` 存在 Metadata 里，两种取值：`age_years` / `days_since`", { text: "挪进代码：`pageValue.ts` 里一张按字段名当键的 `PAGE_CONVERT` 表，三种（`years` / `days` / `scale`）", tone: red }]
   - "`age >= 18` 编成什么": ["`TIMESTAMPDIFF(YEAR, u.birthday, CURRENT_DATE()) >= 18`", "**下推成 `birthday <= '2008-10-09'`**，让条件落在裸列上，Doris 能用分区裁剪和前缀索引"]
-  - 今天/现在从哪来: ["SQL 里直接写 `CURRENT_DATE()`", "由调用方传入 `today` / `now`（`CompileOptions` 上的可选字段），SQL 不写 `CURDATE()` / `NOW()`"]
+  - 相对时间编成什么: ["`col >= DATE_SUB(CURRENT_TIMESTAMP(), INTERVAL n DAY) AND col <= CURRENT_TIMESTAMP()`", "`col >= ? AND col <= ?`，两个值按这一列的 `value_encoding` 编码后写成字面量"]
+  - 今天/现在从哪来: ["SQL 里直接写 `CURRENT_DATE()` / `CURRENT_TIMESTAMP()`", "由调用方传入 `today` / `now`（`CompileOptions` 上的可选字段），SQL 里不出现 `CURDATE()` / `NOW()`"]
+  - "`listSql` 的展示列": ["`TIMESTAMPDIFF(YEAR, u.birthday, CURRENT_DATE()) AS age`", "`u.birthday AS age`，换算在展示层做（`displayPageValue`），不在 SQL 里"]
   - 数值字面量: ["直接写 `1000`", "`CAST('1000' AS DECIMAL(38,10))`，避免参数被当 DOUBLE 丢精度"]
+  - "`DISABLED_REF`": ["语义校验返回它", { text: "码表里有（14 个码之一），但==没有任何一处抛它==，实际抛的是 `UNKNOWN_FIELD`", tone: red }]
 ```
 
-前两行合起来看：`DISABLED_REF` 这个码在表里躺着，却没有一处抛它，正是因为 `validate` 什么都不返回。
-想说“你引用了一个已停用的字段”，就得拿得到“这个字段曾经存在”这个事实，
-而 Catalog 只收录 ENABLED 的字段（Data Admin 那份投影里只有 ENABLED / DISABLED 两种状态），
-停用字段在编译器眼里和“从来没写过这个字段”长得一模一样，
-所以它只能报 `UNKNOWN_FIELD`。这不是忘了写，是**这一层拿不到区分两者所需的信息**。
+### 方案写了，代码里没有
 
-**共用的部分仍然一致**：四步的切分、五种叶子形状、三处扭转、IN 子查询而不是 JOIN、
-uid 游标、Knex 的四处补偿、对外只给字符串。这些是 4.3 的骨架，也是上台要讲的主线。
+```compare
+first: 项
+head: [技术方案怎么写, 代码里什么样]
+rows:
+  - 权限谓词怎么推: ["只看 `dataLevel`：`self` 给 `staff_id`，`team` 给 `group_id IN (…)`", "按 `(dataLevel, scope.kind)` 两键推。`all` + `scope=all` 时==一个权限谓词都不加=="]
+  - 错误码怎么分段: ["形状阶段 6 个、语义阶段 7 个", "`INVALID_SCOPE` 属形状阶段、`OP_NOT_ALLOWED` 两个阶段都抛、`SCOPE_DENIED` 来自第三阶段（`compile()` 里的 `assertScopePermitted`），方案没列"]
+  - 操作符下发什么: ["按语义类型分组，带 `inputForm` 和 `status`", "一张平铺的全局表，只有 `key` / `name` / `sortOrder` / `template`。`inputForm` 是客户端用 `controlFor()` 当场算的"]
+  - 指定 UID 的数量上限: ["1000（暂定），且「代码中尚未强制」", "组件里是 `MAX_UIDS = 500`，而且强制截断（`.slice(0, MAX_UIDS)`）"]
+  - 条件树层级 2、条件数量 15: ["本期约定，代码中尚未强制", "确实没有强制，这一条方案说得对"]
+```
+
+`DISABLED_REF` 那一行值得展开：这个码在表里躺着，却没有一处抛它，
+正是因为 `validate` 什么都不返回。
+想说「你引用了一个已停用的字段」，就得拿得到「这个字段曾经存在」这个事实，
+而 Catalog 只收录 ENABLED 的字段（Data Admin 那份投影里只有 ENABLED / DISABLED 两种状态），
+停用字段在编译器眼里和「从来没写过这个字段」长得一模一样，
+所以它只能报 `UNKNOWN_FIELD`。这不是忘了写，是**这一层拿不到区分两者所需的信息**。
 
 ````callout
 tone: amber
 icon: 🔩
 text: |
-  `派生字段的换算规则` 那一行值得单独说一句，因为它是==唯一一行会变成硬约束的差异==。
+  派生字段那一行会直接变成硬约束，单独说一句。
 
   方案的设计是：换算规则存在 Metadata 里（`derive_kind` 一列），加一种换算不用发版。
   实现把它挪进了代码，用**字段名当键**（`pageValue.ts`）：
@@ -934,12 +971,12 @@ text: |
   字段名拼错了编译器不会拦，只会当成「这个字段没有换算规则」，
   于是「年龄 ≥ 18」被拿 18 去和 `birthday` 直接比。
 ````
+
 ```callout
 tone: violet
 icon: 🧭
 text: |
-  `age >= 18` 那一行是最好用的一个例子：==同一份 DSL，方案和实现编出来的 WHERE 完全不一样，
-  但结果相同==。这正好说明 4.3 的承诺是什么 —— DSL 与物理模型解耦，
+  `age >= 18` 那一行是最好用的一个例子：==同一份 DSL，方案和实现编出来的 WHERE 完全不一样，但结果相同==。这正好说明 4.3 的承诺是什么：DSL 与物理模型解耦，
   换一条编译路径不影响上层协议。
 ```
 
