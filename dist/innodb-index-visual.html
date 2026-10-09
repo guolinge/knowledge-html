@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>sql_builder_v2 的核心抽象</title>
-<meta name="description" content="为什么需要「条件」这个抽象、六种条件入口各是什么、表达式模型为什么是四种形态、方言怎么隔离库差异 —— 按「概念 → 组织 → 架构」讲设计理由，不重复文件地图和整体架构那两篇。" />
+<title>InnoDB 索引：一条查询的页读取旅程</title>
+<meta name="description" content="从磁盘页到两棵 B+ 树，亲手追踪导航、范围扫描与回表，理解最左前缀和写入代价。" />
 <style>
 /* ============================================================
    theme.css — 设计 token 与页面骨架
@@ -5423,151 +5423,62 @@ svg[data-preset="blueprint"] .c-security-group,
   <aside class="toc" id="toc">
       <p class="toc-title">目录</p>
       <a href="../../index.html" class="sub">← 全部笔记</a>
-      <a href="#需求为什么需要条件这个抽象">需求：为什么需要「条件」这个抽象</a>
-      <a href="#一个条件由什么构成">一个条件由什么构成</a>
-      <a href="#为什么条件要能嵌套" class="sub">为什么条件要能嵌套</a>
-      <a href="#六种条件入口entrepot">六种条件入口（entrepot）</a>
-      <a href="#一个容易忽略的差异五种能嵌套一种不能" class="sub">一个容易忽略的差异：五种能嵌套，一种不能</a>
-      <a href="#表达式模型四种形态">表达式模型：四种形态</a>
-      <a href="#为什么不能直接用-sql-字符串" class="sub">为什么不能直接用 SQL 字符串</a>
-      <a href="#四种形态-两个维度的组合" class="sub">四种形态 = 两个维度的组合</a>
-      <a href="#判别靠哪个字段存在" class="sub">判别靠「哪个字段存在」</a>
-      <a href="#组织条件怎么组合成树">组织：条件怎么组合成树</a>
-      <a href="#组织两套词汇两次翻译">组织：两套词汇，两次翻译</a>
-      <a href="#架构以画像为例看条件怎么翻译">架构：以画像为例，看条件怎么翻译</a>
-      <a href="#它是个递归函数" class="sub">它是个递归函数</a>
-      <a href="#五个出口各产出什么" class="sub">五个出口各产出什么</a>
-      <a href="#重点时间条件为什么会膨胀" class="sub">重点：时间条件为什么会「膨胀」</a>
-      <a href="#架构entrepot-六种实现怎么组织">架构：entrepot 六种实现怎么组织</a>
-      <a href="#每种条件是一个类" class="sub">每种条件是一个类</a>
-      <a href="#工厂负责分发" class="sub">工厂负责分发</a>
-      <a href="#架构方言怎么隔离库差异">架构：方言怎么隔离库差异</a>
-      <a href="#为什么需要方言" class="sub">为什么需要方言</a>
-      <a href="#17-个方法覆盖所有差异点" class="sub">17 个方法，覆盖所有差异点</a>
-      <a href="#什么时候调方言" class="sub">什么时候调方言</a>
-      <a href="#一个具体的例子时间戳为什么必须走方言" class="sub">一个具体的例子：时间戳为什么必须走方言</a>
-      <a href="#自测">自测</a>
+      <a href="#查一行为什么要先想页">查一行，为什么要先想「页」？</a>
+      <a href="#原文的-2gb-与-512mb该怎么算" class="sub">原文的 2GB 与 512MB，该怎么算？</a>
+      <a href="#为什么把树做得又宽又矮">为什么把树做得又宽又矮？</a>
+      <a href="#容量看公式不背三层两千万" class="sub">容量看公式，不背「三层两千万」</a>
+      <a href="#往下找一行往右扫一段">往下找一行，往右扫一段</a>
+      <a href="#页到底在文件里长什么样">页到底在文件里长什么样？</a>
+      <a href="#两棵树是一组页不是一份连续数组" class="sub">两棵树是一组页，不是一份连续数组</a>
+      <a href="#一张页两种顺序" class="sub">一张页，两种「顺序」</a>
+      <a href="#表是主树二级索引是另一个入口">表是主树，二级索引是另一个入口</a>
+      <a href="#查询邮箱为什么还要拿主键" class="sub">查询邮箱为什么还要拿主键？</a>
+      <a href="#覆盖icpmrr-分别改了什么" class="sub">覆盖、ICP、MRR 分别改了什么？</a>
+      <a href="#最左前缀在一条叶链上切区间">最左前缀：在一条叶链上切区间</a>
+      <a href="#两条常见绝对化要去掉" class="sub">两条常见绝对化要去掉</a>
+      <a href="#查得快也要养得起每一棵树">查得快，也要养得起每一棵树</a>
+      <a href="#走索引还慢看这三段" class="sub">「走索引还慢」看这三段</a>
+      <a href="#一次-insert不只写主树" class="sub">一次 INSERT，不只写主树</a>
+      <a href="#change-buffer只延后符合条件的二级页变更" class="sub">change buffer：只延后符合条件的二级页变更</a>
+      <a href="#用实测闭环不盯一个-type-等级" class="sub">用实测闭环，不盯一个 type 等级</a>
+      <a href="#新增一个索引前分别做五个判断" class="sub">新增一个索引前，分别做五个判断</a>
+      <a href="#原文与查证-如何回到证据">原文与查证 · 如何回到证据</a>
+      <a href="#合上页面试着回答" class="sub">合上页面，试着回答</a>
   </aside>
 
   <main>
     <div class="hero">
-      <span class="eyebrow">● 代码架构 · 设计取舍</span>
-      <h1>sql_builder_v2 的核心抽象</h1>
-      <p class="lede">为什么需要「条件」这个抽象、六种条件入口各是什么、表达式模型为什么是四种形态、方言怎么隔离库差异 —— 按「概念 → 组织 → 架构」讲设计理由，不重复文件地图和整体架构那两篇。</p>
+      <span class="eyebrow">● 飞书文档 · 机制图解</span>
+      <h1>InnoDB 索引：一条查询的页读取旅程</h1>
+      <p class="lede">从磁盘页到两棵 B+ 树，亲手追踪导航、范围扫描与回表，理解最左前缀和写入代价。</p>
     </div>
 
 
-    <div class="provenance"><span><b>来源</b> sources/gitlab/sql_builder_v2 @ 2c500b2</span><span><b>生成</b> 2026-09-25</span><span><b>模型</b> deepseek-v4.1-flash</span></div>
-    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">架构</span> <span class="tag tone-muted">SQL</span> <span class="tag tone-muted">TypeScript</span> <span class="tag tone-muted">圈人</span> <span class="tag tone-muted">设计</span></span></div>
+    <div class="provenance"><span><b>来源</b> 内部文档《从零推导 InnoDB 索引机制》revision 102（来源链接略去） · 原文 revision 102；正文 7 章与评论图片 40 张 · MySQL 8.4 官方手册与 mysql-8.4.0 源码；查证链接见末节</span><span><b>生成</b> 2026-10-08</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">B+ 树</span> <span class="tag tone-muted">页</span> <span class="tag tone-muted">聚簇索引</span> <span class="tag tone-muted">联合索引</span> <span class="tag tone-muted">回表</span></span></div>
 
-<div class="callout tone-amber">
-      <span class="ic">⚠</span>
-      <div><p><mark class="mk-blue"><strong>这篇已经被一棵「嵌套产物树」替代了，内容不再单独维护。</strong></mark></p>
-<p>它讲的东西已经拆进这 12 篇里，按「概念 → 组织 → 架构 → 模块」重新组织过：</p>
-<ul>
-<li><a href="../sql-builder-v2-concepts/">① 概念</a> · <a href="../sql-builder-v2-organization/">② 组织</a> · <a href="../sql-builder-v2-architecture/">③ 架构</a></li>
-<li><a href="../sql-builder-v2-core/">④ core</a> · <a href="../sql-builder-v2-core-rule/">⑤ Rule[]</a> · <a href="../sql-builder-v2-core-dialect/">⑥ 方言</a> · <a href="../sql-builder-v2-core-time/">⑦ 时间表达式</a></li>
-<li><a href="../sql-builder-v2-crowd/">⑧ crowd</a> · <a href="../sql-builder-v2-crowd-entrepot/">⑨ entrepot</a> · <a href="../sql-builder-v2-crowd-combi/">⑩ combi</a></li>
-</ul>
-<p><strong>建议从 <a href="../sql-builder-v2-concepts/">① 概念篇</a> 开始读。</strong></p>
-<p>这篇留着是因为里面有些原始素材（比如依赖库的逐个拆解）没有全部搬过去。
-要看最新的、互相链接的版本，请走上面那棵树。</p>
-</div>
-    </div><h1>sql_builder_v2 的核心抽象</h1>
-<div class="callout tone-blue">
-      <span class="ic">🧭</span>
-      <div><p>这篇讲<strong>设计</strong>：这个库为什么要有「条件」「表达式」「方言」这几个抽象，
-它们各自解决什么问题。</p>
-<p>想看文件在哪 → <a href="../sql-builder-v2-code-map/">代码地图</a>；
-想看整体分层 → <a href="../sql-builder-v2-architecture/">架构</a>。</p>
-</div>
-    </div><div class="cards" data-cols="3"><div class="ccard tone-green">
-          <span class="tag tone-green">01 ~ 04</span>
-          <h4>概念</h4>
-          <p>为什么需要「条件」这个抽象；一个条件由什么构成；六种条件入口；四种表达式形态</p>
+<h2 id="查一行为什么要先想页"><span class="num">01</span>查一行，为什么要先想「页」？</h2>
+<p>你要查 <code>id=9876543</code>，不是把 1000 万行全部搬进内存。索引要做的，是把目标缩小到少数几个页，再在页里找到这一行。</p>
+<p>本文基于内部文档《从零推导 InnoDB 索引机制》revision 102，读取了正文 7 章和 40 张评论图片。沿着「页 → 树 → 两棵树 → 键序 → 成本」讲解；图中的小数据集是教学示意，不是数据库实测。</p>
+<div class="cards" data-cols="3"><div class="ccard tone-green">
+          <span class="tag tone-green">业务对象</span>
+          <h4>行 · 你要的内容</h4>
+          <p>SELECT 要返回的用户信息。</p>
           
+          <pre>{ id: 42, email: 'lin@demo.cn', name: '小林' }</pre>
+        </div><div class="ccard tone-violet">
+          <span class="tag tone-violet">存储 / 缓存单位</span>
+          <h4>页 · 引擎拿取的单位</h4>
+          <p>InnoDB 默认页大小为 16 KiB，可配置，并非所有实例都固定为 16 KiB。</p>
           
+          <pre>页 L2 = 多条记录 + 页头 + 目录 + 空闲空间</pre>
         </div><div class="ccard tone-blue">
-          <span class="tag tone-blue">05 ~ 06</span>
-          <h4>组织</h4>
-          <p>条件怎么组合成树；两套词汇怎么分工；两次翻译各做什么</p>
+          <span class="tag tone-blue">Buffer Pool</span>
+          <h4>缓冲池 · 页的内存副本</h4>
+          <p>一次逻辑页访问，未必需要一次磁盘读取。</p>
           
-          
-        </div><div class="ccard tone-violet">
-          <span class="tag tone-violet">07 ~ 09</span>
-          <h4>架构</h4>
-          <p>条件怎么翻译成 Rule[]；六种实现怎么组织；方言怎么隔离库差异</p>
-          
-          
-        </div></div><h2 id="需求为什么需要条件这个抽象"><span class="num">01</span>需求：为什么需要「条件」这个抽象</h2>
-<p>先看一个真实场景。</p>
-<blockquote>
-<p>运营要发一张优惠券，<strong>只发给「最近 7 天加购过、并且是 VIP」的用户</strong>。</p>
-</blockquote>
-<p>要落地，得回答「这批人是谁」。而这些数据散在两个地方：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">「加购过」  →  在事件表（行为流水）
-「是 VIP」  →  在画像表（静态属性）
-</code></pre></div>
-<p>最直接的做法：<strong>让运营写 SQL</strong>。</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-sql">SELECT uid FROM event_v2      WHERE event_type = '加购' AND event_time &gt; ...
-INTERSECT
-SELECT uid FROM user_portrait WHERE vip_level &gt;= 3
-</code></pre></div>
-<p>这条路走不通，有四个原因：</p>
-<div class="cards" data-cols="2"><div class="ccard tone-amber">
-          
-          <h4>运营不会写 SQL</h4>
-          <p>业务侧的人是产品和运营，不是工程师</p>
-          
-          
-        </div><div class="ccard tone-amber">
-          
-          <h4>口径要复用</h4>
-          <p>同一批人明天还要圈一次，不能每次重写</p>
-          
-          
-        </div><div class="ccard tone-red">
-          
-          <h4>要防注入</h4>
-          <p>条件里的值是外部传进来的，直接拼字符串会被注入</p>
-          
-          
-        </div><div class="ccard tone-red">
-          
-          <h4>要跑在两个库上</h4>
-          <p>同一句话，Doris 和 ByteHouse 的 SQL 写法不一样</p>
-          
-          
-        </div></div><div class="callout tone-violet quote">
-      <span class="ic">🎯</span>
-      <div><p>所以需要一层中间物：<strong>用业务语言描述「要什么人」，由它生成 SQL。</strong>
-<mark class="mk-blue">「条件」就是这层描述的基本单位。</mark></p>
-</div>
-    </div><h2 id="一个条件由什么构成"><span class="num">02</span>一个条件由什么构成</h2>
-<p>把「最近 7 天加购过」和「是 VIP」拆开看，它们其实是同一种结构：</p>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>拆开看</th><th>「最近 7 天加购过」</th><th>「是 VIP」</th></tr></thead><tbody><tr><th>判断对象</th><td data-label="「最近 7 天加购过」">事件「加购」</td><td data-label="「是 VIP」">画像属性 <code>vip_level</code></td></tr><tr><th>判断方式</th><td data-label="「最近 7 天加购过」">次数 &gt; 0</td><td data-label="「是 VIP」"><code>&gt;=</code></td></tr><tr><th>判断值</th><td data-label="「最近 7 天加购过」">—</td><td data-label="「是 VIP」">3</td></tr><tr><th>额外限定</th><td data-label="「最近 7 天加购过」">最近 7 天</td><td data-label="「是 VIP」">—</td></tr></tbody></table></div><p><strong>共同点<strong>：都是「</strong>对某个东西做一个判断</strong>」。</p>
-<div class="cards" data-cols="2"><div class="ccard tone-green">
-          <span class="tag tone-green">一个判断</span>
-          <h4>叶子条件</h4>
-          <p>最小单位。对某个东西做一次判断</p>
-          
-          <pre>{ op: 'IN', name: 'city', value: ['杭州'] }
-</pre>
-        </div><div class="ccard tone-violet">
-          <span class="tag tone-violet">组合</span>
-          <h4>树枝条件</h4>
-          <p>用 AND / OR 把条件串起来。<strong>业务说的「并且」「或者」就是它</strong></p>
-          
-          <pre>{ logic: 'AND', items: [ ... ] }
-</pre>
-        </div></div><h3 id="为什么条件要能嵌套">为什么条件要能嵌套</h3>
-<p>因为业务说的是：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">「最近 7 天加购过，并且是 VIP」          → AND(叶子, 叶子)
-「最近 7 天加购过，或者是 VIP」          → OR(叶子, 叶子)
-「（加购过 或 下单过）并且是 VIP」        → AND(OR(叶子,叶子), 叶子)
-</code></pre></div>
-<p><strong>最后一个例子说明为什么必须是树，不能是列表</strong> —— 「或者」可以出现在「并且」里面。</p>
-<div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;and&quot;,&quot;to&quot;:&quot;or&quot;,&quot;label&quot;:&quot;左边&quot;},{&quot;from&quot;:&quot;and&quot;,&quot;to&quot;:&quot;vip&quot;,&quot;label&quot;:&quot;右边&quot;},{&quot;from&quot;:&quot;or&quot;,&quot;to&quot;:&quot;cart&quot;},{&quot;from&quot;:&quot;or&quot;,&quot;to&quot;:&quot;order&quot;}]">
+          <pre>L2 已缓存 → 在内存中查；L2 缺失 → 加载页</pre>
+        </div></div><div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;need&quot;,&quot;to&quot;:&quot;hit&quot;,&quot;label&quot;:&quot;已缓存&quot;},{&quot;from&quot;:&quot;need&quot;,&quot;to&quot;:&quot;miss&quot;,&quot;label&quot;:&quot;缺页&quot;},{&quot;from&quot;:&quot;hit&quot;,&quot;to&quot;:&quot;find&quot;},{&quot;from&quot;:&quot;miss&quot;,&quot;to&quot;:&quot;find&quot;}]">
       <svg class="flowd-svg" aria-hidden="true">
         <defs>
           <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
@@ -5577,628 +5488,783 @@ SELECT uid FROM user_portrait WHERE vip_level &gt;= 3
         </defs>
       </svg>
       <div class="flowd-groups"></div>
-      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-violet" data-id="and">
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-blue" data-id="need">
               
               
-              <b>AND</b>
-              <small>顶层</small>
-            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="or">
+              <b>查询要访问页 L2</b>
+              <small>页号由索引导航得到</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="hit">
               
               
-              <b>OR</b>
-              <small>子树枝</small>
-            </div><div class="fnode tone-green" data-id="vip">
+              <b>缓冲池命中</b>
+              <small>直接使用已缓存的页</small>
+            </div><div class="fnode tone-amber" data-id="miss">
               
               
-              <b>是 VIP</b>
-              <small>叶子</small>
-            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="cart">
+              <b>缓冲池未命中</b>
+              <small>读取存储中的页到内存</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="find">
               
               
-              <b>加购过</b>
-              <small>叶子</small>
-            </div><div class="fnode tone-green" data-id="order">
-              
-              
-              <b>下单过</b>
-              <small>叶子</small>
+              <b>在内存中定位记录</b>
+              <small>页目录与记录键序链</small>
             </div></div></div>
       
-    </div><h2 id="六种条件入口entrepot"><span class="num">03</span>六种条件入口（entrepot）</h2>
-<p><strong>为什么是六种？</strong> 因为「判断对象」的来源只有六类。</p>
-<div class="cards" data-cols="2"><div class="ccard tone-green">
-          <span class="tag tone-green">静态属性</span>
-          <h4>portrait</h4>
-          <p>用户的<strong>属性</strong>。查 <code>user_portrait</code> 表，一行 = 一个人</p>
+    </div><h3 id="原文的-2gb-与-512mb该怎么算">原文的 2GB 与 512MB，该怎么算？</h3>
+<p>按原文设定，1000 万行 × 200 字节约为 2×10⁹ 字节。只算数据载荷，除以 16,384 得约 12.2 万页；若把 2GB 当 2GiB，则是 131,072 页。真实表还要计入页头、行头、空闲空间、二级索引等开销，所以不把「12.8 万页」当作精确值。</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>要找 id=9876543</th><th>无可用定位索引</th><th>高扇出 B+ 树</th></tr></thead><tbody><tr><th>页访问形态</th><td data-label="无可用定位索引">逐页检查记录，最坏接近整表；找到即可停</td><td data-label="高扇出 B+ 树">只访问根到目标叶页的一条路径</td></tr><tr><th>1000 万行的示意量级</th><td data-label="无可用定位索引">约十几万数据页，取决于真实布局</td><td data-label="高扇出 B+ 树">若这棵树高 3，则路径含 3 张页</td></tr><tr><th>对缓存的利用</th><td data-label="无可用定位索引">扫描可能涉及许多冷数据页</td><td data-label="高扇出 B+ 树">小规模导航层反复访问，更容易保持热</td></tr><tr><th>不能据此推出</th><td data-label="无可用定位索引">每页都产生一次随机 IO</td><td data-label="高扇出 B+ 树">根页永远不能被淘汰、查询恒定 1 次 IO</td></tr></tbody></table></div><p>原文问「到底读多少次盘」，答案需要两个条件：<strong>索引决定访问哪些页，缓存决定哪些页要重新加载。</strong> 范围宽度、回表、溢出列和版本读取还可能增加访问，不能只背树高。</p>
+<h2 id="为什么把树做得又宽又矮"><span class="num">02</span>为什么把树做得又宽又矮？</h2>
+<p>扇出（fan-out）是一张非叶页能指向多少张子页。将一页装成许多「导航键 + 子页号」，一次页读取就能排除大批不相关数据。</p>
+<div class="cards" data-cols="2"><div class="ccard tone-violet">
           
-          <pre>{ op: 'IN', name: 'city', value: ['杭州'] }
-→ WHERE city IN ('杭州')
-</pre>
-        </div><div class="ccard tone-violet">
-          <span class="tag tone-violet">行为</span>
-          <h4>event</h4>
-          <p>用户<strong>做过什么、几次</strong>。查 <code>event_v2</code>，要 join 回画像表</p>
+          <h4>非叶页 · 只负责指路</h4>
+          <p>目标 70 位于 60 与 90 之间，走 B。首条最小记录有特殊标记，不能机械理解成总与子页当前最小值逐字相等。</p>
           
-          <pre>{ eventName: '加购', timeRange: '最近3天',
-  formula: { op: 'Gt', value: 3 } }
-→ 子查询 group by $user_id having count &gt; 3
-</pre>
-        </div><div class="ccard tone-blue">
-          <span class="tag tone-blue">预先算好</span>
-          <h4>crowd</h4>
-          <p>已经圈好存下来的<strong>一批人</strong>。查 <code>crowds</code> 表</p>
+          <pre>[下界 1 → 页 A] [下界 60 → 页 B] [下界 90 → 页 C]</pre>
+        </div><div class="ccard tone-green">
           
-          <pre>{ op: 'IN', items: [
-    { crowdId: 'C_888', crowdVersion: 'v3' }
-]}
-</pre>
-        </div><div class="ccard tone-muted">
-          <span class="tag tone-muted">直接给</span>
-          <h4>uid</h4>
-          <p>直接给一批用户 ID，<strong>不查表</strong>。最简单的一种</p>
+          <h4>叶页 · 负责存索引记录</h4>
+          <p>聚簇叶子放行记录，二级叶子放索引列与主键。叶页同层相连，范围扫描无需每行回到根。</p>
           
-          <pre>{ op: 'IN', value: ['111','222'],
-  hasEncoded: false }
-</pre>
-        </div><div class="ccard tone-amber">
-          <span class="tag tone-amber">和对象的关系</span>
-          <h4>relation</h4>
-          <p>用户和某个<strong>对象</strong>的关系。查业务明细表</p>
+          <pre>页 B：[60 的记录][70 的记录][80 的记录]；next → C</pre>
+        </div></div><div class="compare-wrap"><table class="compare"><thead><tr><th>存储结构</th><th>擅长什么</th><th>为通用磁盘查询付出的代价</th></tr></thead><tbody><tr><th>哈希</th><td data-label="擅长什么">整键等值定位</td><td data-label="为通用磁盘查询付出的代价">散列不保留键的全局顺序，范围和 ORDER BY 不能直接利用哈希序</td></tr><tr><th>普通平衡二叉树</th><td data-label="擅长什么">内存中有序查找</td><td data-label="为通用磁盘查询付出的代价">扇出只有 2，指针密集；若逐节点跨页，页访问路径过长</td></tr><tr><th>B 树</th><td data-label="擅长什么">高扇出且有序</td><td data-label="为通用磁盘查询付出的代价">数据可分布在内部和叶子层，范围遍历更复杂；记录载荷会挤占导航容量</td></tr><tr><th>B+ 树</th><td data-label="擅长什么">高扇出导航 + 叶链范围扫描</td><td data-label="为通用磁盘查询付出的代价">维护有序页、分裂和合并，需要支付写入代价</td></tr><tr><th>LSM</th><td data-label="擅长什么">内存接收写入，批量生成有序文件</td><td data-label="为通用磁盘查询付出的代价">读取可能涉及多个层或文件，合并带来读/写/空间放大；收益依配置和负载变化</td></tr></tbody></table></div><p>LSM 是另一组取舍，不是被 B+ 树全面淘汰。下图是常见的 leveled LSM 写路径，文件中的记录也有序；差别在于跨文件保存多个版本，而非把所有内容维护在一棵原地更新的树里。</p>
+<div class="pipe"><div class="lane tone-blue">
+        <div class="lane-meta">
           
-          <pre>{ formulaType: 'DETAIL', op: 'IN',
-  relationName: 'niuniu_user_coupon_receive_last',
-  value: ['coupon001'] }
-</pre>
-        </div><div class="ccard tone-red">
-          <span class="tag tone-red">兜底</span>
-          <h4>rawSql</h4>
-          <p>直接塞一段 SQL。<strong>前五种表达不了时用</strong></p>
+          <b>内存接收写入</b>
+          <small>先记录日志，再更新内存结构</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>WAL 与 MemTable</b>
+        <small>日志保障恢复；内存结构维护键与版本</small>
+        
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">冻结并刷出<span class="note">生成有序、不可变的文件</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-violet">
+        <div class="lane-meta">
           
-          <pre>'select uid from some_table where ...'
-</pre>
-        </div></div><div class="callout tone-amber">
-      <span class="ic">⚠</span>
-      <div><p><strong>为什么叫「入口」（entrepot）？</strong></p>
-<p>因为它是一个条件<strong>进入 SQL 世界的入口</strong> ——
-<mark class="mk-blue">每种条件都知道自己该去哪张表、该怎么写 WHERE</mark>。</p>
-<p>「条件」是业务视角的说法，「入口」是实现视角的说法。同一件事。</p>
-</div>
-    </div><h3 id="一个容易忽略的差异五种能嵌套一种不能">一个容易忽略的差异：五种能嵌套，一种不能</h3>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>类型</th><th>能不能嵌套成树</th><th>为什么</th></tr></thead><tbody><tr><th>portrait / event / relation</th><td data-label="能不能嵌套成树"><span class="tag tone-green">能</span></td><td data-label="为什么">它们的判断对象本身可以再组合，比如「城市是杭州 或 深圳」</td></tr><tr><th>crowd / rawSql</th><td data-label="能不能嵌套成树"><span class="tag tone-green">能</span></td><td data-label="为什么">同样支持 AND / OR 组合多个</td></tr><tr><th>uid</th><td data-label="能不能嵌套成树"><span class="tag tone-red">不能</span></td><td data-label="为什么">它就是一个 ID 列表，<strong>没有可组合的语义</strong></td></tr></tbody></table></div><h2 id="表达式模型四种形态"><span class="num">04</span>表达式模型：四种形态</h2>
-<h3 id="为什么不能直接用-sql-字符串">为什么不能直接用 SQL 字符串</h3>
-<p>因为一条 SQL 里，<strong>「数据」和「代码」是两种东西</strong>：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-sql">SELECT uid FROM user_portrait WHERE city = '杭州'
-       ↑                        ↑   ↑      ↑
-     标识符                   标识符 数据  数据
-</code></pre></div>
-<ul>
-<li><strong>标识符</strong>（表名、列名）→ 要包反引号：<code>`city`</code></li>
-<li><strong>数据<strong>（值）→ 要</strong>参数绑定</strong>，不能直接拼进去（否则被注入）</li>
-</ul>
-<p>但如果写成 <code>JSONExtract(properties, 'a')</code> —— 这段是<strong>代码</strong>，不能包反引号。</p>
-<div class="callout tone-red quote">
-      <span class="ic">⚠</span>
-      <div><p>把「数据」当成「代码」处理，或者反过来，<mark class="mk-blue">就是注入漏洞</mark>。</p>
-</div>
-    </div><h3 id="四种形态-两个维度的组合">四种形态 = 两个维度的组合</h3>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>形态</th><th>列名怎么处理</th><th>值怎么处理</th></tr></thead><tbody><tr><th>NormalExpression</th><td data-label="列名怎么处理">包反引号 <code>formatField</code></td><td data-label="值怎么处理">参数绑定 <code>encodeValue</code></td></tr><tr><th>RawValueExpression</th><td data-label="列名怎么处理">包反引号</td><td data-label="值怎么处理"><span class="tag tone-amber">原样（已经是 SQL）</span></td></tr><tr><th>RawColumnExpression</th><td data-label="列名怎么处理"><span class="tag tone-amber">原样（是表达式）</span></td><td data-label="值怎么处理">参数绑定</td></tr><tr><th>RawExpression</th><td data-label="列名怎么处理"><span class="tag tone-amber">整段透传 <code>whereRaw</code></span></td><td data-label="值怎么处理">—</td></tr></tbody></table></div><div class="cards" data-cols="2"><div class="ccard tone-green">
-          <span class="tag tone-green">最常用</span>
-          <h4>NormalExpression</h4>
-          <p>列名和值都是普通数据。<strong>99% 的条件都是这一种</strong></p>
+          <b>SSTable 文件</b>
+          <small>L0 可有重叠键区间</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>新文件 A</b>
+        <small>key 50 = 新值</small>
+        
+      </div><div class="pnode">
+        <b>较旧文件 B</b>
+        <small>key 50 = 旧值</small>
+        
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">Compaction<span class="note">合并版本与键区间，依据快照需要保留或清理旧版本</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-green">
+        <div class="lane-meta">
           
-          <pre>{ op: 'IN', column: 'city', value: ['杭州'] }
-→ WHERE `city` IN (?)     bindings: ['杭州']
-</pre>
-        </div><div class="ccard tone-amber">
-          <span class="tag tone-amber">值是 SQL</span>
-          <h4>RawValueExpression</h4>
-          <p>列名是普通的，但<strong>值本身是一段 SQL</strong>（比如子查询）</p>
-          
-          <pre>{ op: 'Gt', column: 'cnt', rawValue: '(select avg(x) from t)' }
-→ WHERE `cnt` &gt; (select avg(x) from t)
-</pre>
-        </div><div class="ccard tone-amber">
-          <span class="tag tone-amber">列名是 SQL</span>
-          <h4>RawColumnExpression</h4>
-          <p>值普通，但<strong>列名是一段表达式</strong>（比如 JSON 取值）</p>
-          
-          <pre>{ op: 'Eq', rawColumn: &quot;JSONExtract(props, 'a')&quot;, value: 1 }
-→ WHERE JSONExtract(props, 'a') = ?
-</pre>
-        </div><div class="ccard tone-red">
-          <span class="tag tone-red">整段透传</span>
-          <h4>RawExpression</h4>
-          <p>整条 where 都是 SQL。<strong>方言方法返回的就是它</strong></p>
-          
-          <pre>{ raw: &quot;CASE WHEN `x` REGEXP ? THEN 1 ELSE 0 END = 1&quot;,
-  value: '^abc' }
-</pre>
-        </div></div><div class="callout tone-violet">
-      <span class="ic">💡</span>
-      <div><p>看出来了吗？<mark class="mk-blue">四种形态是「列名要不要处理」×「值要不要处理」的 2×2 组合</mark>，
-再加一个「整段都别处理」的兜底。</p>
-<p>为什么要分这么细：因为<strong>「哪些部分是用户数据、哪些部分是 SQL 代码」必须精确区分</strong>。
-这个区分做错了，就是注入漏洞。</p>
-</div>
-    </div><h3 id="判别靠哪个字段存在">判别靠「哪个字段存在」</h3>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-ts">export const isCondition      = (rule) =&gt; 'logic' in rule;
-export const isRawValueExpr   = (rule) =&gt; 'rawValue' in rule;
-export const isRawColumnExpr  = (rule) =&gt; 'rawColumn' in rule;
-export const isRawExpr        = (rule) =&gt; 'raw' in rule;
-</code></pre></div>
-<div class="callout tone-amber">
-      <span class="ic">⚠</span>
-      <div><p><strong>这是鸭子类型。</strong> 好处是不用建 class、JSON 直接可用、跨进程传输天然友好。</p>
-<p>代价是<mark class="mk-blue">拼错字段名不会报错</mark> —— 会掉进「都不是」那个分支抛异常。</p>
-</div>
-    </div><h2 id="组织条件怎么组合成树"><span class="num">05</span>组织：条件怎么组合成树</h2>
-<p>一棵条件树，从业务侧看是这样：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">AND
-├── 事件：加购，最近 7 天，至少 1 次
-└── OR
-    ├── 画像：vip_level &gt;= 3
-    └── 画像：channel = 'APP'
-</code></pre></div>
-<p>换成 JSON：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">{ logic: 'AND', items: [
-    { eventName: '加购', timeRange: '最近7天', ... },
-    { logic: 'OR', items: [
-        { op: 'Gte', name: 'vip_level', value: 3 },
-        { op: 'Eq',  name: 'channel',   value: 'APP' }
-    ]}
-]}
-</code></pre></div>
-<div class="callout tone-violet">
-      <span class="ic">💡</span>
-      <div><p><strong>树只有两种节点</strong>：<code>logic + items</code>（树枝）和叶子。
-<mark class="mk-blue">所有复杂度都来自「树枝可以套树枝」，没有别的。</mark></p>
-</div>
-    </div><h2 id="组织两套词汇两次翻译"><span class="num">06</span>组织：两套词汇，两次翻译</h2>
-<p>这是全篇最容易懵的地方：<strong>同一棵树，业务侧和 core 用两套词汇描述。</strong></p>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>同一个条件</th><th>业务条件（crowd 的输入）</th><th>Rule[]（core 的输入）</th></tr></thead><tbody><tr><th>属性名</th><td data-label="业务条件（crowd 的输入）"><code>name</code></td><td data-label="Rule[]（core 的输入）"><code>column</code></td></tr><tr><th>例子</th><td data-label="业务条件（crowd 的输入）"><code>{ op: 'IN', name: 'city', value: ['杭州'] }</code></td><td data-label="Rule[]（core 的输入）"><code>{ op: 'IN', column: 'city', value: ['杭州'] }</code></td></tr><tr><th>时间条件</th><td data-label="业务条件（crowd 的输入）">用 <code>dateType</code> 描述，如「最近 3 天」</td><td data-label="Rule[]（core 的输入）"><strong>展开成多个条件</strong>（见第 07 节）</td></tr><tr><th>逻辑组合</th><td data-label="业务条件（crowd 的输入）"><code>logic</code> + <code>items</code></td><td data-label="Rule[]（core 的输入）"><code>logic</code> + <code>items</code>（<strong>一样</strong>）</td></tr></tbody></table></div><div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;biz&quot;,&quot;to&quot;:&quot;rule&quot;,&quot;label&quot;:&quot;adapter 翻译&quot;,&quot;tone&quot;:&quot;amber&quot;},{&quot;from&quot;:&quot;rule&quot;,&quot;to&quot;:&quot;sql&quot;,&quot;label&quot;:&quot;knex 编译&quot;,&quot;tone&quot;:&quot;green&quot;}]">
-      <svg class="flowd-svg" aria-hidden="true">
-        <defs>
-          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
-                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
-            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
-          </marker>
-        </defs>
-      </svg>
-      <div class="flowd-groups"></div>
-      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-amber" data-id="biz">
-              
-              
-              <b>业务条件</b>
-              <small>运营/产品能懂的语言</small>
-            </div></div><div class="flowd-row"><div class="fnode tone-blue" data-id="rule">
-              
-              
-              <b>Rule[]</b>
-              <small>core 能懂的语言</small>
-            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="sql">
-              
-              
-              <b>SQL 字符串</b>
-              <small>数据库能懂的语言</small>
-            </div></div></div>
+          <b>后续层的有序文件</b>
+          <small>整理后减少重叠</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>有序文件 C</b>
+        <small>不是修改旧文件中的 key 50</small>
+        
+      </div><div class="pnode">
+        <b>读取辅助结构</b>
+        <small>Bloom Filter 排除不含键的文件，索引与缓存减少读取</small>
+        
+      </div></div>
+      </div></div><p>读取要找到符合当前快照的版本，可能探查多个文件；范围查询也可能归并多个有序输入。不可变文件有利于并发读，但不能据此推出整套引擎「零锁」、复制几个 SST 文件就能完成一致备份。文件集合、元数据与内存日志仍要由引擎的 checkpoint/backup 流程协调。</p>
+<p>哈希也不是在 InnoDB 中完全不存在：自适应哈希是 B+ 树之上的加速机制，不替代底层树。</p>
+<h3 id="容量看公式不背三层两千万">容量看公式，不背「三层两千万」</h3>
+<p>设每叶页能装 R 条记录，每非叶页能指向 F 张子页，高度 h 包含叶层，则示意容量为 <code>R × F^(h−1)</code>。下面只调行宽，固定示意扇出 1000、可用载荷 15KiB；已忽略真实记录头、目录、主键宽度和溢出页。</p>
+<div class="demo" data-widget="tuner" data-config="{&quot;param&quot;:{&quot;label&quot;:&quot;行载荷&quot;,&quot;unit&quot;:&quot;B&quot;,&quot;values&quot;:[100,200,500,1000,2000]},&quot;outputs&quot;:[{&quot;label&quot;:&quot;每叶页行数&quot;,&quot;unit&quot;:&quot;行&quot;,&quot;values&quot;:[153,76,30,15,7],&quot;tone&quot;:&quot;blue&quot;},{&quot;label&quot;:&quot;三层示意容量&quot;,&quot;unit&quot;:&quot;万行&quot;,&quot;values&quot;:[15300,7600,3000,1500,700],&quot;tone&quot;:&quot;green&quot;}]}">
+      <div class="demo-head">
+        <span class="title">行宽变化，三层树容量就变</span>
+        <span class="status" data-status></span>
+        <span class="spacer"></span>
+        
+      </div>
+      <div class="demo-body custom" data-mount></div>
+    </div><p>固定一层高的容量会随行宽和导航记录宽度变化。这里「F=1000」是透明的模型参数，不冒充源码精确值；原文的「键 8B + 页号 6B」也不能代表完整导航记录的实际大小。</p>
+<h2 id="往下找一行往右扫一段"><span class="num">03</span>往下找一行，往右扫一段</h2>
+<div class="demo" data-widget="innodb-visual-lab" data-config="{&quot;mode&quot;:&quot;path&quot;}">
+      <div class="demo-head">
+        <span class="title">亲手追踪：点查、范围查与缓存</span>
+        <span class="status" data-status></span>
+        <span class="spacer"></span>
+        
+      </div>
+      <div class="demo-body custom" data-mount></div>
+    </div><p>试三次：先跑 <code>id=42</code>，再切范围 <code>25≤id≤75</code>，最后把「全部冷缓存」与「仅导航页热」各跑一遍。观察访问路径和缺页加载数：缓存变了，树的键序与查询路径没有变。</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>查询动作</th><th>点查</th><th>范围扫描</th></tr></thead><tbody><tr><th>起点</th><td data-label="点查">按目标键从根向下定位</td><td data-label="范围扫描">按范围下界从根向下定位</td></tr><tr><th>到叶页之后</th><td data-label="点查">找到记录或确认不存在，结束</td><td data-label="范围扫描">页内顺序取记录，沿 next 跨叶页</td></tr><tr><th>简化访问量</th><td data-label="点查">根到叶的高度 h</td><td data-label="范围扫描">h + 新跨入的叶页数，起点叶页不重复计</td></tr><tr><th>最容易变大的部分</th><td data-label="点查">额外回表、旧版本或溢出列读取</td><td data-label="范围扫描">扫过的叶页数与回表数</td></tr></tbody></table></div><div class="callout tone-amber">
       
-    </div><div class="callout tone-green">
-      <span class="ic">✅</span>
-      <div><p><strong>两次翻译，各管一件事：</strong></p>
-<ul>
-<li><strong>adapter</strong>（在 <code>crowd</code> 包里）：业务词汇 → 数据词汇</li>
-<li><strong>knex</strong>（在 <code>core</code> 底层）：数据词汇 → SQL 字符串</li>
-</ul>
-<p><mark class="mk-blue"><code>core</code> 永远不知道「什么是相对时间」「什么是画像属性」。</mark></p>
+      <div><p>叶链有序是「键序连续」，不保证对应页在磁盘或文件里紧挨着。它免去树上反复回溯、让范围访问更容易利用局部性；实际顺序 IO 程度还取决于分配、碎片、缓存和预读。</p>
 </div>
-    </div><h2 id="架构以画像为例看条件怎么翻译"><span class="num">07</span>架构：以画像为例，看条件怎么翻译</h2>
-<div class="callout tone-red">
-      <span class="ic">⚠</span>
-      <div><p><mark class="mk-blue"><strong>先更正一个容易搞错的地方：没有统一的 <code>adapter</code>。</strong></mark></p>
-<p>翻译是<strong>每种条件自己做的</strong> —— 六种实现各写各的，没有一个公共的翻译函数。</p>
-<p>这一节讲的 <code>adapter()</code> 是 <strong><code>portrait.ts</code> 的私有方法</strong>，只是因为它写得最清楚，
-拿它当例子。事件和关系各有自己的一堆函数（<code>getPropRules</code> / <code>getBaseRules</code> /
-<code>buildTimeRangRules</code> …），uid / 人群包 / rawSql 则基本没有转换逻辑。</p>
-<p><mark class="mk-blue">展开讲在 <a href="../sql-builder-v2-crowd/">⑧ crowd 篇</a>。</mark></p>
-</div>
-    </div><h3 id="它是个递归函数">它是个递归函数</h3>
-<div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;in&quot;,&quot;to&quot;:&quot;loop&quot;},{&quot;from&quot;:&quot;loop&quot;,&quot;to&quot;:&quot;q1&quot;,&quot;label&quot;:&quot;是&quot;},{&quot;from&quot;:&quot;q1&quot;,&quot;to&quot;:&quot;rec&quot;,&quot;label&quot;:&quot;是&quot;},{&quot;from&quot;:&quot;q1&quot;,&quot;to&quot;:&quot;q2&quot;,&quot;label&quot;:&quot;否&quot;,&quot;dashed&quot;:true},{&quot;from&quot;:&quot;q2&quot;,&quot;to&quot;:&quot;q3&quot;,&quot;label&quot;:&quot;是&quot;},{&quot;from&quot;:&quot;q2&quot;,&quot;to&quot;:&quot;bad&quot;,&quot;label&quot;:&quot;否&quot;,&quot;dashed&quot;:true,&quot;labelDy&quot;:-78},{&quot;from&quot;:&quot;q3&quot;,&quot;to&quot;:&quot;plain&quot;,&quot;label&quot;:&quot;否&quot;},{&quot;from&quot;:&quot;q3&quot;,&quot;to&quot;:&quot;time&quot;,&quot;label&quot;:&quot;是&quot;}]">
-      <svg class="flowd-svg" aria-hidden="true">
-        <defs>
-          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
-                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
-            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
-          </marker>
-        </defs>
-      </svg>
-      <div class="flowd-groups"></div>
-      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-green" data-id="in">
-              
-              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5L3 8l3 4.5M10 3.5L13 8l-3 4.5"/></svg>
-              <b>adapter(rules)</b>
-              <small>单个条件或数组</small>
-            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="loop">
-              
-              
-              <b>遍历每个 rule</b>
-              
-            </div></div><div class="flowd-row"><div class="fnode tone-amber shape-note" data-id="q1">
-              
-              
-              <b>有 'logic'？</b>
-              <small>是树</small>
-            </div><div class="fnode tone-amber shape-note" data-id="q2">
-              
-              
-              <b>有 'op'？</b>
-              <small>是叶子</small>
-            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="rec">
-              
-              
-              <b>递归 adapter(items)</b>
-              <small>保持 logic 不变</small>
-            </div><div class="fnode tone-amber shape-note" data-id="q3">
-              
-              
-              <b>有 'dateType'？</b>
-              <small>时间条件</small>
-            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="plain">
-              
-              
-              <b>直接改名</b>
-              <small>name → column</small>
-            </div><div class="fnode tone-red" data-id="time">
-              
-              
-              <b>展开成 AND 子树</b>
-              <small>调方言或 utils</small>
-            </div><div class="fnode tone-red" data-id="bad">
-              
-              
-              <b>throw</b>
-              <small>条件错误</small>
-            </div></div></div>
-      
-    </div><h3 id="五个出口各产出什么">五个出口各产出什么</h3>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>分支</th><th>产出</th><th>真实数据</th></tr></thead><tbody><tr><th>有 <code>logic</code></th><td data-label="产出"><strong>递归</strong>，结构不变</td><td data-label="真实数据">{ logic: 'OR', items: [...] }
-→ { logic: 'OR', items: [递归结果] }</td></tr><tr><th>有 <code>dateType</code>\n且是相对时间戳</th><td data-label="产出"><strong>调方言</strong>，展开成 AND 子树</td><td data-label="真实数据">{ op: Gte, name: '..._time', value: 3 }
-→ { logic: AND, items: [3 个 Expression] }</td></tr><tr><th>有 <code>dateType</code>\n其它时间</th><td data-label="产出"><strong>调 utils</strong>，展开成 AND 子树</td><td data-label="真实数据">同上，但生成的是通用 Rule</td></tr><tr><th>有 <code>rawValue</code></th><td data-label="产出">改名 + 透传</td><td data-label="真实数据">{ op: Eq, name: 'c', rawValue: 'a+b' }
-→ { column: 'c', op: Eq, rawValue: 'a+b' }</td></tr><tr><th>普通条件</th><td data-label="产出"><strong>只改名</strong></td><td data-label="真实数据">{ op: IN, name: 'city', value: ['杭州'] }
-→ { column: 'city', op: IN, value: ['杭州'] }</td></tr><tr><th>都不是</th><td data-label="产出">throw</td><td data-label="真实数据">条件错误: {...}</td></tr></tbody></table></div><h3 id="重点时间条件为什么会膨胀">重点：时间条件为什么会「膨胀」</h3>
-<p><strong>一个输入条件，变成一棵子树。</strong></p>
-<div class="jcard">
-          <div class="jcard-head">
-            <span class="tag tone-muted">输入</span>
-            <span class="name">业务条件</span>
-            <span class="spacer"></span>
-            <span class="tag tone-muted">1 行</span>
-          </div>
-          
-          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>{ op: 'Gte', name: '..._opened_time',
-  dateType: 'Relative', value: 30 }
-</pre></div>
-          <p class="jnote">业务侧说的是一句话：「开户时间在<strong>最近 30 天</strong>内」。</p>
-        </div><div class="conn">
-      <span class="stem"></span>
-      <span class="pill">adapter<span class="note">遇到 dateType 分支</span></span>
-      <span class="stem"></span><span class="head"></span>
-    </div><div class="jcard">
-          <div class="jcard-head">
-            <span class="tag tone-violet">展开</span>
-            <span class="name">时间表达式</span>
-            <span class="spacer"></span>
-            <span class="tag tone-violet">变成两个</span>
-          </div>
-          
-          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>{ op: 'Gte', column: '..._opened_time', value: 开始 }
-{ op: 'Lte', column: '..._opened_time', value: 结束 }
-</pre></div>
-          <p class="jnote"><mark class="mk-blue">因为「最近 30 天」在 SQL 里必须写成「&gt;= 开始 AND &lt;= 结束」。</mark>
-一个语义，两个条件。</p>
-        </div><div class="conn">
-      <span class="stem"></span>
-      <span class="pill">补丁<span class="note">某些操作符还要再加一个</span></span>
-      <span class="stem"></span><span class="head"></span>
-    </div><div class="jcard">
-          <div class="jcard-head">
-            <span class="tag tone-amber">补丁</span>
-            <span class="name">addHackRules</span>
-            <span class="spacer"></span>
-            <span class="tag tone-amber">再加一个条件</span>
-          </div>
-          
-          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>如果是 '&lt;' 或 '&lt;='
-  → 再加 { op: 'Gt', column: '...', value: 0 }
-</pre></div>
-          <p class="jnote">代码注释写着原因：
-
-&gt; 对于 <code>&lt;</code> 和 <code>&lt;=</code> 的时间范围，需要加上 <code>&gt; 0</code> 的限制条件，
-&gt; 否则会筛选出值为 0 的数据。
-
-<mark class="mk-blue">「值为 0」在时间戳语义里代表「从没发生过」</mark>，不加会被当成「很久以前发生过」。</p>
-        </div><div class="conn">
-      <span class="stem"></span>
-      <span class="pill">包一层<span class="note">强制 AND</span></span>
-      <span class="stem"></span><span class="head"></span>
-    </div><div class="jcard">
-          <div class="jcard-head">
-            <span class="tag tone-green">输出</span>
-            <span class="name">Rule[]</span>
-            <span class="spacer"></span>
-            <span class="tag tone-green">一棵子树</span>
-          </div>
-          
-          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>{ logic: 'AND', items: [ 3 个 Expression ] }
-</pre></div>
-          <p class="jnote"><strong>外面强制包一层 <code>logic: 'AND'</code>。</strong> 代码注释解释了原因：
-
-&gt; 这里包装一层，因为 timeRules 必须是 And 的关系，
-&gt; 而 result 这一层的关系可能是 Or
-
-不包的话，「最近 3 天 <strong>或</strong> 是 VIP」会被解析成
-「<code>&gt;= 开始</code> <strong>或</strong> <code>&lt;= 结束</code> <strong>或</strong> 是 VIP」—— <mark class="mk-blue">语义就错了。</mark></p>
-        </div><h2 id="架构entrepot-六种实现怎么组织"><span class="num">08</span>架构：entrepot 六种实现怎么组织</h2>
-<h3 id="每种条件是一个类">每种条件是一个类</h3>
+    </div><h2 id="页到底在文件里长什么样"><span class="num">04</span>页到底在文件里长什么样？</h2>
+<h3 id="两棵树是一组页不是一份连续数组">两棵树是一组页，不是一份连续数组</h3>
 <div class="tree" data-tree><ul class="tlist"><li class="has-kids">
             <div class="tnode tone-violet" data-tree-node>
               <span class="tcaret" aria-hidden="true"></span>
-              <b>Entrepot</b>
-              <code>六个类，共同的形状</code>
-              <span class="tnote">每种条件一个类，都实现 list / count</span>
+              <b>users 的表空间</b>
+              
+              <span class="tnote">file-per-table 配置下通常对应 .ibd 文件</span>
+            </div>
+            <ul class="tlist"><li class="has-kids">
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>聚簇索引</b>
+              
+              <span class="tnote">这张表的行数据组织</span>
             </div>
             <ul class="tlist"><li>
             <div class="tnode tone-muted" data-tree-node>
               <span class="tdot" aria-hidden="true"></span>
-              <b>Portrait</b>
-              <code>portrait.ts · 233 行</code>
-              <span class="tnote">查 user_portrait</span>
+              <b>非叶节点段</b>
+              
+              <span class="tnote">导航页与相关空间分配</span>
             </div>
             
           </li><li>
             <div class="tnode tone-muted" data-tree-node>
               <span class="tdot" aria-hidden="true"></span>
-              <b>Event</b>
-              <code>event.ts · 906 行</code>
-              <span class="tnote">最复杂：事件名 + 时间 + 属性 + 次数</span>
-            </div>
-            
-          </li><li>
-            <div class="tnode tone-muted" data-tree-node>
-              <span class="tdot" aria-hidden="true"></span>
-              <b>Relation</b>
-              <code>relation.ts · 715 行</code>
-              <span class="tnote">和对象的关系</span>
-            </div>
-            
-          </li><li>
-            <div class="tnode tone-muted" data-tree-node>
-              <span class="tdot" aria-hidden="true"></span>
-              <b>Crowd</b>
-              <code>crowd.ts · 134 行</code>
-              <span class="tnote">查 crowds</span>
-            </div>
-            
-          </li><li>
-            <div class="tnode tone-muted" data-tree-node>
-              <span class="tdot" aria-hidden="true"></span>
-              <b>Uid</b>
-              <code>uid.ts · 141 行</code>
-              <span class="tnote">不查表</span>
-            </div>
-            
-          </li><li>
-            <div class="tnode tone-muted" data-tree-node>
-              <span class="tdot" aria-hidden="true"></span>
-              <b>RawSql</b>
-              <code>rawSql.ts · 107 行</code>
-              <span class="tnote">透传</span>
+              <b>叶节点段</b>
+              
+              <span class="tnote">行记录所在的叶页</span>
             </div>
             
           </li></ul>
-          </li></ul></div><div class="callout tone-violet">
-      <span class="ic">💡</span>
-      <div><p><strong>每个类只有两个公开方法：<code>list()</code> 和 <code>count()</code>。</strong></p>
-<ul>
-<li><code>list(condition, decode)</code> → 一段能查出 uid 列表的 SQL</li>
-<li><code>count(condition)</code> → 一段能数出人数的 SQL</li>
-</ul>
-<p><mark class="mk-blue">接口小得可怜，但这就是全部。</mark></p>
-</div>
-    </div><h3 id="工厂负责分发">工厂负责分发</h3>
-<div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;in&quot;,&quot;to&quot;:&quot;sw&quot;},{&quot;from&quot;:&quot;sw&quot;,&quot;to&quot;:&quot;p&quot;,&quot;label&quot;:&quot;portrait&quot;},{&quot;from&quot;:&quot;sw&quot;,&quot;to&quot;:&quot;e&quot;,&quot;label&quot;:&quot;event&quot;},{&quot;from&quot;:&quot;sw&quot;,&quot;to&quot;:&quot;o&quot;,&quot;label&quot;:&quot;...&quot;},{&quot;from&quot;:&quot;sw&quot;,&quot;to&quot;:&quot;err&quot;,&quot;label&quot;:&quot;其它&quot;,&quot;dashed&quot;:true},{&quot;from&quot;:&quot;p&quot;,&quot;to&quot;:&quot;out&quot;},{&quot;from&quot;:&quot;e&quot;,&quot;to&quot;:&quot;out&quot;},{&quot;from&quot;:&quot;o&quot;,&quot;to&quot;:&quot;out&quot;}]">
-      <svg class="flowd-svg" aria-hidden="true">
+          </li><li class="has-kids">
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>二级索引 idx_email</b>
+              
+              <span class="tnote">自己有独立的索引页与两类段</span>
+            </div>
+            <ul class="tlist"><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>非叶节点段</b>
+              
+              <span class="tnote">邮箱键导航</span>
+            </div>
+            
+          </li><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>叶节点段</b>
+              
+              <span class="tnote">邮箱 + 主键记录</span>
+            </div>
+            
+          </li></ul>
+          </li><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>空间管理页</b>
+              
+              <span class="tnote">表空间头、位图、段分配元数据；不是用户记录</span>
+            </div>
+            
+          </li></ul>
+          </li></ul></div><div class="pipe"><div class="lane tone-violet">
+        <div class="lane-meta">
+          <span class="ln">分配</span>
+          <b>段 segment</b>
+          <small>一类索引页的管理集合</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>叶段与非叶段</b>
+        <small>每个索引分别管理</small>
+        
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">申请空间<span class="note">小段可先使用零碎页，增长后使用完整 extent</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-blue">
+        <div class="lane-meta">
+          <span class="ln">区间</span>
+          <b>区 extent</b>
+          <small>默认页大小下为 64 页</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>64 × 16 KiB = 1 MiB</b>
+        <small>表空间内连续页号的分配单位</small>
+        
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">选择页<span class="note">文件偏移连续，不等于底层设备物理地址必然连续</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-green">
+        <div class="lane-meta">
+          <span class="ln">节点</span>
+          <b>页 page</b>
+          <small>一张树节点或管理页</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>INDEX 页</b>
+        <small>页头 + 记录 + 目录 + 空闲空间</small>
+        
+      </div><div class="pnode">
+        <b>管理页</b>
+        <small>空间分配与元数据</small>
+        
+      </div></div>
+      </div></div><div class="cards" data-cols="4"><div class="ccard tone-muted">
+          
+          <h4>p0 · FSP_HDR</h4>
+          <p>表空间头与分配信息</p>
+          
+          
+        </div><div class="ccard tone-muted">
+          
+          <h4>p1 · IBUF_BITMAP</h4>
+          <p>change buffer 相关位图</p>
+          
+          
+        </div><div class="ccard tone-muted">
+          
+          <h4>p2 · INODE</h4>
+          <p>段分配元数据</p>
+          
+          
+        </div><div class="ccard tone-violet">
+          
+          <h4>p3 · INDEX</h4>
+          <p>旧版小表实例中的聚簇根页</p>
+          
+          
+        </div></div><p>这是新建小表旧版转储的布局实例，不是所有版本、所有表空间的固定模板；入口位置来自元数据，不应在应用里写死 <code>p3</code>。单表文件也不包含全部 undo 历史。</p>
+<h3 id="一张页两种顺序">一张页，两种「顺序」</h3>
+<figure class="memmap" data-memmap>
+      <figcaption class="mm-title">一个默认 16 KiB INDEX 页的示意切面<span class="mm-cap-sub">按低偏移到高偏移摆放；高度为可读性权重，不按字节比例</span></figcaption>
+      <div class="mm-stack"><div class="mm-seg tone-blue" style="--mm-size:1">
+        <div class="mm-body">
+          <div class="mm-head"><b>FIL 页头</b></div>
+          <p class="mm-sub">页号、页类型、同层 prev/next</p>
+        </div>
+        
+      </div><div class="mm-seg tone-violet" style="--mm-size:1">
+        <div class="mm-body">
+          <div class="mm-head"><b>索引页头 / 段头</b></div>
+          <p class="mm-sub">记录数、层级、空闲与方向等元数据</p>
+        </div>
+        
+      </div><div class="mm-seg tone-muted" style="--mm-size:1">
+        <div class="mm-body">
+          <div class="mm-head"><b>infimum / supremum</b></div>
+          <p class="mm-sub">比所有真实键小 / 大的哨兵</p>
+        </div>
+        
+      </div><div class="mm-seg tone-green" style="--mm-size:2.5">
+        <div class="mm-body">
+          <div class="mm-head"><b>用户记录区</b><span class="mm-dir mm-down" title="向下增长">↓ 向下长</span></div>
+          <p class="mm-sub">按分配位置存放，next 维护键序</p>
+        </div>
+        <div class="mm-side">
+              
+              <span class="mm-mark">向高偏移增长</span>
+            </div>
+      </div><div class="mm-seg tone-muted" style="--mm-size:2">
+        <div class="mm-body">
+          <div class="mm-head"><b>连续空闲空间</b></div>
+          <p class="mm-sub">记录和目录之间的余量</p>
+        </div>
+        
+      </div><div class="mm-seg tone-amber" style="--mm-size:1.5">
+        <div class="mm-body">
+          <div class="mm-head"><b>页目录</b><span class="mm-dir mm-up" title="向上增长">↑ 向上长</span></div>
+          <p class="mm-sub">稀疏槽，每槽为页内偏移</p>
+        </div>
+        <div class="mm-side">
+              
+              <span class="mm-mark">向低偏移增长</span>
+            </div>
+      </div><div class="mm-seg tone-blue" style="--mm-size:1">
+        <div class="mm-body">
+          <div class="mm-head"><b>FIL 页尾</b></div>
+          <p class="mm-sub">校验相关信息</p>
+        </div>
+        
+      </div></div>
+      <div class="mm-ends">
+            <span class="mm-end">高地址 低偏移 · 页起点</span>
+            <span class="mm-end">低地址 高偏移 · 页末尾</span>
+          </div>
+      <p class="mm-note">图中 top/bottom 是文件偏移，不是内存地址的高低；记录区和页目录从两侧向中间增长。</p>
+    </figure><div class="demo" data-widget="innodb-visual-lab" data-config="{&quot;mode&quot;:&quot;page&quot;}">
+      <div class="demo-head">
+        <span class="title">物理无序也能查：用目录找组，用 next 找记录</span>
+        <span class="status" data-status></span>
+        <span class="spacer"></span>
+        
+      </div>
+      <div class="demo-body custom" data-mount></div>
+    </div><p>插入时可以取空闲位置并接入键序链，不需要总把整页记录按键搬一遍。但记录不是「从不搬移」：页内重组和分裂都会搬记录。</p>
+<div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-amber">① 逻辑删除</span>
+            <span class="name">delete-mark</span>
+            <span class="spacer"></span>
+            
+          </div>
+          <div class="rec"><div class="">
+            <b>记录</b><span>仍保留</span></div><div class="">
+            <b>原因</b><span>旧快照可能还需要</span></div></div>
+          
+          <p class="jnote">打删除标记，不意味着占用空间立刻可以随意覆盖。</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">旧版本不再被需要<span class="note">purge 后台清理</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-green">② 物理清理</span>
+            <span class="name">purge</span>
+            <span class="spacer"></span>
+            
+          </div>
+          <div class="rec"><div class="">
+            <b>记录</b><span>从索引中物理移除</span></div><div class="">
+            <b>页内空间</b><span>可供后续复用或整理</span></div></div>
+          
+          <p class="jnote">页内回收、重组和页合并是后续不同层次的空间管理动作。</p>
+        </div><h2 id="表是主树二级索引是另一个入口"><span class="num">05</span>表是主树，二级索引是另一个入口</h2>
+<h3 id="查询邮箱为什么还要拿主键">查询邮箱为什么还要拿主键？</h3>
+<figure class="archfig" data-arch data-pano data-parts='{"query":{"label":"查询邮箱","detail":"查询条件是 email，主键树没有按 email 排序，因此先用二级索引定位。"},"secondaryNav":{"label":"二级树导航页","detail":"导航记录带索引键、补齐的聚簇键与子页号；这里概括了多层导航。"},"secondaryLeaf":{"label":"二级树叶子","detail":"命中记录保存邮箱和主键 id=42，不保存 name 等所有用户列。"},"clusterNav":{"label":"用主键回主树","detail":"回表是一次按主键的逻辑查找，不是用行的物理地址直接跳转。"},"clusterLeaf":{"label":"聚簇树叶子","detail":"拿到行记录和可见性相关字段；大变长列可能还需读取页外数据。"},"result":{"label":"返回结果","detail":"按 SELECT 需求输出列。页是否缺失、是否需要旧版本，决定额外物理读取。"}}' data-anchors='[{"part":"secondaryLeaf","label":"我想看二级叶子"},{"part":"clusterLeaf","label":"我想看整行在哪"}]'>
+      <svg viewBox="0 0 1350 740" role="img" aria-labelledby="archify-diagram-title archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
+        <title id="archify-diagram-title">按邮箱查整行：两棵树用主键接起来</title>
+        <desc id="archify-diagram-description">A architecture diagram generated by Archify.</desc>
+        <!-- Definitions -->
         <defs>
-          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
-                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
-            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-default" />
           </marker>
+          <marker id="arrowhead-emphasis" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-emphasis" />
+          </marker>
+          <marker id="arrowhead-security" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-security" />
+          </marker>
+          <marker id="arrowhead-dashed" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-dashed" />
+          </marker>
+          <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+            <path d="M 40 0 L 0 0 0 40" class="c-grid" stroke-width="0.5"/>
+          </pattern>
         </defs>
+
+        <!-- Background Grid -->
+        <rect width="100%" height="100%" fill="url(#grid)" />
+
+        <!-- Boundaries (behind everything) -->
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="0" x="350" y="110" width="250" height="342" rx="12" class="c-region" stroke-width="1"/>
+        <text x="358" y="128" class="t-cloud" font-size="9" font-weight="600">二级索引：按邮箱排序</text>
+
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="1" x="730" y="330" width="270" height="342" rx="12" class="c-region" stroke-width="1"/>
+        <text x="738" y="348" class="t-cloud" font-size="9" font-weight="600">聚簇索引：按主键排序</text>
+
+        <!-- Connection paths (before components for correct z-order) -->
+        <path data-edge-from="query" data-edge-to="secondaryNav" data-edge-label="定位邮箱" data-edge-key="0" data-composition-points="230,176;380,176" d="M 230 176 L 380 176" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="secondaryNav" data-edge-to="secondaryLeaf" data-edge-label="逐层选页" data-edge-key="1" data-composition-points="475,212;475,360" d="M 475 212 L 475 360" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="secondaryLeaf" data-edge-to="clusterNav" data-edge-label="用 id 42 回表" data-edge-key="2" data-composition-points="570,396;760,396" d="M 570 396 L 760 396" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
+        <path data-edge-from="clusterNav" data-edge-to="clusterLeaf" data-edge-label="逐层选页" data-edge-key="3" data-composition-points="855,432;855,456;881,456;881,556;865,556;865,580" d="M 855 432 L 855 448 Q 855 456 863 456 L 873 456 Q 881 456 881 464 L 881 548 Q 881 556 873 556 L 873 556 Q 865 556 865 564 L 865 580" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="clusterLeaf" data-edge-to="result" data-edge-label="读取行" data-edge-key="4" data-composition-points="970,616;1120,616" d="M 970 616 L 1120 616" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+
+        <!-- Components -->
+        <g id="node-query" data-node-id="query" data-node-label="查询邮箱" tabindex="0" role="button" aria-label="Focus 查询邮箱, email = lin@demo.cn, Architecture component" aria-pressed="false" data-node-kind="external" data-node-sublabel="email = lin@demo.cn" data-node-context="Architecture component">
+          <title>查询邮箱 · email = lin@demo.cn · Architecture component</title>
+          <rect x="40" y="140" width="190" height="72" rx="6" class="c-mask"/>
+          <rect x="40" y="140" width="190" height="72" rx="6" class="c-external" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="external" class="semantic-sigil s-external" transform="translate(46 146) scale(0.6875)">
+            <rect x="2.5" y="5" width="8.5" height="8" rx="1.5"/>
+            <path d="M8 2.5h5.5V8M13.5 2.5 7.5 8.5"/>
+          </g>
+          <text data-detail-anchor x="135" y="174" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">查询邮箱</text>
+        <text data-detail="context" x="135" y="190" class="t-muted" font-size="9" text-anchor="middle">email = lin@demo.cn</text>
+        </g>
+
+        <g id="node-secondaryNav" data-node-id="secondaryNav" data-node-label="二级树导航页" tabindex="0" role="button" aria-label="Focus 二级树导航页, 邮箱键 + 子页号, 二级索引：按邮箱排序" aria-pressed="false" data-node-kind="backend" data-node-sublabel="邮箱键 + 子页号" data-node-context="二级索引：按邮箱排序">
+          <title>二级树导航页 · 邮箱键 + 子页号 · 二级索引：按邮箱排序</title>
+          <rect x="380" y="140" width="190" height="72" rx="6" class="c-mask"/>
+          <rect x="380" y="140" width="190" height="72" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(386 146) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text data-detail-anchor x="475" y="174" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">二级树导航页</text>
+        <text data-detail="context" x="475" y="190" class="t-muted" font-size="9" text-anchor="middle">邮箱键 + 子页号</text>
+        </g>
+
+        <g id="node-secondaryLeaf" data-node-id="secondaryLeaf" data-node-label="二级树叶子" tabindex="0" role="button" aria-label="Focus 二级树叶子, lin@demo.cn + id 42, 二级索引：按邮箱排序" aria-pressed="false" data-node-kind="database" data-node-sublabel="lin@demo.cn + id 42" data-node-context="二级索引：按邮箱排序">
+          <title>二级树叶子 · lin@demo.cn + id 42 · 二级索引：按邮箱排序</title>
+          <rect x="380" y="360" width="190" height="72" rx="6" class="c-mask"/>
+          <rect x="380" y="360" width="190" height="72" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(386 366) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <text data-detail-anchor x="475" y="394" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">二级树叶子</text>
+        <text data-detail="context" x="475" y="410" class="t-muted" font-size="9" text-anchor="middle">lin@demo.cn + id 42</text>
+        </g>
+
+        <g id="node-clusterNav" data-node-id="clusterNav" data-node-label="聚簇树导航页" tabindex="0" role="button" aria-label="Focus 聚簇树导航页, 主键值 + 子页号, 聚簇索引：按主键排序" aria-pressed="false" data-node-kind="backend" data-node-sublabel="主键值 + 子页号" data-node-context="聚簇索引：按主键排序">
+          <title>聚簇树导航页 · 主键值 + 子页号 · 聚簇索引：按主键排序</title>
+          <rect x="760" y="360" width="190" height="72" rx="6" class="c-mask"/>
+          <rect x="760" y="360" width="190" height="72" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(766 366) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text data-detail-anchor x="855" y="394" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">聚簇树导航页</text>
+        <text data-detail="context" x="855" y="410" class="t-muted" font-size="9" text-anchor="middle">主键值 + 子页号</text>
+        </g>
+
+        <g id="node-clusterLeaf" data-node-id="clusterLeaf" data-node-label="聚簇树叶子" tabindex="0" role="button" aria-label="Focus 聚簇树叶子, id 42 + 行数据 + MVCC, 聚簇索引：按主键排序" aria-pressed="false" data-node-kind="database" data-node-sublabel="id 42 + 行数据 + MVCC" data-node-context="聚簇索引：按主键排序">
+          <title>聚簇树叶子 · id 42 + 行数据 + MVCC · 聚簇索引：按主键排序</title>
+          <rect x="760" y="580" width="210" height="72" rx="6" class="c-mask"/>
+          <rect x="760" y="580" width="210" height="72" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(766 586) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <text data-detail-anchor x="865" y="614" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">聚簇树叶子</text>
+        <text data-detail="context" x="865" y="630" class="t-muted" font-size="9" text-anchor="middle">id 42 + 行数据 + MVCC</text>
+        </g>
+
+        <g id="node-result" data-node-id="result" data-node-label="返回所需列" tabindex="0" role="button" aria-label="Focus 返回所需列, id / email / name / …, Architecture component" aria-pressed="false" data-node-kind="external" data-node-sublabel="id / email / name / …" data-node-context="Architecture component">
+          <title>返回所需列 · id / email / name / … · Architecture component</title>
+          <rect x="1120" y="580" width="190" height="72" rx="6" class="c-mask"/>
+          <rect x="1120" y="580" width="190" height="72" rx="6" class="c-external" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="external" class="semantic-sigil s-external" transform="translate(1126 586) scale(0.6875)">
+            <rect x="2.5" y="5" width="8.5" height="8" rx="1.5"/>
+            <path d="M8 2.5h5.5V8M13.5 2.5 7.5 8.5"/>
+          </g>
+          <text data-detail-anchor x="1215" y="614" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">返回所需列</text>
+        <text data-detail="context" x="1215" y="630" class="t-muted" font-size="9" text-anchor="middle">id / email / name / …</text>
+        </g>
+
+        <!-- Connection labels -->
+        <g data-detail="context" data-edge-from="query" data-edge-to="secondaryNav" data-edge-label="定位邮箱" data-edge-key="0">
+          <rect x="280.8" y="156" width="48.4" height="14" rx="3" class="c-mask"/>
+          <text x="305" y="166" class="t-muted" font-size="8" text-anchor="middle">定位邮箱</text>
+        </g>
+        <g data-detail="context" data-edge-from="secondaryNav" data-edge-to="secondaryLeaf" data-edge-label="逐层选页" data-edge-key="1">
+          <rect x="450.8" y="262" width="48.4" height="14" rx="3" class="c-mask"/>
+          <text x="475" y="272" class="t-muted" font-size="8" text-anchor="middle">逐层选页</text>
+        </g>
+        <g data-detail="context" data-edge-from="secondaryLeaf" data-edge-to="clusterNav" data-edge-label="用 id 42 回表" data-edge-key="2">
+          <rect x="628.8" y="376" width="72.4" height="14" rx="3" class="c-mask"/>
+          <text x="665" y="386" class="t-backend" font-size="8" text-anchor="middle">用 id 42 回表</text>
+        </g>
+        <g data-detail="context" data-edge-from="clusterNav" data-edge-to="clusterLeaf" data-edge-label="逐层选页" data-edge-key="3">
+          <rect x="843.8" y="506" width="48.4" height="14" rx="3" class="c-mask"/>
+          <text x="868" y="516" class="t-muted" font-size="8" text-anchor="middle">逐层选页</text>
+        </g>
+        <g data-detail="context" data-edge-from="clusterLeaf" data-edge-to="result" data-edge-label="读取行" data-edge-key="4">
+          <rect x="1025.6" y="596" width="38.8" height="14" rx="3" class="c-mask"/>
+          <text x="1045" y="606" class="t-muted" font-size="8" text-anchor="middle">读取行</text>
+        </g>
+
+        <!-- Legend -->
+        <g data-legend data-legend-bridge>
+          <text x="40" y="704" class="t-primary" font-size="12" font-weight="650">Legend</text>
+          <g data-legend-semantic-kind="backend" data-legend-kind="backend" data-legend-label="导航" data-legend-x="40" data-legend-baseline="724" data-legend-width="63">
+            <rect x="40" y="715" width="16" height="10" rx="2.5" class="c-backend" stroke-width="1"/>
+            <text x="62" y="724" class="t-muted" font-size="10" font-weight="500">导航</text>
+          </g>
+          <g data-legend-semantic-kind="database" data-legend-kind="database" data-legend-label="索引页" data-legend-x="125" data-legend-baseline="724" data-legend-width="73">
+            <rect x="125" y="715" width="16" height="10" rx="2.5" class="c-database" stroke-width="1"/>
+            <text x="147" y="724" class="t-muted" font-size="10" font-weight="500">索引页</text>
+          </g>
+          <g data-legend-semantic-kind="external" data-legend-kind="external" data-legend-label="查询 / 结果" data-legend-x="220" data-legend-baseline="724" data-legend-width="98">
+            <rect x="220" y="715" width="16" height="10" rx="2.5" class="c-external" stroke-width="1"/>
+            <text x="242" y="724" class="t-muted" font-size="10" font-weight="500">查询 / 结果</text>
+          </g>
+        </g>
       </svg>
-      <div class="flowd-groups"></div>
-      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-green" data-id="in">
+      <figcaption>查询整行时的两次导航。图中的导航页概括了根和内部层；点任意节点查看它的直接联系。</figcaption>
+      <div class="pano-ui"></div>
+      <p class="arch-hint"><span class="idle">点头上的任意一个框看它的关系；或者从下面的「我熟悉」进去</span><span class="focused">再点一次空白处取消</span></p>
+    </figure><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-blue">① 二级叶记录</span>
+            <span class="name">idx_email · 索引记录</span>
+            <span class="spacer"></span>
+            
+          </div>
+          <div class="rec"><div class="">
+            <b>email</b><span>lin@demo.cn</span></div><div class="">
+            <b>id</b><span>42</span><em>用于回表</em></div></div>
+          
+          <p class="jnote">这里没有 name。邮箱相邻的两条记录，主键不一定相邻。</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">回表<span class="note">拿 id=42，再定位聚簇树</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-green">② 聚簇叶记录</span>
+            <span class="name">PRIMARY · 行记录</span>
+            <span class="spacer"></span>
+            
+          </div>
+          <div class="rec"><div class="">
+            <b>id</b><span>42</span></div><div class="">
+            <b>name</b><span>小林</span></div><div class="">
+            <b>email</b><span>lin@demo.cn</span></div><div class="">
+            <b>MVCC</b><span>trx_id / roll_pointer</span><em>可见性与旧版本</em></div></div>
+          
+          <p class="jnote">此例全部列内联。大字段可存页外内容，叶子中保存相关信息。</p>
+        </div><p>二级索引保存稳定主键，行因分裂换了页时，引用仍然有效；付出的代价是需要取缺失列时，再查一次聚簇树。主键更新则不同：该行在聚簇树的位置和二级索引中的主键内容都要变。</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>聚簇键选择</th><th>何时使用</th><th>例子</th></tr></thead><tbody><tr><th>显式主键</th><td data-label="何时使用">优先</td><td data-label="例子">PRIMARY KEY(id)</td></tr><tr><th>合适的唯一索引</th><td data-label="何时使用">无主键时，首个所有列均 NOT NULL 的 UNIQUE 索引</td><td data-label="例子">UNIQUE(email)，且 email NOT NULL</td></tr><tr><th>隐藏聚簇键</th><td data-label="何时使用">两者都没有时，生成 GEN_CLUST_INDEX</td><td data-label="例子">单调递增的隐藏 6 字节 row ID，应用不能直接查询它</td></tr></tbody></table></div><h3 id="覆盖icpmrr-分别改了什么">覆盖、ICP、MRR 分别改了什么？</h3>
+<div class="demo" data-widget="innodb-visual-lab" data-config="{&quot;mode&quot;:&quot;optimize&quot;}">
+      <div class="demo-head">
+        <span class="title">同样扫描四条索引记录，为什么回表不同？</span>
+        <span class="status" data-status></span>
+        <span class="spacer"></span>
+        
+      </div>
+      <div class="demo-body custom" data-mount></div>
+    </div><div class="compare-wrap"><table class="compare"><thead><tr><th>优化</th><th>对哪件事动手</th><th>没有承诺什么</th></tr></thead><tbody><tr><th>覆盖索引</th><td data-label="对哪件事动手">所需列都在索引中，免去为缺失列回表</td><td data-label="没有承诺什么">旧快照可见性判断仍可能访问聚簇记录</td></tr><tr><th>ICP · 索引条件下推</th><td data-label="对哪件事动手">索引上先过滤，减少需要回表的记录数</td><td data-label="没有承诺什么">不能替代设计更窄的访问区间</td></tr><tr><th>MRR · 多范围读取</th><td data-label="对哪件事动手">攒一批主键再排序，改善数据页访问局部性</td><td data-label="没有承诺什么">不取消回表，也不保证所有访问都成为物理顺序 IO</td></tr></tbody></table></div><p>ICP 要用真正不能进一步缩小访问区间的条件来讲。比如 <code>(zipcode, lastname, firstname)</code> 中 <code>zipcode='95054' AND lastname LIKE '%etrunia%'</code>：固定邮编段后姓氏仍需过滤。原文 <code>(email,status)</code> 两列都等值的例子，后列常可以直接参与定位，不能当作必然 ICP 的证据。</p>
+<p>数据页已热时，MRR 排序成本可能抵消收益；优化器会按成本选择。三个 EXPLAIN 标志描述的是计划，不是「发生了多少磁盘 IO」的计数器。</p>
+<h2 id="最左前缀在一条叶链上切区间"><span class="num">06</span>最左前缀：在一条叶链上切区间</h2>
+<p>联合索引 <code>(a,b)</code> 先按 a 排，再在 a 相同的段里按 b 排。像版本号 <code>major.minor</code>：先固定 major，minor 才在这段内连续。</p>
+<div class="demo" data-widget="innodb-visual-lab" data-config="{&quot;mode&quot;:&quot;joint&quot;}">
+      <div class="demo-head">
+        <span class="title">换列顺序，看「扫描的」和「命中的」如何分开</span>
+        <span class="status" data-status></span>
+        <span class="spacer"></span>
+        
+      </div>
+      <div class="demo-body custom" data-mount></div>
+    </div><p>试 <code>a≥2 AND b=2</code>：在 <code>(a,b)</code> 上，访问区间从 a=2 延伸到 a=3，b=2 是过滤；换 <code>(b,a)</code>，b=2 锁住一段，a≥2 再缩小该段。相同命中结果，可以需要不同的扫描量。</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>INDEX(a,b,c) 的条件</th><th>能定位到哪里</th><th>后续怎样处理</th></tr></thead><tbody><tr><th>a=1 AND b=2 AND c=3</th><td data-label="能定位到哪里">精确组合键区间</td><td data-label="后续怎样处理">非唯一时仍可能有多条相同组合</td></tr><tr><th>a=1</th><td data-label="能定位到哪里">a=1 整段</td><td data-label="后续怎样处理">继续扫描该段</td></tr><tr><th>a=1 AND c=3</th><td data-label="能定位到哪里">仍可用 a=1 缩小范围</td><td data-label="后续怎样处理">b 未约束，c 常只用于过滤；不是整个索引完全不能用</td></tr><tr><th>只给 b=2</th><td data-label="能定位到哪里">普通最左前缀定位缺少 a</td><td data-label="后续怎样处理">可能全索引扫描，某些条件下可考虑 Skip Scan</td></tr><tr><th>a IN (1,2) AND b=3</th><td data-label="能定位到哪里">多个可定位区间</td><td data-label="后续怎样处理">不必硬凑为一个连续区间</td></tr><tr><th>ORDER BY a,b</th><td data-label="能定位到哪里">排序与索引序匹配时可利用</td><td data-label="后续怎样处理">实际是否选择仍依访问成本</td></tr></tbody></table></div><div class="cards" data-cols="2"><div class="ccard tone-green">
+          
+          <h4>access · 减少读入</h4>
+          <p>参与决定从哪里开始、在哪里结束。</p>
+          
+          <pre>b=2 先锁住一个段；a≥2 再切段</pre>
+        </div><div class="ccard tone-amber">
+          
+          <h4>filter · 读到后再判断</h4>
+          <p>ICP 可把过滤前移到索引上，仍然没有减少本次访问区间。</p>
+          
+          <pre>先扫 a≥2 的全部，再扔掉 b≠2</pre>
+        </div></div><p>对于同一 <code>(等值 E AND 范围 R)</code> 且数据键相同的简单查询，<code>(E,R)</code> 的目标扫描区间通常不大于 <code>(R,E)</code>。不能仅因 E 区分度低，就断言反过来一定扫描更少。选择列顺序还要考虑其他 SQL、排序、覆盖、索引宽度和维护成本。</p>
+<h3 id="两条常见绝对化要去掉">两条常见绝对化要去掉</h3>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>原文简化</th><th>更准确的边界</th><th>例子</th></tr></thead><tbody><tr><th>混合 ASC/DESC 无法利用索引</th><td data-label="更准确的边界">MySQL 8.x 支持对应方向的混合降序索引</td><td data-label="例子">INDEX(a ASC,b DESC) 可服务匹配的 ORDER BY</td></tr><tr><th>LIKE 的前缀范围就是 abc 到 abd</th><td data-label="更准确的边界">在简单序关系下可用来建立直觉，真实边界依排序规则而定</td><td data-label="例子">LIKE 'abc%' 可能用于 range；仍保留 LIKE 条件核验</td></tr><tr><th>函数/OR 一出现就索引失效</th><td data-label="更准确的边界">普通列索引未必支持该表达式，但函数索引、生成列索引、Index Merge 等可改变计划</td><td data-label="例子">先看具体索引与计划，不只看 SQL 字面</td></tr><tr><th>key_len 精确告诉全部条件用法</th><td data-label="更准确的边界">它显示已用键前缀最大长度，可空列与区间转换会带来例外</td><td data-label="例子">结合实际范围、rows、filtered、optimizer trace 判断</td></tr></tbody></table></div><h2 id="查得快也要养得起每一棵树"><span class="num">07</span>查得快，也要养得起每一棵树</h2>
+<h3 id="走索引还慢看这三段">「走索引还慢」看这三段</h3>
+<div class="pipe"><div class="lane tone-blue">
+        <div class="lane-meta">
+          <span class="ln">① 定位</span>
+          <b>树遍历</b>
+          <small>根到起点叶页</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>少量导航页</b>
+        <small>常见树高较小；缓存命中可能高</small>
+        
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">找到起点<span class="note">只解决从哪里开始</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-violet">
+        <div class="lane-meta">
+          <span class="ln">② 扫描</span>
+          <b>叶链扫描</b>
+          <small>区间有多宽</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>访问范围内的叶页</b>
+        <small>索引列序影响区间；LIMIT 可提前停止</small>
+        
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">需要缺失列<span class="note">覆盖可取消这一步的后续回表</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-amber">
+        <div class="lane-meta">
+          <span class="ln">③ 取行</span>
+          <b>回表</b>
+          <small>多少条主键再查主树</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>聚簇索引查找</b>
+        <small>ICP 减少条数，MRR 改善顺序，缓存减少加载</small>
+        
+      </div></div>
+      </div></div><p>这不是三个恒定系数相加的预测器。许多回表可以命中同一张缓存页，不能拿「命中 10 万行」直接乘成「10 万次真实随机 IO」。优化器也可能选全表扫描：扫描大比例数据时，一次有局部性的扫描常比许多分散查找便宜，没有固定的命中百分比门槛。</p>
+<h3 id="一次-insert不只写主树">一次 INSERT，不只写主树</h3>
+<div class="tree" data-tree><ul class="tlist"><li class="has-kids">
+            <div class="tnode tone-violet" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>INSERT 一条新行</b>
               
-              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5L3 8l3 4.5M10 3.5L13 8l-3 4.5"/></svg>
-              <b>EntrepotStruct</b>
-              <small>{ type, condition, options }</small>
-            </div></div><div class="flowd-row"><div class="fnode tone-amber shape-note" data-id="sw">
+              <span class="tnote">这里只展示索引维护；真实持久化还有 redo/undo 等机制</span>
+            </div>
+            <ul class="tlist"><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>聚簇索引</b>
               
+              <span class="tnote">定位叶页，插入行记录，必要时重组或分裂</span>
+            </div>
+            
+          </li><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>二级索引 1</b>
               
-              <b>switch (condition.type)</b>
-              <small>工厂里的分发</small>
-            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="p">
+              <span class="tnote">插入索引列 + 主键，必要时重组或分裂</span>
+            </div>
+            
+          </li><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>二级索引 2 … N</b>
               
-              
-              <b>Portrait</b>
-              
-            </div><div class="fnode tone-violet" data-id="e">
-              
-              
-              <b>Event</b>
-              
-            </div><div class="fnode tone-muted" data-id="o">
-              
-              
-              <b>其余四种</b>
-              
-            </div><div class="fnode tone-red" data-id="err">
-              
-              
-              <b>throw</b>
-              <small>未知类型</small>
-            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="out">
-              
-              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="8" cy="4.2" rx="5" ry="1.9"/><path d="M3 4.2v7.6c0 1.05 2.24 1.9 5 1.9s5-.85 5-1.9V4.2"/></svg>
-              <b>SQL 字符串</b>
-              
-            </div></div></div>
+              <span class="tnote">每个受影响的索引都有维护成本</span>
+            </div>
+            
+          </li></ul>
+          </li></ul></div><div class="demo" data-widget="innodb-visual-lab" data-config="{&quot;mode&quot;:&quot;split&quot;}">
+      <div class="demo-head">
+        <span class="title">页放不下新记录：重组、分裂、父页维护</span>
+        <span class="status" data-status></span>
+        <span class="spacer"></span>
+        
+      </div>
+      <div class="demo-body custom" data-mount></div>
+    </div><p>原文将「子页代表键」讲成比「分隔键」必然少改相邻两条边，这是过度推导。常见分隔键实现也可以在分裂时插入新边界；本页只画经过确认的变化：分配新页、移动记录、更新页链和父导航记录，必要时传播到根。</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>主键维度</th><th>影响</th><th>要权衡什么</th></tr></thead><tbody><tr><th>短</th><td data-label="影响">主键会出现在聚簇导航、二级索引记录中，变宽会减少每页容量</td><td data-label="要权衡什么">BIGINT 8B；二进制 UUID 16B；字符存法还受编码影响</td></tr><tr><th>稳定</th><td data-label="影响">主键变更会影响聚簇位置和二级引用</td><td data-label="要权衡什么">业务字段若会修改，不宜仅因当前唯一就草率选作主键</td></tr><tr><th>有序分布</th><td data-label="影响">趋向叶链尾部插入，通常有更好的局部性</td><td data-label="要权衡什么">尾部页也可能成为并发热点</td></tr><tr><th>随机分布</th><td data-label="影响">插入点分散，通常涉及更多冷页和碎片维护</td><td data-label="要权衡什么">分散热点不等于没有锁争用</td></tr></tbody></table></div><div class="callout tone-amber">
       
-    </div><div class="callout tone-amber">
-      <span class="ic">⚠</span>
-      <div><p><strong>未知类型直接 <code>throw</code>，不静默返回空。</strong></p>
-<p>这个选择很重要：<mark class="mk-blue">静默失败会让 bug 跑到生产才被发现</mark> ——
-生成的 SQL 少了一个条件，圈出来的人就多了一批。</p>
+      <div><p><code>MERGE_THRESHOLD</code> 默认 50%，意思是利用率下降到阈值以下时「尝试」与邻页合并，并不保证任何页永远至少半满。删除不会凭空增加树高；没有及时合并时，可能保留稀疏的旧层级，而不是突然退化为更高的二叉链。</p>
 </div>
-    </div><h2 id="架构方言怎么隔离库差异"><span class="num">09</span>架构：方言怎么隔离库差异</h2>
-<h3 id="为什么需要方言">为什么需要方言</h3>
-<p>同一句业务话，两个数据库的 SQL 完全不一样：</p>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>要做的事</th><th>ByteHouse 写法</th><th>Doris 写法</th></tr></thead><tbody><tr><th>map 取 key</th><td data-label="ByteHouse 写法"><code>mapElement(\</code>name`, 'a')`</td><td data-label="Doris 写法"><code>ELEMENT_AT(\</code>name`, 'a')`</td></tr><tr><th>判空</th><td data-label="ByteHouse 写法"><code>isNull(\</code>x`)`</td><td data-label="Doris 写法"><code>\</code>x` IS NULL`</td></tr><tr><th>转整数</th><td data-label="ByteHouse 写法"><code>toInt64(\</code>x`)`</td><td data-label="Doris 写法"><code>CAST(\</code>x` AS SIGNED)`</td></tr><tr><th>JSON 数组包含</th><td data-label="ByteHouse 写法"><code>hasAny(assumeNotNull(JSONExtract(...)), ...)</code></td><td data-label="Doris 写法"><code>JSON_CONTAINS(CAST(... AS JSON), ...)</code></td></tr><tr><th>相对时间戳</th><td data-label="ByteHouse 写法">要 <code>UNIX_TIMESTAMP(...) * 1000</code> 包装</td><td data-label="Doris 写法">不要包装（event_time 是 DATETIME）</td></tr></tbody></table></div><h3 id="17-个方法覆盖所有差异点">17 个方法，覆盖所有差异点</h3>
-<div class="cards" data-cols="3"><div class="ccard tone-amber">
+    </div><h3 id="change-buffer只延后符合条件的二级页变更">change buffer：只延后符合条件的二级页变更</h3>
+<div class="pipe"><div class="lane tone-amber">
+        <div class="lane-meta">
           
-          <h4>属性取值</h4>
-          <p><code>mapPropertyAccess</code></p>
+          <b>判断是否适用</b>
+          <small>不替代所有写入</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>开启相关 buffering</b>
+        <small>还需满足索引种类与页状态限制</small>
+        
+      </div><div class="pnode">
+        <b>目标二级页不在缓冲池</b>
+        <small>普通聚簇插入 / 唯一性校验不能这样概括</small>
+        
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">暂存变更<span class="note">change buffer 是可持久化的内部结构，不只是一份易失内存列表</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-green">
+        <div class="lane-meta">
           
+          <b>等待目标页加载或后台合并</b>
+          <small>攒起来一起应用</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>合并到目标二级索引页</b>
+        <small>减少为零散写入反复加载同一页的机会</small>
+        
+      </div></div>
+      </div></div><div class="compare-wrap"><table class="compare"><thead><tr><th>版本 / 配置</th><th>默认值</th><th>解读</th></tr></thead><tbody><tr><th>MySQL 8.0 的 innodb_change_buffering</th><td data-label="默认值">all</td><td data-label="解读">支持的变更默认启用 buffering</td></tr><tr><th>MySQL 8.4 的 innodb_change_buffering</th><td data-label="默认值">none</td><td data-label="解读">默认不进行 buffering，别套用旧教程的默认前提</td></tr><tr><th>MERGE_THRESHOLD</th><td data-label="默认值">50</td><td data-label="解读">合并尝试阈值，可配置；不是所有时刻的结构不变量</td></tr></tbody></table></div><h3 id="用实测闭环不盯一个-type-等级">用实测闭环，不盯一个 type 等级</h3>
+<div class="pipe"><div class="lane tone-blue">
+        <div class="lane-meta">
           
-        </div><div class="ccard tone-amber">
+          <b>EXPLAIN</b>
+          <small>优化器准备怎么执行</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>key / type / key_len</b>
+        <small>访问路径和键前缀</small>
+        
+      </div><div class="pnode">
+        <b>rows / filtered / Extra</b>
+        <small>估算扫描量、过滤比例与优化提示</small>
+        
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">建立假设<span class="note">range 也可能扫大区间，ALL 不一定错误</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-violet">
+        <div class="lane-meta">
           
-          <h4>判空</h4>
-          <p><code>isNullCheck</code> / <code>isNotNullCheck</code></p>
+          <b>EXPLAIN ANALYZE</b>
+          <small>执行后看实际行数和时间</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>实际算子行数 / 耗时</b>
+        <small>与估算对照；该命令真的执行查询</small>
+        
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">追问误差<span class="note">估算失真看统计，结构不合适看索引设计</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-green">
+        <div class="lane-meta">
           
-          
-        </div><div class="ccard tone-amber">
-          
-          <h4>空值兜底</h4>
-          <p><code>ifNullWrap</code></p>
-          
-          
-        </div><div class="ccard tone-amber">
-          
-          <h4>类型转换</h4>
-          <p><code>castToInt</code> / <code>castToFloat</code> / <code>castBoolToInt</code></p>
-          
-          
-        </div><div class="ccard tone-amber">
-          
-          <h4>正则</h4>
-          <p><code>regexpMatchExpr</code> / <code>regexpNotMatchExpr</code></p>
-          
-          
-        </div><div class="ccard tone-amber">
-          
-          <h4>JSON 数组</h4>
-          <p><code>jsonArrayContainsRule</code> / <code>NotContains</code> / <code>Equals</code></p>
-          
-          
-        </div><div class="ccard tone-amber">
-          
-          <h4>多条件选择</h4>
-          <p><code>multiIf</code></p>
-          
-          
-        </div><div class="ccard tone-amber">
-          
-          <h4>数组展开</h4>
-          <p><code>arrayExpandSql</code></p>
-          
-          
-        </div><div class="ccard tone-amber">
-          
-          <h4>按天分组</h4>
-          <p><code>groupByEventTime</code></p>
-          
-          
-        </div><div class="ccard tone-amber">
-          
-          <h4>相对时间</h4>
-          <p><code>getRelativeTimestampRules</code></p>
-          
-          
-        </div><div class="ccard tone-amber">
-          
-          <h4>绝对时间</h4>
-          <p><code>getAbsoluteTimestampRules</code></p>
-          
-          
-        </div></div><div class="callout tone-red tinted">
-      <span class="ic">⚠</span>
-      <div><p><strong>方言方法没有一个是直接产出 SQL 的。</strong></p>
-<p>它们返回两种东西：<strong>SQL 片段字符串</strong>（被拼进 <code>Expression.raw</code>），
-或者<strong>完整的 Expression / Rule</strong>（直接进表达式树）。</p>
-<p><mark class="mk-blue">真正把表达式树变成 SQL 的是 knex，不是方言。</mark></p>
-</div>
-    </div><h3 id="什么时候调方言">什么时候调方言</h3>
-<p><strong>只有属性类型特殊时才调</strong> —— 普通条件（<code>=</code>、<code>&gt;</code>、<code>IN</code>）根本不碰方言。</p>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>属性类型</th><th>调哪个方法</th><th>返回什么</th></tr></thead><tbody><tr><th>相对时间 + 时间戳</th><td data-label="调哪个方法"><code>getRelativeTimestampRules()</code></td><td data-label="返回什么"><code>Expression[]</code></td></tr><tr><th>正则匹配</th><td data-label="调哪个方法"><code>regexpMatchExpr()</code></td><td data-label="返回什么"><code>Expression</code></td></tr><tr><th>JSON 数组</th><td data-label="调哪个方法"><code>jsonArrayContainsRule()</code></td><td data-label="返回什么"><code>Rule</code></td></tr><tr><th>bool</th><td data-label="调哪个方法"><code>castBoolToInt()</code></td><td data-label="返回什么"><code>string</code></td></tr><tr><th>map 取值</th><td data-label="调哪个方法"><code>mapPropertyAccess()</code></td><td data-label="返回什么"><code>string</code></td></tr><tr><th>NULL 判断</th><td data-label="调哪个方法"><code>isNullCheck()</code></td><td data-label="返回什么"><code>string</code></td></tr></tbody></table></div><h3 id="一个具体的例子时间戳为什么必须走方言">一个具体的例子：时间戳为什么必须走方言</h3>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>库</th><th>实现方式</th><th>生成的 SQL 形态</th></tr></thead><tbody><tr><th>ByteHouse</th><td data-label="实现方式"><strong>薄壳</strong> —— 直接转发给 <code>utils.getTimestampRules()</code></td><td data-label="生成的 SQL 形态"><code>..._time</code> &gt;= UNIX_TIMESTAMP(
-DS_DATETIME_ADD('day', -3, NOW())
-) * 1000</td></tr><tr><th>Doris</th><td data-label="实现方式"><strong>自己实现</strong> —— 因为 Doris 的 event_time 是 DATETIME</td><td data-label="生成的 SQL 形态"><code>..._time</code> &gt;= DS_DATETIME_ADD('day', -3,
-FROM_UNIXTIME(UNIX_TIMESTAMP(), '%Y-%m-%d 00:00:00')
-)</td></tr></tbody></table></div><div class="callout tone-amber">
-      <span class="ic">⚠</span>
-      <div><p><strong>差别在于要不要 <code>UNIX_TIMESTAMP(...) * 1000</code> 那层包装。</strong></p>
-<p>ByteHouse 的 <code>event_time</code> 是<strong>毫秒时间戳</strong>（数字），要把日期转成毫秒再比。
-Doris 的 <code>event_time</code> 是 <strong>DATETIME</strong>（日期类型），直接比就行。</p>
-<p><mark class="mk-blue">所以「时间戳必须走方言」不是风格差异，是<strong>列的数据类型不同</strong>。</mark></p>
-</div>
-    </div><h2 id="自测"><span class="num">10</span>自测</h2>
+          <b>统计与页指标</b>
+          <small>验证结构层的代价</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>索引前缀基数 / 叶页数</b>
+        <small>mysql.innodb_index_stats</small>
+        
+      </div><div class="pnode">
+        <b>页分裂 / 合并 / 重组</b>
+        <small>INNODB_METRICS，结合负载看趋势</small>
+        
+      </div></div>
+      </div></div><p><code>Using filesort</code> 表示额外排序，不等于一定写了磁盘文件。<code>rows × filtered</code> 也不能直接当回表次数：过滤可能在回表前，也可能在回表后。<code>ANALYZE TABLE</code> 可刷新统计，但不修复列序、覆盖和宽度问题；应按生产环境流程评估后执行。</p>
+<h3 id="新增一个索引前分别做五个判断">新增一个索引前，分别做五个判断</h3>
+<ul class="check"><li>高频 SQL 能切出多窄的访问区间？用 WHERE 与实际数据分布验证。</li><li>所需列是否都在索引里？若不在，预计要回表多少条？</li><li>排序与 LIMIT 能否利用索引序？是否仍需额外排序？</li><li>主键和新增列使每个索引记录增加多少字节？</li><li>节省的读成本是否值得写维护和缓存空间？用代表性负载实测。</li></ul><h2 id="原文与查证-如何回到证据">原文与查证 · 如何回到证据</h2>
+<p>原文中的页号、层数、时延和容量有些属于示意。这里保留机制主线，纠正绝对化说法，未把博客或评论中的硬件性能数字当普遍保证。</p>
+<ul>
+<li>内部文档《从零推导 InnoDB 索引机制》revision 102（来源链接略去）：评论图片已预览，未在 HTML 内打包或公开转载。</li>
+<li><a href="https://docs.oracle.com/cd/E17952_01/mysql-8.4-en/innodb-index-types.html">MySQL 8.4：聚簇与二级索引</a>：聚簇键回退、二级记录保存主键。</li>
+<li><a href="https://docs.oracle.com/cd/E17952_01/mysql-8.4-en/innodb-physical-structure.html">MySQL 8.4：索引物理结构</a>、<a href="https://docs.oracle.com/cd/E17952_01/mysql-8.4-en/innodb-file-space.html">空间管理</a>：页大小、填充、叶段与非叶段、零碎页到 extent 的分配。</li>
+<li><a href="https://blog.jcole.us/2013/01/07/the-physical-structure-of-innodb-index-pages/">Jeremy Cole：INDEX 页物理结构</a>：页目录、哨兵、记录链与同层页链，属于特定时代的转储解析。</li>
+<li><a href="https://github.com/mysql/mysql-server/blob/mysql-8.4.0/storage/innobase/page/page0cur.cc#L484-L552">mysql-8.4.0：page0cur.cc</a>：二分相邻目录槽，再从下界记录向上界顺扫。</li>
+<li><a href="https://docs.oracle.com/cd/E17952_01/mysql-8.4-en/innodb-multi-versioning.html">MySQL 8.4：MVCC 与二级索引</a>：delete-mark、purge、旧快照下的覆盖索引例外。</li>
+<li><a href="https://docs.oracle.com/cd/E17952_01/mysql-8.4-en/index-condition-pushdown-optimization.html">ICP</a>、<a href="https://docs.oracle.com/cd/E17952_01/mysql-8.4-en/mrr-optimization.html">MRR</a>：过滤位置与按主键重排的区别。</li>
+<li><a href="https://docs.oracle.com/cd/E17952_01/mysql-8.4-en/range-optimization.html">多列 range 与 Skip Scan</a>、<a href="https://docs.oracle.com/cd/E17952_01/mysql-8.4-en/order-by-optimization.html">ORDER BY 优化</a>：多个区间、key_len 例外、混合方向索引、filesort 的内存/落盘边界。</li>
+<li><a href="https://docs.oracle.com/cd/E17952_01/mysql-8.4-en/index-page-merge-threshold.html">合并阈值</a>、<a href="https://docs.oracle.com/cd/E17952_01/mysql-8.4-en/innodb-change-buffer.html">change buffer</a>：尝试合并、适用条件与版本默认值。</li>
+<li><a href="https://github.com/facebook/rocksdb/wiki/Leveled-Compaction">RocksDB：Leveled Compaction</a>、<a href="https://github.com/facebook/rocksdb/wiki/Basic-Operations">Basic Operations</a>、<a href="https://github.com/facebook/rocksdb/wiki/Checkpoints">Checkpoints</a>：LSM 内存与文件写路径、层间重叠和快照目录的协调。</li>
+</ul>
+<h3 id="合上页面试着回答">合上页面，试着回答</h3>
 <div class="quiz"><details>
-        <summary>为什么条件必须是「树」，不能是一个平铺的列表？</summary>
-        <div class="a"><p>因为「或者」可以出现在「并且」里面。
-「（加购过 或 下单过）并且是 VIP」这种语义，平铺列表表达不了。
-树只有两种节点：<code>logic + items</code>（树枝）和叶子，树枝可以套树枝。</p>
+        <summary>三层主键树，为什么可能一次盘都不读，也可能加载三张页？</summary>
+        <div class="a"><p>根到叶的逻辑路径仍包含三张页。全部命中缓冲池时不需要加载；全部冷时这三张页都可能要从存储加载。是否有额外版本或溢出列读取需另算。</p>
 </div>
       </details><details>
-        <summary>六种条件入口为什么是六种？</summary>
-        <div class="a"><p>因为「判断对象」的来源只有六类：用户的<strong>属性</strong>（portrait）、
-<strong>行为<strong>（event）、</strong>预先算好的人群<strong>（crowd）、</strong>直接给的 ID</strong>（uid）、
-<strong>和对象的关系<strong>（relation），以及</strong>兜底</strong>（rawSql）。
-每种都知道自己该去哪张表。</p>
+        <summary>二级索引中 email 相邻，为什么拿到的整行可能分散在主树各处？</summary>
+        <div class="a"><p>二级叶链按 email 与主键组合排序，聚簇树按主键排序，两种顺序不必相关。二级记录只提供主键引用；缺失列要按主键回表取行。</p>
 </div>
       </details><details>
-        <summary>Expression 为什么要有四种形态？</summary>
-        <div class="a"><p>因为一条 SQL 里「数据」和「代码」是两种东西，处理方式不同：
-标识符要包反引号，数据要走参数绑定，但表达式不能包反引号。
-四种形态是「列名要不要处理」×「值要不要处理」的 2×2 组合，
-再加一个「整段都别处理」的兜底。<strong>混了就是注入漏洞。</strong></p>
+        <summary>INDEX(a,b,c)，WHERE a=1 AND c=3 算完全不能用索引吗？</summary>
+        <div class="a"><p>可以用最左列 a=1 缩小访问范围，只是 c=3 被未约束的 b 分隔，通常不能把 a 段进一步变成一个更窄的普通前缀区间。c 仍可能参与索引上的过滤。</p>
 </div>
       </details><details>
-        <summary>「最近 3 天」这一个条件，为什么最后变成了一棵子树？</summary>
-        <div class="a"><p>因为「最近 3 天」在 SQL 里必须写成 <code>&gt;= 开始 AND &lt;= 结束</code> —— 一个语义、两个条件。
-某些操作符还要再加一个 <code>&gt; 0</code>（否则会把「值为 0」误当成「很久以前发生过」）。
-最后外面强制包一层 <code>logic: 'AND'</code>，否则和同一层的 <code>OR</code> 混在一起语义就错了。</p>
-</div>
-      </details><details>
-        <summary>方言方法是直接生成 SQL 的吗？</summary>
-        <div class="a"><p><strong>不是。</strong> 它们返回 SQL 片段字符串（被拼进 <code>Expression.raw</code>），
-或者完整的 Expression / Rule（直接进表达式树）。
-真正把表达式树变成 SQL 的是 <strong>knex</strong>，不是方言。</p>
-</div>
-      </details><details>
-        <summary>相对时间戳为什么必须走方言，而不能用通用实现？</summary>
-        <div class="a"><p>因为两个库的 <code>event_time</code> 列<strong>数据类型不同</strong>：
-ByteHouse 是毫秒时间戳（数字），要 <code>UNIX_TIMESTAMP(...) * 1000</code> 包装；
-Doris 是 DATETIME，直接比就行。<strong>不是风格差异，是数据类型差异。</strong></p>
-</div>
-      </details><details>
-        <summary>工厂遇到未知的 <code>condition.type</code> 会怎样？</summary>
-        <div class="a"><p>直接 <code>throw</code>，不静默返回空。
-静默失败会让 bug 跑到生产才被发现 —— 生成的 SQL 少了一个条件，
-圈出来的人就多了一批。</p>
+        <summary>覆盖、ICP、MRR 的区别，能各用一个动词说出吗？</summary>
+        <div class="a"><p>覆盖取消为取缺失列而回表；ICP 提前过滤、减少回表记录；MRR 重排回表顺序、改善局部性。三者都不能把计划标志直接换算成实际磁盘 IO。</p>
 </div>
       </details></div>
 
     <footer>
-      <span>sql_builder_v2 的核心抽象</span>
-      <span>最后更新 2026-09-25 · 单文件可离线打开</span>
+      <span>InnoDB 索引：一条查询的页读取旅程</span>
+      <span>最后更新 2026-10-08 · 单文件可离线打开</span>
     </footer>
   </main>
 </div>

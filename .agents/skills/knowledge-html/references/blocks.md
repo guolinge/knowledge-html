@@ -1227,6 +1227,18 @@ config:
 > 它讲的是一个很通用的形状：**同样是「不够用」，有的资源只能给或不给（死了），
 > 有的可以切分和延后（慢了）。** 内存 vs CPU、连接数 vs 带宽，都是这个区别。
 
+#### `innodb-visual-lab` —— 查询页路径、页内查找与索引优化
+
+```demo
+widget: innodb-visual-lab
+title: 访问哪些页，哪些页需要读盘
+actions: false
+config:
+  mode: path
+```
+
+`config.mode` 可选 `path`（逐页导航与缓存切换）、`page`（页内物理偏移与逻辑键序）、`joint`（字典序区间）、`optimize`（覆盖/ICP/MRR）、`split`（页分裂）。所有数据是教学示意，不连接数据库；逻辑页访问和缺页加载分别计数，回表不冒充真实 IO。
+
 #### `schema-walk` —— 沿着一列在几张表之间走
 
 **讲「表跟表怎么连」**：中间是当前这一行，左边是它用哪些列指着别处，
