@@ -120,10 +120,38 @@ type Apply = (query: Knex.QueryBuilder, gate: Gate) => void
 export function compile(query: InsightQuery, options: CompileOptions): CompileResult
 ```
 
-### 两样输入都是 JSON，第二样长这样
+### Catalog 是唯一的一份「名字 → 位置」对照表
 
-第一样是那份 DSL（03 节有真实例子）。第二样是 **`Catalog`**：
-它只有三个键，整个类型就三行：
+DSL 里写的全是业务名字（`age`、`holding`、`market_value`），SQL 里必须出现表名和列名
+（`user_portraits_wide.birthday`、`rel_holding.market_value_hkd`）。
+这两套名字之间没有规律，光看名字推不出来：
+
+```compare
+first: DSL 里的名字
+head: [它实际落在哪, 名字里看得出来吗]
+rows:
+  - "`age`": ["`user_portraits_wide` · `birthday`", "看不出来"]
+  - "`gender`": ["`user_portraits_wide` · `gender`", "同名的，能猜"]
+  - "`market_value`": ["`rel_holding` · `market_value_hkd`", "列名猜不到，还得多知道它在 `rel_holding` 上"]
+```
+
+所以只能有一份显式的对照表。四步里每一步都要读它，读的东西不一样：
+
+```compare
+first: 步骤
+head: [从 Catalog 里读什么, 拿来干什么]
+rows:
+  - "① Validate 的语义段": ["`fields[].name` / `relations[].name`", "这个名字存在吗"]
+  - "② Resolve": ["同两个数组，取 `table` 和 `column`", "名字换成一张表加一列"]
+  - "③ Compile": ["`column` / `valueEncoding` / `objectColumn` / `props[].column`", "写进 SQL"]
+  - "④ Assemble": ["`universeTable` / `fields`", "`FROM` 哪张表；`SELECT` 里列哪些展示字段"]
+```
+
+还有一层：`Catalog` 不由这个包维护，是从外面传进来的（`compile(query, { catalog, … })`）。
+同一份 DSL 配不同的 Catalog，编出来的 SQL 就不一样。
+所以改 Data Admin 的配置不需要发布这个包，这也是「编译」能独立成包的原因。
+
+### 外壳只有三个键
 
 ```ts
 type Catalog = {
@@ -133,25 +161,105 @@ type Catalog = {
 };
 ```
 
-真实的那一份（测试用的）是 3722 字节：12 个字段、2 个关系。骨架：
+真实那一份（测试用的）现在是 4813 字节：`fields` 12 个、`relations` 2 个，
+每个元素展开都是十几行（下面两节把两份完整贴出来）。
+
+`universeTable` 决定 `FROM` 哪张表。那 12 个字段的 `table` 全部是它，
+所以生成的 SQL 从头到尾只有一张主表（对比 07 节的 `uidsSql`）。
+每个字段都带 `table`，但!!在这份数据里它从不发挥作用!!：编译器里留着
+「字段在别的表上就 LEFT JOIN 过来」的分支，而 12 个字段没有一例外，那段逻辑不会跑。
+
+### `FieldDef`：一个画像字段要交代什么
+
+真实的一个字段，完整照抄。挑 `age` 是因为它的名字和列名对不上：
 
 ```json
 {
-  "universeTable": "user_portraits_wide",
-  "fields":    [ { "name": "age", "table": "user_portraits_wide", "expr": { … } }, …, 共 12 个 ],
-  "relations": [ { "name": "holding", "table": "rel_holding", "props": [ … ] }, …, 共 2 个 ]
+  "name": "age",
+  "label": "年龄",
+  "table": "user_portraits_wide",
+  "column": "birthday",
+  "variableType": "range",
+  "dataType": "long",
+  "contentType": 0,
+  "valueEncoding": "native_date",
+  "physicalType": "DATE",
+  "enumType": "none",
+  "ops": ["eq", "neq", "lt", "lte", "gt", "gte", "is_null", "is_not_null", "between"]
 }
 ```
 
-从这个骨架能读出两件事：
+按键看一遍：
 
-- **`universeTable` 决定 `FROM` 哪张表。** 那 12 个字段的 `table` 全部是它，
-  所以生成的 SQL 从头到尾只有一张主表 —— 对比 07 节的 `uidsSql`，`FROM` 后确实只有 `user_portraits_wide`。
-- 每个字段都带 `table`，!!但在这份数据里它从不发挥作用!!。编译器里留着
-  「字段在别的表上就 LEFT JOIN 过来」的分支，而这 12 个字段没有一例外。
-  ==所以那段 JOIN 逻辑在这份 catalog 下永远不会跑==，读代码时容易误以为真的会联表。
+```compare
+first: 键
+head: [例子里是什么, 作用]
+rows:
+  - "`name`": ["`age`", "DSL 里用的名字"]
+  - "`label`": ["`年龄`", "界面上显示的名字"]
+  - "`table` / `column`": ["`user_portraits_wide` / `birthday`", "落在哪张表、哪一列"]
+  - "`physicalType`": ["`DATE`", "数据库里那一列的类型"]
+  - "`dataType`": ["`long`", "值的逻辑类型：`long` / `double` / `string` / `boolean`"]
+  - "`variableType`": ["`range`", "输入的是一个范围，还是一串候选：`range` / `enum`"]
+  - "`contentType`": ["`0`", "业务分类编号：0 plain、1 date、2 time、3 amount …"]
+  - "`valueEncoding`": ["`native_date`", "一个时刻在这一列上怎么存：`yyyymmdd` / `unix_seconds` …"]
+  - "`enumType`": ["`none`", "候选值从哪来：`none` / `custom` / `value_set` / `dynamic`"]
+  - "`ops`": ["9 个", "这个字段允许哪些操作符"]
+  - "`options`": ["（`gender` 上有）", "枚举候选值，如 `[{value:\"M\",label:\"男\"},…]`"]
+  - "`display`": ["（可省）", "展示层怎么格式化：小数位、前后缀"]
+```
 
-`Catalog` 不是手写的，是从 Data Admin 那批配置表里投影出来的，
+那几个类型键不是冗余，各回答一个问题：
+
+- `physicalType`：数据库里那一列是什么类型
+- `dataType`：值在逻辑上是什么
+- `variableType`：用户输入的是一个范围还是一串候选
+- `contentType`：业务上这是什么（日期？时间？金额？）
+- `valueEncoding`：一个时刻在这一列上是怎么存的
+
+`fieldType.ts` 拿这几个键推导出三件事：允许哪些 `op`（`applicableOps`）、
+输入控件长什么样（`controlFor`）、值怎么编码进 SQL。配置里写一次，编译器就知道了，
+不用在每个字段上重复声明能做什么。
+
+`age` 还值得多看一眼：它的 `column` 是 `birthday`，所以「年龄 ≥ 18」
+不能拿 18 去和 `birthday` 比，得先用今天倒推 18 年算出 `2008-10-09`。
+这条换算规则不在 Catalog 里，在代码里一张按字段名查的表（`pageValue.ts` 的 `PAGE_CONVERT`），
+04 节末尾讲它，10 节再提它的后果。
+
+### `RelationDef`：一个关系要交代什么
+
+```json
+{
+  "name": "holding",
+  "label": "持仓标的",
+  "table": "rel_holding",
+  "objectColumn": "object_id",
+  "objectVariableType": "range",
+  "objectDataType": "string",
+  "objectContentType": 0,
+  "objectEnumType": "dynamic",
+  "objectSource": { "kind": "provider", "key": "stock_search" },
+  "props": [ … 3 个，见下面 … ]
+}
+```
+
+```compare
+first: 键
+head: [例子里是什么, 作用]
+rows:
+  - "`name` / `label`": ["`holding` / `持仓标的`", "DSL 里 `relation: \"holding\"` 说的就是它"]
+  - "`table`": ["`rel_holding`", "关系的记录落在哪张表"]
+  - "`objectColumn`": ["`object_id`", "「被持有的标的」在这张表的哪一列"]
+  - "`objectVariableType` 等四个": ["`range` / `string` / `0` / `dynamic`", "对象那一列的类型描述，含义与 `FieldDef` 那四项相同"]
+  - "`objectSource`": ["`{kind:\"provider\", key:\"stock_search\"}`", "对象的候选值从哪来：内联一张列表，还是问一个 provider"]
+  - "`props`": ["`market` / `qty` / `market_value`", "关系上的属性，每个是一份 `RelationPropDef`"]
+```
+
+`RelationPropDef` 长得和 `FieldDef` 几乎一样，只少一个 `table`：
+属性落在哪张表由它所属的关系决定（`rel_holding`），不用自己声明。
+`market_value` 是个好例子，它的 `column` 是 `market_value_hkd`，名字照样对不上。
+
+`Catalog` 本身不是手写的，是从 Data Admin 那批配置表里投影出来的，
 只收录 `ENABLED` 的字段与关系，对应接口 `GET /api/meta/catalog`。
 那批表长什么样、怎么映射到这份 JSON，在「Data Admin 的 7 张配置表」那篇里。
 
@@ -244,7 +352,7 @@ CompileError {
 所以调用方看到的是两种结果：安静返回，或者一个带 `code` 的 Error。
 后者直接拿去当接口的错误码用，不需要再映射一层。
 
-`code` 是一张**联合类型写死的**表（13 个），不是自由字符串：
+`code` 是一张**联合类型写死的**表（14 个），不是自由字符串：
 
 ```ts
 MISSING_SCOPE  INVALID_SCOPE  EMPTY_TEAM  EMPTY_GROUP  SCOPE_DENIED
@@ -259,94 +367,86 @@ OP_NOT_ALLOWED  VALUE_TYPE  INCOMPLETE_LEAF  UNKNOWN_NODE
 
 ## 04 · Resolve：把名字换成物理位置
 
-四种解析，三种查法：
+DSL 里出现的每一种名字，都在 Catalog 里对应一次查找：
 
 ```compare
 first: DSL 里出现的东西
-head: [怎么查, 查出来什么]
+head: [在哪查, 查出来什么]
 rows:
-  - "画像字段 `field`": ["`field_type = PORTRAIT` 且 `field_key` 匹配", "该字段的 `column_name`，如 `user_portraits_wide.birthday`"]
-  - "关系 `relation`": ["`field_type = RELATION` 且 `field_key` 匹配", "该关系的物理表名，如 `rel_holding`"]
-  - "关系子项 `objects[]`": [{ text: "**两次查找**：先定位关系，再在子项里取 `item_role = OBJECT` 的那一条", tone: amber }, "该子项的 `column_name`，如 `rel_holding.object_id`"]
-  - "关系子项 `props.items[]`": [{ text: "同上，取 `item_role = PROPERTY` 的那一条", tone: amber }, "该子项的 `column_name`，如 `rel_holding.qty`"]
+  - "画像字段 `field`": ["`fieldByName(catalog, name)`", "一份 `FieldDef`，里面直接有 `table` 和 `column`"]
+  - "关系 `relation`": ["`relationByName(catalog, name)`", "一份 `RelationDef`，里面有 `table` 和 `objectColumn`"]
+  - "关系属性 `props.items[].field`": [{ text: "先定位关系，再 `rel.props.find(…)`", tone: amber }, "一份 `RelationPropDef`，里面有 `column`"]
 ```
 
-关系子项为什么要两次查找，方案单独画了一张图解释：
+只有第三行是两次查找。原因不是数据库结构，而是==属性的名字空间属于它所在的那个关系==。
+投影的时候（`rowsToCatalog`）就是按 `relationId` 把属性挂到各自关系下的，
+所以两个关系里可以有同名属性，互不干扰。
 
-```flow
-grid: true
-nodes:
-  - { id: leaf, label: "DSL 的关系叶子", sub: "relation=holding · objects=['00700.HK'] · props=[qty >= 100]", row: 0, kind: external }
-  - { id: rel, label: "关系本体那一行", sub: "field_key=holding · parent_id=0", row: 1, tone: violet }
-  - { id: obj, label: "子项 · OBJECT", sub: "field_key=stock → column_name=symbol", row: 2, tone: blue }
-  - { id: prop, label: "子项 · PROPERTY", sub: "field_key=qty → column_name=qty", row: 2, tone: blue }
-  - { id: c1, label: "rel_holding.symbol", sub: "objects 落这一列", row: 3, tone: green }
-  - { id: c2, label: "rel_holding.qty", sub: "props 落这一列", row: 3, tone: green }
-edges:
-  - { from: leaf, to: rel, label: "按 field_key 找关系" }
-  - { from: rel, to: obj, label: "按 parent_id" }
-  - { from: rel, to: prop, label: "按 parent_id" }
-  - { from: obj, to: c1 }
-  - { from: prop, to: c2 }
+拿真实的 Catalog 走一遍这三条路：
+
+```tree
+- label: Catalog
+  tone: violet
+  sub: "4813 字节"
+  children:
+    - label: fields[]
+      sub: "12 个"
+      note: "画像字段，各自带 table + column"
+      children:
+        - { label: age, sub: "→ user_portraits_wide · birthday" }
+        - { label: gender, sub: "→ user_portraits_wide · gender" }
+    - label: relations[]
+      sub: "2 个"
+      note: "各自带 table + objectColumn，外加自己的 props[]"
+      children:
+        - label: holding
+          sub: "→ rel_holding"
+          note: "objectColumn = object_id"
+          children:
+            - { label: "props: market / qty / market_value", note: "每个带自己的 column" }
+        - label: product
+          sub: "→ rel_product"
+          note: "objectColumn = object_id（和 holding 同名，各指自己表上的列）"
+          children:
+            - { label: "props: status" }
 ```
 
-多这一步的原因很实在：**`qty` 这种 `field_key` 只在自己所属的关系内唯一**。同一个名字挂在两个关系下可以指向两个不同的列，所以查找时必须先定位关系，再查它自己的子项。
+### 查出来的是什么
 
-方案里还有一条硬约束：!!一个关系最多配置一个 OBJECT!!。因为 `objects[]` 到底落在哪一列，取决于该关系下哪条子项的 `item_role` 是 `OBJECT`；配了两条就无法确定用哪一条。这条由 Data Admin 在写入时拦截，不会进到编译阶段。
+`FieldDef` / `RelationDef` 各自长什么样、每个键什么意思，02 节已经完整给过了。
+Resolve 这一步只需要从里面取走两样东西：
 
-### 真实形态
-
-这一层最能落地：它返回的不是“映射关系”，而是两个真真实实的对象。
-拿 `age` 和 `holding` 去查，回来的就是下面这两个（实际跑出来的，一个字段没改）：
-
-```json
-// fieldByName(catalog, 'age')
-{
-  "name": "age", "label": "年龄",
-  "table": "user_portraits_wide",
-  "expr": { "fn": "years_between", "args": [ { "col": "birthday" }, { "ctx": "today" } ] },
-  "valueType": "int",
-  "ops": ["eq","neq","lt","lte","gt","gte","between","is_null","is_not_null"]
-}
+```ts
+fieldByName(catalog, 'age')                // → table: user_portraits_wide, column: birthday
+relationByName(catalog, 'holding')         // → table: rel_holding, objectColumn: object_id
+rel.props.find((p) => p.name === 'qty')    // → column: qty
 ```
 
-```json
-// relationByName(catalog, 'holding')
-{
-  "name": "holding", "label": "持仓标的",
-  "table": "rel_holding",
-  "objectType": "string",
-  "objectSource": { "kind": "provider", "key": "stock_search" },
-  "props": [
-    { "name": "market", "column": "market", "valueType": "enum",
-      "options": [ { "value": "HK", "label": "港股" }, { "value": "US", "label": "美股" } ] },
-    { "name": "qty", "column": "qty", "valueType": "decimal" },
-    { "name": "market_value", "valueType": "decimal",
-      "expr": { "fn": "div", "args": [ { "col": "market_value_hkd" }, { "lit": 10000 } ] } }
-  ]
-}
+左边是 DSL 里的名字，右边是 SQL 里要出现的位置。==这一步做完，后面不再查字典==。
+
+### 名字对不上列名时，谁负责换算
+
+`age` 是个好例子。表里没有 `age` 这一列，值要由 `birthday` 算出来，
+所以「年龄 ≥ 18」不能拿 18 去和 `birthday` 比。
+
+换算规则不在 Catalog 里，在代码里一张按字段名查的表（`pageValue.ts`）：
+
+```ts
+const PAGE_CONVERT = {
+  age:                     { kind: 'years' },
+  register_days:           { kind: 'days' },
+  last_deposit_days:       { kind: 'days' },
+  …
+  'holding.market_value':  { kind: 'scale', factor: 10000 },
+};
 ```
 
-两个细节看这两个 JSON 就够了：
+三种换算：`years`（和今天比年数）、`days`（和今天比天数）、`scale`（差一个倍率）。
+所以 `age >= 18` 编译出来是 `birthday <= '2008-10-09'`，
+而 `market_value >= 10` 是 `market_value_hkd >= 100000`。
 
-- `age` 有 `table` 但**没有 `column`**，它靠 `expr` 算出值；同形状的直连字段有 `column` 没 `expr`。
-  编译器不需要分支，它读的是同一个位置，只是那个位置可能是列名、也可能是一棵表达式。
-- 关系的 `table` 是 `rel_holding`（一张表，不是一个列），
-  而对象本身没有列名，它靠 `objectSource` 说“值从哪里来”：
-  `provider` 是一个搜索服务，所以 `stock_search` 才会被叫成 resolver。
-
-### 有个东西库里没有对应的列
-
-`age` 就是例子。表里没有 `age` 列，它的值由 `birthday` 算出来。方案用 `derive_kind` 描述这种换算关系：
-
-```text
-age_years   →  TIMESTAMPDIFF(YEAR, col, CURRENT_DATE())
-days_since  →  DATEDIFF(CURRENT_DATE(), col)
-```
-
-`derive_kind` 的取值**写死在代码里**，Metadata 只能从里面挑，不能自己新增。理由是很直接的一条：每增加一种派生方式，编译器就要多一个对应的 SQL 模板。也就是说，==这一列看起来是数据，改它就是在改代码==。
-
-本条还有一句限定：派生方式决定的是「`column_name` 这个位置填什么」。`column_name` 和 `derive_kind` 的关系是「填了列名就不再填派生」。
+这件事原来是放在元数据里的（方案的 `derive_kind` 一列），现在挪进了代码。
+==字段名当键写死在代码里==，加一个派生量要改代码、重新发布，10 节会再提一次。
 
 ---
 
@@ -796,18 +896,17 @@ first: 项
 head: [技术方案 4.3, 代码里的事实]
 rows:
   - 第 ① 步的输出: ["「输出还是一份 DSL」", { text: "`validate(): void` —— 什么都不返回", tone: red }]
-  - 停用字段的错误码: ["语义校验返回 `DISABLED_REF`", { text: "**零处**。这个码在 `packages/dsl` 里一次都没出现", tone: red }]
+  - 停用字段的错误码: ["语义校验返回 `DISABLED_REF`", { text: "码表里有（14 个码之一），但==没有任何一处抛它==，实际抛的是 `UNKNOWN_FIELD`", tone: red }]
   - 越权客户范围: ["未单独列错误码", { text: "有 `SCOPE_DENIED`（3 处引用）", tone: amber }]
-  - 关系对象落到哪一列: ["取 Metadata 里 OBJECT 子项的 `column_name`，例子里叫 `symbol`", { text: "**写死 `object_id`**（`compile.ts:356`）—— 这个列名不来自 Catalog", tone: red }]
-  - 派生字段: ["`derive_kind` 两种取值：`age_years` / `days_since`", "换成声明式表达式 `expr`，原语 12 个（`div` / `mul` / `years_between` …）"]
+  - 派生字段的换算规则: ["`derive_kind` 存在 Metadata 里，两种取值：`age_years` / `days_since`", { text: "挪进代码：`pageValue.ts` 里一张==按字段名查==的 `PAGE_CONVERT` 表（`age` / `register_days` / `holding.market_value` …）", tone: red }]
   - "`age >= 18` 编成什么": ["`TIMESTAMPDIFF(YEAR, u.birthday, CURRENT_DATE()) >= 18`", "**下推成 `birthday <= '2008-10-09'`**，让条件落在裸列上，Doris 能用分区裁剪和前缀索引"]
   - 今天/现在从哪来: ["SQL 里直接写 `CURRENT_DATE()`", "由调用方传入 `today` / `now`（`CompileOptions` 上的可选字段），SQL 不写 `CURDATE()` / `NOW()`"]
   - 数值字面量: ["直接写 `1000`", "`CAST('1000' AS DECIMAL(38,10))`，避免参数被当 DOUBLE 丢精度"]
 ```
 
-前两行合起来看：**`DISABLED_REF` 不存在，正是因为 `validate` 什么都不返回。**
+前两行合起来看：`DISABLED_REF` 这个码在表里躺着，却没有一处抛它，正是因为 `validate` 什么都不返回。
 想说“你引用了一个已停用的字段”，就得拿得到“这个字段曾经存在”这个事实，
-而 Catalog 只收录 ENABLED 的字段（Data Admin 那份投影里只姿势两种状态），
+而 Catalog 只收录 ENABLED 的字段（Data Admin 那份投影里只有 ENABLED / DISABLED 两种状态），
 停用字段在编译器眼里和“从来没写过这个字段”长得一模一样，
 所以它只能报 `UNKNOWN_FIELD`。这不是忘了写，是**这一层拿不到区分两者所需的信息**。
 
@@ -818,20 +917,23 @@ uid 游标、Knex 的四处补偿、对外只给字符串。这些是 4.3 的骨
 tone: amber
 icon: 🔩
 text: |
-  `object_id` 那一行值得单独说一句，因为它是**唯一一行会直接变成硬约束的差异**。
+  `派生字段的换算规则` 那一行值得单独说一句，因为它是==唯一一行会变成硬约束的差异==。
 
-  方案的设计是：对象列名由 Metadata 的 `column_name` 给，所以每个关系可以不一样
-  （持仓叫 `symbol`、产品叫 `product_code` 都行）。
-  实现把 `object_id` 写死在 `compile.ts:356`：
+  方案的设计是：换算规则存在 Metadata 里（`derive_kind` 一列），加一种换算不用发版。
+  实现把它挪进了代码，用**字段名当键**（`pageValue.ts`）：
 
   ```ts
-  query.whereIn(`${rel.table}.object_id`, values)
+  const PAGE_CONVERT = {
+    age:                    { kind: 'years' },
+    register_days:          { kind: 'days' },
+    'holding.market_value': { kind: 'scale', factor: 10000 },
+  };
   ```
 
-  ==后果：所有关系表的对象列都必须叫 `object_id`==，否则生成的 SQL 找不到列。
-  demo 里两张关系表也都遵守了（`rel_holding.object_id` / `rel_product.object_id`）。
+  ==后果：加一个派生量要改代码、重新发布==。而且键的类型是 `Record<string, …>`，
+  字段名拼错了编译器不会拦，只会当成「这个字段没有换算规则」，
+  于是「年龄 ≥ 18」被拿 18 去和 `birthday` 直接比。
 ````
-
 ```callout
 tone: violet
 icon: 🧭
