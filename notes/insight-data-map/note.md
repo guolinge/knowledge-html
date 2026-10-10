@@ -2,7 +2,7 @@
 
 中间发生了什么？SQL 打在哪些表上？数据怎么被找出来的？
 
-这篇把底下那层全部摊开：**11 张表**、每张表干什么、它们之间怎么连、一次查询怎么从界面走到 Doris 再走回来。
+这篇把底下那层全部摊开：**15 张表**、每张表干什么、它们之间怎么连、一次查询怎么从界面走到 Doris 再走回来。
 
 ```callout
 tone: blue
@@ -19,16 +19,16 @@ text: |
 
 ---
 
-## 01 · 11 张表，分成两半
+## 01 · 15 张表，分成两半
 
 ```compare
 first: 维度
-head: [MySQL `crm_dc`（7 张）, Doris `crm_insight`（4 张）]
+head: [MySQL `crm_dc`（10 张）, Doris `crm_insight`（5 张）]
 rows:
-  - 是什么: ["**配置** —— 有哪些字段、叫什么、怎么筛", "**数据** —— 真正的人、持仓、开通产品"]
-  - 谁写: ["Data Admin（运营在界面上配）", "离线任务灌进来（`doris/seed.mjs`）"]
-  - 谁读: ["后端启动时读一次，缓存在进程里", "每次查询都真去扫"]
-  - 改一行会怎样: ["界面跟着变（要重启后端）", [{ text: "数字跟着变，界面不变", tone: amber }]]
+  - 是什么: ["**配置** —— 有哪些字段、叫什么、怎么筛，外加预设和快照任务", "**数据** —— 真正的人、持仓、开通产品，和冻下来的名单"]
+  - 谁写: ["Data Admin（运营在界面上配）", "离线任务灌进来（`doris/seed.mjs`），快照由任务写"]
+  - 谁读: ["后端读进内存，缓存 5 秒", "每次查询都真去扫"]
+  - 改一行会怎样: ["界面跟着变（最多 5 秒）", [{ text: "数字跟着变，界面不变", tone: amber }]]
   - 量级: ["几十行", "100 万 ~ 133 万行"]
   - 丢了会怎样: ["界面空了", "人都查不出来"]
 ```
@@ -45,11 +45,11 @@ text: |
   一次圈选查询 = **拿 MySQL 的定义，去 Doris 里筛事实。**
 ```
 
-### 1.1 先看 MySQL 这 5 张「配置表」
+### 1.1 先看 MySQL 这 6 张「配置表」
 
 ```arch
 svg: data-map-config
-caption: 中心是 crm_dc_data_field —— 其他四张都是给它「查字典」用的。
+caption: 左边三本是字典，只被引用；右边三张是字段表，引用列都长在这一侧。图上一本字典只画一条边，×N 是真实引用数。
 ```
 
 **逐张看：**
@@ -57,132 +57,134 @@ caption: 中心是 crm_dc_data_field —— 其他四张都是给它「查字典
 ```cards
 cols: 1
 items:
-  - title: crm_dc_data_field —— 字段字典（47 行 × 37 列）
+  - title: crm_dc_portrait —— 特征字典（40 行 × 32 列）
     tag: 中心
     tone: violet
     body: |
-      ==界面上能选到的每一个字段，这里都有一行。==
+      ==界面上能选到的每一个画像字段，这里都有一行。==
 
-      37 列里，**只有 7 列参与映射**，其余是运维信息（谁改的、什么时候改的、口径说明、负责人）：
+      32 列里，**参与映射的就这几组**，其余是运维信息（谁改的、什么时候改的、口径说明、负责人）：
 
       | 列 | 连到哪 / 干什么 | 例子 |
       |---|---|---|
       | `field_key` | **DSL 里的字段名**，代码引用它 | `age` |
-      | `column_name` | **物理表的列名** | `birthday` |
-      | `field_type` | `1`=画像特征 `2`=关系 `3`=关系子项 | `1` |
+      | `column_name` | **物理表的列名**（NOT NULL —— 这一版没有派生列了） | `birthday` |
       | `data_source_id` | → `crm_dc_data_source.id` | `1` |
-      | `parent_id` | → **本表** id（关系子项挂在哪个关系下） | `62` |
       | `business_domain_id` | → `business_domain.id` | `70` |
-      | `semantic_type` | → `crm_dc_operator.semantic_type` | `4`（NUMBER） |
-      | `value_source_type` | 下拉选项哪来的：`0`不用 `1`内嵌 `2`值集 `3`动态 | `0` |
-      | `value_set_id` | → `crm_dc_value_set.id`（仅 `=2` 时用） | `NULL` |
-      | `value_mapping` | 内嵌选项（仅 `=1` 时用） | `{"US":{"label":…}}` |
-      | `physical_type` | 物理类型，`derive` 靠它判断 | `DATE` |
+      | `variable_type` / `data_type` | 候选还是范围 / 值的基础类型 | `enum` / `string` |
+      | `content_type` | 业务分类：0 普通、1 日期、2 时间、3 金额……10 推广位 | `7`（城市） |
+      | `value_encoding` | 日期在这一列上怎么存 | `native_date` |
+      | `enum_type` + `enum_content` | 候选值来源（none/custom/value_set/dynamic 四选一）+ 内嵌候选 | `custom` |
+      | `value_set_id` | → `crm_dc_value_set.id`（仅 value_set 用） | `32` |
+      | `value_resolver_key` | 动态候选的解析器（仅 dynamic 用） | `stock_search` |
 
       真实的 `age` 那一行：
 
       ```json
-      { "id": 22, "field_key": "age", "column_name": "birthday",
-        "field_type": 1, "data_source_id": 1,
+      { "field_key": "age", "column_name": "birthday",
+        "variable_type": "range", "data_type": "long", "content_type": 0,
+        "value_encoding": "native_date", "data_source_id": 1,
         "display_name_i18n": {"zh-CN":"年龄","en":"Age","zh-HK":"年齡"},
-        "semantic_type": 4, "physical_type": "DATE",
         "business_domain_id": 70, "status": 1 }
       ```
 
-  - title: crm_dc_data_source —— 逻辑名 → 物理表（3 行）
-    tag: 7 列
+  - title: crm_dc_relation —— 关系字典（2 行 × 33 列）
+    tag: 客体长在本行
     tone: blue
     body: |
-      | id | source_key | source_type | table_name |
-      |---|---|---|---|
-      | `1` | `user_portrait` | `1` 画像 | `user_portraits_wide` |
-      | `2` | `holding` | `2` 关系 | `rel_holding` |
-      | `3` | `product` | `2` 关系 | `rel_product` |
+      一行一条关系，**客体的 13 个 `object_*` 列直接长在本行上**：
+
+      | 列 | holding 的值 |
+      |---|---|
+      | `relation_key` | `holding`（DSL 里的名字） |
+      | `object_name` / `object_column_name` | `stock` / `object_id` |
+      | `object_enum_type` | `dynamic` → `object_value_resolver_key = stock_search` |
+      | `data_source_id` | → `rel_holding` |
+
+      ==「这条关系连到什么东西」不用再往下查子行== —— 上一版客体是关系下面的子项，
+      这一版它是本体行自己的列。
+
+  - title: crm_dc_relation_attr —— 关系属性字典（3 行 × 25 列）
+    tag: 靠 relation_id 挂
+    tone: green
+    body: |
+      | 行 | 挂在哪 | 落在哪一列 |
+      |---|---|---|
+      | `market` | `relation_id` → holding | `rel_holding.market`（值集 market） |
+      | `qty` | `relation_id` → holding | `rel_holding.qty`（无值集） |
+      | `status` | `relation_id` → product | `rel_product.status`（内嵌选项） |
+
+      唯一索引是 `(relation_id, field_key)` —— ==属性的名字空间属于关系==，
+      两个关系可以有同名属性。
+
+  - title: crm_dc_data_source —— 逻辑名 → 物理表（3 行 × 8 列）
+    tag: 8 列
+    tone: blue
+    body: |
+      | source_key | table_name |
+      |---|---|
+      | `user_portrait` | `user_portraits_wide` |
+      | `holding` | `rel_holding` |
+      | `product` | `rel_product` |
 
       ==这张表存在的意义：**代码永远不写物理表名**。==
       表改名 / 迁库 / 拆表，改这一行就够。
 
-      代码里引用的是 `source_key`（`user_portrait`），物理表名只有到这里才知道。
+      代码里引用的是 `source_key`，物理表名只有到这里才知道。
 
-  - title: crm_dc_business_domain —— 业务域层级（7 行）
-    tag: 自关联
-    tone: green
-    body: |
-      一棵树，`parent_id` 指回本表：
-
-      ```text
-      futu         (level 1)
-      ├── identity    身份      7 个字段
-      ├── account     账户      8 个
-      ├── asset       资产     12 个
-      ├── trade       交易      7 个
-      └── service     服务      6 个
-      legacy       (level 1)
-      ```
-
-      ==它和宽表的列分组**一一对应**== —— 见 1.2。
-
-  - title: crm_dc_operator —— 类型 → 操作符（30 行）
-    tag: 决定下拉
+  - title: 操作符 —— 不入库了
+    tag: 代码常量
     tone: amber
     body: |
-      界面上「大于等于」那个下拉框，选项是从这里查的：
+      上一版这里有一张 `crm_dc_operator` 表（30 行，「类型 → 操作符」）。
 
-      | `semantic_type` | 可用操作符 | 个数 |
-      |---|---|---|
-      | `1` ENUM | `eq neq in not_in is_null is_not_null` | 6 |
-      | `2` DATE | `eq between last_n_days before_n_days last_n_hours before_n_hours is_null is_not_null` | 8 |
-      | `3` BOOLEAN | `eq is_null is_not_null` | 3 |
-      | `4` NUMBER | `eq neq lt lte gt gte between is_null is_not_null` | 9 |
-      | `5` STRING | `eq neq is_null is_not_null` | 4 |
-      | | | **30** |
+      这一版==没有这张表==。一个字段能用哪些操作符由它自己的形状算
+      （`applicableOps`，按 `variable_type` / `data_type` / `content_type`）；
+      操作符的**名字和顺序**在代码常量 `OPERATOR_DISPLAY` 里（15 个，三语）。
 
-      字段的 `semantic_type` 决定它拿到哪一套。
-      所以把 `age` 从 `NUMBER` 改成 `STRING`，操作符下拉**自动换一套**。
+      数值 9 个、枚举/字符串 6 个、布尔 3 个；日期/时间再追加相对时间那几个。
 
-  - title: crm_dc_value_set —— 共享值集（2 行）
+  - title: crm_dc_value_set —— 共享值集（2 行 × 10 列）
     tag: 复用
     tone: muted
     body: |
-      | id | set_key | 值 | 谁在用 |
-      |---|---|---|---|
-      | `32` | `city` | 10 个城市 | `city` 字段 |
-      | `77` | `market` | `US` `HK` | 关系里的 `market` |
+      | set_key | 值 | 谁在用 |
+      |---|---|---|
+      | `city` | 10 个城市（`440300` 停用未删） | `city`、`open_city` 两个字段 |
+      | `market` | `HK` `US` `JP` | 关系属性 `market` |
 
-      和 `value_mapping`（字段自己内嵌）的区别：
+      候选存成 `enum_content` **数组**，每项自带 `value / label / status / sortOrder`。
+      和字段上内嵌的 `custom` 候选的区别：
       ==值集是**多个字段共用**的，改一处全都变。==
-
-      形状是一样的：
-      ```json
-      { "US": {"label":{"zh-CN":"美国"}, "sortOrder":10, "status":1} }
-      ```
 ```
 
-### 1.2 再看两张「任务表」
+### 1.2 再看四张「另一条线」的表
 
 ```callout
 tone: muted
 icon: 📋
 text: |
-  `snapshot_job`（18 列）和 `snapshot_log`（6 列）**不参与配置映射** ——
-  它们是「建快照」这条**另一条路**用的。
+  配置表之外，MySQL 里还有**预设两张 + 快照任务两张**，它们不参与字段映射：
 
-  | 表 | 干什么 | 关键列 |
-  |---|---|---|
-  | `snapshot_job` | 一次快照任务 | `sql_text`（当时编出来的 SQL）、`query_json`（当时的 DSL）、`status`、`doris_job_id` |
-  | `snapshot_log` | 任务的逐条事件 | `snapshot_id` → `snapshot_job.id`、`event`、`message` |
+  | 表 | 行数 | 干什么 | 关键列 |
+  |---|---|---|---|
+  | `dsl_preset_category` | 6 | 首页卡片墙的页签 | `category_key`、`name_i18n` |
+  | `dsl_preset` | 30 | 一张预设卡片 = 一份圈选草稿 | `query_json`（比较值可空）、`staff_id` |
+  | `snapshot_job` | 22 列 | 一次快照任务 | `sql_text`（当时编出来的 SQL）、`query_json`、`status`、`doris_job_id` |
+  | `snapshot_log` | 6 列 | 任务的逐条事件 | `snapshot_id` → `snapshot_job.id`、`event`、`message` |
 
-  `snapshot_log.snapshot_id` 指向 `snapshot_job.id` —— 这是 MySQL 里唯一的**跨表外键**。
+  `snapshot_log.snapshot_id` 指向 `snapshot_job.id`，预设的 `category_id` 指向分类表 ——
+  加上字段表的那些引用，全库 ==`FOREIGN KEY` 仍然是 0 条==，全是约定。
 
-  ==注意它记了 `sql_text` 和 `query_json`。== 意思是：快照跑完之后，
+  ==`snapshot_job` 记了 `sql_text` 和 `query_json`。== 意思是：快照跑完之后，
   即使元数据改了，你也能回头看出「当时是用什么条件、什么 SQL 建的名单」。
 ```
 
-### 1.3 Doris 那 4 张
+### 1.3 Doris 那 5 张
 
 ```arch
 svg: data-map-landing
-caption: 配置里的两样东西分别落到 Doris —— data_source 给表名，data_field 给列名。
+caption: 配置里的两样东西分别落到 Doris —— data_source 给关系表名，字段表给列名。
 ```
 
 **`user_portraits_wide` —— 宽表，45 列，100 万行**
@@ -219,7 +221,7 @@ head: [多少, 说明]
 rows:
   - 宽表实际列: ['45', '含 6 个身份/归属列']
   - 可筛的列: ['39', "45 − 6 —— 这才是界面下拉框里的项数"]
-  - 元数据 FEATURE 行: ['40', '40 条里有一条是停用的']
+  - 元数据 portrait 行: ['40', '40 行里有一条是停用的']
   - 停用的那条: ['1', "`open_city`（`status=0`）—— 而且**宽表里根本没有这一列**"]
   - 两侧对账: [{ text: "✅ 40 − 1 = 39", tone: green }, '元数据启用的 = 宽表可筛的']
 ```
@@ -233,7 +235,8 @@ text: |
   它在元数据里挂着一个 `column_name = 'open_city'`，
   但==`user_portraits_wide` 里根本没有这一列==。
 
-  之所以没炸，是因为它 `status = 0`（停用）—— 没人会去查它。
+  之所以没炸，是因为它 `status = 0`（停用）—— 没人会去查它；
+  而且重读缓存时的 `assertMetadataRows` 只查引用关系和类型，不查「列在不在 Doris 里」。
 
   ==也就是说：元数据**可以**指向一个不存在的列，只要它是停用的。==
   如果哪天有人在 Data Admin 里把它启用，查询会当场报「列不存在」。
@@ -276,18 +279,20 @@ text: |
   见第 2 节。
 ````
 
-**`audience_snapshot` —— 快照落表（0 行）**
+**`crm_dc_audience_snapshot` —— 快照落表（0 行）**
 
 ```spec
-title: audience_snapshot
+title: crm_dc_audience_snapshot
 sub: 建快照时，把名单「冻」在这里
 rows:
-  - 列: "`snapshot_id` `snapshot_date` `snapshot_minute` `user_id`"
+  - 列: "demo：`snapshot_id` `snapshot_date` `snapshot_minute` `user_id`"
   - 干什么: "点「创建快照」时，把当时的 UID 全量写进来"
   - 为什么: "圈选条件是活的 —— 明天数据变了，名单就变了。快照是**当时那一刻的名单**"
-  - 保留: "14 天（本机 demo 收成 5 分钟），按 `snapshot_date` 分区"
+  - 保留: "方案：15 个自然日（D-14 至 D），`encrypt_uid` 密文列、日分区；本机 demo 收成 5 分钟分钟分区，列还是明文 `user_id`"
   - 现在: "0 行 —— 还没人建过快照"
 ```
+
+还有一张 `insight_uid_job_meta` —— 任务状态迁到 MySQL 之前的**遗留表**，建表脚本还在、代码只留了一个 LEGACY 常量，不再使用。
 
 ---
 
@@ -302,15 +307,15 @@ participants:
   - { id: do, label: "Doris", sub: "crm_insight" }
 messages:
   - { from: fe, to: be, label: "POST /api/preview　条件树 JSON", kind: sync, note: ① 条件树 }
-  - { from: be, to: my, label: "读 5 张配置表", kind: sync, note: ② 拿字典 }
-  - { from: my, to: be, label: "Catalog（39 字段 + 操作符 + 值集）", kind: reply }
+  - { from: be, to: my, label: "读 6 张配置表（缓存 5 秒）", kind: sync, note: ② 拿字典 }
+  - { from: my, to: be, label: "Catalog（39 字段 + 2 关系 + 3 属性）", kind: reply }
   - { from: be, to: be, label: "编译：条件树 → SQL", kind: self, note: ③ 编译 }
   - { from: be, to: do, label: "countSql / listSql / uidsSql", kind: sync, note: ④ SQL }
   - { from: do, to: be, label: "人数 + 一页名单", kind: reply, note: ⑤ 结果 }
   - { from: be, to: fe, label: "count / rows / SQL 原文", kind: reply }
 gap: 0
 segments:
-  - { from: 1, to: 3, label: 每次查询都重读 }
+  - { from: 1, to: 3, label: 缓存过期才重读 }
   - { from: 4, to: 5, label: 真去扫 Doris }
 ```
 
@@ -323,7 +328,7 @@ first: 条件类型
 head: [界面长什么样, 编译成什么, 打在哪个表]
 rows:
   - 普通列: ["地区 = 美国", "`u.region = 'US'`", "`user_portraits_wide`"]
-  - 派生字段: ["年龄 ≥ 18", "`TIMESTAMPDIFF(YEAR, u.birthday, CURRENT_DATE()) >= 18`", "`user_portraits_wide`"]
+  - 换算字段: ["年龄 ≥ 18", "`u.birthday <= '2008-09-30'`（用今天倒推，条件落在裸列上）", "`user_portraits_wide`"]
   - 关系·明细: ["持有 AMD 且市场=美国", "`u.uid IN (SELECT uid FROM rel_holding WHERE …)`", "**`rel_holding`**"]
   - 关系·次数: ["持仓 ≥ 5 笔", "`u.uid IN (SELECT uid FROM rel_holding WHERE … GROUP BY uid HAVING COUNT(*) >= 5)`", "**`rel_holding`**"]
   - 关系·反向: ["不持有 AMD", "`NOT EXISTS (SELECT 1 FROM rel_holding WHERE rel.uid = u.uid AND …)`", "**`rel_holding`**"]
@@ -364,15 +369,15 @@ config:
     - label: "① 普通列"
       code: "WHERE u.region = 'US'"
       note: "直接读列名。元数据说 region 的 column_name 就是 region。"
-    - label: "② 派生字段"
-      code: "AND TIMESTAMPDIFF(YEAR, u.birthday, CURRENT_DATE()) >= 18"
-      note: "年龄在表里不存在。元数据说 column_name=birthday，代码按 field_key='age' 决定按年算。"
+    - label: "② 换算字段"
+      code: "AND u.birthday <= '2008-09-30'"
+      note: "年龄在表里不存在。元数据说 column_name=birthday，换算注册表说 age 按年算 —— 编译器用今天倒推出日期上界，条件落在裸列上。"
     - label: "③ 关系条件"
       code: "AND u.uid IN (\n  SELECT rel_holding.uid FROM rel_holding\n  WHERE rel_holding.object_id IN ('AMD.US')\n    AND (rel_holding.market = 'US')\n)"
-      note: "换成子查询。表名 rel_holding 来自 crm_dc_data_source，列名来自关系子项那几行。"
+      note: "换成子查询。表名 rel_holding 来自 crm_dc_data_source，客体列和属性列来自关系两三张字段表。"
     - label: 包一层
       code: "SELECT COUNT(*) FROM (\n  <上面那一段>\n) AS t"
-      note: "countSql 外面套一层，因为里面可能有 DISTINCT 之类的东西。"
+      note: "countSql 外面套一层：把「人数」定义成「uidsSql 这个集合的大小」。它不去重 —— 不去重靠的是关系条件走子查询、不产生重复行。"
     - label: 发出去
       code: "-- 真实结果\ncount = 53,208\nusedTables = ['rel_holding', 'user_portraits_wide']"
       note: "两张表都被用到了 —— 后端记录了它碰过哪些表。"
@@ -407,7 +412,8 @@ text: |
   **注意「权限范围」那一步 —— 它不在界面上，是后端偷偷加的。**
 
   界面上你只看到「客户范围：本人 / 指定团队 / 全部」。
-  编译时它会变成 `WHERE staff_id = 301` 之类的谓词，**直接写进 SQL**。
+  编译时它会变成 `WHERE staff_id = 301` 之类的谓词，**直接写进 SQL**；
+  范围越权时整次查询直接被拒绝（`SCOPE_DENIED`），不默默裁剪。
 
   ==所以圈选页永远查不出不属于你的人的名单 —— 不是前端拦的，是 SQL 里就没有。==
 ```
@@ -554,8 +560,8 @@ items:
 ```summary
 title: 三句话
 text: |
-  **11 张表分两半。** MySQL 那 7 张是定义，改完界面就变；
-  Doris 那 4 张是事实，就是数据本身。中心的 `crm_dc_data_field` 用 7 个外键把两边接起来。
+  **15 张表分两半。** MySQL 那 10 张是定义（配置 6 + 预设 2 + 任务 2），改完界面 5 秒内就变；
+  Doris 那 5 张是事实，就是数据本身。三张字段表用引用列把两边接起来。
 
   **一次查询 = 拿定义去筛事实** —— 画像条件变成 `WHERE 列`，关系条件变成 `uid IN (子查询)`，
   ==一律不用 JOIN，因为关系表里一个人有 N 行。==
@@ -570,7 +576,8 @@ text: |
     `user_portraits_wide` 表的 `birthday` 列。
 
     元数据里 `field_key='age'` 那行的 `column_name` 是 **`birthday`** ——
-    ==表里根本没有 age 这一列==，它是 `TIMESTAMPDIFF(YEAR, birthday, CURRENT_DATE())` 现算的。
+    ==表里根本没有 age 这一列==。换算规则在代码注册表（`pageValue.ts`）里：
+    `age: { kind: 'years' }`，编译器用今天倒推出 `birthday <= '2008-09-30'`。
 
     表名来自 `crm_dc_data_source.table_name`（`data_source_id=1` → `user_portrait` → `user_portraits_wide`）。
 
