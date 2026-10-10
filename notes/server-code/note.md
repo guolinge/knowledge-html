@@ -1,6 +1,6 @@
 ```arch
 svg: conn-establish
-caption: ==从左到右读，这就是「accept 干的事」的全部。== 四个虚线框是四个世界（你的代码 / 你的进程 / 内核 / 硬件），它们**两两不重叠** —— 这么排是为了让每个世界的范围一眼看得出来。注意中间那条往下的线：accept 队列挂在监听 socket 名下；而最右边那格是 accept 真正动过的地方。
+caption: ==从左到右读，这就是「accept 干的事」的全部。== 四个虚线框是四个世界（你的代码 / 你的进程 / 内核 / 硬件），它们**两两不重叠** —— 这么排是为了让每个世界的范围一眼看得出来。注意两根不顺主流程走的线：中间那根往下，accept 队列挂在监听 socket 名下；最底下那根**竖直的虚线**是交付本身 —— fd 表里新开的那一格，指回内核里已经建好的连接 socket。
 parts:
   calls:
     label: socket() bind() listen()
@@ -27,7 +27,7 @@ parts:
   fdtable:
     label: fd 表
     sub: accept 在这里开一格
-    detail: ==这才是 accept 真正动过的地方。== 它不在连接 socket 上动任何手脚，只是在你的 fd 表里新建一格，指过去。
+    detail: ==这才是 accept 真正动过的地方。== 它不在连接 socket 上动任何手脚，只是在你的 fd 表里新建一格，指过去 —— 图上那根竖直的虚线就是它的全部效果。
 anchors:
   - { part: conn, label: "我想搞清「一条连接」" }
   - { part: fdtable, label: "accept 到底动了什么" }
@@ -41,7 +41,7 @@ tours:
       - { at: [tcp, conn], text: "==握手完成的那一刻，内核就把连接 socket 建好了== —— 就在协议栈里。" }
       - { at: [conn], text: "注意它现在的处境：==对象已经完整存在，但还没有 fd，也不属于任何进程。== 你的代码够不到它。" }
       - { at: [conn, accq, lsock], text: "它被放进==accept 队列== —— 这条队列挂在监听 socket 名下。" }
-      - { at: [accq, fdtable], text: "==accept 做的事只有一件：在你的 fd 表里开一格，指向那个已经存在的连接 socket。==\n\n所以 accept 干的是**交付**，不是**创建** —— 它不产生任何新的内核对象，只是把一根线接上了。" }
+      - { at: [accq, fdtable, conn], text: "看那根**竖直的虚线**：从 fd 表指回内核里那个已经存在的连接 socket。旁边横着的那根是它的前半句 —— 从队列里**取走**。==accept 做的事只有一件：在你的 fd 表里开一格，指向那个已经存在的连接 socket。==\n\n所以 accept 干的是**交付**，不是**创建** —— 它不产生任何新的内核对象，只是把一根线接上了。" }
 ```
 
 ```arch
