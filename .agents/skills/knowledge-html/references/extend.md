@@ -159,6 +159,23 @@ text: |
   这次写 combination-control-lab 两个坑都踩了，`check` 全绿，只有截图看得见。
 ````
 
+````callout
+ tone: red
+ icon: ⚠
+ text: |
+   ==`classList.toggle(name, force)` 的 `force` 是 `undefined` 时是**翻转**，不是「移除」。==
+
+   真实事故（arch 积木的导览）：点亮逻辑写的是
+   `var on = want[from] && want[to]` —— 键不存在时得到的是 `undefined`，不是 `false`。
+   而前面的 `clear()` 刚把 `is-hot` 摘掉，`toggle('is-hot', undefined)` 又把它**翻回来** ——
+   表现是「导览模式下所有边永远全亮，淡出从来没生效过」。
+   节点那边写了 `!!want[...]` 就没事。修法一行：`!!` 布尔化。
+
+   这类状态 bug `check` / `visual-check` 都查不到 ——
+   ==它们不点交互==。点亮/淡出这类东西要自己写探针点一遍
+   （headless Chrome 注入脚本点按钮，再 dump class / computed opacity）。
+````
+
 **三条约定**：
 
 1. **数据驱动优先。** 能用 `config` 表达的，别让作者手写 HTML。
