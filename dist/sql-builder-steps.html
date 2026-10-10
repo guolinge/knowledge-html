@@ -5605,9 +5605,9 @@ svg[data-preset="blueprint"] .c-security-group,
       <a href="#扭转三include-和-exclude-的写法差一层-coalesce" class="sub">扭转三：include 和 exclude 的写法差一层 COALESCE</a>
       <a href="#扩展点常见改动各要动哪里">扩展点：常见改动各要动哪里</a>
       <a href="#讲的时候留意方案和实现现在的差异">讲的时候留意：方案和实现现在的差异</a>
-      <a href="#名字对不上" class="sub">名字对不上</a>
-      <a href="#同样输入产出不同" class="sub">同样输入，产出不同</a>
-      <a href="#方案写了代码里没有" class="sub">方案写了，代码里没有</a>
+      <a href="#已经对上的上一版列过现在方案改口了" class="sub">已经对上的（上一版列过，现在方案改口了）</a>
+      <a href="#还没对上的" class="sub">还没对上的</a>
+      <a href="#方案删了代码还在的" class="sub">方案删了、代码还在的</a>
   </aside>
 
   <main>
@@ -6249,12 +6249,14 @@ FROM (
   `u`.`uid`           AS `uid`,
   `u`.`customer_name` AS `customer_name`,
   `u`.`staff_name`    AS `staff_name`,
-  TIMESTAMPDIFF(YEAR, `u`.`birthday`, '2026-09-30') AS `age`
+  `u`.`birthday`      AS `age`
 FROM `user_portraits_wide` AS `u`
 WHERE ( ... )
 ORDER BY `u`.`uid`
 LIMIT 10
 </code></pre></div>
+<p>展示列选的是原始列（<code>birthday</code>），「岁数」的换算在展示层做（<code>displayPageValue</code>）——
+SQL 里不出现换算表达式，这样 ORDER BY、导出、下游消费拿到的都是同一份裸列。</p>
 <p>翻第二页时不加 <code>OFFSET</code>，而是把上一页最后一个 uid 带上（真实夹具里的形态）：</p>
 <div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-sql">SELECT `u`.`uid` AS `uid`, `u`.`customer_name` AS `customer_name`
 FROM `user_portraits_wide` AS `u`
@@ -6271,7 +6273,7 @@ LIMIT 10
 <div class="compare-wrap"><table class="compare"><thead><tr><th>Knex 的默认行为</th><th>怎么办</th><th>为什么</th></tr></thead><tbody><tr><th>字符串用反斜杠转义：<code>'O\\'Brien'</code>&quot;</th><td data-label="怎么办">覆盖转义函数，改成单引号翻倍 <code>'O''Brien'</code></td><td data-label="为什么">Doris 走 ANSI 语法</td></tr><tr><th>布尔值输出小写 <code>true</code> / <code>false</code>&quot;</th><td data-label="怎么办">改成 <code>TRUE</code> / <code>FALSE</code></td><td data-label="为什么">Doris 要大写</td></tr><tr><th><code>offset</code> 为 0 时省略 <code>OFFSET</code> 子句</th><td data-label="怎么办">显式补一个 <code>OFFSET 0</code></td><td data-label="为什么">让分页语句的形状保持固定，不随参数变</td></tr><tr><th>关键字输出小写&quot;</th><td data-label="怎么办">渲染之后统一转成大写</td><td data-label="为什么">fixture 和调用方看的是大写形态</td></tr></tbody></table></div><p>方案还限定了一件界外的事：<strong>只把 Knex 当 SQL 构造器用</strong>：不用它的 model、migration、seed 和连接池。因为本包不连数据库，只生成文本。</p>
 <hr>
 <h2 id="三处扭转"><span class="num">08</span>三处扭转</h2>
-<p>这三处是评审时最容易被挑的地方，也是方案专门用「实现约定」一节写的。</p>
+<p>这三处是评审时最容易被挑的地方。其中前两处方案里还有（「实现约定」一节），第三处（include/exclude 的 COALESCE）的方案章节在这一版里被删了 —— 代码照写、测试照看，方案不再背书。</p>
 <h3 id="扭转一关系条件用-in-子查询不用-left-join">扭转一：关系条件用 <code>IN</code> 子查询，不用 LEFT JOIN</h3>
 <div class="compare-wrap"><table class="compare"><thead><tr><th>写法</th><th>一个人持 5 个标的会怎样</th><th>结论</th></tr></thead><tbody><tr><th>LEFT JOIN</th><td data-label="一个人持 5 个标的会怎样"><span class="tag tone-red">JOIN 之后这个人变成 5 行，<code>COUNT(*)</code> 把 1 个人数成 5 个人</span></td><td data-label="结论">不能用</td></tr><tr><th><code>IN</code> 子查询</th><td data-label="一个人持 5 个标的会怎样">只回答「这个 uid 在不在结果集里」，一行对应一个人</td><td data-label="结论">采用</td></tr></tbody></table></div><p>方案在这里补了一句容易被忽略的话：<mark class="mk-blue">子查询里只写 <code>SELECT uid</code> 不会去重</mark>，去重需要 <code>DISTINCT</code> 或 <code>GROUP BY</code>。而本设计是<mark class="mk-blue">从语句形状上避免重复行的产生</mark>，不是在统计时去重。 这正是 countSql 那一层不写 <code>DISTINCT</code> 的前提。</p>
 <h3 id="扭转二notin-编译成-not-exists">扭转二：<code>not_in</code> 编译成 <code>NOT EXISTS</code></h3>
@@ -6291,49 +6293,52 @@ NOT EXISTS (
 exclude  →  NOT COALESCE((cond1 AND cond2), FALSE)
 </code></pre></div>
 <p>不写 <code>COALESCE</code> 的话，一个性别为 NULL 的记录会被「排除男性」一并排除掉。这部分 <code>null-lab</code> 那个交互讲的正是它：同一批数据、同一个条件，只换「放进哪边」和「包不包 COALESCE」，看哪几行被留住。</p>
-<p>方案给的机制解释是：SQL 里 <code>NOT UNKNOWN</code> 的结果<strong>仍是 <code>UNKNOWN</code></strong>，在 WHERE 中按 false 处理，于是「是男性」和「不是男性」两个集合都没收留它。</p>
+<p>机制是 SQL 的三值逻辑：<code>NOT UNKNOWN</code> 的结果<strong>仍是 <code>UNKNOWN</code></strong>，在 WHERE 中按 false 处理，
+于是「是男性」和「不是男性」两个集合都没收留它。包上 <code>COALESCE(expr, FALSE)</code> 之后：
+UNKNOWN 被压成 FALSE，<code>NOT FALSE</code> → TRUE，正确留下。</p>
+<p>上一版方案专门有一节写这个；这一版删了，但代码和 <code>includeCoalesce.spec.ts</code> 都还在 ——
+这条约定现在是「代码 + 测试看住」，不再是方案背书。</p>
 <p>这三处扭转让「同一段 WHERE」这句描述变得不准确。准确的说法是：<mark class="mk-blue">include 和 exclude 共用一套叶子编译规则，但最外层包法不同。</mark></p>
 <hr>
 <h2 id="扩展点常见改动各要动哪里"><span class="num">09</span>扩展点：常见改动各要动哪里</h2>
-<p>方案专门列了这一张表，它回答的是「这个组件的可演进性在哪」。改动分两边：数据在 Data Admin 里配，配完即生效；代码改完要重新发布。</p>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>需要新增</th><th>改哪里</th><th>说明</th></tr></thead><tbody><tr><th>一个数据源</th><td data-label="改哪里"><code>crm_dc_data_source</code> 与 <code>crm_dc_data_field</code> 增加记录</td><td data-label="说明">SQL Builder 不感知有几个数据源，只认传进来的字段字典</td></tr><tr><th>一个操作符</th><td data-label="改哪里"><code>schema.ts</code> 加定义；<code>compile.ts</code> 加编译分支；<code>crm_dc_operator</code> 加记录</td><td data-label="说明"><strong>前三处缺一不可</strong> —— 前两处决定它怎么变成 SQL，第三处决定哪些字段能用它</td></tr><tr><th>一个叶子类型</th><td data-label="改哪里"><code>schema.ts</code> 加类型和类型判断；<code>validate.ts</code> 与 <code>compile.ts</code> 各加分支</td><td data-label="说明">叶子类型是 DSL 结构的一部分，校验和编译都要认识它</td></tr><tr><th>一种派生方式</th><td data-label="改哪里"><code>metadata.ts</code> 的 <code>FieldDerive</code> 加取值与 SQL 模板；<code>crm_dc_data_field</code> 补取值</td><td data-label="说明">可选取值写死在代码里，Metadata 只能从中挑</td></tr></tbody></table></div><p>这张表值得在讲解时点一句：<mark class="mk-blue">四行里只有第一行是纯配置</mark>。加字段不加代码，加操作符和加叶子要发版。这是设计上刻意的取舍，不是疏漏。</p>
+<p>上一版方案里有一张「扩展点」表，这一版删掉了；这张表从代码侧重建，回答的是
+「这个组件的可演进性在哪」。改动分两边：字段配置在 Data Admin 里改，最多 5 秒生效；代码改完要重新发布。</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>需要新增</th><th>改哪里</th><th>说明</th></tr></thead><tbody><tr><th>一个数据源</th><td data-label="改哪里"><code>crm_dc_data_source</code> 加一行，字段表上的 <code>data_source_id</code> 指过去</td><td data-label="说明">SQL Builder 不感知有几个数据源，只认传进来的字段字典</td></tr><tr><th>一个字段</th><td data-label="改哪里"><code>crm_dc_portrait</code>（或关系两张表）加一行</td><td data-label="说明">纯配置 —— 形状（variable_type/data_type/content_type）决定操作符和控件，不用发版</td></tr><tr><th>一个操作符</th><td data-label="改哪里"><code>schema.ts</code> 加常量；<code>compile.ts</code> 加编译分支；<code>operators.ts</code> 的 <code>OPERATOR_DISPLAY</code> 加名字</td><td data-label="说明">三处都在代码里 —— 操作符不入库了，所以 <mark class="mk-blue">加操作符必发版</mark>，没有表可插</td></tr><tr><th>一个叶子类型</th><td data-label="改哪里"><code>schema.ts</code> 加类型和类型判断；<code>validate.ts</code> 与 <code>compile.ts</code> 各加分支</td><td data-label="说明">叶子类型是 DSL 结构的一部分，校验和编译都要认识它</td></tr><tr><th>一种换算方式</th><td data-label="改哪里"><code>pageValue.ts</code> 的 <code>PAGE_CONVERT</code> 加键；展示层用同一个注册表反推</td><td data-label="说明">换算规则只在代码里，字段名当键 —— 拼错只会被夹具抓住，编译器不报错</td></tr></tbody></table></div><p>这张表值得在讲解时点一句：<mark class="mk-blue">前两行是纯配置</mark>。加字段不加代码；加操作符、加叶子、加换算要发版。
+和上一版相比的变化是：操作符从「改编译器 + 插一行表」变成「三处代码」，
+换算从「Metadata 挑取值」变成「代码里的注册表」。</p>
 <hr>
 <h2 id="讲的时候留意方案和实现现在的差异"><span class="num">10</span>讲的时候留意：方案和实现现在的差异</h2>
-<p>技术方案 4.2 / 4.3 是设计稿，<code>packages/dsl</code> 和圈选组件是按它实现的。<mark class="mk-blue">哪边说了算，按代码。</mark>
-对不上的地方分三类：名字对不上、同样输入产出不同、方案写了代码里没有。</p>
-<h3 id="名字对不上">名字对不上</h3>
-<p>读文档写代码时会直接撞上的一批。改的是叫法，语义基本没变。</p>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>文档里写的</th><th>代码里实际是</th><th>出现在</th></tr></thead><tbody><tr><th><code>semantic_type</code></th><td data-label="代码里实际是">拆成五个列：<code>variable_type</code> / <code>data_type</code> / <code>content_type</code> / <code>value_encoding</code> / <code>enum_type</code></td><td data-label="出现在">4.1 三张表、4.2 解析规则、4.3 语义校验</td></tr><tr><th><code>crm_dc_relation.field_key</code></th><td data-label="代码里实际是"><code>relation_key</code></td><td data-label="出现在">4.2 设计目标、4.3 解析表</td></tr><tr><th><code>object_field_key</code></th><td data-label="代码里实际是"><code>object_name</code>（客体类别标识）</td><td data-label="出现在">4.2 设计目标</td></tr><tr><th><code>valueSource: 'INLINE'</code></th><td data-label="代码里实际是"><code>'CUSTOM'</code>，一样带 <code>items[]</code></td><td data-label="出现在">4.2 数据来源表</td></tr><tr><th>组件侧的 <code>fields</code></th><td data-label="代码里实际是"><code>features</code>；顶层还有 <code>revision</code></td><td data-label="出现在">4.2 数据来源表</td></tr><tr><th><code>BuildResult</code></th><td data-label="代码里实际是"><code>CompileResult</code></td><td data-label="出现在">4.3 编译过程流程图</td></tr><tr><th><code>compile(DSL, Metadata)</code></th><td data-label="代码里实际是"><code>compile(query, options)</code></td><td data-label="出现在">4.3 时序图与流程图</td></tr><tr><th><code>CompileOptions</code> 只有三个键</th><td data-label="代码里实际是">还有 <code>today</code> / <code>now</code>，相对时间的基准就是它们</td><td data-label="出现在">4.3 对外接口</td></tr><tr><th><code>FieldDerive</code> / <code>expr</code></th><td data-label="代码里实际是">都不存在，换算规则见下面 <code>PAGE_CONVERT</code></td><td data-label="出现在">4.3 扩展点表</td></tr><tr><th>「四类叶子」</th><td data-label="代码里实际是">三类叶子（portrait / relation / uid）加组节点，才是四类<strong>节点</strong></td><td data-label="出现在">4.3 Compile 表</td></tr></tbody></table></div><h3 id="同样输入产出不同">同样输入，产出不同</h3>
-<p>这一组要小心：上层说「按方案来的」，实际编出来的 SQL 不是那个样子。</p>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>项</th><th>技术方案</th><th>代码里的事实</th></tr></thead><tbody><tr><th>第 ① 步的输出</th><td data-label="技术方案">「输出还是一份 DSL」</td><td data-label="代码里的事实"><span class="tag tone-red"><code>validate(): void</code>，什么都不返回</span></td></tr><tr><th>越权客户范围</th><td data-label="技术方案">「越权的 <code>groupId</code> 被过滤掉」</td><td data-label="代码里的事实"><span class="tag tone-red"><strong>整次查询拒绝</strong>，抛 <code>SCOPE_DENIED</code>。过滤是圈选组件里 <code>clampScope</code> 的事，不是编译器</span></td></tr><tr><th>派生字段的换算规则</th><td data-label="技术方案"><code>derive_kind</code> 存在 Metadata 里，两种取值：<code>age_years</code> / <code>days_since</code></td><td data-label="代码里的事实"><span class="tag tone-red">挪进代码：<code>pageValue.ts</code> 里一张按字段名当键的 <code>PAGE_CONVERT</code> 表，三种（<code>years</code> / <code>days</code> / <code>scale</code>）</span></td></tr><tr><th><code>age &gt;= 18</code> 编成什么</th><td data-label="技术方案"><code>TIMESTAMPDIFF(YEAR, u.birthday, CURRENT_DATE()) &gt;= 18</code></td><td data-label="代码里的事实"><strong>下推成 <code>birthday &lt;= '2008-10-09'</code></strong>，让条件落在裸列上，Doris 能用分区裁剪和前缀索引</td></tr><tr><th>相对时间编成什么</th><td data-label="技术方案"><code>col &gt;= DATE_SUB(CURRENT_TIMESTAMP(), INTERVAL n DAY) AND col &lt;= CURRENT_TIMESTAMP()</code></td><td data-label="代码里的事实"><code>col &gt;= ? AND col &lt;= ?</code>，两个值按这一列的 <code>value_encoding</code> 编码后写成字面量</td></tr><tr><th>今天/现在从哪来</th><td data-label="技术方案">SQL 里直接写 <code>CURRENT_DATE()</code> / <code>CURRENT_TIMESTAMP()</code></td><td data-label="代码里的事实">由调用方传入 <code>today</code> / <code>now</code>（<code>CompileOptions</code> 上的可选字段），SQL 里不出现 <code>CURDATE()</code> / <code>NOW()</code></td></tr><tr><th><code>listSql</code> 的展示列</th><td data-label="技术方案"><code>TIMESTAMPDIFF(YEAR, u.birthday, CURRENT_DATE()) AS age</code></td><td data-label="代码里的事实"><code>u.birthday AS age</code>，换算在展示层做（<code>displayPageValue</code>），不在 SQL 里</td></tr><tr><th>数值字面量</th><td data-label="技术方案">直接写 <code>1000</code></td><td data-label="代码里的事实"><code>CAST('1000' AS DECIMAL(38,10))</code>，避免参数被当 DOUBLE 丢精度</td></tr><tr><th><code>DISABLED_REF</code></th><td data-label="技术方案">语义校验返回它</td><td data-label="代码里的事实"><span class="tag tone-red">码表里有（14 个码之一），但<mark class="mk-blue">没有任何一处抛它</mark>，实际抛的是 <code>UNKNOWN_FIELD</code></span></td></tr></tbody></table></div><h3 id="方案写了代码里没有">方案写了，代码里没有</h3>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>项</th><th>技术方案怎么写</th><th>代码里什么样</th></tr></thead><tbody><tr><th>权限谓词怎么推</th><td data-label="技术方案怎么写">只看 <code>dataLevel</code>：<code>self</code> 给 <code>staff_id</code>，<code>team</code> 给 <code>group_id IN (…)</code></td><td data-label="代码里什么样">按 <code>(dataLevel, scope.kind)</code> 两键推。<code>all</code> + <code>scope=all</code> 时<mark class="mk-blue">一个权限谓词都不加</mark></td></tr><tr><th>错误码怎么分段</th><td data-label="技术方案怎么写">形状阶段 6 个、语义阶段 7 个</td><td data-label="代码里什么样"><code>INVALID_SCOPE</code> 属形状阶段、<code>OP_NOT_ALLOWED</code> 两个阶段都抛、<code>SCOPE_DENIED</code> 来自第三阶段（<code>compile()</code> 里的 <code>assertScopePermitted</code>），方案没列</td></tr><tr><th>操作符下发什么</th><td data-label="技术方案怎么写">按语义类型分组，带 <code>inputForm</code> 和 <code>status</code></td><td data-label="代码里什么样">一张平铺的全局表，只有 <code>key</code> / <code>name</code> / <code>sortOrder</code> / <code>template</code>。<code>inputForm</code> 是客户端用 <code>controlFor()</code> 当场算的</td></tr><tr><th>指定 UID 的数量上限</th><td data-label="技术方案怎么写">1000（暂定），且「代码中尚未强制」</td><td data-label="代码里什么样">组件里是 <code>MAX_UIDS = 500</code>，而且强制截断（<code>.slice(0, MAX_UIDS)</code>）</td></tr><tr><th>条件树层级 2、条件数量 15</th><td data-label="技术方案怎么写">本期约定，代码中尚未强制</td><td data-label="代码里什么样">确实没有强制，这一条方案说得对</td></tr></tbody></table></div><p><code>DISABLED_REF</code> 那一行值得展开：这个码在表里躺着，却没有一处抛它，
-正是因为 <code>validate</code> 什么都不返回。
+<p>技术方案 4.2 / 4.3 在 10-09 晚上按实现重写过一轮：上一版笔记在这里列的十几处差异，
+<strong>大部分已经被方案吸收了</strong>。剩下的少量差异按三类列在下面 —— <mark class="mk-blue">哪边说了算，按代码。</mark></p>
+<h3 id="已经对上的上一版列过现在方案改口了">已经对上的（上一版列过，现在方案改口了）</h3>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>上一版的差异</th><th>现在方案怎么写</th></tr></thead><tbody><tr><th><code>semantic_type</code> 一个数</th><td data-label="现在方案怎么写">拆成 <code>variable_type</code> / <code>data_type</code> / <code>content_type</code> / <code>value_encoding</code> / <code>enum_type</code> 五列，方案 4.1 已按五列写</td></tr><tr><th>关系的名字</th><td data-label="现在方案怎么写">方案统一用 <code>relation_key</code>，客体用 <code>object_name</code></td></tr><tr><th>第 ① 步的输出</th><td data-label="现在方案怎么写">方案不再说「输出还是一份 DSL」，改写为「不通过则抛 CompileError」—— 和 <code>validate(): void</code> 一致</td></tr><tr><th>越权客户范围</th><td data-label="现在方案怎么写">方案明写「越权会让整次查询以 SCOPE_DENIED 被拒绝，不做裁剪」—— 和代码一致</td></tr><tr><th><code>age &gt;= 18</code> 编成什么</th><td data-label="现在方案怎么写">方案示例就是 <code>u.birthday &lt;= '2008-10-09'</code> —— 下推形态，两边一致</td></tr><tr><th>相对时间编成什么</th><td data-label="现在方案怎么写">方案写 <code>col &gt;= ? AND col &lt;= ?</code>、按 <code>value_encoding</code> 编码 —— 两边一致</td></tr><tr><th>今天/现在从哪来</th><td data-label="现在方案怎么写">方案 <code>CompileOptions</code> 带 <code>today</code> / <code>now</code> —— 两边一致（代码里缺省时退回业务时钟 <code>businessClock</code>）</td></tr><tr><th><code>listSql</code> 的展示列</th><td data-label="现在方案怎么写">方案示例就是 <code>u.birthday AS age</code>，换算在展示层 —— 两边一致</td></tr><tr><th>操作符下发什么</th><td data-label="现在方案怎么写">方案改为扁平列表（<code>key</code> / <code>name</code> / <code>sortOrder</code>，相对时间带 <code>template</code>），<code>controlFor</code> 由客户端算 —— 两边一致</td></tr><tr><th>权限谓词怎么推</th><td data-label="现在方案怎么写">方案给出 <code>(dataLevel, scope.kind)</code> 的完整对照表 —— 和 <code>applyUniverse</code> 一致</td></tr><tr><th>错误码怎么分段</th><td data-label="现在方案怎么写">方案补了 <code>SCOPE_DENIED</code> 的出处（<code>assertScopePermitted</code>），并明说 <code>DISABLED_REF</code> 没有任何一处抛出</td></tr><tr><th>指定 UID 上限</th><td data-label="现在方案怎么写">方案定为 500（组件按 <code>MAX_UIDS</code> 截断）</td></tr></tbody></table></div><h3 id="还没对上的">还没对上的</h3>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>项</th><th>方案</th><th>代码里的事实</th></tr></thead><tbody><tr><th>换算规则存在哪</th><td data-label="方案">方案不再提换算（上一版的 <code>derive_kind</code> / <code>expr</code> 已删）</td><td data-label="代码里的事实"><span class="tag tone-amber">代码里 <code>pageValue.ts</code> 的 <code>PAGE_CONVERT</code>，按字段名当键，三种（<code>years</code> / <code>days</code> / <code>scale</code>）</span></td></tr><tr><th>数值字面量</th><td data-label="方案">直接写 <code>1000</code></td><td data-label="代码里的事实"><code>CAST('1000' AS DECIMAL(38,10))</code>，避免参数被当 DOUBLE 丢精度</td></tr><tr><th>UID 上限的自相矛盾</th><td data-label="方案">实现约定写 500，组件约束一节残留一句「当前方案中的 1000 为暂定值」</td><td data-label="代码里的事实">代码里是 <code>MAX_UIDS = 500</code>，强制截断</td></tr><tr><th>编译缺省时钟</th><td data-label="方案"><code>today</code> / <code>now</code> 是可选字段，没说缺省行为</td><td data-label="代码里的事实">两个都传才用；缺一个就用业务时区的 <code>businessClock</code> 现算</td></tr></tbody></table></div><h3 id="方案删了代码还在的">方案删了、代码还在的</h3>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>项</th><th>状态</th></tr></thead><tbody><tr><th>include/exclude 的 COALESCE 约定</th><td data-label="状态">方案章节已删；代码照写，<code>includeCoalesce.spec.ts</code> 看住它</td></tr><tr><th>扩展点表</th><td data-label="状态">方案章节已删；第 09 节从代码侧重建了一张</td></tr><tr><th>Admin API 明细</th><td data-label="状态">方案只留了两行文字，六张表的写入校验细节在 <code>assertMetadataRows</code> 里（见配置表那篇）</td></tr></tbody></table></div><p><code>DISABLED_REF</code> 值得单独记一句，因为方案现在和代码说的是同一件事：这个码在表里躺着，却没有一处抛它。
 想说「你引用了一个已停用的字段」，就得拿得到「这个字段曾经存在」这个事实，
-而 Catalog 只收录 ENABLED 的字段（Data Admin 那份投影里只有 ENABLED / DISABLED 两种状态），
-停用字段在编译器眼里和「从来没写过这个字段」长得一模一样，
+而 Catalog 只收录 ENABLED 的字段，停用字段在编译器眼里和「从来没写过这个字段」长得一模一样，
 所以它只能报 <code>UNKNOWN_FIELD</code>。这不是忘了写，是<strong>这一层拿不到区分两者所需的信息</strong>。</p>
 <div class="callout tone-amber">
       <span class="ic">🔩</span>
-      <div><p>派生字段那一行会直接变成硬约束，单独说一句。</p>
-<p>方案的设计是：换算规则存在 Metadata 里（<code>derive_kind</code> 一列），加一种换算不用发版。
-实现把它挪进了代码，用<strong>字段名当键</strong>（<code>pageValue.ts</code>）：</p>
+      <div><p>换算规则那一行是现在最重要的遗留差异，单独说一句。</p>
+<p>方案不再规定换算规则存在哪；实现把它放在代码里，用<strong>字段名当键</strong>（<code>pageValue.ts</code>）：</p>
 <div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-ts">const PAGE_CONVERT = {
   age:                    { kind: 'years' },
   register_days:          { kind: 'days' },
   'holding.market_value': { kind: 'scale', factor: 10000 },
 };
 </code></pre></div>
-<p><mark class="mk-blue">后果：加一个派生量要改代码、重新发布</mark>。而且键的类型是 <code>Record&lt;string, …&gt;</code>，
+<p><mark class="mk-blue">后果：加一个换算要改代码、重新发布</mark>。而且键的类型是 <code>Record&lt;string, …&gt;</code>，
 字段名拼错了编译器不会拦，只会当成「这个字段没有换算规则」，
-于是「年龄 ≥ 18」被拿 18 去和 <code>birthday</code> 直接比。</p>
+于是「年龄 ≥ 18」被拿 18 去和 <code>birthday</code> 直接比。
+目前唯一的防线是夹具（每条换算路径的 SQL 都被快照锁着）。</p>
 </div>
     </div><div class="callout tone-violet">
       <span class="ic">🧭</span>
-      <div><p><code>age &gt;= 18</code> 那一行是最好用的一个例子：<mark class="mk-blue">同一份 DSL，方案和实现编出来的 WHERE 完全不一样，但结果相同</mark>。这正好说明 4.3 的承诺是什么：DSL 与物理模型解耦，
-换一条编译路径不影响上层协议。</p>
+      <div><p>上一版最好用的那个例子（方案写 <code>TIMESTAMPDIFF</code>、代码下推）现在失效了 —— 方案已经改成和代码一致。
+这轮「方案向实现收敛」本身就是 4.3 承诺的一次兑现：<mark class="mk-blue">DSL 与物理模型解耦，换一条编译路径不影响上层协议</mark>，
+所以方案改口时，DSL 和调用方一个字都不用动。</p>
 </div>
-    </div><hr>
-<div class="quiz"><details>
+    </div><div class="quiz"><details>
         <summary>为什么校验要分成两段，而不是一次查完？</summary>
         <div class="a"><p>因为两段依赖的东西不同。形状校验只需要 DSL 本身，不依赖字段字典，
 所以圈选组件能在发请求之前先在浏览器里跑一遍，用户填错结构当场提示，不用等一次网络往返。
@@ -8755,6 +8760,7 @@ LEFT JOIN 会让一个人持 5 个标的变成 5 行，<code>COUNT(*)</code> 就
     if (!actors.length || !conds.length) return;
 
     const st = { actor: 0, mode: 'include', pick: {}, val: {} };
+    const TODAY = cfg.today || '2026-09-30';   // 真编译器由调用方传 today；演示固定一个业务日期
     conds.forEach((c, i) => { st.pick[c.key] = i === 0; st.val[c.key] = c.def; });
 
     const H = (tag, cls, text) => el(tag, cls, text);
@@ -8844,7 +8850,7 @@ LEFT JOIN 会让一个人持 5 个标的变成 5 行，<code>COUNT(*)</code> 就
     const legend = H('div', 'dl-legend');
     [['var(--amber)', '权限（演员决定，不是用户圈出来的）'],
      ['var(--text)', '用户圈的条件'],
-     ['var(--violet)', '派生表达式（逻辑字段 → 物理列）']]
+     ['var(--violet)', '换算窗口（页面值 → 裸列上的窗口）']]
       .forEach(([c, t]) => {
         const s = H('span');
         const i = H('i'); i.style.background = c;
@@ -8871,10 +8877,31 @@ LEFT JOIN 会让一个人持 5 个标的变成 5 行，<code>COUNT(*)</code> 就
     }
 
     function universeSegs(a) {
+      /* 真编译器 applyUniverse：scope 跟着级别走（演示里没有单独的范围选择器）。
+         team → group_id IN (groups)；self → staff_id；all → 不加。 */
       const out = [];
-      if (a.dataLevel === 'team') out.push(['`u`.`group_id` IN (1, 2, 3)', 'perm']);
+      if (a.dataLevel === 'team') out.push(['`u`.`group_id` IN (' + (a.groupIds || [1]).join(', ') + ')', 'perm']);
       if (a.dataLevel === 'self') out.push(['`u`.`staff_id` = ' + a.staffId, 'perm']);
       return out;
+    }
+
+    /* 换算字段下推：age gte 18 → birthday <= '2008-09-30'。
+       方向映射和真编译器 compileElapsed 一致：gte→col<=b(v)，lt→col>b(v)，其余类推。 */
+    function stampShift(kind, amount) {
+      const d = new Date(TODAY + 'T00:00:00Z');
+      if (kind === 'years') d.setUTCFullYear(d.getUTCFullYear() - amount);
+      else d.setUTCDate(d.getUTCDate() - amount);
+      return d.toISOString().slice(0, 10);
+    }
+
+    function elapsedSeg(col, kind, op, v) {
+      const b = (n) => "'" + stampShift(kind, n) + "'";
+      if (op === 'eq') return '(' + col + ' > ' + b(v + 1) + ' AND ' + col + ' <= ' + b(v) + ')';
+      if (op === 'neq') return '(' + col + ' <= ' + b(v + 1) + ' OR ' + col + ' > ' + b(v) + ')';
+      if (op === 'gt') return col + ' <= ' + b(v + 1);
+      if (op === 'gte') return col + ' <= ' + b(v);
+      if (op === 'lt') return col + ' > ' + b(v);
+      return col + ' > ' + b(v + 1);   // lte
     }
 
     function condSeg(c) {
@@ -8883,14 +8910,14 @@ LEFT JOIN 会让一个人持 5 个标的变成 5 行，<code>COUNT(*)</code> 就
         const o = (c.options || []).find((x) => x.v === v) || { v: v, t: v };
         return [q(c.col) + " = '" + o.v + "'", 'cond'];
       }
-      /* 派生字段：逻辑名 → 物理列的表达式。和 slug 的 derive 字段同构。 */
-      const derived = c.derive === 'age'
-        ? ['TIMESTAMPDIFF(YEAR, `u`.`birthday`, CURRENT_DATE())', 'cast']
-        : c.derive === 'days'
-          ? ['DATEDIFF(CURRENT_DATE(), ' + q(c.col) + ')', 'cast']
-          : [q(c.col), 'cond'];
+      /* 换算字段：页面上填的数换算到物理列上的窗口，条件落在裸列上。 */
+      if (c.derive === 'age' || c.derive === 'days') {
+        return [elapsedSeg(q(c.col), c.derive === 'age' ? 'years' : 'days', c.op || 'gte', Number(v) || 0), 'cond'];
+      }
       const opSql = { gt: '>', gte: '>=', lt: '<', lte: '<=', eq: '=' }[c.op || 'gte'];
-      return [derived[0] + ' ' + opSql + ' ' + v, derived[1]];
+      /* double 列的值走 DECIMAL CAST，和真编译器的字面量一致 */
+      const lit = c.dataType === 'double' ? "CAST('" + v + "' AS DECIMAL(38,10))" : v;
+      return [q(c.col) + ' ' + opSql + ' ' + lit, 'cond'];
     }
 
     /* 把若干片用 AND 连起来，外层加括号 —— 跟真编译器一样，单条也包括号 */
@@ -9726,7 +9753,7 @@ LEFT JOIN 会让一个人持 5 个标的变成 5 行，<code>COUNT(*)</code> 就
      左边是 MySQL 里的元数据行（可改），右边是照着它渲染出来的界面。
      点任一边，另一边高亮来源/去向。改左边的字，右边当场变。
      config:
-       rows: [{ key, zh, col, vt, on }]        元数据行（crm_dc_data_field）
+       rows: [{ key, zh, col, vt, on }]        元数据行（画像字段表，表名由 cfg.table 提供）
        conds: [{ key, op, val }]               初始条件行
        ops:  { valueType: [opKey, ...] }       类型 → 可用操作符（crm_dc_operator）
        opLabels: { opKey: 中文 }
@@ -9758,7 +9785,7 @@ LEFT JOIN 会让一个人持 5 个标的变成 5 行，<code>COUNT(*)</code> 就
     const left = el('div', 'c2u-pane');
     left.appendChild(el('div', 'c2u-head')).append(
       Object.assign(el('span', 'tag tone-violet', 'MySQL'), {}),
-      el('b', '', 'crm_dc_data_field'),
+      el('b', '', cfg.table || 'crm_dc_data_field'),
       el('span', 'sub', 'Data Admin 写这里'),
     );
     const recsBox = el('div', 'c2u-recs');
@@ -9868,7 +9895,7 @@ LEFT JOIN 会让一个人持 5 个标的变成 5 行，<code>COUNT(*)</code> 就
       // 结果表头（同一份元数据的另一种投影）
       const th = el('div', 'c2u-thead');
       th.setAttribute('data-from', '__head');
-      const tHead = el('div', 'c2u-thead-t', '结果表头 —— 同样来自那 46 条记录');
+      const tHead = el('div', 'c2u-thead-t', '结果表头 —— 同样来自那 ' + (cfg.facts && cfg.facts.total != null ? cfg.facts.total : '46') + ' 条记录');
       th.appendChild(tHead);
       const tr = el('div', 'c2u-tr');
       ['UID', '客户名称', '跟进人'].forEach((t) => tr.appendChild(el('span', 'c2u-th2 fixed', t)));
@@ -9896,7 +9923,7 @@ LEFT JOIN 会让一个人持 5 个标的变成 5 行，<code>COUNT(*)</code> 就
           '左边 <b>' + rows.length + '</b> 条记录，右边渲染出 <b>' + on.length +
           '</b> 个字段下拉 + <b>' + on.length + '</b> 列表头。<br>' +
           '真实表里有 <b>' + F.total + '</b> 条记录，但只有 <b>' + F.feature +
-          '</b> 条是画像字段进了下拉 —— 另外 <b>' + F.rel + '</b> 条是关系，走另一条路。<br>' +
+          '</b> 条是画像字段进了下拉 —— ' + (F.tail || ('另外 <b>' + F.rel + '</b> 条是关系，走另一条路。')) + '<br>' +
           '<span class="c2u-note-hi">前端代码从头到尾没多一行。</span>';
         uiBox.appendChild(note);
       }
@@ -9962,7 +9989,7 @@ LEFT JOIN 会让一个人持 5 个标的变成 5 行，<code>COUNT(*)</code> 就
        tabs: [{
          key,
          ui:     { label, src }                       界面那一格
-         field:  { rows: [[k,v]], hint }              crm_dc_data_field
+         field:  { rows: [[k,v]], hint }              字段表（cfg.fieldTable）
          source: { rows: [[k,v]], hint }              crm_dc_data_source
          table:  { name, cols: [[col,type,sample]], absent }   物理表
          code:   { rows: [[file,rule]] }              代码（不在数据库里）
@@ -10033,8 +10060,8 @@ LEFT JOIN 会让一个人持 5 个标的变成 5 行，<code>COUNT(*)</code> 就
 
       body.appendChild(arrow('前端不认识业务，照配置渲染', true));
 
-      // ② crm_dc_data_field
-      const L2 = layer('②', 'crm_dc_data_field', '元数据 · Data Admin 改这里', 'violet');
+      // ② 字段表（表名由 cfg.fieldTable 提供，默认保持旧名以兼容旧笔记）
+      const L2 = layer('②', cfg.fieldTable || 'crm_dc_data_field', '元数据 · Data Admin 改这里', 'violet');
       (t.field.rows || []).forEach((r) => L2.appendChild(row(r[0], r[1])));
       if (t.field.hint) L2.appendChild(el('div', 'fl-note', '← ' + t.field.hint));
       body.appendChild(L2);

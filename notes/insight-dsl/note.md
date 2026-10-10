@@ -946,14 +946,14 @@ const filtered = (joins, seek) => {
 
 - badge: LAYER 02
   title: 类型与换算
-  desc: 只依赖 LAYER 01 和彼此的下游
+  desc: 只依赖 LAYER 01
   tone: green
   nodes:
     - { title: metadata.ts, sub: 82 行, tag: Catalog 类型 }
-    - { title: fieldType.ts / operators.ts, sub: "84 + 58 行", tag: 形状 → 操作符/控件 }
-    - { title: clock.ts / encoding.ts, sub: "139 + 84 行", tag: 时钟 + 字面量编码 }
-    - { title: pageValue.ts / convert.ts / temporal.ts, sub: "40 + 72 + 35 行", tag: 换算下推 }
-    - { title: page.ts / fragment.ts / knex.ts, sub: "17 + 15 + 130 行", tag: 入参 + SQL 零件 + 包装 }
+    - { title: fieldType / operators, sub: "84 + 58 行", tag: 形状 → 操作符 }
+    - { title: clock / encoding, sub: "139 + 84 行", tag: 时钟 + 编码 }
+    - { title: pageValue / convert / temporal, sub: "40 + 72 + 35 行", tag: 换算下推 }
+    - { title: page / fragment / knex, sub: "17 + 15 + 130 行", tag: 入参 + SQL 零件 }
   next: "校验器要用形状 :: :: 编排要用全部"
 
 - badge: LAYER 03

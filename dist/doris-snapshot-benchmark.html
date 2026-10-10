@@ -8435,6 +8435,7 @@ Unique 慢 4 倍、分表先撞 FE 内存、共享表 tablet 数不随快照数�
     if (!actors.length || !conds.length) return;
 
     const st = { actor: 0, mode: 'include', pick: {}, val: {} };
+    const TODAY = cfg.today || '2026-09-30';   // 真编译器由调用方传 today；演示固定一个业务日期
     conds.forEach((c, i) => { st.pick[c.key] = i === 0; st.val[c.key] = c.def; });
 
     const H = (tag, cls, text) => el(tag, cls, text);
@@ -8524,7 +8525,7 @@ Unique 慢 4 倍、分表先撞 FE 内存、共享表 tablet 数不随快照数�
     const legend = H('div', 'dl-legend');
     [['var(--amber)', '权限（演员决定，不是用户圈出来的）'],
      ['var(--text)', '用户圈的条件'],
-     ['var(--violet)', '派生表达式（逻辑字段 → 物理列）']]
+     ['var(--violet)', '换算窗口（页面值 → 裸列上的窗口）']]
       .forEach(([c, t]) => {
         const s = H('span');
         const i = H('i'); i.style.background = c;
@@ -8551,10 +8552,31 @@ Unique 慢 4 倍、分表先撞 FE 内存、共享表 tablet 数不随快照数�
     }
 
     function universeSegs(a) {
+      /* 真编译器 applyUniverse：scope 跟着级别走（演示里没有单独的范围选择器）。
+         team → group_id IN (groups)；self → staff_id；all → 不加。 */
       const out = [];
-      if (a.dataLevel === 'team') out.push(['`u`.`group_id` IN (1, 2, 3)', 'perm']);
+      if (a.dataLevel === 'team') out.push(['`u`.`group_id` IN (' + (a.groupIds || [1]).join(', ') + ')', 'perm']);
       if (a.dataLevel === 'self') out.push(['`u`.`staff_id` = ' + a.staffId, 'perm']);
       return out;
+    }
+
+    /* 换算字段下推：age gte 18 → birthday <= '2008-09-30'。
+       方向映射和真编译器 compileElapsed 一致：gte→col<=b(v)，lt→col>b(v)，其余类推。 */
+    function stampShift(kind, amount) {
+      const d = new Date(TODAY + 'T00:00:00Z');
+      if (kind === 'years') d.setUTCFullYear(d.getUTCFullYear() - amount);
+      else d.setUTCDate(d.getUTCDate() - amount);
+      return d.toISOString().slice(0, 10);
+    }
+
+    function elapsedSeg(col, kind, op, v) {
+      const b = (n) => "'" + stampShift(kind, n) + "'";
+      if (op === 'eq') return '(' + col + ' > ' + b(v + 1) + ' AND ' + col + ' <= ' + b(v) + ')';
+      if (op === 'neq') return '(' + col + ' <= ' + b(v + 1) + ' OR ' + col + ' > ' + b(v) + ')';
+      if (op === 'gt') return col + ' <= ' + b(v + 1);
+      if (op === 'gte') return col + ' <= ' + b(v);
+      if (op === 'lt') return col + ' > ' + b(v);
+      return col + ' > ' + b(v + 1);   // lte
     }
 
     function condSeg(c) {
@@ -8563,14 +8585,14 @@ Unique 慢 4 倍、分表先撞 FE 内存、共享表 tablet 数不随快照数�
         const o = (c.options || []).find((x) => x.v === v) || { v: v, t: v };
         return [q(c.col) + " = '" + o.v + "'", 'cond'];
       }
-      /* 派生字段：逻辑名 → 物理列的表达式。和 slug 的 derive 字段同构。 */
-      const derived = c.derive === 'age'
-        ? ['TIMESTAMPDIFF(YEAR, `u`.`birthday`, CURRENT_DATE())', 'cast']
-        : c.derive === 'days'
-          ? ['DATEDIFF(CURRENT_DATE(), ' + q(c.col) + ')', 'cast']
-          : [q(c.col), 'cond'];
+      /* 换算字段：页面上填的数换算到物理列上的窗口，条件落在裸列上。 */
+      if (c.derive === 'age' || c.derive === 'days') {
+        return [elapsedSeg(q(c.col), c.derive === 'age' ? 'years' : 'days', c.op || 'gte', Number(v) || 0), 'cond'];
+      }
       const opSql = { gt: '>', gte: '>=', lt: '<', lte: '<=', eq: '=' }[c.op || 'gte'];
-      return [derived[0] + ' ' + opSql + ' ' + v, derived[1]];
+      /* double 列的值走 DECIMAL CAST，和真编译器的字面量一致 */
+      const lit = c.dataType === 'double' ? "CAST('" + v + "' AS DECIMAL(38,10))" : v;
+      return [q(c.col) + ' ' + opSql + ' ' + lit, 'cond'];
     }
 
     /* 把若干片用 AND 连起来，外层加括号 —— 跟真编译器一样，单条也包括号 */
@@ -9406,7 +9428,7 @@ Unique 慢 4 倍、分表先撞 FE 内存、共享表 tablet 数不随快照数�
      左边是 MySQL 里的元数据行（可改），右边是照着它渲染出来的界面。
      点任一边，另一边高亮来源/去向。改左边的字，右边当场变。
      config:
-       rows: [{ key, zh, col, vt, on }]        元数据行（crm_dc_data_field）
+       rows: [{ key, zh, col, vt, on }]        元数据行（画像字段表，表名由 cfg.table 提供）
        conds: [{ key, op, val }]               初始条件行
        ops:  { valueType: [opKey, ...] }       类型 → 可用操作符（crm_dc_operator）
        opLabels: { opKey: 中文 }
@@ -9438,7 +9460,7 @@ Unique 慢 4 倍、分表先撞 FE 内存、共享表 tablet 数不随快照数�
     const left = el('div', 'c2u-pane');
     left.appendChild(el('div', 'c2u-head')).append(
       Object.assign(el('span', 'tag tone-violet', 'MySQL'), {}),
-      el('b', '', 'crm_dc_data_field'),
+      el('b', '', cfg.table || 'crm_dc_data_field'),
       el('span', 'sub', 'Data Admin 写这里'),
     );
     const recsBox = el('div', 'c2u-recs');
@@ -9548,7 +9570,7 @@ Unique 慢 4 倍、分表先撞 FE 内存、共享表 tablet 数不随快照数�
       // 结果表头（同一份元数据的另一种投影）
       const th = el('div', 'c2u-thead');
       th.setAttribute('data-from', '__head');
-      const tHead = el('div', 'c2u-thead-t', '结果表头 —— 同样来自那 46 条记录');
+      const tHead = el('div', 'c2u-thead-t', '结果表头 —— 同样来自那 ' + (cfg.facts && cfg.facts.total != null ? cfg.facts.total : '46') + ' 条记录');
       th.appendChild(tHead);
       const tr = el('div', 'c2u-tr');
       ['UID', '客户名称', '跟进人'].forEach((t) => tr.appendChild(el('span', 'c2u-th2 fixed', t)));
@@ -9576,7 +9598,7 @@ Unique 慢 4 倍、分表先撞 FE 内存、共享表 tablet 数不随快照数�
           '左边 <b>' + rows.length + '</b> 条记录，右边渲染出 <b>' + on.length +
           '</b> 个字段下拉 + <b>' + on.length + '</b> 列表头。<br>' +
           '真实表里有 <b>' + F.total + '</b> 条记录，但只有 <b>' + F.feature +
-          '</b> 条是画像字段进了下拉 —— 另外 <b>' + F.rel + '</b> 条是关系，走另一条路。<br>' +
+          '</b> 条是画像字段进了下拉 —— ' + (F.tail || ('另外 <b>' + F.rel + '</b> 条是关系，走另一条路。')) + '<br>' +
           '<span class="c2u-note-hi">前端代码从头到尾没多一行。</span>';
         uiBox.appendChild(note);
       }
@@ -9642,7 +9664,7 @@ Unique 慢 4 倍、分表先撞 FE 内存、共享表 tablet 数不随快照数�
        tabs: [{
          key,
          ui:     { label, src }                       界面那一格
-         field:  { rows: [[k,v]], hint }              crm_dc_data_field
+         field:  { rows: [[k,v]], hint }              字段表（cfg.fieldTable）
          source: { rows: [[k,v]], hint }              crm_dc_data_source
          table:  { name, cols: [[col,type,sample]], absent }   物理表
          code:   { rows: [[file,rule]] }              代码（不在数据库里）
@@ -9713,8 +9735,8 @@ Unique 慢 4 倍、分表先撞 FE 内存、共享表 tablet 数不随快照数�
 
       body.appendChild(arrow('前端不认识业务，照配置渲染', true));
 
-      // ② crm_dc_data_field
-      const L2 = layer('②', 'crm_dc_data_field', '元数据 · Data Admin 改这里', 'violet');
+      // ② 字段表（表名由 cfg.fieldTable 提供，默认保持旧名以兼容旧笔记）
+      const L2 = layer('②', cfg.fieldTable || 'crm_dc_data_field', '元数据 · Data Admin 改这里', 'violet');
       (t.field.rows || []).forEach((r) => L2.appendChild(row(r[0], r[1])));
       if (t.field.hint) L2.appendChild(el('div', 'fl-note', '← ' + t.field.hint));
       body.appendChild(L2);
