@@ -316,3 +316,19 @@ npm run view -- blocks-cheatsheet  # 打开示例页看效果
 
    ++凡是 `config` 驱动的控件，`demo` 块里一律写上 `config:`（哪怕是 `{}`）。++
    ==这次写 `authz-lab` 时漏了，白查了一轮「为什么它没挂载」。==
+
+## 架构图里的 N×M 引用关系（insight-refresh 实测）
+
+画「三张表各自引用三本字典」这类 N×M 关系时，3×3 全连会挂
+`proper-crossing` / `ambiguous-corridor`，怎么调 labelAt 都救不回来。
+解法是按「1 : N 只画一条边」的规矩收缩：
+
+- 每本字典只画一条边（挑最有代表性的那张表），**把 ×N 写进 sublabel**（如「被 value_set_id 引用 ×3」）
+- 笔记的 compare 表里补全每一条引用，图管形状、表管清单
+
+另两条调试用的实底：
+
+- `label-route-clearance` 报错里的 label rect 是以 `labelAt` 为**中心**算的（rect = labelAt ± w/2）。
+  修碰撞优先把标签挪到自己那条边的水平段上，而不是和另一条边的竖直走廊挤
+- 两条边共用走廊报 `ambiguous-corridor` 时，给其中一条加 `via` 强制专属走廊；
+  平行竖走廊的间距要 ≥ 边标签的宽度，否则标签压走廊照样报
