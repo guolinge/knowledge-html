@@ -195,7 +195,7 @@ rows:
 cols: 3
 items:
   - title: 近乎无限的水平扩展
-    desc: key 按哈希打散到任意多节点，加机器即加容量与吞吐
+    desc: key 空间切成索引分片摊到任意多节点，加机器即加容量与吞吐
     tone: green
   - title: HTTP 原生可寻址
     desc: 每个对象天然是一个 URL，浏览器 / CDN 直接可达
@@ -265,30 +265,114 @@ rows:
       用户自定义键值对，如 `x-amz-meta-author: tom` —— 业务标记、检索索引用。
 ```
 
-为什么这个模型天然可分片？因为==扁平 key 空间可以按哈希无限打散==：key 经过哈希落到某个分片（partition / shard），分片分布在不同存储节点上。增加节点只需要迁移少量分片 —— 没有层级依赖，就没有中心元数据瓶颈。
-
-```flow
-grid: true
-nodes:
-  - { id: k1, label: "photos/a.jpg", sub: key, row: 0, tone: muted }
-  - { id: k2, label: "logs/err.log", sub: key, row: 0, tone: muted }
-  - { id: k3, label: "avatar.png", sub: key, row: 0, tone: muted }
-  - { id: h, label: 一致性哈希, sub: "hash(key)", row: 1, tone: amber }
-  - { id: shard, label: 分片（partition）, sub: "按哈希均匀散落", row: 2, tone: violet }
-  - { id: node, label: "Node A · B · C · D …", sub: "加机器 = 搬少量分片", row: 3, tone: green }
-edges:
-  - { from: k1, to: h }
-  - { from: k2, to: h }
-  - { from: k3, to: h }
-  - { from: h, to: shard }
-  - { from: shard, to: node }
-```
-
-和 01.2 里文件存储那棵「所有 readdir / rename 压向根」的目录树对比：一边的元数据收敛在少数节点上，一边按哈希均匀散落、无中心瓶颈。这就是「扁平换扩展」的落地形态。
+为什么这个模型天然可分片？因为扁平 key 空间没有层级依赖，整张表可以切成任意多片摊到不同机器上，加机器只需要迁移少量分片。和 01.2 里文件存储那棵「所有 readdir / rename 压向根」的目录树对比：目录树的元数据收敛在少数节点上，扁平 key 空间没有这样的根。这就是「扁平换扩展」的落地形态。
 
 这套模型下，所有操作都简单到不像话：`PUT = map.set(key, object)`，`GET = map.get(key)`，`DELETE = map.delete(key)`，`LIST = map.keys().filter(prefix)`。==正是这种极简接口让它能在 EB 量级上运转。==
 
 Bucket 名是**全局唯一**的（同一服务商内、甚至跨区域），像注册域名 —— 一旦被占就不能重名。它的作用是==限定 key 的作用域 + 承载桶级别的配置==（权限、生命周期规则、版本控制开关等）。第 08 节会看到这些规则设一次就管住几十亿个对象 —— 这就是桶存在的意义之一。
+
+### 02.2 打开机器盖子看：key 在索引层，字节在数据层
+
+Map 模型还缺一角：它物理上长什么样。掀开机器盖子，桶在集群里并不是一个装文件的文件夹，而是两拨分工不同的机器：
+
+```cards
+cols: 2
+items:
+  - title: 索引层 · 元数据服务器
+    desc: 存 key 的地方。桶的 key 空间被切成多个「索引分片」，每片维护一段 key 的账本：key → {size、ETag、Content-Type、数据分片的坐标}。Ceph 默认每桶 11 个索引分片，单片约 10 万条 entry 就自动再分片
+    tone: violet
+  - title: 数据层 · 存储节点集群
+    desc: 存字节的地方。对象的字节被切成纠删码分片，散在大量机器的盘上。盘上的文件名是内部 ID，不是 key —— 你在控制台看到的「photos/2024/a.jpg」在盘上并不存在
+    tone: green
+```
+
+一次 GET 在这两层之间怎么走，①~④ 一条线读完：
+
+```arch
+svg: oss-machine-anatomy
+caption: 索引层只出「坐标」，字节全部从数据层来。凑齐 K 片拼出原文件，沿原连接返回客户端 —— key 全程只在索引层出现过一次。
+parts:
+  client:
+    label: 用户 / 应用
+    sub: 请求里只有 (bucket, key)
+    detail: 数据在哪块盘上，调用方永远不需要知道，也没有任何接口能查到。
+  gw:
+    label: S3 网关
+    sub: 无状态
+    detail: 网关自己不存 key、也不存字节，任何一台网关都能处理任何请求。它做的事：鉴权、算出这个 key 归哪个索引分片、拿到坐标后去数据层凑分片。
+  idx1:
+    label: 索引分片
+    sub: 一段 key 空间的账本
+    detail: Ceph 的索引分片是 RADOS 对象上的 omap，按对象名哈希选片，默认 11 片，单片约 10 万条 entry 就触发自动再分片。S3 的性能按 prefix 分区伸缩，官方给的账是每 prefix 至少 3,500 PUT / 5,500 GET 每秒。
+  idx2:
+    label: 索引分片
+    sub: 同一桶的另一段 key
+    detail: 同一个桶的另一段 key 空间住在另一台元数据服务器上。分片切的是索引，不是数据。
+  data1:
+    label: 存储节点
+    sub: 每块盘一个分片
+    detail: MinIO 把盘组成 16 块一组的 erasure set，对象切 12 数据 + 4 校验片、组内每盘一片；S3 每次 PUT 随机选一组盘（shuffle sharding），同一个 key 再传一次，落的盘组都不一样，盘上跑的是 log-structured 的 ShardStore 文件系统。
+  data2:
+    label: 存储节点
+    sub: 另一台机器
+    detail: 同一个对象的分片散在多台机器的盘上，坏一台不丢数据 —— 04.3 的 EC 就落在这里。
+anchors:
+  - { part: client, label: 我想跟着一次 GET 走一遍 }
+  - { part: idx1, label: 我想搞清「桶怎么装 key」 }
+  - { part: data1, label: 我想搞清「对象到底在哪」 }
+tours:
+  - id: get-journey
+    label: 一次 GET 的完整旅程
+    steps:
+      - { at: [client, gw], text: "请求先打到网关。网关==不存任何数据==，只做鉴权和路由。" }
+      - { at: [idx1, idx2], text: "网关查索引层：这个桶的 key 空间被切成很多分片，photos/2024/a.jpg 的 entry 就在其中一片里。" }
+      - { at: [idx1], text: "entry 里没有字节，只有==坐标==：大小、ETag、十几个分片分别在哪些盘上。" }
+      - { at: [data1, data2], text: "网关按坐标并行要分片，凑齐 K 片就能拼出原文件。==key 全程只在索引层出现过一次==" }
+```
+
+放大看两层各自装的是什么：
+
+```compare
+first: 放大
+head: [索引层的一条 entry, 数据层盘上的一个分片]
+rows:
+  - 装什么:
+      - "key 本体 + 元数据：size、ETag、mtime、数据分片的坐标"
+      - "一截对象的字节（12+4 切法里的 1/16）+ 它自己的分片元数据"
+  - 有没有 key 字符串:
+      - "有，key 就是这条 entry 的身份"
+      - { text: "没有，全是匿名分片", tone: red }
+  - 数量级:
+      - "单片约 10 万条 entry，超了自动再分片（Ceph 的 omap 上限）"
+      - "S3 一个机架约 1000 块 20TB 盘、约 20PB，上面全是各个对象的分片"
+  - 删对象时:
+      - "先删这条 entry（开着版本控制时是打删除标记，08.3）"
+      - "盘上的分片由后台异步回收 —— Ceph 的 GC 专门负责清 EC 的 `__shadow` 分片"
+```
+
+桶里面的 key 空间怎么切分片，公开资料里能对出两种流派：
+
+```compare
+first: 两种流派
+head: [按 prefix 分区（S3 的行为）, 按哈希分片（Ceph 的做法）]
+rows:
+  - 怎么切:
+      - "负载跟着 prefix 走：每个 prefix 至少 3,500 PUT / 5,500 GET 每秒，官方建议用随机化前缀把负载摊到更多分区"
+      - "hash(对象名) 选出索引分片，默认 11 片"
+  - LIST 的代价:
+      - "ListObjectsV2 按字典序返回（API 文档承诺的排序），配合 delimiter 就是第 03 节那套折叠"
+      - "官方开发文档原话：ordered listing 是 complex and I/O intensive —— 各片并行取批，再归并出有序结果"
+  - 怕什么:
+      - "顺序前缀（时间戳、自增 ID）把请求挤进同一个分区，变成热点"
+      - "负载天然散开，不怕热点"
+```
+
+```callout
+tone: violet
+icon: 💡
+text: |
+  两层结构解释了后面几节的现象：LIST 便宜是因为只扫索引、不碰数据盘（第 03 节）；「目录」几乎免费是因为目录只是 key 里的前缀字符串，索引里没有树（第 03 节）；坏几台机器数据不丢是因为分片早就散在多台机器上（第 04 节的 ec-lab 可以亲手点坏试试）。
+```
 
 ## 03 · 目录是幻觉：prefix / delimiter / CommonPrefixes
 
@@ -406,7 +490,7 @@ items:
 
 ### 为什么这么设计
 
-如果真搞目录：要维护目录节点的元数据、创建 / 删除 / 移动文件时要更新父目录、目录一致性要跨节点保证 —— 01 节讲过的「中心元数据瓶颈」原样回来了，扩展性受限。用前缀模拟目录之后：key 就是一个字符串，存在哪台机器只看 hash；没有「父目录」要更新；删一个对象不需要通知任何「目录」；创建对象也不需要「先创建父目录」。==真正的扁平化，无限扩展；「目录感」只在查询时按需生成 —— 读的体验好，写的开销小。==
+如果真搞目录：要维护目录节点的元数据、创建 / 删除 / 移动文件时要更新父目录、目录一致性要跨节点保证 —— 01 节讲过的「中心元数据瓶颈」原样回来了，扩展性受限。用前缀模拟目录之后：key 就是一个字符串，落到哪个索引分片由分片规则决定（02.2 的两种流派）；没有「父目录」要更新；删一个对象不需要通知任何「目录」；创建对象也不需要「先创建父目录」。==真正的扁平化，无限扩展；「目录感」只在查询时按需生成 —— 读的体验好，写的开销小。==
 
 ```summary
 title: 三句话收束这一节

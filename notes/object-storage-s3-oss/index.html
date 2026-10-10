@@ -35,6 +35,7 @@
       <a href="#015-对象存储的取舍用能力换规模" class="sub">01.5 对象存储的取舍：用「能力」换「规模」</a>
       <a href="#核心模型一张巨型分布式-map">核心模型：一张巨型分布式 Map</a>
       <a href="#021-一切都是扁平的-key-value" class="sub">02.1 一切都是扁平的 key-value</a>
+      <a href="#022-打开机器盖子看key-在索引层字节在数据层" class="sub">02.2 打开机器盖子看：key 在索引层，字节在数据层</a>
       <a href="#目录是幻觉prefix-delimiter-commonprefixes">目录是幻觉：prefix / delimiter / CommonPrefixes</a>
       <a href="#亲手折叠一遍" class="sub">亲手折叠一遍</a>
       <a href="#三个直接后果" class="sub">三个直接后果</a>
@@ -86,7 +87,7 @@
     </div>
 
 
-    <div class="provenance"><span><b>来源</b> 飞书文档《对象存储与 S3、OSS》（futu.feishu.cn/docx/A9IrdOvTYof6pNxQYHlc3SmOnGg）正文与 22 条评论、77 张配图（本篇知识来源） · AWS 官方 S3 Pricing：GET $0.0004/千次（Standard）、Standard-IA 最小计费对象 128KB、最短存储 30 天：https://aws.amazon.com/s3/pricing/ · AWS 官方文档 · 存储类与取回选项：Glacier Flexible Retrieval 三档（Expedited 1~5 分钟 / Standard 3~5 小时 / Bulk 5~12 小时）、Deep Archive 9~48 小时：https://docs.aws.amazon.com/AmazonS3/latest/userguide/restoring-objects-retrieval-options.html · AWS News Blog · Amazon S3 Update – Strong Read-After-Write Consistency（2020-12-01 强一致）：https://aws.amazon.com/blogs/aws/amazon-s3-update-strong-read-after-write-consistency/</span><span><b>生成</b> 2026-10-09</span></div>
+    <div class="provenance"><span><b>来源</b> 飞书文档《对象存储与 S3、OSS》（futu.feishu.cn/docx/A9IrdOvTYof6pNxQYHlc3SmOnGg）正文与 22 条评论、77 张配图（本篇知识来源） · AWS 官方 S3 Pricing：GET $0.0004/千次（Standard）、Standard-IA 最小计费对象 128KB、最短存储 30 天：https://aws.amazon.com/s3/pricing/ · AWS 官方文档 · 存储类与取回选项：Glacier Flexible Retrieval 三档（Expedited 1~5 分钟 / Standard 3~5 小时 / Bulk 5~12 小时）、Deep Archive 9~48 小时：https://docs.aws.amazon.com/AmazonS3/latest/userguide/restoring-objects-retrieval-options.html · AWS News Blog · Amazon S3 Update – Strong Read-After-Write Consistency（2020-12-01 强一致）：https://aws.amazon.com/blogs/aws/amazon-s3-update-strong-read-after-write-consistency/ · AWS re:Invent 2024 · Dive deep on Amazon S3 (STG302)（Seth Markle / James Bornholt）：对象切 EC 分片写入、每次 PUT 随机选一组盘（shuffle sharding）、ShardStore log-structured 文件系统、单机架约 1000 块 20TB 盘 ≈ 20PB（转写：https://zenn.dev/kiiwami/articles/340ccc2cf012720f） · Ceph 官方开发文档 · Rados Bucket Index（索引分片默认 11、按对象名哈希选片、omap 单对象约 10 万条上限、动态再分片、ordered listing 跨片归并）：https://docs.ceph.com/en/latest/dev/radosgw/bucket_index/ · MinIO 官方文档 · Erasure Coding（erasure set 默认 2~16 盘、对象切 K 数据 + M 校验分片组内每盘一片、EC:4 生产默认）：https://min.io/docs/minio/linux/operations/concepts/erasure-coding.html · AWS 官方文档 · Optimizing Amazon S3 performance（每 prefix 至少 3,500 PUT / 5,500 GET 每秒、随机化前缀摊负载）：https://docs.aws.amazon.com/AmazonS3/latest/userguide/optimizing-performance.html</span><span><b>生成</b> 2026-10-09</span></div>
     <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">对象存储</span> <span class="tag tone-muted">S3</span> <span class="tag tone-muted">OSS</span> <span class="tag tone-muted">CDN</span> <span class="tag tone-muted">前端工程</span> <span class="tag tone-muted">存储入门</span></span></div>
 
 <h2 id="为什么需要对象存储三种存储范式的分工"><span class="num">01</span>为什么需要对象存储：三种存储范式的分工</h2>
@@ -283,7 +284,7 @@ key + blob · HTTP</small>
 <div class="cards" data-cols="3"><div class="ccard tone-green">
           
           <h4>近乎无限的水平扩展</h4>
-          <p>key 按哈希打散到任意多节点，加机器即加容量与吞吐</p>
+          <p>key 空间切成索引分片摊到任意多节点，加机器即加容量与吞吐</p>
           
           
         </div><div class="ccard tone-green">
@@ -347,53 +348,178 @@ key + blob · HTTP</small>
           <div class="sv"><p>用户自定义键值对，如 <code>x-amz-meta-author: tom</code> —— 业务标记、检索索引用。</p>
 </div>
         </div></div>
-    </div><p>为什么这个模型天然可分片？因为<mark class="mk-blue">扁平 key 空间可以按哈希无限打散</mark>：key 经过哈希落到某个分片（partition / shard），分片分布在不同存储节点上。增加节点只需要迁移少量分片 —— 没有层级依赖，就没有中心元数据瓶颈。</p>
-<div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;k1&quot;,&quot;to&quot;:&quot;h&quot;},{&quot;from&quot;:&quot;k2&quot;,&quot;to&quot;:&quot;h&quot;},{&quot;from&quot;:&quot;k3&quot;,&quot;to&quot;:&quot;h&quot;},{&quot;from&quot;:&quot;h&quot;,&quot;to&quot;:&quot;shard&quot;},{&quot;from&quot;:&quot;shard&quot;,&quot;to&quot;:&quot;node&quot;}]">
-      <svg class="flowd-svg" aria-hidden="true">
-        <defs>
-          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
-                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
-            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
-          </marker>
-        </defs>
-      </svg>
-      <div class="flowd-groups"></div>
-      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-muted" data-id="k1">
-              
-              
-              <b>photos/a.jpg</b>
-              <small>key</small>
-            </div><div class="fnode tone-muted" data-id="k2">
-              
-              
-              <b>logs/err.log</b>
-              <small>key</small>
-            </div><div class="fnode tone-muted" data-id="k3">
-              
-              
-              <b>avatar.png</b>
-              <small>key</small>
-            </div></div><div class="flowd-row"><div class="fnode tone-amber" data-id="h">
-              
-              
-              <b>一致性哈希</b>
-              <small>hash(key)</small>
-            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="shard">
-              
-              
-              <b>分片（partition）</b>
-              <small>按哈希均匀散落</small>
-            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="node">
-              
-              
-              <b>Node A · B · C · D …</b>
-              <small>加机器 = 搬少量分片</small>
-            </div></div></div>
-      
-    </div><p>和 01.2 里文件存储那棵「所有 readdir / rename 压向根」的目录树对比：一边的元数据收敛在少数节点上，一边按哈希均匀散落、无中心瓶颈。这就是「扁平换扩展」的落地形态。</p>
+    </div><p>为什么这个模型天然可分片？因为扁平 key 空间没有层级依赖，整张表可以切成任意多片摊到不同机器上，加机器只需要迁移少量分片。和 01.2 里文件存储那棵「所有 readdir / rename 压向根」的目录树对比：目录树的元数据收敛在少数节点上，扁平 key 空间没有这样的根。这就是「扁平换扩展」的落地形态。</p>
 <p>这套模型下，所有操作都简单到不像话：<code>PUT = map.set(key, object)</code>，<code>GET = map.get(key)</code>，<code>DELETE = map.delete(key)</code>，<code>LIST = map.keys().filter(prefix)</code>。<mark class="mk-blue">正是这种极简接口让它能在 EB 量级上运转。</mark></p>
 <p>Bucket 名是<strong>全局唯一</strong>的（同一服务商内、甚至跨区域），像注册域名 —— 一旦被占就不能重名。它的作用是<mark class="mk-blue">限定 key 的作用域 + 承载桶级别的配置</mark>（权限、生命周期规则、版本控制开关等）。第 08 节会看到这些规则设一次就管住几十亿个对象 —— 这就是桶存在的意义之一。</p>
-<h2 id="目录是幻觉prefix-delimiter-commonprefixes"><span class="num">03</span>目录是幻觉：prefix / delimiter / CommonPrefixes</h2>
+<h3 id="022-打开机器盖子看key-在索引层字节在数据层">02.2 打开机器盖子看：key 在索引层，字节在数据层</h3>
+<p>Map 模型还缺一角：它物理上长什么样。掀开机器盖子，桶在集群里并不是一个装文件的文件夹，而是两拨分工不同的机器：</p>
+<div class="cards" data-cols="2"><div class="ccard tone-violet">
+          
+          <h4>索引层 · 元数据服务器</h4>
+          <p>存 key 的地方。桶的 key 空间被切成多个「索引分片」，每片维护一段 key 的账本：key → {size、ETag、Content-Type、数据分片的坐标}。Ceph 默认每桶 11 个索引分片，单片约 10 万条 entry 就自动再分片</p>
+          
+          
+        </div><div class="ccard tone-green">
+          
+          <h4>数据层 · 存储节点集群</h4>
+          <p>存字节的地方。对象的字节被切成纠删码分片，散在大量机器的盘上。盘上的文件名是内部 ID，不是 key —— 你在控制台看到的「photos/2024/a.jpg」在盘上并不存在</p>
+          
+          
+        </div></div><p>一次 GET 在这两层之间怎么走，①~④ 一条线读完：</p>
+<figure class="archfig" data-arch data-pano data-parts='{"client":{"label":"用户 / 应用","sub":"请求里只有 (bucket, key)","detail":"数据在哪块盘上，调用方永远不需要知道，也没有任何接口能查到。"},"gw":{"label":"S3 网关","sub":"无状态","detail":"网关自己不存 key、也不存字节，任何一台网关都能处理任何请求。它做的事：鉴权、算出这个 key 归哪个索引分片、拿到坐标后去数据层凑分片。"},"idx1":{"label":"索引分片","sub":"一段 key 空间的账本","detail":"Ceph 的索引分片是 RADOS 对象上的 omap，按对象名哈希选片，默认 11 片，单片约 10 万条 entry 就触发自动再分片。S3 的性能按 prefix 分区伸缩，官方给的账是每 prefix 至少 3,500 PUT / 5,500 GET 每秒。"},"idx2":{"label":"索引分片","sub":"同一桶的另一段 key","detail":"同一个桶的另一段 key 空间住在另一台元数据服务器上。分片切的是索引，不是数据。"},"data1":{"label":"存储节点","sub":"每块盘一个分片","detail":"MinIO 把盘组成 16 块一组的 erasure set，对象切 12 数据 + 4 校验片、组内每盘一片；S3 每次 PUT 随机选一组盘（shuffle sharding），同一个 key 再传一次，落的盘组都不一样，盘上跑的是 log-structured 的 ShardStore 文件系统。"},"data2":{"label":"存储节点","sub":"另一台机器","detail":"同一个对象的分片散在多台机器的盘上，坏一台不丢数据 —— 04.3 的 EC 就落在这里。"}}' data-anchors='[{"part":"client","label":"我想跟着一次 GET 走一遍"},{"part":"idx1","label":"我想搞清「桶怎么装 key」"},{"part":"data1","label":"我想搞清「对象到底在哪」"}]' data-tours='[{"id":"get-journey","label":"一次 GET 的完整旅程","steps":[{"at":["client","gw"],"text":"请求先打到网关。网关==不存任何数据==，只做鉴权和路由。"},{"at":["idx1","idx2"],"text":"网关查索引层：这个桶的 key 空间被切成很多分片，photos/2024/a.jpg 的 entry 就在其中一片里。"},{"at":["idx1"],"text":"entry 里没有字节，只有==坐标==：大小、ETag、十几个分片分别在哪些盘上。"},{"at":["data1","data2"],"text":"网关按坐标并行要分片，凑齐 K 片就能拼出原文件。==key 全程只在索引层出现过一次=="}]}]'>
+      <svg viewBox="0 0 1040 630" role="img" aria-labelledby="archify-diagram-title archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
+        <title id="archify-diagram-title">一次 GET 的机器之旅：索引层出坐标，数据层出字节</title>
+        <desc id="archify-diagram-description">A architecture diagram generated by Archify.</desc>
+        <!-- Definitions -->
+        <defs>
+          <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-default" />
+          </marker>
+          <marker id="arrowhead-emphasis" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-emphasis" />
+          </marker>
+          <marker id="arrowhead-security" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-security" />
+          </marker>
+          <marker id="arrowhead-dashed" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-dashed" />
+          </marker>
+          <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+            <path d="M 40 0 L 0 0 0 40" class="c-grid" stroke-width="0.5"/>
+          </pattern>
+        </defs>
+
+        <!-- Background Grid -->
+        <rect width="100%" height="100%" fill="url(#grid)" />
+
+        <!-- Boundaries (behind everything) -->
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="0" x="570" y="74" width="430" height="122" rx="12" class="c-region" stroke-width="1"/>
+        <text x="578" y="92" class="t-cloud" font-size="9" font-weight="600">索引层 · 元数据服务器</text>
+
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="1" x="570" y="440" width="430" height="122" rx="12" class="c-region" stroke-width="1"/>
+        <text x="578" y="458" class="t-cloud" font-size="9" font-weight="600">数据层 · 存储节点集群</text>
+
+        <!-- Connection paths (before components for correct z-order) -->
+        <path data-edge-from="client" data-edge-to="gw" data-edge-label="① GET" data-edge-key="0" data-composition-points="200,312;300,312" d="M 200 312 L 300 312" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
+        <path data-edge-from="gw" data-edge-to="idx1" data-edge-label="② 查 entry" data-edge-key="1" data-composition-points="375,276;375,252;576,252;576,140;600,140" d="M 375 276 L 375 260 Q 375 252 383 252 L 568 252 Q 576 252 576 244 L 576 148 Q 576 140 584 140 L 600 140" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
+        <path data-edge-from="idx1" data-edge-to="gw" data-edge-label="③ 返回坐标×16" data-edge-key="2" data-composition-points="680,176;680,200;474,200;474,312;450,312" d="M 680 176 L 680 192 Q 680 200 672 200 L 482 200 Q 474 200 474 208 L 474 304 Q 474 312 466 312 L 450 312" class="a-dashed" stroke-width="1.5" marker-end="url(#arrowhead-dashed)"/>
+        <path data-edge-from="gw" data-edge-to="data1" data-edge-label="④ 并行读分片" data-edge-key="3" data-composition-points="375,348;375,372;576,372;576,506;600,506" d="M 375 348 L 375 364 Q 375 372 383 372 L 568 372 Q 576 372 576 380 L 576 498 Q 576 506 584 506 L 600 506" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
+
+        <!-- Components -->
+        <g id="node-client" data-node-id="client" data-node-label="用户 / 应用" tabindex="0" role="button" aria-label="Focus 用户 / 应用, GET /photos/2024/a.jpg, Architecture component" aria-pressed="false" data-node-kind="external" data-node-sublabel="GET /photos/2024/a.jpg" data-node-context="Architecture component">
+          <title>用户 / 应用 · GET /photos/2024/a.jpg · Architecture component</title>
+          <rect x="40" y="276" width="160" height="72" rx="6" class="c-mask"/>
+          <rect x="40" y="276" width="160" height="72" rx="6" class="c-external" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="external" class="semantic-sigil s-external" transform="translate(46 282) scale(0.6875)">
+            <rect x="2.5" y="5" width="8.5" height="8" rx="1.5"/>
+            <path d="M8 2.5h5.5V8M13.5 2.5 7.5 8.5"/>
+          </g>
+          <text data-detail-anchor x="120" y="310" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">用户 / 应用</text>
+        <text data-detail="context" x="120" y="326" class="t-muted" font-size="9" text-anchor="middle">GET /photos/2024/a.jpg</text>
+        </g>
+
+        <g id="node-gw" data-node-id="gw" data-node-label="S3 网关" tabindex="0" role="button" aria-label="Focus S3 网关, 无状态 · 鉴权 + 路由, Architecture component" aria-pressed="false" data-node-kind="backend" data-node-sublabel="无状态 · 鉴权 + 路由" data-node-context="Architecture component">
+          <title>S3 网关 · 无状态 · 鉴权 + 路由 · Architecture component</title>
+          <rect x="300" y="276" width="150" height="72" rx="6" class="c-mask"/>
+          <rect x="300" y="276" width="150" height="72" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(306 282) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text data-detail-anchor x="375" y="310" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">S3 网关</text>
+        <text data-detail="context" x="375" y="326" class="t-muted" font-size="9" text-anchor="middle">无状态 · 鉴权 + 路由</text>
+        </g>
+
+        <g id="node-idx1" data-node-id="idx1" data-node-label="索引分片" tabindex="0" role="button" aria-label="Focus 索引分片, 一段 key 空间的账本, 索引层 · 元数据服务器" aria-pressed="false" data-node-kind="database" data-node-sublabel="一段 key 空间的账本" data-node-context="索引层 · 元数据服务器">
+          <title>索引分片 · 一段 key 空间的账本 · 索引层 · 元数据服务器</title>
+          <rect x="600" y="104" width="160" height="72" rx="6" class="c-mask"/>
+          <rect x="600" y="104" width="160" height="72" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(606 110) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <text data-detail-anchor x="680" y="138" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">索引分片</text>
+        <text data-detail="context" x="680" y="154" class="t-muted" font-size="9" text-anchor="middle">一段 key 空间的账本</text>
+        </g>
+
+        <g id="node-idx2" data-node-id="idx2" data-node-label="索引分片" tabindex="0" role="button" aria-label="Focus 索引分片, 同一桶 · 另一段 key, 索引层 · 元数据服务器" aria-pressed="false" data-node-kind="database" data-node-sublabel="同一桶 · 另一段 key" data-node-context="索引层 · 元数据服务器">
+          <title>索引分片 · 同一桶 · 另一段 key · 索引层 · 元数据服务器</title>
+          <rect x="810" y="104" width="160" height="72" rx="6" class="c-mask"/>
+          <rect x="810" y="104" width="160" height="72" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(816 110) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <text data-detail-anchor x="890" y="138" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">索引分片</text>
+        <text data-detail="context" x="890" y="154" class="t-muted" font-size="9" text-anchor="middle">同一桶 · 另一段 key</text>
+        </g>
+
+        <g id="node-data1" data-node-id="data1" data-node-label="存储节点 A" tabindex="0" role="button" aria-label="Focus 存储节点 A, 16 块盘 · 每盘一片, 数据层 · 存储节点集群" aria-pressed="false" data-node-kind="backend" data-node-sublabel="16 块盘 · 每盘一片" data-node-context="数据层 · 存储节点集群">
+          <title>存储节点 A · 16 块盘 · 每盘一片 · 数据层 · 存储节点集群</title>
+          <rect x="600" y="470" width="160" height="72" rx="6" class="c-mask"/>
+          <rect x="600" y="470" width="160" height="72" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(606 476) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text data-detail-anchor x="680" y="504" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">存储节点 A</text>
+        <text data-detail="context" x="680" y="520" class="t-muted" font-size="9" text-anchor="middle">16 块盘 · 每盘一片</text>
+        </g>
+
+        <g id="node-data2" data-node-id="data2" data-node-label="存储节点 B" tabindex="0" role="button" aria-label="Focus 存储节点 B, 另一台机器上的盘, 数据层 · 存储节点集群" aria-pressed="false" data-node-kind="backend" data-node-sublabel="另一台机器上的盘" data-node-context="数据层 · 存储节点集群">
+          <title>存储节点 B · 另一台机器上的盘 · 数据层 · 存储节点集群</title>
+          <rect x="810" y="470" width="160" height="72" rx="6" class="c-mask"/>
+          <rect x="810" y="470" width="160" height="72" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(816 476) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text data-detail-anchor x="890" y="504" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">存储节点 B</text>
+        <text data-detail="context" x="890" y="520" class="t-muted" font-size="9" text-anchor="middle">另一台机器上的盘</text>
+        </g>
+
+        <!-- Connection labels -->
+        <g data-detail="context" data-edge-from="client" data-edge-to="gw" data-edge-label="① GET" data-edge-key="0">
+          <rect x="233" y="292" width="34" height="14" rx="3" class="c-mask"/>
+          <text x="250" y="302" class="t-backend" font-size="8" text-anchor="middle">① GET</text>
+        </g>
+        <g data-detail="context" data-edge-from="gw" data-edge-to="idx1" data-edge-label="② 查 entry" data-edge-key="1">
+          <rect x="396.5" y="256" width="58" height="14" rx="3" class="c-mask"/>
+          <text x="425.5" y="266" class="t-backend" font-size="8" text-anchor="middle">② 查 entry</text>
+        </g>
+        <g data-detail="context" data-edge-from="idx1" data-edge-to="gw" data-edge-label="③ 返回坐标×16" data-edge-key="2">
+          <rect x="600.8" y="194" width="72.4" height="14" rx="3" class="c-mask"/>
+          <text x="637" y="204" class="t-messagebus" font-size="8" text-anchor="middle">③ 返回坐标×16</text>
+        </g>
+        <g data-detail="context" data-edge-from="gw" data-edge-to="data1" data-edge-label="④ 并行读分片" data-edge-key="3">
+          <rect x="441.7" y="352" width="67.6" height="14" rx="3" class="c-mask"/>
+          <text x="475.5" y="362" class="t-backend" font-size="8" text-anchor="middle">④ 并行读分片</text>
+        </g>
+
+        <!-- Legend -->
+        <g data-legend data-legend-bridge>
+          <text x="40" y="594" class="t-primary" font-size="12" font-weight="650">Legend</text>
+          <g data-legend-semantic-kind="backend" data-legend-kind="backend" data-legend-label="Backend" data-legend-x="40" data-legend-baseline="614" data-legend-width="78">
+            <rect x="40" y="605" width="16" height="10" rx="2.5" class="c-backend" stroke-width="1"/>
+            <text x="62" y="614" class="t-muted" font-size="10" font-weight="500">Backend</text>
+          </g>
+          <g data-legend-semantic-kind="database" data-legend-kind="database" data-legend-label="Database" data-legend-x="140" data-legend-baseline="614" data-legend-width="83">
+            <rect x="140" y="605" width="16" height="10" rx="2.5" class="c-database" stroke-width="1"/>
+            <text x="162" y="614" class="t-muted" font-size="10" font-weight="500">Database</text>
+          </g>
+          <g data-legend-semantic-kind="external" data-legend-kind="external" data-legend-label="External" data-legend-x="245" data-legend-baseline="614" data-legend-width="83">
+            <rect x="245" y="605" width="16" height="10" rx="2.5" class="c-external" stroke-width="1"/>
+            <text x="267" y="614" class="t-muted" font-size="10" font-weight="500">External</text>
+          </g>
+        </g>
+      </svg>
+      <figcaption>索引层只出「坐标」，字节全部从数据层来。凑齐 K 片拼出原文件，沿原连接返回客户端 —— key 全程只在索引层出现过一次。</figcaption>
+      <div class="pano-ui"></div>
+      <p class="arch-hint"><span class="idle">点头上的任意一个框看它的关系；或者从下面的「我熟悉」进去</span><span class="focused">再点一次空白处取消</span></p>
+    </figure><p>放大看两层各自装的是什么：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>放大</th><th>索引层的一条 entry</th><th>数据层盘上的一个分片</th></tr></thead><tbody><tr><th>装什么</th><td data-label="索引层的一条 entry">key 本体 + 元数据：size、ETag、mtime、数据分片的坐标</td><td data-label="数据层盘上的一个分片">一截对象的字节（12+4 切法里的 1/16）+ 它自己的分片元数据</td></tr><tr><th>有没有 key 字符串</th><td data-label="索引层的一条 entry">有，key 就是这条 entry 的身份</td><td data-label="数据层盘上的一个分片"><span class="tag tone-red">没有，全是匿名分片</span></td></tr><tr><th>数量级</th><td data-label="索引层的一条 entry">单片约 10 万条 entry，超了自动再分片（Ceph 的 omap 上限）</td><td data-label="数据层盘上的一个分片">S3 一个机架约 1000 块 20TB 盘、约 20PB，上面全是各个对象的分片</td></tr><tr><th>删对象时</th><td data-label="索引层的一条 entry">先删这条 entry（开着版本控制时是打删除标记，08.3）</td><td data-label="数据层盘上的一个分片">盘上的分片由后台异步回收 —— Ceph 的 GC 专门负责清 EC 的 <code>__shadow</code> 分片</td></tr></tbody></table></div><p>桶里面的 key 空间怎么切分片，公开资料里能对出两种流派：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>两种流派</th><th>按 prefix 分区（S3 的行为）</th><th>按哈希分片（Ceph 的做法）</th></tr></thead><tbody><tr><th>怎么切</th><td data-label="按 prefix 分区（S3 的行为）">负载跟着 prefix 走：每个 prefix 至少 3,500 PUT / 5,500 GET 每秒，官方建议用随机化前缀把负载摊到更多分区</td><td data-label="按哈希分片（Ceph 的做法）">hash(对象名) 选出索引分片，默认 11 片</td></tr><tr><th>LIST 的代价</th><td data-label="按 prefix 分区（S3 的行为）">ListObjectsV2 按字典序返回（API 文档承诺的排序），配合 delimiter 就是第 03 节那套折叠</td><td data-label="按哈希分片（Ceph 的做法）">官方开发文档原话：ordered listing 是 complex and I/O intensive —— 各片并行取批，再归并出有序结果</td></tr><tr><th>怕什么</th><td data-label="按 prefix 分区（S3 的行为）">顺序前缀（时间戳、自增 ID）把请求挤进同一个分区，变成热点</td><td data-label="按哈希分片（Ceph 的做法）">负载天然散开，不怕热点</td></tr></tbody></table></div><div class="callout tone-violet">
+      <span class="ic">💡</span>
+      <div><p>两层结构解释了后面几节的现象：LIST 便宜是因为只扫索引、不碰数据盘（第 03 节）；「目录」几乎免费是因为目录只是 key 里的前缀字符串，索引里没有树（第 03 节）；坏几台机器数据不丢是因为分片早就散在多台机器上（第 04 节的 ec-lab 可以亲手点坏试试）。</p>
+</div>
+    </div><h2 id="目录是幻觉prefix-delimiter-commonprefixes"><span class="num">03</span>目录是幻觉：prefix / delimiter / CommonPrefixes</h2>
 <p>这是前端工程师最容易踩的认知误区。在 S3 / OSS 控制台里你看到的「文件夹」结构：</p>
 <div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code>photos/
   2024/
@@ -475,7 +601,7 @@ key + blob · HTTP</small>
 </div>
           
         </div></div><h3 id="为什么这么设计">为什么这么设计</h3>
-<p>如果真搞目录：要维护目录节点的元数据、创建 / 删除 / 移动文件时要更新父目录、目录一致性要跨节点保证 —— 01 节讲过的「中心元数据瓶颈」原样回来了，扩展性受限。用前缀模拟目录之后：key 就是一个字符串，存在哪台机器只看 hash；没有「父目录」要更新；删一个对象不需要通知任何「目录」；创建对象也不需要「先创建父目录」。<mark class="mk-blue">真正的扁平化，无限扩展；「目录感」只在查询时按需生成 —— 读的体验好，写的开销小。</mark></p>
+<p>如果真搞目录：要维护目录节点的元数据、创建 / 删除 / 移动文件时要更新父目录、目录一致性要跨节点保证 —— 01 节讲过的「中心元数据瓶颈」原样回来了，扩展性受限。用前缀模拟目录之后：key 就是一个字符串，落到哪个索引分片由分片规则决定（02.2 的两种流派）；没有「父目录」要更新；删一个对象不需要通知任何「目录」；创建对象也不需要「先创建父目录」。<mark class="mk-blue">真正的扁平化，无限扩展；「目录感」只在查询时按需生成 —— 读的体验好，写的开销小。</mark></p>
 <div class="summary">
       <h3 id="三句话收束这一节">三句话收束这一节</h3>
       <p><strong>Prefix</strong> = 「我只要以这个字符串开头的 key」（过滤）。
@@ -1570,7 +1696,7 @@ const { Body } = await client.send(new GetObjectCommand({
 
     <footer>
       <span>对象存储与 S3、OSS：把「往哪放数据」讲到「选哪家」</span>
-      <span>最后更新 2026-10-09 · 单文件可离线打开</span>
+      <span>最后更新 2026-10-10 · 单文件可离线打开</span>
     </footer>
   </main>
 </div>
