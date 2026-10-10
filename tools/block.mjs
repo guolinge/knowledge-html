@@ -37,7 +37,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import MarkdownIt from 'markdown-it';
-import { blocksPlugin, blockNames, addAnchors, lintFences, lintLinkifyStars } from './lib/blocks.mjs';
+import { blocksPlugin, blockNames, addAnchors, lintFences, lintLinkifyStars, lintRawHtml } from './lib/blocks.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CHROME =
@@ -164,7 +164,7 @@ try {
 }
 
 /* 渲染结果的检查也要跑 —— 这一块正是「看着对、实际错」的高发区 */
-const issues = [...lintFences(body, target.text), ...lintLinkifyStars(body, target.text)];
+const issues = [...lintFences(body, target.text), ...lintLinkifyStars(body, target.text), ...lintRawHtml(body, target.text)];
 
 /* ---------- ③ 拼一个完整页面 ---------- */
 /* 用 file:// 绝对路径引资源，而不是相对路径 —— 临时页放在 /tmp 下，
@@ -200,7 +200,10 @@ const script = `<script>
   setTimeout(kbMeasure, 2500);
 <\/script><script src="file://${path.join(ROOT, 'assets', 'app.js')}"></script>`;
 
-const OUT = path.join(ROOT, 'node_modules', '.block-preview.html');
+/* 临时页的路径**必须带 PID** —— 多会话共用一份 node_modules（软链），
+   固定路径会让两个会话互相覆盖：A 刚写的页面被 B 覆盖，A 的 Chrome 截到的是 B 的块。
+   已经踩过一次（visual-check 修过同款 bug，block.mjs 漏了）。 */
+const OUT = path.join(ROOT, 'node_modules', `.block-preview-${process.pid}.html`);
 fs.writeFileSync(
   OUT,
   `<!DOCTYPE html><html lang="zh-CN" data-theme="light"><head>
@@ -290,3 +293,16 @@ if (OPEN) {
 } else {
   console.log('');
 }
+
+/* 收掉自己的临时页：路径带 PID，所以只会删到自己那一份。
+   顺手清掉别的会话被 kill 掉后留下的残骸（超过 1 小时的那些）。 */
+try { fs.unlinkSync(OUT); } catch { /* 忽略 */ }
+try {
+  const dir = path.join(ROOT, 'node_modules');
+  const now = Date.now();
+  for (const f of fs.readdirSync(dir)) {
+    if (!/^\.block-preview-\d+\.html$/.test(f)) continue;
+    const fp = path.join(dir, f);
+    if (now - fs.statSync(fp).mtimeMs > 3600_000) fs.unlinkSync(fp);
+  }
+} catch { /* 忽略 */ }

@@ -249,3 +249,20 @@ npm run view -- blocks-cheatsheet  # 打开示例页看效果
    （比如并排两栏），应该改用 **container queries**（Chrome 105 / FF 110 / Safari 16，
    已广泛可用）。当前所有积木都还没改。
 
+8. **`demo` 不写 `config` 就没有 `[data-mount]`，而 `mountOf()` 会静默回退到 root。**
+
+   `demo` 积木有三种形态：`panes`（默认，日志式）、`html`、`config`。
+   **只有后两种会在页面上生成 `<div data-mount>`。** 不写 `config` 时：
+
+   ```js
+   const mountOf = (root) => root.querySelector('[data-mount]') || root;   // 回退到 root
+   ```
+
+   控件照样能渲染（内容 append 到 `.demo` 上），肉眼看不出问题 ——
+   于是「这个控件挂载了没有」这个信号就没了：
+
+   - `visual-check` 的探针数 `[data-mount]` 的子元素 → 它报 0
+   - 你会以为是控件抛异常，去 `app.js` 里翻半天
+
+   ++凡是 `config` 驱动的控件，`demo` 块里一律写上 `config:`（哪怕是 `{}`）。++
+   ==这次写 `authz-lab` 时漏了，白查了一轮「为什么它没挂载」。==

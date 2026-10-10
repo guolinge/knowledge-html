@@ -13,7 +13,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import MarkdownIt from 'markdown-it';
-import { blocksPlugin, addAnchors, lintFences, lintLinkifyStars } from './lib/blocks.mjs';
+import { blocksPlugin, addAnchors, lintFences, lintLinkifyStars, lintRawHtml } from './lib/blocks.mjs';
 import { renderPage } from './lib/page.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -120,7 +120,7 @@ function relink(html) {
     .replace(/href="(?:\.\.\/)*(plans|tools|assets)\//g, 'href="../$1/');
 }
 const anchored2 = relink(anchored);
-const issues = [...lintFences(anchored2, src), ...lintLinkifyStars(anchored2, src)];
+const issues = [...lintFences(anchored2, src), ...lintLinkifyStars(anchored2, src), ...lintRawHtml(anchored2, src)];
   if (issues.length) {
     warned += issues.length;
     console.error(`\n  ⚠ ${p.file}`);

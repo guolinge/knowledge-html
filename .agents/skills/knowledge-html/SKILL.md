@@ -1246,6 +1246,10 @@ text: |
 - **积木名拼错** → 会静默退化成普通代码块，页面看着正常但图没了
 - **YAML 语法错** → 定位到文件和行号，并回显原始内容
 - **缺 `quiz`** → 违反本仓库约定（见「硬约束」）
+- **源码里写了裸的 `<script>` / `<style>`** → 积木会把裸 HTML 原样输出，而
+  `script` 是 raw-text 元素，没有 `</script>` 时**浏览器会把后面整篇文档当成脚本文本吃掉**。
+  表现是「那之后的图连线全空、`demo` 控件全不挂载」，==而构建和 check 都不报错==。
+  用反引号包起来就对了。
 
 ```callout
 tone: red
@@ -1345,6 +1349,12 @@ text: |
 
   ② **一个省事的约定（软链 `node_modules`）制造了一份跨会话的共享可变状态。**
   ==推荐一个约定的时候，要顺手想一想它把什么东西变成了共享的。==
+
+  ③ 这条规矩**修完要全仓库搜一遍**：后来又踩了第二次 ——
+  `visual-check.mjs` 当时修好了，但 `block.mjs` 的预览页还写着固定路径
+  `node_modules/.block-preview.html`，两个会话同时跑 `npm run block` 时，
+  我截到的第 N 块**是另一个会话的第 1 块**（截图上的行号和我这一篇对不上）。
+  ==修好一处不等于修好这一类；「临时文件」这个字符串要在 `tools/` 下 grep 一遍。==
 ```
 
 修完之后的判定规则（`ATTEMPTS = 3`）仍然保留 —— 噪声还在，只是不再是主因：
@@ -1955,7 +1965,7 @@ text: |
 | `summary` | 小结 |
 | `raw` | 直接写 HTML |
 
-**交互控件 46 个**（在 `assets/app.js` 的 `WIDGETS` 里，供 `demo` 积木引用）：
+**交互控件 49 个**（在 `assets/app.js` 的 `WIDGETS` 里，供 `demo` 积木引用）：
 `polling-vs-cdc` `combination-count` `join-lab` `on-vs-where` `knex-chain`
 `stepper` `tuner` `diff` `stream-modes` `operator-lab` `hashring` `partition-prune`
 `dsl-lab` `null-lab` `config-to-ui` `field-lineage` `count-dedup-lab`
@@ -1965,6 +1975,7 @@ text: |
 `epoll-tables` `lt-vs-et` `thread-audit` `code-and-stacks` `clone-lab` `isolation-spectrum` `fork-or-thread`
 `schema-walk`
 `tri-logic-lab` `uid-set-lab` `dist-lab` `storage-anatomy` `prune-lab` `innodb-visual-lab`
+`ls-cost-lab` `atomic-lab` `rtt-lab`
 
 **已知缺口**（按优先级）：
 

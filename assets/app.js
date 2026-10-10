@@ -7132,6 +7132,381 @@
     }
   };
 
+  /* ============================================================
+     控件：ls-cost-lab —— 一个目录装 N 个文件，ls 要忙多久
+     目录本身是一个文件，内容是「名字 → inode 号」的表。
+     表按每条目录项 32 B 估算；readdir 顺序读按 500 MB/s；
+     远端 stat 按 5 万次/秒；排序按 5e6 条/秒。
+     都是量级估算，用来看「哪个数量级在卡」。
+  ============================================================ */
+  WIDGETS['ls-cost-lab'] = (root) => {
+    const box = mountOf(root);
+    const statusEl = root.querySelector('[data-status]');
+    const cfg = cfgOf(root);
+    const ENTRY_B = 32;
+    const READ_MBPS = 500;
+    const STAT_QPS = 50000;
+    const SORT_RATE = 5e6;
+    const DAYS = 365;
+    const PREFIXES = 256;
+    const STEPS = [1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9];
+    const st = { n: cfg.n || 1e8, mode: cfg.mode === 'tiered' ? 'tiered' : 'flat' };
+    const H = (tag, cls, text) => el(tag, cls, text);
+
+    function fmtCount(n) {
+      if (n >= 1e8) return (n / 1e8).toFixed(n % 1e8 ? 1 : 0) + ' 亿';
+      if (n >= 1e4) return (n / 1e4).toFixed(n % 1e4 ? 1 : 0) + ' 万';
+      return String(n);
+    }
+    function fmtBytes(b) {
+      if (b >= 1e9) return (b / 1e9).toFixed(2) + ' GB';
+      if (b >= 1e6) return (b / 1e6).toFixed(1) + ' MB';
+      if (b >= 1e3) return (b / 1e3).toFixed(1) + ' KB';
+      return b + ' B';
+    }
+    function fmtDur(sec) {
+      if (sec >= 3600) return (sec / 3600).toFixed(1) + ' 小时';
+      if (sec >= 60) return (sec / 60).toFixed(1) + ' 分钟';
+      if (sec >= 1) return sec.toFixed(1) + ' 秒';
+      if (sec >= 1e-3) return (sec * 1e3).toFixed(1) + ' 毫秒';
+      return (sec * 1e6).toFixed(0) + ' 微秒';
+    }
+
+    const wrap = H('div', 'lsc-wrap');
+    const ctrl = H('div', 'lsc-ctrl');
+    const g1 = H('div', 'lsc-grp');
+    g1.append(H('h5', null, '文件总数（拖一下）'));
+    const sl = H('div', 'lsc-slider');
+    const sIn = document.createElement('input');
+    sIn.type = 'range'; sIn.min = '0'; sIn.max = String(STEPS.length - 1); sIn.step = '1';
+    sIn.value = String(STEPS.indexOf(st.n) >= 0 ? STEPS.indexOf(st.n) : 5);
+    const sV = H('b', null, fmtCount(st.n));
+    sl.append(sIn, sV);
+    g1.append(sl);
+    const g2 = H('div', 'lsc-grp');
+    g2.append(H('h5', null, '这些文件怎么放'));
+    const opts = H('div', 'lsc-opts');
+    const bFlat = H('button', null, '全堆进一个目录');
+    const bTier = H('button', null, '按天 + 2 位前缀分层');
+    bFlat.addEventListener('click', () => { st.mode = 'flat'; draw(); });
+    bTier.addEventListener('click', () => { st.mode = 'tiered'; draw(); });
+    opts.append(bFlat, bTier);
+    g2.append(opts);
+    ctrl.append(g1, g2);
+    wrap.append(ctrl);
+
+    const body = H('div', 'lsc-body');
+    const metrics = H('div', 'lsc-metrics');
+    const right = H('div', 'lsc-metrics');
+    const tree = H('div', 'lsc-tree');
+    const bars = H('div', 'lsc-bars');
+    bars.className = 'lsc-metrics';
+    right.append(tree, bars);
+    body.append(metrics, right);
+    wrap.append(body);
+    const note = H('div', 'lsc-note');
+    wrap.append(note);
+    box.append(wrap);
+
+    function draw() {
+      const N = st.n;
+      const tiered = st.mode === 'tiered';
+      /* 两种放法各自的「单目录条目数」都算出来 —— 对比条要同时显示两条，
+         所以这里不能只算当前模式那一个。 */
+      const flatPerDir = N;
+      const tierPerDir = Math.max(1, Math.ceil(N / DAYS / PREFIXES));
+      const perDir = tiered ? tierPerDir : flatPerDir;
+      const dirCount = tiered ? Math.min(N, DAYS * PREFIXES) : 1;
+      const tableBytes = perDir * ENTRY_B;
+      /* ls 只看一个目录（可能是分层的某一层）；ls -l 还要逐个查 inode */
+      const readSec = tableBytes / (READ_MBPS * 1e6);
+      const sortSec = perDir / SORT_RATE;
+      const statCount = perDir;
+      const statSec = statCount / STAT_QPS;
+
+      bFlat.classList.toggle('on', !tiered);
+      bTier.classList.toggle('on', tiered);
+      sV.textContent = fmtCount(N);
+
+      function metric(label, val, cls) {
+        const d = H('div', 'lsc-metric' + (cls ? ' ' + cls : ''));
+        d.append(H('small', null, label));
+        d.append(H('b', null, val));
+        return d;
+      }
+      fill(metrics, [
+        metric('你正在看的这个目录里有', fmtCount(perDir) + ' 个条目'),
+        metric('这个目录本身（一张表）', fmtBytes(tableBytes), tiered ? 'ok' : 'bad'),
+        metric('readdir 要读的条目', fmtCount(perDir) + ' 条'),
+        metric('ls -l 还要查多少次 inode', fmtCount(statCount) + ' 次'),
+        metric('远端元数据服务要跑（5 万次/秒）', fmtDur(statSec), tiered ? 'ok' : 'bad'),
+        metric('本地读表 + 排序（估算）', fmtDur(readSec + sortSec)),
+      ]);
+
+      const path = tiered
+        ? '/logs/2026/10/10/ab/\n  access-00001.log\n  access-00002.log\n  …（' + fmtCount(perDir) + ' 个）'
+        : '/logs/\n  access-20261010-00001.log\n  access-20261010-00002.log\n  …（' + fmtCount(perDir) + ' 个）';
+      fill(tree, [H('small', null, tiered ? '分层之后：一次 ls 只需要看一个小目录' : '平铺：一个目录装下全部'), el('pre', '', path)]);
+
+      /* 两条对比条：单目录条目数（对数刻度示意） */
+      const maxLog = Math.log10(1e9);
+      const w = (v) => Math.max(2, (Math.log10(Math.max(1, v)) / maxLog) * 100);
+      function bar(label, v, tone, text) {
+        const d = H('div', 'lsc-bar');
+        d.append(H('small', null, label));
+        const tr = H('div', 'lsc-bar-track');
+        const sp = H('span', tone || '');
+        sp.style.width = w(v) + '%';
+        tr.append(sp);
+        d.append(tr);
+        d.append(H('div', 'lsc-bar-val', text));
+        return d;
+      }
+      fill(bars, [
+        bar('全堆进一个目录' + (!tiered ? '（当前）' : ''), flatPerDir, 'warn',
+          fmtCount(flatPerDir) + ' 条（' + fmtBytes(flatPerDir * ENTRY_B) + '）'),
+        bar('按天 + 2 位前缀分层' + (tiered ? '（当前）' : ''), tierPerDir, '',
+          fmtCount(tierPerDir) + ' 条（' + fmtBytes(tierPerDir * ENTRY_B) + '）'),
+      ]);
+
+      const text = tiered
+        ? '同样 ' + fmtCount(N) + ' 个文件，切成 ' + fmtCount(dirCount) + ' 个目录之后，**任何一次 ls 只面对 ' +
+          fmtCount(perDir) + ' 个条目** —— 表是 ' + fmtBytes(tableBytes) + '，一条命令就回来了。文件总数没变，' +
+          '==变的是「一次要数清的条目数」==。'
+        : '把 ' + fmtCount(N) + ' 个文件堆在一个目录里，这个**目录自身**就是一张 ' + fmtBytes(tableBytes) +
+          ' 的表。`ls` 要把它读完（' + fmtCount(perDir) + ' 条），`ls -l` 还要再逐个查 ' + fmtCount(statCount) +
+          ' 次 inode —— 全部压在管这个目录的元数据节点上。';
+      fill(note, [richText(el('div'), text)]);
+
+      if (statusEl) {
+        statusEl.textContent = (tiered ? '分层' : '平铺') + ' · ' + fmtCount(N) + ' 个文件 · 单目录 ' +
+          fmtCount(perDir) + ' 条 · 表 ' + fmtBytes(tableBytes);
+      }
+    }
+    sIn.addEventListener('input', () => {
+      st.n = STEPS[Number(sIn.value)];
+      draw();
+    });
+    draw();
+  };
+
+  /* ============================================================
+     控件：atomic-lab —— 一次「移动」，中间会露出什么
+     三种实现：原子 rename（锁住两张表一起改）/ 复制再删 / 先删再建。
+     逐步推进，盯住两个位置的存在状态和「另一个客户端看到什么」。
+  ============================================================ */
+  WIDGETS['atomic-lab'] = (root) => {
+    const box = mountOf(root);
+    const statusEl = root.querySelector('[data-status]');
+    const H = (tag, cls, text) => el(tag, cls, text);
+
+    /* old / new：'ok' 存在且完整 · 'none' 不存在 · 'part' 字节在但没名字 */
+    const MODES = {
+      rename: {
+        label: 'rename（原子）',
+        steps: [
+          { t: '初始：/a/x.txt 存在，/b/y.txt 不存在', old: 'ok', new: 'none', see: '在 /a 读到 x.txt，内容完整 ✓' },
+          { t: '锁住 /a 和 /b 两张表', old: 'ok', new: 'none', see: '还在 /a 读到 ✓（加锁不影响别人读到旧状态）', lock: true },
+          { t: '在同一个持锁区间里改两处：/a 删一行，/b 加一行', old: 'none', new: 'ok', see: '看到的是「一次跳变」：/a 有 → /b 有，中间没有空档 ✓', lock: true, bad: false },
+          { t: '释放两把锁', old: 'none', new: 'ok', see: '在 /b 读到 y.txt，内容完整 ✓' },
+        ],
+        tail: 'POSIX 要求的正是这一条：外面只能看到「操作前」或「操作后」。代价是这一次操作要把两把锁都拿在手里 —— 锁的持有时间就是后面跨机房那笔账。',
+      },
+      copy: {
+        label: '复制到新位置再删旧的',
+        steps: [
+          { t: '初始：/a/x.txt 存在', old: 'ok', new: 'none', see: '在 /a 读到 ✓' },
+          { t: '把内容复制到 /b 的数据块（字节已经在盘上，但还没有名字）', old: 'ok', new: 'part', see: '在 /a 读到 ✓；/b 里看不到东西（没名字）' },
+          { t: '给 /b 加上目录项', old: 'ok', new: 'ok', see: '!!两个位置都能读到同一个文件 —— 看起来像有两个文件!!', bad: true },
+          { t: '删掉 /a 的目录项', old: 'none', new: 'ok', see: '现在只剩 /b ✓' },
+        ],
+        tail: '没有「两边都没有」的窗口，但中间有一段时间**同一份内容有两个名字**：磁盘要双倍空间，扫描、配额、备份工具都会看见两份。如果第 1~2 步之间断电，留在盘上的是**没有名字的字节** —— 占着空间，谁也访问不到。',
+      },
+      del: {
+        label: '先删旧的，再建新的',
+        steps: [
+          { t: '初始：/a/x.txt 存在', old: 'ok', new: 'none', see: '在 /a 读到 ✓' },
+          { t: '先删掉 /a 的目录项（以为先腾地方更省事）', old: 'none', new: 'none', see: '!!文件不见了：/a 没有、/b 也没有!!', bad: true, readerBad: true },
+          { t: '在 /b 建目录项', old: 'none', new: 'ok', see: '文件又出现了，但在新位置' },
+          { t: '把数据搬完', old: 'none', new: 'ok', see: '在 /b 读到 ✓' },
+        ],
+        tail: '这中间有一段**真的空档**：观察者会看到文件凭空消失，又凭空出现在别处。如果第 1~2 步之间失败，这次移动就变成了一次删除 —— 数据没了。',
+      },
+    };
+    const st = { mode: 'rename', i: 0 };
+    const wrap = H('div', 'atl-wrap');
+    const ctrl = H('div', 'atl-ctrl');
+    const modes = H('div', 'atl-modes');
+    const mBtns = Object.keys(MODES).map((k) => {
+      const b = H('button', null, MODES[k].label);
+      b.addEventListener('click', () => { st.mode = k; st.i = 0; draw(); });
+      modes.append(b);
+      return { b, k };
+    });
+    const btns = H('div', 'atl-btns');
+    const bNext = H('button', null, '下一步 ▶');
+    const bReset = H('button', null, '重来');
+    bNext.addEventListener('click', () => {
+      const steps = MODES[st.mode].steps;
+      st.i = Math.min(st.i + 1, steps.length - 1);
+      draw();
+    });
+    bReset.addEventListener('click', () => { st.i = 0; draw(); });
+    btns.append(bNext, bReset);
+    ctrl.append(modes, btns);
+    wrap.append(ctrl);
+
+    const two = H('div', 'atl-two');
+    const left = H('div', 'atl-steps');
+    const seen = H('div', 'atl-seen');
+    two.append(left, seen);
+    wrap.append(two);
+    const note = H('div', 'atl-note');
+    wrap.append(note);
+    box.append(wrap);
+
+    function slot(label, state) {
+      const s = H('div', 'atl-slot ' + (state === 'ok' ? 'has' : state === 'none' ? 'gone' : ''));
+      s.append(H('small', null, label));
+      s.append(H('b', null, state === 'ok' ? '有，内容完整' : state === 'part' ? '字节在，但没有名字' : '不存在'));
+      return s;
+    }
+
+    function draw() {
+      const M = MODES[st.mode];
+      mBtns.forEach((x) => x.b.classList.toggle('on', x.k === st.mode));
+      bNext.disabled = st.i >= M.steps.length - 1;
+      const cur = M.steps[st.i];
+
+      fill(left, M.steps.map((s, idx) => {
+        const d = H('div', 'atl-step' + (idx < st.i ? ' done' : idx === st.i ? ' cur' : '') + (s.bad ? ' bad' : ''));
+        d.append(H('i', null, String(idx + 1)));
+        d.append(richText(el('span'), s.t + (s.lock ? '（两把锁都在手里）' : '')));
+        return d;
+      }));
+
+      const head = H('h6');
+      head.textContent = '此刻另一个客户端看到什么（第 ' + (st.i + 1) + '/' + M.steps.length + ' 步）';
+      const slots = H('div', 'atl-slots');
+      slots.append(slot('/a/x.txt（旧位置）', cur.old), slot('/b/y.txt（新位置）', cur.new));
+      const reader = H('div', 'atl-reader' + (cur.readerBad ? ' bad' : ''));
+      reader.append(richText(el('span'), '读者：' + cur.see));
+      fill(seen, [head, slots, reader]);
+      fill(note, [richText(el('div'), M.tail)]);
+
+      if (statusEl) statusEl.textContent = M.label + ' · 第 ' + (st.i + 1) + '/' + M.steps.length + ' 步';
+    }
+    draw();
+  };
+
+  /* ============================================================
+     控件：rtt-lab —— 距离怎么变成锁的持有时间
+     一次「加锁 → 改两处 → 提交」按 3 个往返回合算。
+     时间是 往返次数 × RTT；锁一直握到提交完成，所以
+     这个目录每秒最多完成的次数 = 1000ms / 总毫秒。
+  ============================================================ */
+  WIDGETS['rtt-lab'] = (root) => {
+    const box = mountOf(root);
+    const statusEl = root.querySelector('[data-status]');
+    const cfg = cfgOf(root);
+    const H = (tag, cls, text) => el(tag, cls, text);
+    const PLACES = [
+      { id: 'mem', name: '同一台机器', sub: '锁在内存里', rtt: 0.01, tone: 'ok' },
+      { id: 'rack', name: '同机房', sub: '不同机器', rtt: 0.2, tone: 'ok' },
+      { id: 'city', name: '同城两机房', sub: '约 20 公里', rtt: 10, tone: 'bad' },
+      { id: 'world', name: '跨洲', sub: '上海 ↔ 美西', rtt: 120, tone: 'bad' },
+    ];
+    const st = { place: cfg.place || 'rack', rounds: cfg.rounds || 3 };
+    const wrap = H('div', 'rtl-wrap');
+    const ctrl = H('div', 'rtl-ctrl');
+    const g1 = H('div', 'rtl-grp');
+    g1.append(H('h5', null, '这一段距离一个往返要多久（RTT）'));
+    const places = H('div', 'rtl-places');
+    const pBtns = PLACES.map((p) => {
+      const b = H('button', null, p.name);
+      b.addEventListener('click', () => { st.place = p.id; draw(); });
+      places.append(b);
+      return { b, id: p.id };
+    });
+    g1.append(places);
+    const g2 = H('div', 'rtl-grp');
+    g2.append(H('h5', null, '这次操作要跑几个来回'));
+    const sl = H('div', 'rtl-slider');
+    const rIn = document.createElement('input');
+    rIn.type = 'range'; rIn.min = '1'; rIn.max = '6'; rIn.step = '1'; rIn.value = String(st.rounds);
+    const rV = H('b', null, st.rounds + ' 个往返');
+    sl.append(rIn, rV);
+    g2.append(sl);
+    ctrl.append(g1, g2);
+    wrap.append(ctrl);
+
+    const body = H('div', 'rtl-body');
+    const metrics = H('div', 'rtl-metrics');
+    const rows = H('div', 'rtl-rows');
+    body.append(metrics, rows);
+    wrap.append(body);
+    const note = H('div', 'rtl-note');
+    wrap.append(note);
+    box.append(wrap);
+
+    function fmtMs(ms) {
+      if (ms >= 1000) return (ms / 1000).toFixed(2) + ' 秒';
+      if (ms >= 10) return ms.toFixed(1) + ' 毫秒';
+      if (ms >= 1) return ms.toFixed(2) + ' 毫秒';
+      return (ms * 1000).toFixed(0) + ' 微秒';
+    }
+
+    function draw() {
+      const p = PLACES.find((x) => x.id === st.place) || PLACES[1];
+      pBtns.forEach((x) => x.b.classList.toggle('on', x.id === st.place));
+      rV.textContent = st.rounds + ' 个往返';
+      const totalMs = p.rtt * st.rounds;
+      const perSec = 1000 / totalMs;
+
+      function metric(label, val, cls) {
+        const d = H('div', 'rtl-metric' + (cls ? ' ' + cls : ''));
+        d.append(H('small', null, label));
+        d.append(H('b', null, val));
+        return d;
+      }
+      fill(metrics, [
+        metric('一个往返（RTT）', fmtMs(p.rtt)),
+        metric('这次操作实际耗时', fmtMs(totalMs), p.rtt > 1 ? 'bad' : 'ok'),
+        metric('锁的持有时长', '≈ ' + fmtMs(totalMs), p.rtt > 1 ? 'bad' : 'ok'),
+        metric('这个目录每秒最多完成', perSec >= 10 ? perSec.toFixed(0) + ' 次' : perSec.toFixed(2) + ' 次',
+          perSec >= 100 ? 'ok' : perSec >= 10 ? '' : 'bad'),
+      ]);
+
+      const maxMs = Math.max(...PLACES.map((x) => x.rtt * st.rounds));
+      fill(rows, PLACES.map((x) => {
+        const ms = x.rtt * st.rounds;
+        const d = H('div', 'rtl-row');
+        d.append(H('small', null, x.name + ' · ' + x.sub));
+        const tr = H('div', 'rtl-row-track');
+        const sp = H('span', ms > 30 ? 'warn' : '');
+        sp.style.width = Math.max(2, (ms / maxMs) * 100) + '%';
+        tr.append(sp);
+        d.append(tr);
+        const rate = 1000 / ms;
+        d.append(H('div', 'rtl-row-val', fmtMs(ms) + ' → 每秒最多 ' + (rate >= 10 ? rate.toFixed(0) : rate.toFixed(2)) + ' 次'));
+        return d;
+      }));
+
+      const speedFloor = (p.rtt / 2) * 2; /* 单程光速时间 × 2 = RTT，用于说明下限来源 */
+      fill(note, [richText(el('div'),
+        '光在光纤里大约每毫秒走 200 公里，所以**距离直接换算成时间**：' + p.name + ' 的一个往返约 ' + fmtMs(p.rtt) +
+        '。这次操作要 ' + st.rounds + ' 个往返，等于 ' + fmtMs(totalMs) + '；锁要一直握到提交完成，' +
+        '所以这个目录每秒只能做完 ' + (perSec >= 1 ? perSec.toFixed(0) : perSec.toFixed(2)) + ' 次。' +
+        '==这个差距不是硬盘慢了，是光跑得就那么快。==')]);
+
+      if (statusEl) {
+        statusEl.textContent = p.name + ' · RTT ' + fmtMs(p.rtt) + ' · ' + st.rounds + ' 个往返 · 共 ' + fmtMs(totalMs);
+      }
+    }
+    rIn.addEventListener('input', () => { st.rounds = Number(rIn.value); draw(); });
+    draw();
+  };
+
   /* ---------- 挂载 ---------- */
   document.querySelectorAll('[data-widget]').forEach((root) => {
     var name = root.getAttribute('data-widget');

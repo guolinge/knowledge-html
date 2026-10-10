@@ -11,7 +11,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import MarkdownIt from 'markdown-it';
-import { blocksPlugin, addAnchors, lintFences, lintLinkifyStars } from './lib/blocks.mjs';
+import { blocksPlugin, addAnchors, lintFences, lintLinkifyStars, lintRawHtml } from './lib/blocks.mjs';
 import { renderPage } from './lib/page.mjs';
 import { renderHome } from './lib/home.mjs';
 import { readAllPlans, attachNotes, needsHtml } from './lib/plan.mjs';
@@ -159,7 +159,7 @@ function main() {
       continue;
     }
 
-    const issues = [...lintNote(meta, src, env.warnings), ...lintFences(anchored, src), ...lintLinkifyStars(anchored, src)];
+    const issues = [...lintNote(meta, src, env.warnings), ...lintFences(anchored, src), ...lintLinkifyStars(anchored, src), ...lintRawHtml(anchored, src)];
     for (const it of issues) console.warn(`  ⚠ ${slug}: ${it}`);
     warnings += issues.length;
 

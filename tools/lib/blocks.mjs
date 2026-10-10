@@ -1076,10 +1076,23 @@ export function addAnchors(html) {
   const toc = [];
   const seen = new Map();
 
+  /* 标题文字是从**渲染后的 HTML** 里剥标签拿到的，所以实体还留着。
+     不解码的话，标题里带 `"` / `'` / `&` 的笔记，目录里会原样显示
+     `&quot;目录&quot;`（而且 slug 里会多出 `quot`）——
+     模板再转义一次就成了 `&amp;quot;`，页面上看到的就是这串字符本身。
+     踩过：`## 03 · "目录"是怎么来的` 这一节。 */
+  const decode = (s) =>
+    String(s)
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'")
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&amp;/g, '&');
+
   const out = html.replace(/<h([23])>([\s\S]*?)<\/h\1>/g, (m, lvl, inner) => {
     // 「01 · 标题」→ 编号徽章
     let content = inner;
-    const text = inner.replace(/<[^>]+>/g, '').trim();
+    const text = decode(inner.replace(/<[^>]+>/g, '').trim());
     const m2 = text.match(/^(\d+[a-z]?)\s*[·:：]\s*(.+)$/);
     if (m2 && lvl === '2') {
       // 从原始 HTML 里剥掉开头的编号，保留其余行内标记
@@ -1193,6 +1206,61 @@ export function lintFences(html, src = '') {
           `      → 把那个外层围栏换成四个反引号 \`\`\`\``,
       );
     }
+  }
+  return issues;
+}
+
+
+/**
+ * 检查源码里直接写了「会吃掉后面所有内容」的 HTML 标签。
+ *
+ * 积木里的正文和单元格都走 `html: true` 的行内渲染 —— 裸 HTML 是支持的。
+ * 所以 `<script src="...">` 会被原样输出成一个**真的 script 元素**；
+ * 而 HTML 解析器遇到没有 `</script>` 的 script 时，
+ * ==会把后面整篇文档都当成脚本文本吃掉==。
+ *
+ * 实测代价：一篇笔记的 compare 单元格里写了
+ * `<script src="https://cdn.example.com/app.js">`，
+ * 页面上那之后的**所有积木、所有 demo 控件、连 app.js 本身**都不存在了 ——
+ * 表现是「flow 的连线全空、控件全不挂载」，而 `npm run check` 全绿。
+ *
+ * 同类标签还有 style / textarea / title / xmp，都是 raw-text 元素：
+ * 没闭合就会一路吞到下一个同名闭合标签。
+ * 想展示这类标签，用反引号包起来（会转义成 &lt;script&gt;）。
+ */
+export function lintRawHtml(_html, src = '') {
+  const issues = [];
+  if (!src) return issues;
+  const lines = src.split('\n');
+  const RISKY = /<\s*(script|style|textarea|title|xmp)\b/i;
+
+  /* 跳过围栏内部 —— 代码块里写脚本示例是正常的，而且那里会被转义。
+     围栏规则同 lintFences：行首 ≤3 空格 + ≥ 开围栏长度的反引号 + 后面只有空白。 */
+  let i = 0;
+  while (i < lines.length) {
+    const open = /^(`{3,})(\S+)\s*$/.exec(lines[i]);
+    if (!open) {
+      /* 行内的反引号片段要先摘掉 —— `` `<script ...>` `` 是正确写法，不该报。
+         （多反引号的片段先处理，否则 `` `a `` b` `` 这种会被切错。） */
+      const inlineCode = /(`+)[\s\S]*?\1/g;
+      const stripped = lines[i].replace(/``[\s\S]*?``/g, '').replace(inlineCode, '');
+      if (RISKY.test(stripped)) {
+        const tag = RISKY.exec(stripped)[1].toLowerCase();
+        issues.push(
+          `note.md:${i + 1} 附近 → 源码里直接写了裸的 \`<${tag}>\`。\n` +
+            `      积木会把它原样输出成真的 HTML 元素；\`${tag}\` 是 raw-text 元素，\n` +
+            `      没有闭合标签时**浏览器会把后面整篇文档当成它的内容吃掉**：\n` +
+            `      那之后的积木、控件、脚本全都不存在，而且不报错。\n` +
+            `      → 用反引号包起来：\`<${tag} ...>\`（渲染成转义后的等宽文本）`,
+        );
+      }
+      i += 1;
+      continue;
+    }
+    const ticks = open[1].length;
+    let j = i + 1;
+    while (j < lines.length && !new RegExp('^`{' + ticks + ',}\\s*$').test(lines[j])) j++;
+    i = j + 1;
   }
   return issues;
 }
