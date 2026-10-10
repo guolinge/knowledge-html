@@ -319,9 +319,14 @@ knex('rel_holding')
 ```
 · 列名                        —— Metadata 给的常量，反引号由代码拼
 · COUNT(*)                    —— times 节点的计数
-· CURRENT_DATE()              —— 相对时间的基准
+· NOT COALESCE( … , FALSE)    —— exclude 的三值逻辑包装
+· CAST('…' AS DECIMAL(38,10)) —— double 字面量
 · `rel`.`uid` = `u`.`uid`     —— 关联子查询的关联条件
 ```
+
+上一版白名单里还有 `CURRENT_DATE()` —— 这一版没有了。相对时间的基准 `today` / `now`
+由调用方传入，SQL 里不出现 `CURRENT_DATE()` / `NOW()`，全部是按 `value_encoding`
+编码好的字面量。少一个函数，就少一类「SQL 里的时钟和业务时钟不一致」的隐患。
 
 **白名单比黑名单好** —— 加新东西的时候必须先想「它该不该进白名单」。
 
@@ -405,7 +410,7 @@ items:
     tone: blue
     body: |
       **做法**：任何要接进来的表都必须有一列叫 `uid`。
-      **而且这个列名不入库** —— `crm_dc_data_field` 里永远不会有
+      **而且这个列名不入库** —— 元数据那六张表里永远不会有
       「`uid` 映射到 `xxx`」这样一行。SQL Builder 直接写死。
 
       ```sql
@@ -502,8 +507,8 @@ text: |
 // A · 时间字段 + 相对时间操作符
 { "field": "last_trade_time", "op": "last_n_days", "value": 30 }
 
-// B · 派生字段（天数）+ 普通比较
-{ "field": "last_trade_days", "op": "lte", "value": 30 }
+// B · 换算字段（天数）+ 普通比较
+{ "field": "last_trade_days", "op": "gte", "value": 30 }
 ```
 
 ```journey
@@ -515,49 +520,49 @@ text: |
     - { k: 字段, v: last_trade_time, note: 还是那个时间点 }
     - { k: 操作符, v: last_n_days, note: 单位藏在操作符里, tone: warn }
     - { k: 值, v: "30" }
-  note: SQL 是 `last_trade_time >= CURRENT_DATE() - INTERVAL 30 DAY`。
+  note: SQL 是 `last_trade_time >= '2026-08-31' AND last_trade_time <= '2026-09-30'`（按 value_encoding 编码的字面量）。
   next: "要反向呢？ :: :: 得再加一个操作符"
 
-- tag: B · 派生字段
+- tag: B · 换算字段
   tone: green
-  name: derive（days_since）
-  badge: 先把时间点算成一个数字
+  name: PAGE_CONVERT（days）
+  badge: 页面上的天数换算到裸列上的窗口
   fields:
     - { k: 字段, v: last_trade_days, note: 「距上次成交天数」, tone: ok }
-    - { k: 操作符, v: lte, note: 普通比较符, tone: ok }
+    - { k: 操作符, v: gte, note: 普通比较符, tone: ok }
     - { k: 值, v: "30" }
-  note: SQL 是 `DATEDIFF(CURRENT_DATE(), last_trade_time) <= 30`。
-  next: "要反向呢？ :: :: 把 lte 改成 gte 就行"
+  note: SQL 是 `last_trade_time >= '2026-08-31'`（今天减 30 天，方向随 op 反转）。
+  next: "要反向呢？ :: :: 把 gte 改成 lte 就行"
 ```
 
 ### 决定的差别
 
 ```compare
 first: 维度
-head: [A · last_n_days, B · derive]
+head: [A · last_n_days, B · 换算字段]
 rows:
   - 要反向（60 天没来）:
       - { text: "得再加一个操作符 before_n_days", tone: red }
-      - { text: "把 lte 改成 gte 就行", tone: green }
+      - { text: "把 gte 改成 lte 就行", tone: green }
   - 能当表格一列吗:
       - { text: "不能 —— 操作符产不出一列值", tone: red }
-      - { text: "能 —— 它就是个字段", tone: green }
+      - { text: "能 —— 展示层拿同一个注册表把 birthday 换算成岁数", tone: green }
   - 能按它排序吗:
       - { text: "不能", tone: red }
       - { text: "能", tone: green }
   - 单位能是「年」吗:
       - { text: "不能 —— 只有天和小时", tone: red }
-      - { text: "能 —— age_years 就是年", tone: green }
+      - { text: "能 —— age 就是 years", tone: green }
 ```
 
 **最后一条是决定性的**。「年龄 ≥ 18」**只能**用 B：
 
 ```sql
--- ✅ B · derive(age_years)
-TIMESTAMPDIFF(YEAR, birthday, CURRENT_DATE()) >= 18     -- 闰年也正确
+-- ✅ B · years 换算：18 岁变成生日上界
+u.birthday <= '2008-09-30'     -- 闰年也正确，条件落在裸列上
 
 -- ❌ A 想做也做不了
-birthday <= CURRENT_DATE() - INTERVAL 6570 DAY          -- 单位是天，且闰年差几天
+-- 没有 last_n_years 这个操作符；按天倒推 6570 天闰年会差几天
 ```
 
 ### 所以两套都留着会怎样
@@ -578,6 +583,11 @@ text: |
   ==这就叫「不自洽」：同一个意思有两种说法。==
 
   而且 A 的能力是 B 的子集 —— ++删 A 不损失任何表达力。++
+
+  上一版笔记在这里的判断是「建议只留一个」。这一版两套都还在：
+  方案里相对时间操作符是正式的操作符表成员，换算字段也是正式的字段。
+  ==结论不变：这是 DSL 层面的冗余，迟早要定默认== —— 差别是现在两条路编译成同一种形状，
+  挑错的代价比上一版（一条是表达式、一条是裸列）小了。
 ````
 
 ---
@@ -616,19 +626,23 @@ text: |
   ==三个里最该写清的是第三个 —— 它决定「超了怎么办」。==
 ```
 
-**4.3 应该做的**：
+**这一版已经落地的答案**：
 
 ```compare
 first: 事项
-head: [怎么做]
+head: [落成什么样]
 rows:
   - 定一个数字:
-      - "跟界面输入框能装多少、驱动参数上限，取小的那个"
+      - "组件里 `MAX_UIDS = 500`，超出部分**静默截断**（`.slice(0, MAX_UIDS)`）"
   - 说清超了怎么办:
-      - "==在 Validate 阶段就拒绝==，返回明确错误码 —— 别让它跑到数据库再报语法错"
-  - 留一句演进方向:
+      - { text: "不是在 Validate 阶段拒绝 —— 编译侧不校验 UID 数量，截断发生在组件", tone: amber }
+  - 演进方向:
       - "如果 UID 规模真的上千上万，`IN (?, ?, ...)` 这个形状本身就不合适了 —— 那是换机制（临时表 / 数组参数），不是调上限"
 ```
+
+值得留意的是「截断」这个选择：用户粘 800 个 UID 进来，多出来的 300 个**不报错、直接丢**。
+上一版建议的「在 Validate 阶段拒绝」没有采用 —— 这是个产品决定（粘贴场景宁丢勿报），
+但==丢得悄无声息==这一点，值得在评审时再问一句。
 
 ---
 
@@ -675,12 +689,12 @@ rows:
     ==这不是安全漏洞，是功能性 bug，而且更难定位 ——==
     报错信息里看不出「是一个值引起的」。
     实测：`'a\'` 直接 ERROR 1105，绑定版本正常返回 0。
-- q: "`last_n_days` 和 `derive` 为什么建议只留一个？"
+- q: "`last_n_days` 和换算字段为什么建议只留一个？"
   a: |
-    因为**它们能表达同一件事**（「最近 30 天」两条路都通），
-    而 `derive` 是 `last_n_days` 的**超集**：
+    因为**它们能表达同一件事**（「最近 30 天」两条路都通，而且这一版编译成同一种裸列窗口），
+    而换算字段是 `last_n_days` 的**超集**：
 
-    · 反向不用加新操作符（`lte` 改 `gte`）
+    · 反向不用加新操作符（`gte` 改 `lte`）
     · 能当展示列、能排序
     · **能表达「年」这个量纲** —— `last_n_days` 只有天和小时
 
@@ -688,6 +702,7 @@ rows:
     （6570 天和 18 岁的实岁算法不是一回事，闰年会差）。
 
     两套都留着 → 两套 UI、两套测试、改口径改两处。==删掉子集，不损失任何表达力。==
+    这一版两套都还在，冗余成立，只是挑错的代价比上一版小了。
 - q: 「把可变变成常量」这个手法，在这套设计里有哪三处？
   a: |
     | 原本可变的 | 变成什么 |

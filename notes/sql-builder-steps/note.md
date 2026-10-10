@@ -769,12 +769,15 @@ SELECT
   `u`.`uid`           AS `uid`,
   `u`.`customer_name` AS `customer_name`,
   `u`.`staff_name`    AS `staff_name`,
-  TIMESTAMPDIFF(YEAR, `u`.`birthday`, '2026-09-30') AS `age`
+  `u`.`birthday`      AS `age`
 FROM `user_portraits_wide` AS `u`
 WHERE ( ... )
 ORDER BY `u`.`uid`
 LIMIT 10
 ```
+
+展示列选的是原始列（`birthday`），「岁数」的换算在展示层做（`displayPageValue`）——
+SQL 里不出现换算表达式，这样 ORDER BY、导出、下游消费拿到的都是同一份裸列。
 
 翻第二页时不加 `OFFSET`，而是把上一页最后一个 uid 带上（真实夹具里的形态）：
 
@@ -812,7 +815,7 @@ rows:
 
 ## 08 · 三处扭转
 
-这三处是评审时最容易被挑的地方，也是方案专门用「实现约定」一节写的。
+这三处是评审时最容易被挑的地方。其中前两处方案里还有（「实现约定」一节），第三处（include/exclude 的 COALESCE）的方案章节在这一版里被删了 —— 代码照写、测试照看，方案不再背书。
 
 ### 扭转一：关系条件用 `IN` 子查询，不用 LEFT JOIN
 
@@ -862,7 +865,12 @@ exclude  →  NOT COALESCE((cond1 AND cond2), FALSE)
 
 不写 `COALESCE` 的话，一个性别为 NULL 的记录会被「排除男性」一并排除掉。这部分 `null-lab` 那个交互讲的正是它：同一批数据、同一个条件，只换「放进哪边」和「包不包 COALESCE」，看哪几行被留住。
 
-方案给的机制解释是：SQL 里 `NOT UNKNOWN` 的结果**仍是 `UNKNOWN`**，在 WHERE 中按 false 处理，于是「是男性」和「不是男性」两个集合都没收留它。
+机制是 SQL 的三值逻辑：`NOT UNKNOWN` 的结果**仍是 `UNKNOWN`**，在 WHERE 中按 false 处理，
+于是「是男性」和「不是男性」两个集合都没收留它。包上 `COALESCE(expr, FALSE)` 之后：
+UNKNOWN 被压成 FALSE，`NOT FALSE` → TRUE，正确留下。
+
+上一版方案专门有一节写这个；这一版删了，但代码和 `includeCoalesce.spec.ts` 都还在 ——
+这条约定现在是「代码 + 测试看住」，不再是方案背书。
 
 这三处扭转让「同一段 WHERE」这句描述变得不准确。准确的说法是：==include 和 exclude 共用一套叶子编译规则，但最外层包法不同。==
 
@@ -870,94 +878,86 @@ exclude  →  NOT COALESCE((cond1 AND cond2), FALSE)
 
 ## 09 · 扩展点：常见改动各要动哪里
 
-方案专门列了这一张表，它回答的是「这个组件的可演进性在哪」。改动分两边：数据在 Data Admin 里配，配完即生效；代码改完要重新发布。
+上一版方案里有一张「扩展点」表，这一版删掉了；这张表从代码侧重建，回答的是
+「这个组件的可演进性在哪」。改动分两边：字段配置在 Data Admin 里改，最多 5 秒生效；代码改完要重新发布。
 
 ```compare
 first: 需要新增
 head: [改哪里, 说明]
 rows:
-  - 一个数据源: ["`crm_dc_data_source` 与 `crm_dc_data_field` 增加记录", "SQL Builder 不感知有几个数据源，只认传进来的字段字典"]
-  - 一个操作符: ["`schema.ts` 加定义；`compile.ts` 加编译分支；`crm_dc_operator` 加记录", "**前三处缺一不可** —— 前两处决定它怎么变成 SQL，第三处决定哪些字段能用它"]
+  - 一个数据源: ["`crm_dc_data_source` 加一行，字段表上的 `data_source_id` 指过去", "SQL Builder 不感知有几个数据源，只认传进来的字段字典"]
+  - 一个字段: ["`crm_dc_portrait`（或关系两张表）加一行", "纯配置 —— 形状（variable_type/data_type/content_type）决定操作符和控件，不用发版"]
+  - 一个操作符: ["`schema.ts` 加常量；`compile.ts` 加编译分支；`operators.ts` 的 `OPERATOR_DISPLAY` 加名字", "三处都在代码里 —— 操作符不入库了，所以 ==加操作符必发版==，没有表可插"]
   - 一个叶子类型: ["`schema.ts` 加类型和类型判断；`validate.ts` 与 `compile.ts` 各加分支", "叶子类型是 DSL 结构的一部分，校验和编译都要认识它"]
-  - 一种派生方式: ["`metadata.ts` 的 `FieldDerive` 加取值与 SQL 模板；`crm_dc_data_field` 补取值", "可选取值写死在代码里，Metadata 只能从中挑"]
+  - 一种换算方式: ["`pageValue.ts` 的 `PAGE_CONVERT` 加键；展示层用同一个注册表反推", "换算规则只在代码里，字段名当键 —— 拼错只会被夹具抓住，编译器不报错"]
 ```
 
-这张表值得在讲解时点一句：==四行里只有第一行是纯配置==。加字段不加代码，加操作符和加叶子要发版。这是设计上刻意的取舍，不是疏漏。
+这张表值得在讲解时点一句：==前两行是纯配置==。加字段不加代码；加操作符、加叶子、加换算要发版。
+和上一版相比的变化是：操作符从「改编译器 + 插一行表」变成「三处代码」，
+换算从「Metadata 挑取值」变成「代码里的注册表」。
 
 ---
 
 ## 10 · 讲的时候留意：方案和实现现在的差异
 
-技术方案 4.2 / 4.3 是设计稿，`packages/dsl` 和圈选组件是按它实现的。==哪边说了算，按代码。==
-对不上的地方分三类：名字对不上、同样输入产出不同、方案写了代码里没有。
+技术方案 4.2 / 4.3 在 10-09 晚上按实现重写过一轮：上一版笔记在这里列的十几处差异，
+**大部分已经被方案吸收了**。剩下的少量差异按三类列在下面 —— ==哪边说了算，按代码。==
 
-### 名字对不上
-
-读文档写代码时会直接撞上的一批。改的是叫法，语义基本没变。
+### 已经对上的（上一版列过，现在方案改口了）
 
 ```compare
-first: 文档里写的
-head: [代码里实际是, 出现在]
+first: 上一版的差异
+head: [现在方案怎么写]
 rows:
-  - "`semantic_type`": ["拆成五个列：`variable_type` / `data_type` / `content_type` / `value_encoding` / `enum_type`", "4.1 三张表、4.2 解析规则、4.3 语义校验"]
-  - "`crm_dc_relation.field_key`": ["`relation_key`", "4.2 设计目标、4.3 解析表"]
-  - "`object_field_key`": ["`object_name`（客体类别标识）", "4.2 设计目标"]
-  - "`valueSource: 'INLINE'`": ["`'CUSTOM'`，一样带 `items[]`", "4.2 数据来源表"]
-  - "组件侧的 `fields`": ["`features`；顶层还有 `revision`", "4.2 数据来源表"]
-  - "`BuildResult`": ["`CompileResult`", "4.3 编译过程流程图"]
-  - "`compile(DSL, Metadata)`": ["`compile(query, options)`", "4.3 时序图与流程图"]
-  - "`CompileOptions` 只有三个键": ["还有 `today` / `now`，相对时间的基准就是它们", "4.3 对外接口"]
-  - "`FieldDerive` / `expr`": ["都不存在，换算规则见下面 `PAGE_CONVERT`", "4.3 扩展点表"]
-  - "「四类叶子」": ["三类叶子（portrait / relation / uid）加组节点，才是四类**节点**", "4.3 Compile 表"]
+  - "`semantic_type` 一个数": ["拆成 `variable_type` / `data_type` / `content_type` / `value_encoding` / `enum_type` 五列，方案 4.1 已按五列写"]
+  - "关系的名字": ["方案统一用 `relation_key`，客体用 `object_name`"]
+  - "第 ① 步的输出": ["方案不再说「输出还是一份 DSL」，改写为「不通过则抛 CompileError」—— 和 `validate(): void` 一致"]
+  - 越权客户范围: ["方案明写「越权会让整次查询以 SCOPE_DENIED 被拒绝，不做裁剪」—— 和代码一致"]
+  - "`age >= 18` 编成什么": ["方案示例就是 `u.birthday <= '2008-10-09'` —— 下推形态，两边一致"]
+  - 相对时间编成什么: ["方案写 `col >= ? AND col <= ?`、按 `value_encoding` 编码 —— 两边一致"]
+  - 今天/现在从哪来: ["方案 `CompileOptions` 带 `today` / `now` —— 两边一致（代码里缺省时退回业务时钟 `businessClock`）"]
+  - "`listSql` 的展示列": ["方案示例就是 `u.birthday AS age`，换算在展示层 —— 两边一致"]
+  - 操作符下发什么: ["方案改为扁平列表（`key` / `name` / `sortOrder`，相对时间带 `template`），`controlFor` 由客户端算 —— 两边一致"]
+  - 权限谓词怎么推: ["方案给出 `(dataLevel, scope.kind)` 的完整对照表 —— 和 `applyUniverse` 一致"]
+  - 错误码怎么分段: ["方案补了 `SCOPE_DENIED` 的出处（`assertScopePermitted`），并明说 `DISABLED_REF` 没有任何一处抛出"]
+  - 指定 UID 上限: ["方案定为 500（组件按 `MAX_UIDS` 截断）"]
 ```
 
-### 同样输入，产出不同
-
-这一组要小心：上层说「按方案来的」，实际编出来的 SQL 不是那个样子。
+### 还没对上的
 
 ```compare
 first: 项
-head: [技术方案, 代码里的事实]
+head: [方案, 代码里的事实]
 rows:
-  - 第 ① 步的输出: ["「输出还是一份 DSL」", { text: "`validate(): void`，什么都不返回", tone: red }]
-  - 越权客户范围: ["「越权的 `groupId` 被过滤掉」", { text: "**整次查询拒绝**，抛 `SCOPE_DENIED`。过滤是圈选组件里 `clampScope` 的事，不是编译器", tone: red }]
-  - 派生字段的换算规则: ["`derive_kind` 存在 Metadata 里，两种取值：`age_years` / `days_since`", { text: "挪进代码：`pageValue.ts` 里一张按字段名当键的 `PAGE_CONVERT` 表，三种（`years` / `days` / `scale`）", tone: red }]
-  - "`age >= 18` 编成什么": ["`TIMESTAMPDIFF(YEAR, u.birthday, CURRENT_DATE()) >= 18`", "**下推成 `birthday <= '2008-10-09'`**，让条件落在裸列上，Doris 能用分区裁剪和前缀索引"]
-  - 相对时间编成什么: ["`col >= DATE_SUB(CURRENT_TIMESTAMP(), INTERVAL n DAY) AND col <= CURRENT_TIMESTAMP()`", "`col >= ? AND col <= ?`，两个值按这一列的 `value_encoding` 编码后写成字面量"]
-  - 今天/现在从哪来: ["SQL 里直接写 `CURRENT_DATE()` / `CURRENT_TIMESTAMP()`", "由调用方传入 `today` / `now`（`CompileOptions` 上的可选字段），SQL 里不出现 `CURDATE()` / `NOW()`"]
-  - "`listSql` 的展示列": ["`TIMESTAMPDIFF(YEAR, u.birthday, CURRENT_DATE()) AS age`", "`u.birthday AS age`，换算在展示层做（`displayPageValue`），不在 SQL 里"]
+  - 换算规则存在哪: ["方案不再提换算（上一版的 `derive_kind` / `expr` 已删）", { text: "代码里 `pageValue.ts` 的 `PAGE_CONVERT`，按字段名当键，三种（`years` / `days` / `scale`）", tone: amber }]
   - 数值字面量: ["直接写 `1000`", "`CAST('1000' AS DECIMAL(38,10))`，避免参数被当 DOUBLE 丢精度"]
-  - "`DISABLED_REF`": ["语义校验返回它", { text: "码表里有（14 个码之一），但==没有任何一处抛它==，实际抛的是 `UNKNOWN_FIELD`", tone: red }]
+  - UID 上限的自相矛盾: ["实现约定写 500，组件约束一节残留一句「当前方案中的 1000 为暂定值」", "代码里是 `MAX_UIDS = 500`，强制截断"]
+  - 编译缺省时钟: ["`today` / `now` 是可选字段，没说缺省行为", "两个都传才用；缺一个就用业务时区的 `businessClock` 现算"]
 ```
 
-### 方案写了，代码里没有
+### 方案删了、代码还在的
 
 ```compare
 first: 项
-head: [技术方案怎么写, 代码里什么样]
+head: [状态]
 rows:
-  - 权限谓词怎么推: ["只看 `dataLevel`：`self` 给 `staff_id`，`team` 给 `group_id IN (…)`", "按 `(dataLevel, scope.kind)` 两键推。`all` + `scope=all` 时==一个权限谓词都不加=="]
-  - 错误码怎么分段: ["形状阶段 6 个、语义阶段 7 个", "`INVALID_SCOPE` 属形状阶段、`OP_NOT_ALLOWED` 两个阶段都抛、`SCOPE_DENIED` 来自第三阶段（`compile()` 里的 `assertScopePermitted`），方案没列"]
-  - 操作符下发什么: ["按语义类型分组，带 `inputForm` 和 `status`", "一张平铺的全局表，只有 `key` / `name` / `sortOrder` / `template`。`inputForm` 是客户端用 `controlFor()` 当场算的"]
-  - 指定 UID 的数量上限: ["1000（暂定），且「代码中尚未强制」", "组件里是 `MAX_UIDS = 500`，而且强制截断（`.slice(0, MAX_UIDS)`）"]
-  - 条件树层级 2、条件数量 15: ["本期约定，代码中尚未强制", "确实没有强制，这一条方案说得对"]
+  - include/exclude 的 COALESCE 约定: ["方案章节已删；代码照写，`includeCoalesce.spec.ts` 看住它"]
+  - 扩展点表: ["方案章节已删；第 09 节从代码侧重建了一张"]
+  - Admin API 明细: ["方案只留了两行文字，六张表的写入校验细节在 `assertMetadataRows` 里（见配置表那篇）"]
 ```
 
-`DISABLED_REF` 那一行值得展开：这个码在表里躺着，却没有一处抛它，
-正是因为 `validate` 什么都不返回。
+`DISABLED_REF` 值得单独记一句，因为方案现在和代码说的是同一件事：这个码在表里躺着，却没有一处抛它。
 想说「你引用了一个已停用的字段」，就得拿得到「这个字段曾经存在」这个事实，
-而 Catalog 只收录 ENABLED 的字段（Data Admin 那份投影里只有 ENABLED / DISABLED 两种状态），
-停用字段在编译器眼里和「从来没写过这个字段」长得一模一样，
+而 Catalog 只收录 ENABLED 的字段，停用字段在编译器眼里和「从来没写过这个字段」长得一模一样，
 所以它只能报 `UNKNOWN_FIELD`。这不是忘了写，是**这一层拿不到区分两者所需的信息**。
 
 ````callout
 tone: amber
 icon: 🔩
 text: |
-  派生字段那一行会直接变成硬约束，单独说一句。
+  换算规则那一行是现在最重要的遗留差异，单独说一句。
 
-  方案的设计是：换算规则存在 Metadata 里（`derive_kind` 一列），加一种换算不用发版。
-  实现把它挪进了代码，用**字段名当键**（`pageValue.ts`）：
+  方案不再规定换算规则存在哪；实现把它放在代码里，用**字段名当键**（`pageValue.ts`）：
 
   ```ts
   const PAGE_CONVERT = {
@@ -967,20 +967,20 @@ text: |
   };
   ```
 
-  ==后果：加一个派生量要改代码、重新发布==。而且键的类型是 `Record<string, …>`，
+  ==后果：加一个换算要改代码、重新发布==。而且键的类型是 `Record<string, …>`，
   字段名拼错了编译器不会拦，只会当成「这个字段没有换算规则」，
   于是「年龄 ≥ 18」被拿 18 去和 `birthday` 直接比。
+  目前唯一的防线是夹具（每条换算路径的 SQL 都被快照锁着）。
 ````
 
 ```callout
 tone: violet
 icon: 🧭
 text: |
-  `age >= 18` 那一行是最好用的一个例子：==同一份 DSL，方案和实现编出来的 WHERE 完全不一样，但结果相同==。这正好说明 4.3 的承诺是什么：DSL 与物理模型解耦，
-  换一条编译路径不影响上层协议。
+  上一版最好用的那个例子（方案写 `TIMESTAMPDIFF`、代码下推）现在失效了 —— 方案已经改成和代码一致。
+  这轮「方案向实现收敛」本身就是 4.3 承诺的一次兑现：==DSL 与物理模型解耦，换一条编译路径不影响上层协议==，
+  所以方案改口时，DSL 和调用方一个字都不用动。
 ```
-
----
 
 ```quiz
 - q: 为什么校验要分成两段，而不是一次查完？
