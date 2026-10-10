@@ -2391,6 +2391,7 @@
     if (!actors.length || !conds.length) return;
 
     const st = { actor: 0, mode: 'include', pick: {}, val: {} };
+    const TODAY = cfg.today || '2026-09-30';   // 真编译器由调用方传 today；演示固定一个业务日期
     conds.forEach((c, i) => { st.pick[c.key] = i === 0; st.val[c.key] = c.def; });
 
     const H = (tag, cls, text) => el(tag, cls, text);
@@ -2480,7 +2481,7 @@
     const legend = H('div', 'dl-legend');
     [['var(--amber)', '权限（演员决定，不是用户圈出来的）'],
      ['var(--text)', '用户圈的条件'],
-     ['var(--violet)', '派生表达式（逻辑字段 → 物理列）']]
+     ['var(--violet)', '换算窗口（页面值 → 裸列上的窗口）']]
       .forEach(([c, t]) => {
         const s = H('span');
         const i = H('i'); i.style.background = c;
@@ -2507,10 +2508,31 @@
     }
 
     function universeSegs(a) {
+      /* 真编译器 applyUniverse：scope 跟着级别走（演示里没有单独的范围选择器）。
+         team → group_id IN (groups)；self → staff_id；all → 不加。 */
       const out = [];
-      if (a.dataLevel === 'team') out.push(['`u`.`group_id` IN (1, 2, 3)', 'perm']);
+      if (a.dataLevel === 'team') out.push(['`u`.`group_id` IN (' + (a.groupIds || [1]).join(', ') + ')', 'perm']);
       if (a.dataLevel === 'self') out.push(['`u`.`staff_id` = ' + a.staffId, 'perm']);
       return out;
+    }
+
+    /* 换算字段下推：age gte 18 → birthday <= '2008-09-30'。
+       方向映射和真编译器 compileElapsed 一致：gte→col<=b(v)，lt→col>b(v)，其余类推。 */
+    function stampShift(kind, amount) {
+      const d = new Date(TODAY + 'T00:00:00Z');
+      if (kind === 'years') d.setUTCFullYear(d.getUTCFullYear() - amount);
+      else d.setUTCDate(d.getUTCDate() - amount);
+      return d.toISOString().slice(0, 10);
+    }
+
+    function elapsedSeg(col, kind, op, v) {
+      const b = (n) => "'" + stampShift(kind, n) + "'";
+      if (op === 'eq') return '(' + col + ' > ' + b(v + 1) + ' AND ' + col + ' <= ' + b(v) + ')';
+      if (op === 'neq') return '(' + col + ' <= ' + b(v + 1) + ' OR ' + col + ' > ' + b(v) + ')';
+      if (op === 'gt') return col + ' <= ' + b(v + 1);
+      if (op === 'gte') return col + ' <= ' + b(v);
+      if (op === 'lt') return col + ' > ' + b(v);
+      return col + ' > ' + b(v + 1);   // lte
     }
 
     function condSeg(c) {
@@ -2519,14 +2541,14 @@
         const o = (c.options || []).find((x) => x.v === v) || { v: v, t: v };
         return [q(c.col) + " = '" + o.v + "'", 'cond'];
       }
-      /* 派生字段：逻辑名 → 物理列的表达式。和 slug 的 derive 字段同构。 */
-      const derived = c.derive === 'age'
-        ? ['TIMESTAMPDIFF(YEAR, `u`.`birthday`, CURRENT_DATE())', 'cast']
-        : c.derive === 'days'
-          ? ['DATEDIFF(CURRENT_DATE(), ' + q(c.col) + ')', 'cast']
-          : [q(c.col), 'cond'];
+      /* 换算字段：页面上填的数换算到物理列上的窗口，条件落在裸列上。 */
+      if (c.derive === 'age' || c.derive === 'days') {
+        return [elapsedSeg(q(c.col), c.derive === 'age' ? 'years' : 'days', c.op || 'gte', Number(v) || 0), 'cond'];
+      }
       const opSql = { gt: '>', gte: '>=', lt: '<', lte: '<=', eq: '=' }[c.op || 'gte'];
-      return [derived[0] + ' ' + opSql + ' ' + v, derived[1]];
+      /* double 列的值走 DECIMAL CAST，和真编译器的字面量一致 */
+      const lit = c.dataType === 'double' ? "CAST('" + v + "' AS DECIMAL(38,10))" : v;
+      return [q(c.col) + ' ' + opSql + ' ' + lit, 'cond'];
     }
 
     /* 把若干片用 AND 连起来，外层加括号 —— 跟真编译器一样，单条也包括号 */
