@@ -1,11 +1,11 @@
-[全景篇](notes/combination-overview.html)讲了这个包的位置和地图。这一篇往下钻一层：草稿更新的具体写法、一行条件的诞生过程、控件怎么决策、候选值怎么加载、坏草稿在哪里被拦。三处交互里的错误码、操作符表、控件形态，都是 2026-10-10 用 `tsx` 实跑包内源码得到的输出，不是照文档抄的。
+[全景篇](../combination-overview/)讲了这个包的位置和地图。这一篇往下钻一层：草稿更新的具体写法、一行条件的诞生过程、控件怎么决策、候选值怎么加载、坏草稿在哪里被拦。三处交互里的错误码、操作符表、控件形态，都是 2026-10-10 用 `tsx` 实跑包内源码得到的输出，不是照文档抄的。
 
 ```callout
 tone: blue
 icon: 🧭
 text: |
   **读这篇之前**：先过全景篇的 02（受控组件）、03（草稿 vs DSL）、04（形状四元组与值来源）。
-  05 节会碰到 `@insight/dsl` 的 `validateStructure`，那条线在 [@insight/dsl 篇](notes/insight-dsl.html)。
+  05 节会碰到 `@insight/dsl` 的 `validateStructure`，那条线在 [@insight/dsl 篇](../insight-dsl/)。
 ```
 
 ## 01 · 受控数据流的四种更新模式
@@ -590,7 +590,7 @@ text: |
   组件侧收窄只是**交互反馈**：越权团队从下拉里消失、选不了「全部」。
   权限的权威在服务端 —— `assertScopePermitted` 发现 scope 超出
   `actor.dataLevel` 时整单抛 `SCOPE_DENIED`，不裁剪、不降级。
-  那条线在 [@insight/dsl 篇](notes/insight-dsl.html)的权限谓词一节。
+  那条线在 [@insight/dsl 篇](../insight-dsl/)的权限谓词一节。
 ```
 
 ## 07 · 设计取舍：六个「为什么」
