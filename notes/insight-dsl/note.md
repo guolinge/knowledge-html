@@ -4,7 +4,7 @@
 
 中间发生了什么？
 
-一个 1700 行的包 —— `@insight/dsl` —— 把「她点出来的条件」翻译成了数据库能跑的 SQL。
+一个 2100 行的包 —— `@insight/dsl` —— 把「她点出来的条件」翻译成了数据库能跑的 SQL。
 
 ```callout
 tone: blue
@@ -78,8 +78,8 @@ head: [对策, 落在哪]
 rows:
   - 表结构暴露: ["界面只说 `age`，物理列名 `birthday` 留在服务端", "字段字典"]
   - 权限漏过滤: ["权限编进 WHERE，不是查完再过滤", "身份（Actor）"]
-  - 口径不一致: ["「年龄」怎么算只有一处定义", "派生字段"]
-  - 注入 / NULL / 分页: ["只在这一个包里踩一次，332 个测试看住", "校验器 + 夹具"]
+  - 口径不一致: ["「年龄」怎么算只有一处定义", "换算注册表（`pageValue.ts`）"]
+  - 注入 / NULL / 分页: ["只在这一个包里踩一次，338 个测试看住", "校验器 + 夹具"]
 ```
 
 ```callout
@@ -132,8 +132,9 @@ items:
       ```json
       { "name": "age", "label": "年龄",
         "table": "user_portraits_wide", "column": "birthday",
-        "valueType": "int", "ops": ["gt","gte","lt","lte","eq","between"],
-        "derive": { "kind": "age_years" } }
+        "variableType": "range", "dataType": "long", "contentType": 0,
+        "valueEncoding": "native_date",
+        "ops": ["gt","gte","lt","lte","eq","between","is_null","is_not_null"] }
       ```
 
       !!注意 `name` 是 `age`，而 `column` 是 `birthday`。!! 这两者不一样 —— 第 04 节会讲为什么。
@@ -226,13 +227,13 @@ first: 名字
 head: [长什么样, 干什么用]
 rows:
   - "`uidsSql`":
-      - "`SELECT u.uid AS uid FROM user_portraits_wide AS u WHERE u.staff_id = 101 AND (TIMESTAMPDIFF(YEAR, u.birthday, CURRENT_DATE()) >= 18)`"
+      - "`SELECT u.uid AS uid FROM user_portraits_wide AS u WHERE u.staff_id = 101 AND (u.birthday <= '2008-09-30')`"
       - "把命中的 uid 全捞出来。**冻名单**（做快照）用的就是它"
   - "`countSql`":
       - "`SELECT COUNT(*) AS count FROM ( <上面那句> ) AS t`"
       - "界面上的「共 1413 人」。它数的就是 `uidsSql` 定义的那个集合 —— !!包一层不去重，这个代码里也没东西需要去重!!"
   - "`listSql`":
-      - "比 uidsSql 多几列：`u.uid, u.customer_name, u.staff_name, TIMESTAMPDIFF(...) AS age`，末尾 `ORDER BY u.uid LIMIT 10 OFFSET 0`"
+      - "比 uidsSql 多几列：`u.uid, u.customer_name, u.staff_name, u.birthday AS age`（裸列，换算在展示层做），末尾 `ORDER BY u.uid LIMIT 10 OFFSET 0`"
       - "表格那一屏。分页走 uid 游标，不走 OFFSET"
   - "`droppedUidsSql`":
       - { text: "只有用了「指定 UID」才有，否则是 null", tone: muted }
@@ -250,7 +251,7 @@ text: |
   | 事实 | 怎么核实的 |
   |---|---|
   | 关系条件编译成 `IN (子查询)`，**不是 JOIN** | 读 `compileRelation` —— detail / times / not_in 三个分支全是 `IN` / `EXISTS` |
-  | 全库 318 条夹具 SQL 里只有 1 条含 JOIN | 而且那 1 条是分页用的 `CROSS JOIN`，不是关系表 |
+  | 全库 309 条夹具 SQL 里只有 1 条含 JOIN | 而且那 1 条是分页用的 `CROSS JOIN`，不是关系表 |
   | 宽表的 `uid` 是 `UNIQUE KEY` | `SHOW CREATE TABLE`；实测 100 万行 = 100 万去重后 |
 
   所以 `COUNT(*) FROM (uidsSql)` 在这个代码里是个**语义 no-op** ——
@@ -310,16 +311,17 @@ widget: dsl-lab
 title: 勾条件，看 SQL 怎么长出来
 config:
   table: user_portraits_wide
+  today: '2026-09-30'
   actors:
-    - { staffId: 101, dataLevel: self, label: 客户经理, note: "只看自己名下的客户" }
-    - { staffId: 201, dataLevel: team, label: 组长, note: "看整个组" }
-    - { staffId: 301, dataLevel: all,  label: 运营, note: "看全部" }
+    - { staffId: 101, dataLevel: self, label: 客户经理, note: "只看自己名下的客户", groupIds: [1] }
+    - { staffId: 201, dataLevel: team, label: 组长, note: "看整个组", groupIds: [1] }
+    - { staffId: 301, dataLevel: all,  label: 运营, note: "看全部", groupIds: [1, 2, 3] }
   conds:
     - { key: age,      label: "年龄 ≥",         kind: num,  col: birthday, derive: age, op: gte, def: 18 }
     - { key: region,   label: "地区 =",         kind: enum, col: region,   def: US,
         options: [{v: US, t: 美国}, {v: HK, t: 中国香港}, {v: CN, t: 中国大陆}, {v: SG, t: 新加坡}] }
-    - { key: aum_usd,  label: "总资产(USD) ≥",  kind: num,  col: aum_usd,  op: gte, def: 1000 }
-    - { key: cash_hkd, label: "现金(HKD) ≥",    kind: num,  col: cash_hkd, op: gte, def: 1 }
+    - { key: aum_usd,  label: "总资产(USD) ≥",  kind: num,  col: aum_usd,  op: gte, def: 1000, dataType: double }
+    - { key: cash_hkd, label: "现金(HKD) ≥",    kind: num,  col: cash_hkd, op: gte, def: 1, dataType: double }
     - { key: vip_level, label: "客户等级 =",     kind: enum, col: vip_level, def: GOLD,
         options: [{v: GOLD, t: 黄金}, {v: PLATINUM, t: 铂金}, {v: DIAMOND, t: 钻石}] }
 actions: false
@@ -331,17 +333,20 @@ actions: false
 cols: 3
 items:
   - title: 换身份，看权限怎么进去
-    desc: "把①从「客户经理」换成「运营」，看 WHERE 最前面那段。"
+    desc: "把①从「客户经理」换成「组长」，看 WHERE 最前面那段。"
     tone: amber
     body: |
       ==权限是从「谁在圈」推出来的，不是用户圈出来的。==
 
       客户经理 → `u.staff_id = 101`
-      组长     → `u.group_id IN (1, 2, 3)`
+      组长     → `u.group_id IN (1)`
       运营     → 什么都不加
 
+      （真实编译器里，组长如果圈「本人」范围，还会同时加上 `staff_id` ——
+      这个演示把范围跟级别绑在一起，看不到那一支；规则见第 04 节的权限表。）
+
       所以界面**不需要**有一个「只看我的客户」开关 ——
-      它是身份自带的，想关也关不掉。
+      它是身份自带的，想关也关不掉。范围越权时，编译器直接抛 `SCOPE_DENIED`，不默默裁剪。
   - title: 把条件放进 exclude
     desc: "把③从「包含」切成「排除」，看那段 SQL 变成了什么。"
     tone: red
@@ -555,21 +560,19 @@ config:
 | 枚举 | `eq` `neq` `in` `notIn` `isNull` `isNotNull` |
 | 布尔 | `eq` `isNull` `isNotNull` |
 
-这三个数组在测试夹具（`test/catalog.ts`）里叫 `RANGE` / `SET` / `BOOL`。生产路径上，它是服务端按 `semantic_type` 从 `crm_dc_operator` 查出来、组装进 `Catalog` 的。
+这三个数组在测试夹具（`test/catalog.ts`）里叫 `RANGE` / `SET` / `BOOL`。生产路径上，它是 `applicableOps(variable_type, data_type, content_type)` 按字段形状现算的 —— 上一版查 `crm_dc_operator` 表，这一版没有这张表，规则只活在代码里。
 
-**③ 值类型对吗** —— `isValidValue(value, valueType, options)` 的五个分支：
+**③ 值类型对吗** —— `isValidValue(value, shape, options)`：
 
-| `valueType` | 怎么判 | 例子 |
+| 先后两道 | 怎么判 | 例子 |
 |---|---|---|
-| `int` | `typeof === 'number'` 且是整数 | `18` ✓，`"18"` ✗ |
-| `decimal` | `typeof === 'number'` 且有限 | `1000.5` ✓ |
-| `string` | `typeof === 'string'` | 任何字符串都过 |
-| `bool` | `typeof === 'boolean'` | `true` ✓，`1` ✗ |
-| `enum` | **有 `options` 就逐个比对**；没有就只查类型 | `"US"` 在候选里 ✓，`"XX"` ✗ |
+| 日期/时间内容类型 | `content_type` 是 1 或 2 时，值必须是安全整数（Unix 毫秒） | `1735660800000` ✓，`"2026-01-01"` ✗ |
+| 枚举候选 | `variable_type = enum` 且来源是 `custom`/`value_set` 时，**逐个比对 `options`** | `"US"` 在候选里 ✓，`"XX"` ✗ |
+| 基础类型 | `valueMatchesDataType(dataType, value)`：`long` 要整数、`double` 要有限数、`string` 要字符串、`boolean` 要布尔 | `18` ✓，`"18"` ✗ |
 
-注意 `enum` 那一行：**有候选值列表时，校验会收紧**。这是枚举字段拼不出任意字符串的原因。
+注意枚举那一行：**有候选值列表时，校验会收紧**。这是枚举字段拼不出任意字符串的原因。
 
-**关系对象走的是另一条路。** `relations[].objectType` 决定值类型，候选值来自 `objectSource`：
+**关系对象走的是另一条路。** 客体的 `objectDataType` 决定值类型，候选值来自 `objectSource`：
 
 ```text
 holding 的 objectSource 是 { kind: 'provider', key: 'stock_search' }
@@ -630,7 +633,7 @@ else query.where(grouped);
 | 叶子 | 生成的 SQL |
 |---|---|
 | `portrait` | `` `u`.`region` = ? `` |
-| `portrait` + `derive` | `` TIMESTAMPDIFF(YEAR, `u`.`birthday`, CURRENT_DATE()) >= ? `` |
+| `portrait`（换算字段） | `` `u`.`birthday` <= '2008-09-30' ``（页面上的 18 换算成日期上界） |
 | `relation` + `detail` | `` `u`.`uid` IN (SELECT `rel_holding`.`uid` FROM `rel_holding` AS `rel_holding` WHERE ...) `` |
 | `relation` + `detail` + `not_in` | `` NOT EXISTS (SELECT 1 FROM `rel_holding` AS `rel_holding` WHERE `rel_holding`.`uid` = `u`.`uid` AND ...) `` |
 | `relation` + `times` | `` `u`.`uid` IN (SELECT uid FROM ... GROUP BY uid HAVING COUNT(*) >= ?) `` |
@@ -647,50 +650,52 @@ WHERE (`rel_holding`.`qty` >= ? AND `rel_holding`.`market` = ?)
 ```
 
 **相对时间操作符有自己的编译器。** `last_n_days` / `before_n_days` / `last_n_hours` /
-`before_n_hours` 四个不走进普通比较，而是把「数字 + 单位 + 方向」算成一个时间窗：
+`before_n_hours` 四个不走进普通比较，而是把「数字 + 单位 + 方向」算成一个时间窗，
+两个端点按这一列的 `value_encoding` 编码后写成字面量：
 
-```ts
-case Ops.lastNDays:    applyTimeWindow(query, gate, physical, 'DAY',  'last',   value); return;
-case Ops.beforeNHours: applyTimeWindow(query, gate, physical, 'HOUR', 'before', value); return;
+```sql
+last_n_days / last_n_hours     ->  col >= ? AND col <= ?
+before_n_days / before_n_hours ->  col < ?
 ```
 
-它和「派生字段 + `lte`」能表达同一件事（见第 07 节）。
+`today` / `now` 由调用方传入（`CompileOptions`），SQL 里不出现 `CURRENT_DATE()`。
 
-#### 派生字段走的不是普通比较
+它和「换算字段 + `lte`」能表达同一件事（见第 07 节）。
 
-`portraitExpr(field)` 决定这个字段的「表达式」是什么：
+#### 换算字段：把页面上的数换算到裸列上的窗口
+
+换算规则不在 Catalog 里，在代码注册表里（`pageValue.ts` 的 `PAGE_CONVERT`，按字段名当键）：
 
 ```ts
-if (field.derive?.kind === 'days_since')
-  return db.raw('DATEDIFF(CURRENT_DATE(), ??)', [ref])          // 距上次 X 天数
-if (field.derive?.kind === 'age_years')
-  return db.raw('TIMESTAMPDIFF(YEAR, ??, CURRENT_DATE())', [ref]) // 年龄
-return { kind: 'column', ref }                                   // 普通列
+age: { kind: 'years' }          // 页面填 18 → birthday <= '2008-09-30'
+last_trade_days: { kind: 'days' } // 页面填 30 → last_trade_time >= '2026-08-31'
+'holding.market_value': { kind: 'scale', factor: 10000 }  // 页面填 10 → market_value_hkd >= 100000
 ```
 
-返回值有两种形态：`{ kind: 'column' }` 和 `{ kind: 'sql' }`。后面 `applyIn` / `applyBetween` / `applyScalar` 都要按这两种形态分叉：
+编译时 `compilePageCompare` 把「页面上填的数」换算到**物理列上的窗口**，
+方向映射是：`gte` → `col <= 上界`、`gt` → `col <= 上界+1`、`lt`/`lte` → `col > 下界`、
+`eq`/`neq` 编成一个闭区间窗口。条件全部落在裸列上，Doris 的分区裁剪和前缀索引才用得上。
 
-| 形态 | 怎么加条件 |
-|---|---|
-| `column` | 用 Knex 的 `where(ref, op, value)` / `whereIn` / `whereBetween` |
-| `sql` | 用 `whereRaw(sql, values)`，表达式里用 `??` 占位列、`?` 占位值 |
+**这就是「年龄」在数据库里不存在的原因。** 字段字典里 `age` 的 `column_name` 是 `birthday`，
+注册表里 `age` 按年算，编译时用 `today` 倒推出日期上界。
 
-**这就是「年龄」在数据库里不存在的原因。** 字段字典里 `age` 的 `column_name` 是 `birthday`、`derive_kind` 是 `age_years`，编译时现算。
+好处是它不会过期（存年龄要每天刷全表），口径也只有一处（周岁还是虚岁、按哪天算，只有一个答案），
+而且==换算不进表达式，进的是值== —— 对数据库来说这就是一个普通的列比较。
 
-好处是它不会过期（存年龄要每天刷全表），口径也只有一处（周岁还是虚岁、按哪天算，只有一个答案）。
-
-同一个机制还用在四个「距上次 X 天数」的字段上，它们都是 `days_since`：
+同一个机制还用在六个「距上次 X 天数」的字段上，它们都是 `days`：
 
 ```tree
-- label: "derive_kind: days_since"
-  sub: "DATEDIFF(CURRENT_DATE(), col)"
+- label: "PAGE_CONVERT: { kind: 'days' }"
+  sub: "col >= 今天减 N 天（方向随 op 反转）"
   tone: green
-  note: 一个模板，四个字段在用
+  note: 一条规则，六个字段在用
   children:
     - { label: register_days, sub: "→ register_time", note: 开户天数 }
     - { label: last_deposit_days, sub: "→ last_deposit_time", note: 距上次入金天数 }
     - { label: last_trade_days, sub: "→ last_trade_time", note: 距上次成交天数 }
     - { label: last_touch_days, sub: "→ last_touch_time", note: 距上次触达天数 }
+    - { label: last_call_days, sub: "→ last_call_time", note: 距上次通话天数 }
+    - { label: last_meet_days, sub: "→ last_meet_time", note: 距上次拜访天数 }
 ```
 
 #### 权限谓词插在最前面
@@ -703,17 +708,22 @@ actor = { staffId: number; dataLevel: 'self' | 'team' | 'all'; groupIds: number[
 
 | `scope.kind` | `actor.dataLevel` | 加什么谓词 |
 |---|---|---|
-| `team` | `team` | `group_id IN (scope 和 actor 的交集)` |
-| `team` | 其它 | `group_id IN (scope.groupIds)` |
-| 其它 | `team` | `group_id IN (actor.groupIds)` |
-| `self` 或 `actor` 是 `self` | | `staff_id = ?` |
+| `team` | `team` 或 `all` | `group_id IN (scope.groupIds)` |
+| `self` | `team` | `group_id IN (actor.groupIds)` **和** `staff_id = actor.staffId` 两条都加 |
+| `self` | `self` 或 `all` | `staff_id = actor.staffId` |
+| `all` | `all` | 什么都不加 |
 
 **它是编进 WHERE 的，不是查完再筛。** 所以不存在「某个接口忘了过滤」这种漏洞 —— 想绕过就得改 `compile()` 本身。
 
+越权不在这个表里 —— 它在编译一开始就拦住了：`assertScopePermitted` 在 `compile()` 进入编译前先跑，
+范围超出身份级别、或 team 范围里带了权限外的 groupId，==整次查询直接抛 `SCOPE_DENIED`，不默默裁剪==。
+
 两个细节：
 
-- **交集那个分支**：组长传 `groupIds: [1, 2, 3]` 但他只有组 1，交集之后只剩 `[1]`。越权的组不是被拒绝，是从谓词里消失了。
-- **空交集**：`applyGroups` 拿到空数组时生成 `FALSE`。一个恒假条件，等于查不到任何人 —— 这比生成一个空 `IN ()`（语法错误）安全。
+- **team 身份圈「本人」**：谓词是两条同时加（`group_id IN (...)` 和 `staff_id = ...`）——
+  团队长看自己名下客户时，两条限制同时生效。
+- **越权的 groupId**：不在「悄悄消失」之列 —— 那是圈选组件侧收窄选项的事（`clampScope`），
+  编译器这侧只有拒绝一种结果。
 
 #### include 和 exclude 的写法不一样
 
@@ -841,16 +851,16 @@ const filtered = (joins, seek) => {
 
 ## 05 · 它由什么组成
 
-`src/` 下 **11 个文件、1507 行**。按行数排：
+`src/` 下 **20 个文件、2142 行**。按职责分组：
 
 ```tree
 - label: packages/dsl/src
   tone: violet
-  note: 11 个文件 · 1507 行（wc -l 实测）
+  note: 20 个文件 · 2142 行（wc -l 实测）
   children:
     - label: compile.ts
-      sub: 533 行
-      note: 编排者。三段管道都在这里串起来
+      sub: 543 行
+      note: 编排者。三段管道 + 四条 SQL 都在这里串起来
       children:
         - { label: compile, sub: "(query, options)", note: "对外唯一入口" }
         - { label: compileNode, note: "递归展开条件树，返回 Apply" }
@@ -858,22 +868,38 @@ const filtered = (joins, seek) => {
         - { label: applyUniverse, note: "权限谓词" }
         - { label: filtered, note: "内部函数 —— 四条 SQL 都从它长出来" }
     - label: validate.ts
-      sub: 357 行
+      sub: 377 行
       tone: blue
       note: 两段校验器。**不含任何 SQL**
       children:
         - { label: validateStructure, note: "只查形状，不需要字典" }
         - { label: validateSemantics, note: "只查字典，假定形状已合法" }
+        - { label: assertScopePermitted, note: "编译前单独一道：范围越权直接 SCOPE_DENIED" }
     - label: schema.ts
-      sub: 320 行
+      sub: 319 行
       tone: green
       note: 类型定义 + 类型守卫 + 几个构造器
       children:
         - { label: Ops, note: "15 个操作符常量" }
         - { label: "BoolNode / PortraitLeaf / RelationLeaf / UidLeaf", note: "四种节点" }
         - { label: "isGroup / isPortrait / isRelation / isUid", note: "类型守卫，编译器和校验器都用" }
+    - label: 类型与换算（这一版新增的一层）
+      tone: violet
+      note: 字段形状、时钟、编码、换算 —— Catalog 形状和 SQL 字面量之间的桥
+      children:
+        - { label: fieldType.ts, sub: 84 行, note: "applicableOps / controlFor —— 字段形状算出操作符和控件" }
+        - { label: operators.ts, sub: 58 行, note: "OPERATOR_DISPLAY —— 15 个操作符的三语名字和顺序" }
+        - { label: pageValue.ts, sub: 40 行, note: "PAGE_CONVERT 换算注册表 + 展示层换算" }
+        - { label: clock.ts, sub: 139 行, note: "业务时区时钟：today/now、年月位移、zoned 时间戳" }
+        - { label: encoding.ts, sub: 84 行, note: "value_encoding：一个时刻在这一列上怎么写成字面量" }
+        - { label: convert.ts, sub: 72 行, note: "compilePageCompare / literal —— 换算下推和 DECIMAL 字面量" }
+        - { label: temporal.ts, sub: 35 行, note: "相对时间窗口的编译" }
+        - { label: fragment.ts, sub: 15 行, note: "SqlPart：SQL 片段 + 绑定值的内部表示" }
+    - label: render.ts
+      sub: 62 行
+      note: 把条件树渲染回人话（调试抽屉用），不在编译路径上
     - label: knex.ts
-      sub: 129 行
+      sub: 130 行
       note: Knex 的包装层。四处补偿
       children:
         - { label: db, note: "client 是 mysql，**不连库**，只用来拼 SQL" }
@@ -882,34 +908,27 @@ const filtered = (joins, seek) => {
         - { label: renderSql, note: "toString() 之后把关键字转大写（Knex 输出小写）" }
         - { label: crossJoin, note: "Knex 没有 cross join 的一等 API" }
     - label: metadata.ts
-      sub: 61 行
+      sub: 82 行
       note: Catalog 的类型定义 + 两个查名字的函数
       children:
         - { label: "FieldDef / RelationDef / Catalog", note: 纯类型 }
         - { label: "fieldByName / relationByName", note: "找不到返回 undefined，由调用方决定怎么报错" }
     - label: sql.ts
-      sub: 52 行
+      sub: 44 行
       note: 重构前是唯一的拼 SQL 入口，**现在不在生成路径上**
       children:
-        - { label: compileScalarOp, note: "把 op 映射成 = / != / < / <= / > / >=" }
-        - { label: "ident / qualify / sqlString / sqlLiteral / joinSql / inList", note: "旧的手拼辅助函数，测试还在跑，生产不再调用" }
+        - { label: "ident / sqlString / joinSql / inList …", note: "旧的手拼辅助函数，测试还在跑，生产不再调用" }
     - label: errors.ts
-      sub: 23 行
-      note: 12 个错误码 + 一个 CompileError 类
+      sub: 25 行
+      note: 14 个错误码 + 一个 CompileError 类
     - label: page.ts
       sub: 17 行
       note: 只有一个函数，处理分页游标的入参
       children:
         - { label: parseAfterUid, note: "把 bigint / number / string 统一成十进制整数字符串，不合法返回 undefined" }
-    - label: index.ts
-      sub: 7 行
-      note: 包的出口。决定哪些是公开契约
-    - label: context.ts
-      sub: 7 行
-      note: Actor 和 DataLevel 两个类型。**没有依赖**
-    - label: ast.ts
-      sub: 1 行
-      note: "只有一行：export * from './schema.ts'"
+    - label: index.ts / context.ts / ast.ts
+      sub: "8 + 7 + 1 行"
+      note: 出口、Actor 类型、纯转发
 ```
 
 ### 依赖是单向的
@@ -921,27 +940,28 @@ const filtered = (joins, seek) => {
   tone: muted
   nodes:
     - { title: context.ts, sub: 7 行, tag: Actor 类型 }
-    - { title: errors.ts, sub: 23 行, tag: 错误码 }
-    - { title: schema.ts, sub: 320 行, tag: 四种节点 + 类型守卫 }
+    - { title: errors.ts, sub: 25 行, tag: 14 个错误码 }
+    - { title: schema.ts, sub: 319 行, tag: 四种节点 + 类型守卫 }
   next: "被引用 :: :: 单向，不回头"
 
 - badge: LAYER 02
-  title: 类型与工具
+  title: 类型与换算
   desc: 只依赖 LAYER 01
   tone: green
   nodes:
-    - { title: metadata.ts, sub: 61 行, tag: 类型 + 查名字 }
-    - { title: page.ts, sub: 17 行, tag: 分页入参 }
-    - { title: sql.ts, sub: 52 行, tag: 比较符映射 }
-    - { title: knex.ts, sub: 129 行, tag: 外部库的包装 }
-  next: "校验器要用字典 :: :: 而字典要用类型"
+    - { title: metadata.ts, sub: 82 行, tag: Catalog 类型 }
+    - { title: fieldType / operators, sub: "84 + 58 行", tag: 形状 → 操作符 }
+    - { title: clock / encoding, sub: "139 + 84 行", tag: 时钟 + 编码 }
+    - { title: pageValue / convert / temporal, sub: "40 + 72 + 35 行", tag: 换算下推 }
+    - { title: page / fragment / knex, sub: "17 + 15 + 130 行", tag: 入参 + SQL 零件 }
+  next: "校验器要用形状 :: :: 编排要用全部"
 
 - badge: LAYER 03
   title: 校验
   desc: 两道门。不含任何 SQL
   tone: blue
   nodes:
-    - { title: validate.ts, sub: 357 行, tag: 形状 + 语义 }
+    - { title: validate.ts, sub: 377 行, tag: 形状 + 语义 }
   next: "两道都过了才轮到 :: :: 这样拼 SQL 时不用再判断规则"
 
 - badge: LAYER 04
@@ -949,16 +969,18 @@ const filtered = (joins, seek) => {
   desc: 在顶端，依赖下面所有层
   tone: violet
   nodes:
-    - { title: compile.ts, sub: 533 行, tag: 对外唯一入口 }
+    - { title: compile.ts, sub: 543 行, tag: 对外唯一入口 }
 ```
 
 ```callout
 tone: green
 icon: ✅
 text: |
-  ==**每一层只依赖它下面那层，没有回环。**==
+  ==**依赖仍然是单向的，只是中间多了一层。**==
 
   三个底层文件（`context` / `errors` / `schema`）一个依赖都没有，所以能被任何一层引用，包括测试。
+  新增的「类型与换算」一层（`fieldType` / `clock` / `encoding` / `pageValue` / `convert` / `temporal`）
+  只依赖底层和彼此 —— 它是 Catalog 形状和 SQL 字面量之间的桥。
 
   `knex.ts` 的位置也在这里 —— 它包着外部库，被 `compile.ts` 用，**校验器完全不碰它**。
   所以校验逻辑可以脱离 Knex 单独测。
@@ -966,11 +988,11 @@ text: |
 
 ## 06 · 怎么保证它是对的
 
-334 个测试，878ms 跑完。分三层，每层管的事不一样。
+338 个测试，1.5s 跑完。分三层，每层管的事不一样。
 
 | 层 | 规模 | 管什么 |
 |---|---|---|
-| 单元测试 | 11 个文件 166 个用例 | 一个特性一个文件，断言「抛的是哪个错误码」而不是「抛没抛」 |
+| 单元测试 | 13 个文件 338 个用例 | 一个特性一个文件，断言「抛的是哪个错误码」而不是「抛没抛」 |
 | 夹具 | 168 条 | 锁住输出 —— 每条夹具是一份 `{ query, expected }`，`expected` 里是**逐字符**的 SQL 快照 |
 | 真库验证 | 单独一套配置 | 同一批夹具喂给真 Doris 跑，跟快照对账 |
 
@@ -1044,60 +1066,55 @@ if (missingGender <= 0 || missingGender >= expected.universe_total)
 
 ## 07 · 它现在缺什么
 
-诚实说几处。不是 bug，是「现在这样也能跑，但迟早要处理」。
+诚实说几处。上一版的四个缺口，前两个已经修掉了；剩下的是现在这样也能跑、但迟早要处理的：
+
+```compare
+first: 上一版的缺口
+head: [现在怎么样了]
+rows:
+  - 目录缓存永不刷新: [{ text: "✅ 已修：5 秒 TTL + 并发去重 + 预览一致性（revision 哈希）", tone: green }]
+  - 物理列类型两处记录: [{ text: "✅ 已修：`physical_type` 进了元数据，代码里的手抄兜底表删了", tone: green }]
+  - 相对时间与换算字段重叠: ["还在 —— 见下面第一条"]
+  - "`ast.ts` 只有一行": ["还在 —— 见下面第三条"]
+```
 
 ```cards
-cols: 2
+cols: 1
 items:
-  - title: 目录缓存永远不会刷新
-    tag: 最要紧
-    tone: red
-    body: |
-      `source.ts` 里有一个进程内缓存：
-
-      ```ts
-      let cached: MetadataRows | null = null
-      export function getMetadataRows() {
-        if (!cached) cached = await loadMetadataRows()   // 只读一次
-        return cached
-      }
-      ```
-
-      同时有一个 `resetCatalogCache()` —— **全项目搜下来只有定义，没有任何调用点。**
-
-      ==后果：改了元数据必须重启后端才生效。==
-
-      这在目标架构里是个真缺口：等 Data Admin 上线，
-      运营在配置台改完，用户看到的还是旧的。
-  - title: 物理列类型在代码里有另一份
-    tone: amber
-    body: |
-      `crm_dc_data_field` 里没存列的物理类型，所以服务端要维护一份映射兜底：
-
-      - 目录：`apps/server/src/metadata/project.ts`
-      - 长什么样：`'user_portraits_wide.birthday': 'DATE'`
-
-      ==文件的注释写的是「只用于字面量和参数转换」== —— 它不影响编译出的 SQL 结构，
-      只影响值怎么写成字面量。所以风险不算高。
-
-      !!但仍然是两个地方记着同一件事，表结构改了要记得同步。!!
-  - title: 相对时间和派生字段重叠
+  - title: 相对时间和换算字段重叠
+    tag: 最值得定个默认
     tone: amber
     body: |
       表达「最近 30 天成交过」，两条路都能走：
 
       ```
       A: { field: 'last_trade_time', op: 'last_n_days', value: 30 }
-      B: { field: 'last_trade_days',  op: 'lte',         value: 30 }
+      B: { field: 'last_trade_days',  op: 'gte',        value: 30 }
       ```
 
-      两条路在编译器里都实现了（`A` 走 `applyTimeWindow`，`B` 走派生字段 + 普通比较），
-      结果一样。
+      两条路都实现着，而且这一版它们编译成**同一种形状** —— 都是落在裸列上的窗口
+      （上一版 B 还是 `DATEDIFF` 现算，这一版也下推了），结果一样。
 
       ==但没有哪里说明什么时候用哪个。==
 
       圈选组件要为两种写法做两种 UI，测试要覆盖两条路径，改口径要改两处。
       这一条需要在 Metadata 或 DSL 层面定个默认。
+  - title: 换算注册表拿字段名当键
+    tone: amber
+    body: |
+      `PAGE_CONVERT` 以 `field_key` 字符串为键：
+
+      ```ts
+      age: { kind: 'years' }
+      ```
+
+      字段名拼错了不会报错 —— 编译器只会认为「这个字段没有换算规则」，
+      于是「年龄 ≥ 18」变成拿 18 直接和 `birthday` 日期列比。
+      值类型校验拦不住它（18 是合法 long）。
+
+      !!唯一的防线是夹具：每条换算路径的 SQL 都被快照锁着，改键名会当场变红。!!
+      但测试只能看住仓库里的字段，拦不住 Data Admin 后来新增的。
+      这条要么进元数据（方案的原始意图），要么等一个「注册表键必须对应 Catalog 字段」的启动校验。
   - title: "`ast.ts` 只有一行"
     tone: muted
     body: |
@@ -1111,20 +1128,8 @@ items:
       小问题，但可以删。
 ```
 
-```callout
-tone: amber
-icon: ⚠
-text: |
-  **这四条里，第一条最值得先做** —— 因为它已经从「将来会出问题」变成
-  「现在就挡着路」了：
-
-  我已经实测过：改完 MySQL 里的字段中文名，接口**仍然返回旧值**，
-  必须 `touch` 一下源码让 `tsx watch` 重启后端才生效。
-
-  ==修复也不难：给 `resetCatalogCache` 挂一个接口，或者加个 TTL。==
-```
-
 ---
+
 
 ## 08 · 自测
 
@@ -1183,15 +1188,17 @@ text: |
 - q: 数据库里为什么没有 `age` 这一列？
   a: |
     因为字段字典里 `age` 的 `name` 是 `age`，但 `column` 是 `birthday`，
-    还带一个 `derive: { kind: 'age_years' }`。
+    换算注册表里 `age: { kind: 'years' }`。
 
-    编译时会生成 `TIMESTAMPDIFF(YEAR, birthday, CURRENT_DATE())` —— 年龄是现算的。
+    编译时把「页面上填的 18」换算成 `birthday <= '2008-09-30'` ——
+    条件落在裸列上，不是在 SQL 里现算表达式。
 
-    好处有两个：
+    好处有三个：
     1. **它不会过期** —— 存年龄就得每天刷全表，忘了刷就会推出「30 岁」而实际 31
     2. **口径只有一处** —— 周岁还是虚岁、按哪天算，整个系统只有一个答案
+    3. **条件可下推** —— 裸列比较才能吃到 Doris 的分区裁剪和前缀索引
 
-    同一个机制还用在四个「距上次 X 天数」的字段上（都是 `days_since`）。
+    同一个机制还用在六个「距上次 X 天数」的字段上（都是 `{ kind: 'days' }`）。
 - q: 权限为什么不是「查完再过滤」？
   a: |
     因为「查完再过滤」意味着越权数据**已经被查出来了**，
@@ -1201,6 +1208,6 @@ text: |
     而且这不是靠自觉：`compile()` 的签名里 `actor` 是必填的，
     ==不存在「这个接口先不接权限，以后再补」的路径。==
 
-    还有一个细节：`team` 身份圈别的组时，`scope.groupIds` 会和
-    `actor.groupIds` 取交集 —— 越权那部分不是被拒绝，是**悄悄消失**。
+    还有一个细节：范围越权不是裁剪 —— `assertScopePermitted` 在编译一开始就抛 `SCOPE_DENIED`。
+    「把越权选项收窄掉」是圈选组件的事，编译器这侧只有拒绝一种结果。
 ```
