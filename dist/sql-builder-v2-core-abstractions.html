@@ -5594,8 +5594,32 @@ a.need:hover { color: var(--blue); }
 .oss-pt b { font: 650 12.5px var(--sans); color: var(--text); }
 .oss-pt span { font: 400 11.5px/1.6 var(--sans); color: var(--text-2); }
 @media (max-width: 820px) { .oss-dist { grid-template-columns: 1fr; } }
->>>>>>> theirs
->>>>>>> origin/main
+
+/* ============================================================
+   控件：mysql-2pc-crash —— 两阶段提交 · 崩溃点模拟
+   ------------------------------------------------------------
+   左栏：断电那一刻两份日志的状态（等宽键值对）
+   右栏：重启后恢复规则的逐步判定
+   只消费 theme.css 的 token，不写死色值。
+   ============================================================ */
+.p2c { padding: 18px; }
+.p2c-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+@media (max-width: 820px) { .p2c-cols { grid-template-columns: 1fr; } }
+.p2c-cols .log { min-height: 236px; }
+.p2c-kv {
+  display: flex; gap: 10px; align-items: baseline;
+  padding: 7px 2px; border-bottom: 1px dashed var(--border);
+  font: 500 12.5px/1.5 var(--mono);
+}
+.p2c-kv:last-child { border-bottom: 0; }
+.p2c-kv > i { flex: none; font-style: normal; color: var(--muted); min-width: 8.5em; }
+.p2c-kv > span { min-width: 0; }
+.p2c-line {
+  display: flex; gap: 8px; align-items: baseline;
+  padding: 7px 2px; border-bottom: 1px dashed var(--border);
+  font: 400 13px/1.65 var(--sans);
+}
+.p2c-line:last-child { border-bottom: 0; }
 
 </style>
   <style>
@@ -14926,6 +14950,162 @@ Doris 是 DATETIME，直接比就行。<strong>不是风格差异，是数据类
     }
     draw();
   };
+
+/* ============================================================
+   控件：mysql-2pc-crash —— 两阶段提交的三个崩溃点
+   ------------------------------------------------------------
+   redo prepare → binlog → redo commit，中间任何一点断电，
+   重启后都由同一条恢复规则兜底：停在 prepare 的事务，
+   拿 XID 去 binlog 里对账 —— binlog 完整就提交，缺失就回滚。
+
+   点一个崩溃点（或「不崩」）：左栏是断电瞬间两份日志的状态，
+   右栏是重启后恢复规则一步步怎么判。判定文本支持 richText 标记。
+   ============================================================ */
+WIDGETS['mysql-2pc-crash'] = (root) => {
+  const modesBox = root.querySelector('[data-p2c-modes]');
+  const ruleEl = root.querySelector('[data-p2c-rule]');
+  const stateHead = root.querySelector('[data-p2c-state-head]');
+  const recHead = root.querySelector('[data-p2c-rec-head]');
+  const stateBox = root.querySelector('[data-log="state"]');
+  const recBox = root.querySelector('[data-log="rec"]');
+  const foot = root.querySelector('[data-p2c-foot]');
+  const statusEl = root.querySelector('[data-status]');
+
+  const MODES = [
+    {
+      id: 'a', btn: 'A · prepare 后断电', tone: 'amber',
+      rule: 'redo 已落盘、binlog 还没写 —— 两个朴素方案里「先写 redo」的死穴。',
+      stateHead: '断电那一刻 · 崩溃点 A',
+      state: [
+        ['redo log', '==[ prepare ]== ✓ 已落盘'],
+        ['binlog', '—— 还没写过'],
+        ['客户端', '还在等，没收到任何回复'],
+      ],
+      recHead: '重启 · 恢复规则怎么判',
+      rec: [
+        '重启。扫描 redo log……',
+        '最后一个事务 `XID=207`，状态停在 ==prepare==。',
+        '拿 XID 去 binlog 里对账……',
+        'binlog 里根本没写过它 —— ==回滚这个事务==。',
+        '主库退回旧值；从库本来就没收到。==两边都没有，一致。==',
+      ],
+      foot: [['主库 · 旧值', 'muted'], ['从库 · 没有', 'muted'], ['一致 ✓', 'green']],
+      status: '崩溃点 A · 判定：回滚',
+    },
+    {
+      id: 'b', btn: 'B · binlog 写完后断电', tone: 'violet',
+      rule: 'binlog 完整写入、redo 还停在 prepare —— 两个朴素方案里「先写 binlog」的死穴。',
+      stateHead: '断电那一刻 · 崩溃点 B',
+      state: [
+        ['redo log', '==[ prepare ]== ✓ 已落盘'],
+        ['binlog', '==✓ 完整写入==（完整事件 + XID 收尾）'],
+        ['客户端', '还在等'],
+      ],
+      recHead: '重启 · 恢复规则怎么判',
+      rec: [
+        '重启。扫描 redo log……',
+        '最后一个事务 `XID=207`，状态停在 ==prepare==。',
+        '拿 XID 去 binlog 里对账……',
+        'binlog 有完整事件、以 XID 事件收尾 —— ==提交这个事务==。',
+        '主库追上新值；从库重放同一条 binlog。==两边都有，一致。==',
+      ],
+      foot: [['主库 · 新值', 'green'], ['从库 · 有', 'green'], ['一致 ✓', 'green']],
+      status: '崩溃点 B · 判定：提交',
+    },
+    {
+      id: 'c', btn: 'C · commit 后断电', tone: 'green',
+      rule: 'redo 已标记 commit，binlog 也已写完 —— 就差给客户端的最后一个返回。',
+      stateHead: '断电那一刻 · 崩溃点 C',
+      state: [
+        ['redo log', '==[ commit ]== ✓ 已落盘'],
+        ['binlog', '==✓ 完整写入=='],
+        ['客户端', '还在等（就差最后一个返回）'],
+      ],
+      recHead: '重启 · 恢复规则怎么判',
+      rec: [
+        '重启。扫描 redo log……',
+        '最后一个事务 `XID=207`，状态已是 ==commit==。',
+        '==直接生效==，连 binlog 都不用查。',
+        '主库是新值；从库重放 binlog。==两边都有，一致。==',
+      ],
+      foot: [['主库 · 新值', 'green'], ['从库 · 有', 'green'], ['一致 ✓', 'green']],
+      status: '崩溃点 C · 判定：直接生效',
+    },
+    {
+      id: 'none', btn: '不崩，走完', tone: 'blue',
+      rule: '两份日志都完整落盘，客户端拿到「执行成功」—— 两阶段提交要维持的常态。',
+      stateHead: '走完之后 · 两份日志',
+      state: [
+        ['redo log', '==[ commit ]== ✓'],
+        ['binlog', '==✓ 完整写入=='],
+        ['客户端', '==收到「执行成功」=='],
+      ],
+      recHead: '不需要恢复 · 但规则始终在场',
+      rec: [
+        '没有崩溃。redo ==commit==、binlog 完整，客户端拿到「成功」。',
+        '两份日志说同一句话 —— 这就是那条恢复规则==每天在守着的常态==。',
+        '换个角度想：==只要崩溃点被枚举穷尽==，每种结局都能自圆其说，一致性就是抠出来的。',
+      ],
+      foot: [['redo · commit', 'green'], ['binlog · 完整', 'green'], ['主从 · 一致', 'green']],
+      status: '正常完成 · 两份日志一致',
+    },
+  ];
+
+  let timers = [];
+  const clearTimers = () => { timers.forEach(clearTimeout); timers = []; };
+  const line = (host, text) => {
+    const d = el('div', 'p2c-line');
+    richText(d, text);
+    host.append(d);
+  };
+
+  function renderState(m) {
+    stateBox.textContent = '';
+    stateHead.textContent = m.stateHead;
+    m.state.forEach(([k, v]) => {
+      const row = el('div', 'p2c-kv');
+      row.append(el('i', null, k));
+      const val = el('span');
+      richText(val, v);
+      row.append(val);
+      stateBox.append(row);
+    });
+  }
+
+  function renderRec(m) {
+    recBox.textContent = '';
+    recHead.textContent = m.recHead;
+    m.rec.forEach((t, i) => {
+      timers.push(setTimeout(() => line(recBox, t), 220 * i));
+    });
+  }
+
+  function renderFoot(m) {
+    foot.textContent = '';
+    m.foot.forEach(([label, tone]) => {
+      foot.append(el('span', 'tag tone-' + tone, label));
+    });
+  }
+
+  function setMode(m, btn) {
+    clearTimers();
+    modesBox.querySelectorAll('button').forEach((b) => b.classList.remove('on'));
+    if (btn) btn.classList.add('on');
+    ruleEl.style.setProperty('--tone', 'var(--' + m.tone + ')');
+    richText(ruleEl, m.rule);
+    renderState(m);
+    renderRec(m);
+    renderFoot(m);
+    if (statusEl) statusEl.textContent = m.status;
+  }
+
+  MODES.forEach((m) => {
+    const b = el('button', null, m.btn);
+    b.addEventListener('click', () => setMode(m, b));
+    modesBox.append(b);
+  });
+  setMode(MODES[1], modesBox.querySelectorAll('button')[1]);
+};
 
   /* ---------- 挂载 ---------- */
   document.querySelectorAll('[data-widget]').forEach((root) => {
