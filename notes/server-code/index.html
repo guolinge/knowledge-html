@@ -45,7 +45,7 @@
     </div>
 
 
-    <div class="provenance"><span><b>来源</b> 用户与 AI 中台的问答（原始素材，两问：一连接一线程是否复制代码 / 监听 socket 与普通 socket 的区别） · man7 · listen(2) / accept(2) https://man7.org/linux/man-pages/man2/listen.2.html · TCP 连接由四元组唯一确定；监听 socket 使用通配地址与 LISTEN 状态</span><span><b>生成</b> 2026-10-07</span><span><b>模型</b> claude-opus-4-5</span></div>
+    <div class="provenance"><span><b>来源</b> 用户与 AI 中台的问答（原始素材，两问：一连接一线程是否复制代码 / 监听 socket 与普通 socket 的区别） · man7 · listen(2) / accept(2) https://man7.org/linux/man-pages/man2/listen.2.html · TCP 连接由四元组唯一确定；监听 socket 使用通配地址与 LISTEN 状态 · man7 · pthreads(7)：新线程的默认栈大小取自 `RLIMIT_STACK`（`ulimit -s`，通常 8MB）且创建后不可长 —— 它是虚拟地址预留，不是常驻内存 https://man7.org/linux/man-pages/man7/pthreads.7.html</span><span><b>生成</b> 2026-10-07</span><span><b>模型</b> claude-opus-4-5</span></div>
     <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">socket</span> <span class="tag tone-muted">线程</span> <span class="tag tone-muted">服务器</span> <span class="tag tone-muted">文件描述符</span> <span class="tag tone-muted">epoll</span> <span class="tag tone-muted">Linux 内核</span></span></div>
 
 <figure class="archfig" data-arch data-pano data-parts='{"calls":{"label":"socket() bind() listen()","sub":"起手三件事","detail":"==这三个调用只是让内核里出现一个对象，并给它一个地址。== 它们不产生任何连接，也不收发任何数据。"},"lsock":{"label":"监听 socket","sub":"TCP_LISTEN · 没有对端","detail":"一个端口一个。==它自己不传数据==，全部工作就是等新连接。从进程启动到进程结束，它一直在那守着。"},"nic":{"label":"网卡","detail":"SYN 从这里进来。网卡不认识 socket，它只认识包。"},"tcp":{"label":"TCP 协议栈","sub":"拆包 / 完成握手","detail":"==三次握手是内核替你完成的，你的程序不需要在场。=="},"conn":{"label":"连接 socket","sub":"握手完成的这一刻就建好了","detail":"==它出现的时候，还没有 fd，也不属于任何进程。== 一个完整的、但没有主人的内核对象 —— 这是理解 accept 的关键。"},"accq":{"label":"accept 队列","detail":"已经建好、等你去取的连接排在这。长度由 `listen()` 的 `backlog` 决定，上限是 `net.core.somaxconn`。"},"fdtable":{"label":"fd 表","sub":"accept 在这里开一格","detail":"==这才是 accept 真正动过的地方。== 它不在连接 socket 上动任何手脚，只是在你的 fd 表里新建一格，指过去 —— 图上那根竖直的虚线就是它的全部效果。"}}' data-anchors='[{"part":"conn","label":"我想搞清「一条连接」"},{"part":"fdtable","label":"accept 到底动了什么"},{"part":"lsock","label":"我从监听 socket 看"}]' data-tours='[{"id":"establish","label":"一条连接的一生","steps":[{"at":["calls","lsock"],"text":"起手三件事，内核里出现==一个监听 socket==。它守着 `0.0.0.0:80`，不传数据，也不知道会跟谁说话。"},{"at":["nic","tcp"],"text":"浏览器发来 SYN。包从==网卡==进来，被==协议栈==拆开。"},{"at":["tcp","conn"],"text":"==握手完成的那一刻，内核就把连接 socket 建好了== —— 就在协议栈里。"},{"at":["conn"],"text":"注意它现在的处境：==对象已经完整存在，但还没有 fd，也不属于任何进程。== 你的代码够不到它。"},{"at":["conn","accq","lsock"],"text":"它被放进==accept 队列== —— 这条队列挂在监听 socket 名下。"},{"at":["accq","fdtable","conn"],"text":"看那根**竖直的虚线**：从 fd 表指回内核里那个已经存在的连接 socket。旁边横着的那根是它的前半句 —— 从队列里**取走**。==accept 做的事只有一件：在你的 fd 表里开一格，指向那个已经存在的连接 socket。==\n\n所以 accept 干的是**交付**，不是**创建** —— 它不产生任何新的内核对象，只是把一根线接上了。"}]}]'>
@@ -537,48 +537,229 @@ conn_fd 3  →  浏览器 C
 <div class="compare-wrap"><table class="compare"><thead><tr><th>东西</th><th>一份还是 N 份</th><th>后果</th></tr></thead><tbody><tr><th>服务端代码</th><td data-label="一份还是 N 份"><span class="tag tone-green">一份</span></td><td data-label="后果">一万个线程也不会多占一个字节</td></tr><tr><th>监听 socket</th><td data-label="一份还是 N 份"><span class="tag tone-green">一份</span></td><td data-label="后果">一个端口一个；它只负责接新连接</td></tr><tr><th>连接 socket</th><td data-label="一份还是 N 份"><span class="tag tone-red">N 份</span></td><td data-label="后果">每条连接一个，各带自己的缓冲区和状态</td></tr><tr><th>接收 / 发送缓冲区</th><td data-label="一份还是 N 份"><span class="tag tone-red">N 份</span></td><td data-label="后果">内核的内存，每个 socket 自己的</td></tr><tr><th>线程栈 + 寄存器</th><td data-label="一份还是 N 份"><span class="tag tone-red">N 份</span></td><td data-label="后果">局部变量在这里，所以 <code>buf</code> 有 N 份</td></tr><tr><th>打开文件表 / 堆</th><td data-label="一份还是 N 份"><span class="tag tone-amber">一份</span></td><td data-label="后果">共享，所以需要同步</td></tr></tbody></table></div><p>需要 <code>needs</code> 深挖的，回这两篇：线程共享/独享的完整清单在 <code>os-thread</code> 的 02 节；一个 socket 在内核里长什么样在 <code>socket-fd</code>。</p>
 <hr>
 <h2 id="于是一连接一线程的代价就清楚了"><span class="num">07</span>于是「一连接一线程」的代价就清楚了</h2>
-<p>一万个浏览器连上来，一连接一线程，那么：</p>
-<div class="flowd has-grid has-groups" data-flow data-edges="[{&quot;from&quot;:&quot;code&quot;,&quot;to&quot;:&quot;sock&quot;,&quot;label&quot;:&quot;&quot;},{&quot;from&quot;:&quot;sock&quot;,&quot;to&quot;:&quot;stack&quot;,&quot;label&quot;:&quot;&quot;},{&quot;from&quot;:&quot;stack&quot;,&quot;to&quot;:&quot;sched&quot;,&quot;label&quot;:&quot;&quot;}]">
-      <svg class="flowd-svg" aria-hidden="true">
+<p>一万个浏览器连上来，一连接一线程。<mark class="mk-blue">问题不是「多了哪些东西」，而是<strong>哪些东西变成了一万份</strong>。</mark></p>
+<figure class="archfig" data-arch data-pano data-parts='{"conn":{"label":"一万个浏览器连接","sub":"另一头，同时在线","detail":"一万条连接同时开着，但==任何时刻真正有数据的只有几条==。它们是这张图的起点：下面那些「×10000」，都是从这个「一万」长出来的。"},"code":{"label":"服务端代码","sub":"全进程一份","detail":"编译出来的机器指令，放在只读的代码段。==一万个线程执行的都是这一份== —— 换个连接数，它一个字节都不会变。"},"heap":{"label":"堆 / 全局变量","sub":"全进程一份","detail":"它和代码正好相反：==只有一份，但谁都能改==。所以多个线程碰它的时候要加锁。"},"fdtable":{"label":"fd 表","sub":"全进程一份，格数会涨","detail":"表本身只有一张，但格数跟着连接涨：监听 fd 占一格，之后每 `accept` 一次多开一格。==格子里指向的，就是内核里那个连接 socket。=="},"thread":{"label":"线程 · 私有栈","sub":"每条连接一个","detail":"==「一连接一线程」就落在这里。== 每个线程自带一份栈和一组寄存器 —— 一个「执行现场」。它被造出来的唯一理由，是**替这条连接站在那里等**。"},"lsock":{"label":"监听 socket","sub":"全进程一份","detail":"从进程启动守到进程结束，==它不跟着连接数涨==。它只负责接新连接，接完就交给新造出来的连接 socket。"},"sock":{"label":"连接 socket","sub":"每条连接一个","detail":"这条「×10000」和线程那一条**性质不一样**：连接本来就是各自独立的 —— 四元组、收发缓冲区、序列号，每条一套。==就算换成事件驱动，这一万份照样在。== 它不是代价，是必要。"},"task":{"label":"调度实体","sub":"每个线程一个","detail":"线程在内核里的身份：一个 `task_struct` 加一份内核栈。==它跑不跑都要占着== —— 睡着的线程不在就绪队列里，但这份身份一直在，调度器要维护的实体数就是它。"},"mem":{"label":"内存条","sub":"上面所有东西的落点","detail":"一万份栈、一万个内核对象，最后都落在它上面。==但「8MB × 10000 = 80GB」这个算式是错的== —— 那 80GB 是虚拟地址预留，不是真占的内存。"},"cpu":{"label":"CPU 核","sub":"只有几个","detail":"一万个调度实体，最后要在这几个核上排队。==名单是按「执行」的规模准备的一万份，能干活的核只有几个== —— 这就是「用执行资源去买等待」的落点。"}}' data-anchors='[{"part":"thread","label":"线程"},{"part":"sock","label":"内核里的 socket"},{"part":"fdtable","label":"accept 给的 fd"},{"part":"cpu","label":"CPU 核"}]' data-tours='[{"id":"grow","label":"一万个连接多出了什么","steps":[{"at":["conn"],"text":"一万条连接同时在线。==它们几乎不占 CPU== —— 每条大部分时间都停在那，什么也不干。"},{"at":["conn","sock"],"text":"每条连接在内核里本来就有自己的一份状态：四元组、收发缓冲区、序列号，都在连接 socket 里。==这一万份是必须的==，换成任何方案都一样。"},{"at":["thread","sock"],"text":"但你的代码是**阻塞式**的：`read` 要卡在那等数据。于是一连接一线程 —— ==用户态里多出一万个执行现场==，每个自带一份私有栈。"},{"at":["thread","task"],"text":"线程在内核里也要有个身份：==一万个 `task_struct` + 一万份内核栈==。它们不是「用的时候才存在」，是**一直在**。"},{"at":["task","cpu"],"text":"一万个调度实体，==核只有几个==。任何时刻真在跑的只有几个，剩下的全在名单上排着 —— 这一句就是「用执行资源去买等待」。"}]},{"id":"shared","label":"哪些是一份","steps":[{"at":["code","heap","fdtable"],"text":"一万条连接压过来，==这三样没有跟着长==：代码段只有一份（一万个线程跑的是同一份指令）、堆只有一块（所以改它要加锁）、fd 表只有一张（只是格子变多了）。"},{"at":["lsock"],"text":"内核这边也一样：==监听 socket 就一个==。它从启动守到结束，只负责接新连接。"},{"at":["code","sock","thread"],"text":"所以「一份 / 一万份」的分界线不是「内存还是内核」，而是：==这份东西是每条连接各有一套，还是全进程共用一套。=="}]},{"id":"cost","label":"亏的是哪一份","steps":[{"at":["sock","mem"],"text":"先别急着算内存。==连接 socket 和它的缓冲区不是亏的==：一条连接本来就要一份自己的状态；栈的 8MB 也只是虚拟预留，不是真占。"},{"at":["thread","task"],"text":"真正为「等」多出来的是这一串：==线程、私有栈、调度实体==。它们存在的唯一理由是「阻塞式代码需要一个执行单位站在那等」。"},{"at":["cpu"],"text":"把这些加起来看：==一万个执行单位，去抢几个核==。这就是下一篇要拆的东西。"}]}]'>
+      <svg viewBox="0 0 1248 872" role="img" aria-labelledby="archify-diagram-title archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
+        <title id="archify-diagram-title">一万个连接，在机器里长成了什么样</title>
+        <desc id="archify-diagram-description">左边一列是「一份」的，右边一列是「每条连接各一份」的</desc>
+        <!-- Definitions -->
         <defs>
-          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
-                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
-            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-default" />
           </marker>
+          <marker id="arrowhead-emphasis" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-emphasis" />
+          </marker>
+          <marker id="arrowhead-security" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-security" />
+          </marker>
+          <marker id="arrowhead-dashed" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-dashed" />
+          </marker>
+          <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+            <path d="M 40 0 L 0 0 0 40" class="c-grid" stroke-width="0.5"/>
+          </pattern>
         </defs>
+
+        <!-- Background Grid -->
+        <rect width="100%" height="100%" fill="url(#grid)" />
+
+        <!-- Boundaries (behind everything) -->
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="0" x="906" y="36" width="298" height="108" rx="12" class="c-region" stroke-width="1"/>
+        <text x="914" y="54" class="t-cloud" font-size="9" font-weight="600">网络 · 另一头</text>
+
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="1" x="92" y="162" width="1116" height="322" rx="12" class="c-region" stroke-width="1"/>
+        <text x="100" y="180" class="t-cloud" font-size="9" font-weight="600">你的进程 · 用户态</text>
+
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="2" x="92" y="517" width="1116" height="112" rx="12" class="c-region" stroke-width="1"/>
+        <text x="100" y="535" class="t-cloud" font-size="9" font-weight="600">内核</text>
+
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="3" x="92" y="692" width="1116" height="112" rx="12" class="c-region" stroke-width="1"/>
+        <text x="100" y="710" class="t-cloud" font-size="9" font-weight="600">硬件 · 这些东西最后落在哪</text>
+
+        <!-- Connection paths (before components for correct z-order) -->
+        <path data-edge-from="conn" data-edge-to="thread" data-edge-label="一连接一线程" data-edge-key="0" data-edge-id="e1" data-composition-points="1055,124;1055,190" d="M 1055 124 L 1055 190" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="thread" data-edge-to="code" data-edge-label="跑的是同一份指令" data-edge-key="1" data-edge-id="e2" data-composition-points="930,215;370,215" d="M 930 215 L 370 215" class="a-dashed" stroke-width="1.5" marker-end="url(#arrowhead-dashed)"/>
+        <path data-edge-from="thread" data-edge-to="heap" data-edge-label="共用同一块堆" data-edge-key="2" data-edge-id="e3" data-composition-points="930,229;650,229;650,327;370,327" d="M 930 229 L 658 229 Q 650 229 650 237 L 650 319 Q 650 327 642 327 L 370 327" class="a-dashed" stroke-width="1.5" marker-end="url(#arrowhead-dashed)"/>
+        <path data-edge-from="thread" data-edge-to="task" data-edge-label="线程在内核里的身份" data-edge-key="3" data-edge-id="e4" data-composition-points="1055,254;1055,545" d="M 1055 254 L 1055 545" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="fdtable" data-edge-to="sock" data-edge-label="accept 开一格，指过去" data-edge-key="4" data-edge-id="e5" data-composition-points="370,432;645,432;645,545" d="M 370 432 L 637 432 Q 645 432 645 440 L 645 545" class="a-dashed" stroke-width="1.5" marker-end="url(#arrowhead-dashed)"/>
+        <path data-edge-from="lsock" data-edge-to="sock" data-edge-label="新连接由它接进来" data-edge-key="5" data-edge-id="e6" data-composition-points="370,577;520,577" d="M 370 577 L 520 577" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="task" data-edge-to="cpu" data-edge-label="一万个实体抢几个核" data-edge-key="6" data-edge-id="e7" data-composition-points="1055,609;1055,720" d="M 1055 609 L 1055 720" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+
+        <!-- Components -->
+        <g id="node-conn" data-node-id="conn" data-node-label="一万个浏览器连接" tabindex="0" role="button" aria-label="Focus 一万个浏览器连接, ×10000 · 每条大部分时间在等, 网络 · 另一头" aria-pressed="false" data-node-kind="external" data-node-sublabel="×10000 · 每条大部分时间在等" data-node-context="网络 · 另一头">
+          <title>一万个浏览器连接 · ×10000 · 每条大部分时间在等 · 网络 · 另一头</title>
+          <rect x="930" y="60" width="250" height="64" rx="6" class="c-mask"/>
+          <rect x="930" y="60" width="250" height="64" rx="6" class="c-external" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="external" class="semantic-sigil s-external" transform="translate(936 66) scale(0.6875)">
+            <rect x="2.5" y="5" width="8.5" height="8" rx="1.5"/>
+            <path d="M8 2.5h5.5V8M13.5 2.5 7.5 8.5"/>
+          </g>
+          <text data-detail-anchor x="1055" y="90" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">一万个浏览器连接</text>
+        <text data-detail="context" x="1055" y="106" class="t-muted" font-size="9" text-anchor="middle">×10000 · 每条大部分时间在等</text>
+        </g>
+
+        <g id="node-code" data-node-id="code" data-node-label="服务端代码" tabindex="0" role="button" aria-label="Focus 服务端代码, 1 份 · 一万个线程共用同一份指令, 你的进程 · 用户态" aria-pressed="false" data-node-kind="backend" data-node-sublabel="1 份 · 一万个线程共用同一份指令" data-node-context="你的进程 · 用户态">
+          <title>服务端代码 · 1 份 · 一万个线程共用同一份指令 · 你的进程 · 用户态</title>
+          <rect x="120" y="190" width="250" height="64" rx="6" class="c-mask"/>
+          <rect x="120" y="190" width="250" height="64" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(126 196) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text data-detail-anchor x="245" y="220" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">服务端代码</text>
+        <text data-detail="context" x="245" y="236" class="t-muted" font-size="9" text-anchor="middle">1 份 · 一万个线程共用同一份指令</text>
+        </g>
+
+        <g id="node-heap" data-node-id="heap" data-node-label="堆 / 全局变量" tabindex="0" role="button" aria-label="Focus 堆 / 全局变量, 1 份 · 共用，所以改它要加锁, 你的进程 · 用户态" aria-pressed="false" data-node-kind="backend" data-node-sublabel="1 份 · 共用，所以改它要加锁" data-node-context="你的进程 · 用户态">
+          <title>堆 / 全局变量 · 1 份 · 共用，所以改它要加锁 · 你的进程 · 用户态</title>
+          <rect x="120" y="295" width="250" height="64" rx="6" class="c-mask"/>
+          <rect x="120" y="295" width="250" height="64" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(126 301) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text data-detail-anchor x="245" y="325" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">堆 / 全局变量</text>
+        <text data-detail="context" x="245" y="341" class="t-muted" font-size="9" text-anchor="middle">1 份 · 共用，所以改它要加锁</text>
+        </g>
+
+        <g id="node-fdtable" data-node-id="fdtable" data-node-label="fd 表" tabindex="0" role="button" aria-label="Focus fd 表, 1 份 · 每 accept 一次多开一格, 你的进程 · 用户态" aria-pressed="false" data-node-kind="backend" data-node-sublabel="1 份 · 每 accept 一次多开一格" data-node-context="你的进程 · 用户态">
+          <title>fd 表 · 1 份 · 每 accept 一次多开一格 · 你的进程 · 用户态</title>
+          <rect x="120" y="400" width="250" height="64" rx="6" class="c-mask"/>
+          <rect x="120" y="400" width="250" height="64" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(126 406) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text data-detail-anchor x="245" y="430" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">fd 表</text>
+        <text data-detail="context" x="245" y="446" class="t-muted" font-size="9" text-anchor="middle">1 份 · 每 accept 一次多开一格</text>
+        </g>
+
+        <g id="node-thread" data-node-id="thread" data-node-label="线程 · 私有栈" tabindex="0" role="button" aria-label="Focus 线程 · 私有栈, ×10000 · 每条连接一个执行现场, 你的进程 · 用户态" aria-pressed="false" data-node-kind="backend" data-node-sublabel="×10000 · 每条连接一个执行现场" data-node-context="你的进程 · 用户态">
+          <title>线程 · 私有栈 · ×10000 · 每条连接一个执行现场 · 你的进程 · 用户态</title>
+          <rect x="930" y="190" width="250" height="64" rx="6" class="c-mask"/>
+          <rect x="930" y="190" width="250" height="64" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(936 196) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text data-detail-anchor x="1055" y="220" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">线程 · 私有栈</text>
+        <text data-detail="context" x="1055" y="236" class="t-muted" font-size="9" text-anchor="middle">×10000 · 每条连接一个执行现场</text>
+        </g>
+
+        <g id="node-lsock" data-node-id="lsock" data-node-label="监听 socket" tabindex="0" role="button" aria-label="Focus 监听 socket, 1 份 · 它不跟着连接数涨, 内核" aria-pressed="false" data-node-kind="database" data-node-sublabel="1 份 · 它不跟着连接数涨" data-node-context="内核">
+          <title>监听 socket · 1 份 · 它不跟着连接数涨 · 内核</title>
+          <rect x="120" y="545" width="250" height="64" rx="6" class="c-mask"/>
+          <rect x="120" y="545" width="250" height="64" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(126 551) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <text data-detail-anchor x="245" y="575" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">监听 socket</text>
+        <text data-detail="context" x="245" y="591" class="t-muted" font-size="9" text-anchor="middle">1 份 · 它不跟着连接数涨</text>
+        </g>
+
+        <g id="node-sock" data-node-id="sock" data-node-label="连接 socket" tabindex="0" role="button" aria-label="Focus 连接 socket, ×10000 · 每条连接一个，各带收发缓冲, 内核" aria-pressed="false" data-node-kind="database" data-node-sublabel="×10000 · 每条连接一个，各带收发缓冲" data-node-context="内核">
+          <title>连接 socket · ×10000 · 每条连接一个，各带收发缓冲 · 内核</title>
+          <rect x="520" y="545" width="250" height="64" rx="6" class="c-mask"/>
+          <rect x="520" y="545" width="250" height="64" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(526 551) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <text data-detail-anchor x="645" y="575" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">连接 socket</text>
+        <text data-detail="context" x="645" y="591" class="t-muted" font-size="9" text-anchor="middle">×10000 · 每条连接一个，各带收发缓冲</text>
+        </g>
+
+        <g id="node-task" data-node-id="task" data-node-label="调度实体" tabindex="0" role="button" aria-label="Focus 调度实体, ×10000 · task_struct + 内核栈, 内核" aria-pressed="false" data-node-kind="database" data-node-sublabel="×10000 · task_struct + 内核栈" data-node-context="内核">
+          <title>调度实体 · ×10000 · task_struct + 内核栈 · 内核</title>
+          <rect x="930" y="545" width="250" height="64" rx="6" class="c-mask"/>
+          <rect x="930" y="545" width="250" height="64" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(936 551) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <text data-detail-anchor x="1055" y="575" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">调度实体</text>
+        <text data-detail="context" x="1055" y="591" class="t-muted" font-size="9" text-anchor="middle">×10000 · task_struct + 内核栈</text>
+        </g>
+
+        <g id="node-mem" data-node-id="mem" data-node-label="内存条" tabindex="0" role="button" aria-label="Focus 内存条, 1 条 · 8MB 只是记在这的虚拟预留, 硬件 · 这些东西最后落在哪" aria-pressed="false" data-node-kind="cloud" data-node-sublabel="1 条 · 8MB 只是记在这的虚拟预留" data-node-context="硬件 · 这些东西最后落在哪">
+          <title>内存条 · 1 条 · 8MB 只是记在这的虚拟预留 · 硬件 · 这些东西最后落在哪</title>
+          <rect x="120" y="720" width="250" height="64" rx="6" class="c-mask"/>
+          <rect x="120" y="720" width="250" height="64" rx="6" class="c-cloud" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="cloud" class="semantic-sigil s-cloud" transform="translate(126 726) scale(0.6875)">
+            <path d="M4.3 12.5h7.3a2.4 2.4 0 0 0 .2-4.8 4 4 0 0 0-7.5-1.3A3.1 3.1 0 0 0 4.3 12.5Z"/>
+          </g>
+          <text data-detail-anchor x="245" y="750" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">内存条</text>
+        <text data-detail="context" x="245" y="766" class="t-muted" font-size="9" text-anchor="middle">1 条 · 8MB 只是记在这的虚拟预留</text>
+        </g>
+
+        <g id="node-cpu" data-node-id="cpu" data-node-label="CPU 核" tabindex="0" role="button" aria-label="Focus CPU 核, 几个 · 一万个实体轮着上, 硬件 · 这些东西最后落在哪" aria-pressed="false" data-node-kind="cloud" data-node-sublabel="几个 · 一万个实体轮着上" data-node-context="硬件 · 这些东西最后落在哪">
+          <title>CPU 核 · 几个 · 一万个实体轮着上 · 硬件 · 这些东西最后落在哪</title>
+          <rect x="930" y="720" width="250" height="64" rx="6" class="c-mask"/>
+          <rect x="930" y="720" width="250" height="64" rx="6" class="c-cloud" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="cloud" class="semantic-sigil s-cloud" transform="translate(936 726) scale(0.6875)">
+            <path d="M4.3 12.5h7.3a2.4 2.4 0 0 0 .2-4.8 4 4 0 0 0-7.5-1.3A3.1 3.1 0 0 0 4.3 12.5Z"/>
+          </g>
+          <text data-detail-anchor x="1055" y="750" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">CPU 核</text>
+        <text data-detail="context" x="1055" y="766" class="t-muted" font-size="9" text-anchor="middle">几个 · 一万个实体轮着上</text>
+        </g>
+
+        <!-- Connection labels -->
+        <g data-detail="context" data-edge-from="conn" data-edge-to="thread" data-edge-label="一连接一线程" data-edge-key="0" data-edge-id="e1">
+          <rect x="1021.2" y="128" width="67.6" height="14" rx="3" class="c-mask"/>
+          <text x="1055" y="138" class="t-muted" font-size="8" text-anchor="middle">一连接一线程</text>
+        </g>
+        <g data-detail="context" data-edge-from="thread" data-edge-to="code" data-edge-label="跑的是同一份指令" data-edge-key="1" data-edge-id="e2">
+          <rect x="606.6" y="195" width="86.8" height="14" rx="3" class="c-mask"/>
+          <text x="650" y="205" class="t-messagebus" font-size="8" text-anchor="middle">跑的是同一份指令</text>
+        </g>
+        <g data-detail="context" data-edge-from="thread" data-edge-to="heap" data-edge-label="共用同一块堆" data-edge-key="2" data-edge-id="e3">
+          <rect x="616.2" y="258" width="67.6" height="14" rx="3" class="c-mask"/>
+          <text x="650" y="268" class="t-messagebus" font-size="8" text-anchor="middle">共用同一块堆</text>
+        </g>
+        <g data-detail="context" data-edge-from="thread" data-edge-to="task" data-edge-label="线程在内核里的身份" data-edge-key="3" data-edge-id="e4">
+          <rect x="1006.8" y="258" width="96.39999999999999" height="14" rx="3" class="c-mask"/>
+          <text x="1055" y="268" class="t-muted" font-size="8" text-anchor="middle">线程在内核里的身份</text>
+        </g>
+        <g data-detail="context" data-edge-from="fdtable" data-edge-to="sock" data-edge-label="accept 开一格，指过去" data-edge-key="4" data-edge-id="e5">
+          <rect x="589.6" y="468.5" width="110.8" height="14" rx="3" class="c-mask"/>
+          <text x="645" y="478.5" class="t-messagebus" font-size="8" text-anchor="middle">accept 开一格，指过去</text>
+        </g>
+        <g data-detail="context" data-edge-from="lsock" data-edge-to="sock" data-edge-label="新连接由它接进来" data-edge-key="5" data-edge-id="e6">
+          <rect x="401.6" y="557" width="86.8" height="14" rx="3" class="c-mask"/>
+          <text x="445" y="567" class="t-muted" font-size="8" text-anchor="middle">新连接由它接进来</text>
+        </g>
+        <g data-detail="context" data-edge-from="task" data-edge-to="cpu" data-edge-label="一万个实体抢几个核" data-edge-key="6" data-edge-id="e7">
+          <rect x="1006.8" y="613" width="96.39999999999999" height="14" rx="3" class="c-mask"/>
+          <text x="1055" y="623" class="t-muted" font-size="8" text-anchor="middle">一万个实体抢几个核</text>
+        </g>
+
+        <!-- Legend -->
+        <g data-legend data-legend-bridge>
+          <text x="40" y="836" class="t-primary" font-size="12" font-weight="650">Legend</text>
+          <g data-legend-semantic-kind="backend" data-legend-kind="backend" data-legend-label="Backend" data-legend-x="40" data-legend-baseline="856" data-legend-width="78">
+            <rect x="40" y="847" width="16" height="10" rx="2.5" class="c-backend" stroke-width="1"/>
+            <text x="62" y="856" class="t-muted" font-size="10" font-weight="500">Backend</text>
+          </g>
+          <g data-legend-semantic-kind="database" data-legend-kind="database" data-legend-label="Database" data-legend-x="140" data-legend-baseline="856" data-legend-width="83">
+            <rect x="140" y="847" width="16" height="10" rx="2.5" class="c-database" stroke-width="1"/>
+            <text x="162" y="856" class="t-muted" font-size="10" font-weight="500">Database</text>
+          </g>
+          <g data-legend-semantic-kind="cloud" data-legend-kind="cloud" data-legend-label="Cloud" data-legend-x="245" data-legend-baseline="856" data-legend-width="68">
+            <rect x="245" y="847" width="16" height="10" rx="2.5" class="c-cloud" stroke-width="1"/>
+            <text x="267" y="856" class="t-muted" font-size="10" font-weight="500">Cloud</text>
+          </g>
+          <g data-legend-semantic-kind="external" data-legend-kind="external" data-legend-label="External" data-legend-x="335" data-legend-baseline="856" data-legend-width="83">
+            <rect x="335" y="847" width="16" height="10" rx="2.5" class="c-external" stroke-width="1"/>
+            <text x="357" y="856" class="t-muted" font-size="10" font-weight="500">External</text>
+          </g>
+        </g>
       </svg>
-      <div class="flowd-groups"><div class="fgroup tone-green" data-group-box="one">
-          <span class="fgroup-label">全进程只有一份</span>
-        </div><div class="fgroup tone-red" data-group-box="many">
-          <span class="fgroup-label">每个连接各一份</span>
-        </div></div>
-      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-green" data-id="code" data-group="one">
-              
-              
-              <b>服务端代码</b>
-              <small>机器指令，只读</small>
-            </div></div><div class="flowd-row"><div class="fnode tone-red" data-id="sock" data-group="many">
-              
-              
-              <b>一万个连接 socket</b>
-              <small>各带自己的接收缓冲区</small>
-            </div></div><div class="flowd-row"><div class="fnode tone-red" data-id="stack" data-group="many">
-              
-              
-              <b>一万个线程栈</b>
-              <small>各带自己的局部变量</small>
-            </div></div><div class="flowd-row"><div class="fnode tone-red" data-id="sched" data-group="many">
-              
-              
-              <b>一万个调度实体</b>
-              <small><mark class="mk-blue">都排在调度器名单上</mark></small>
-            </div></div></div>
-      
-    </div><p><strong>但注意：一万份「N 份」的东西里，代码不在其中。</strong> 所以亏的不是内存里的代码，而是：</p>
+      <figcaption>四个虚线框是四个世界（另一头 / 你的进程 / 内核 / 硬件）。<strong>左边一列是「一份」的，右边一列是「每条连接各一份」的</strong> —— 每个框第二行开头那个标记，就是它在这件事里的份数。</figcaption>
+      <div class="pano-ui"></div>
+      <p class="arch-hint"><span class="idle">点头上的任意一个框看它的关系；或者从下面的「我熟悉」进去</span><span class="focused">再点一次空白处取消</span></p>
+    </figure><p><strong>但注意：一万份「N 份」的东西里，代码不在其中。</strong> 所以亏的不是内存里的代码，而是：</p>
 <blockquote>
 <p><strong>一万份「因为要等而必须养着」的执行资源。</strong></p>
 </blockquote>
-<p><mark class="mk-blue">这就是下一段故事的开头，也是「等待不该占用执行资源」那句话的具体样子。</mark></p>
+<p><mark class="mk-blue">这就是下一段故事的开头，也是「等待不该占用执行资源」那句话的具体样子。</mark> 这笔账一笔一笔怎么算，在<a href="../wait-vs-execute/">「一连接一线程亏在哪」</a>。</p>
 <hr>
 <h2 id="顺带回答第二个问题监听-socket-和连接-socket-的区别"><span class="num">08</span>顺带回答第二个问题：监听 socket 和连接 socket 的区别</h2>
 <div class="compare-wrap"><table class="compare"><thead><tr><th>对比项</th><th>监听 socket</th><th>已连接 socket</th></tr></thead><tbody><tr><th>怎么来的</th><td data-label="监听 socket"><code>socket → bind → listen</code></td><td data-label="已连接 socket"><code>accept()</code> 从队列里取出来的</td></tr><tr><th>TCP 状态</th><td data-label="监听 socket"><code>LISTEN</code></td><td data-label="已连接 socket">通常 <code>ESTABLISHED</code></td></tr><tr><th>地址</th><td data-label="监听 socket"><code>0.0.0.0:80</code>（通配）</td><td data-label="已连接 socket">服务端 IP:80 ↔ 对端 IP:端口</td></tr><tr><th>有没有对端</th><td data-label="监听 socket"><span class="tag tone-amber">没有</span></td><td data-label="已连接 socket"><span class="tag tone-green">有，就那一个</span></td></tr><tr><th>干什么</th><td data-label="监听 socket">只接新连接，不传数据</td><td data-label="已连接 socket">收发这条连接的业务数据</td></tr><tr><th>平时调什么</th><td data-label="监听 socket"><code>accept()</code></td><td data-label="已连接 socket"><code>read()</code> / <code>write()</code></td></tr><tr><th>数量</th><td data-label="监听 socket">一个端口一个（就一个）</td><td data-label="已连接 socket">每条连接一个</td></tr><tr><th>关掉它</th><td data-label="监听 socket">再也不能接新连接</td><td data-label="已连接 socket">只断开那一个客户端</td></tr></tbody></table></div><p><mark class="mk-amber">最常见的误解是「<code>accept()</code> 把监听 socket 变成了连接 socket」。</mark> 不是：<mark class="mk-blue"><code>accept</code> 不动监听 socket，它只是<strong>另外</strong>给你一个新的。</mark> <code>listen_fd</code> 从进程启动到进程结束，一直在那守着。</p>
