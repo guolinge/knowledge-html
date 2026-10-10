@@ -273,6 +273,31 @@ export function blocksPlugin(md) {
     </div>`;
   }
 
+  /* ===== 积木 8 · shot —— 构建期内联的界面截图 =====
+     图片放在 notes/<slug>/assets/<名字>.png，构建时读出来转 base64 塞进页面。
+     为什么做进构建：单文件发人是本仓库的底线，相对路径的 <img> 出了 dist 就断。
+     什么时候用：讲 UI 组件、讲界面行为 —— 文字和示意 SVG 都画不出来的「真实长这样」。
+  ============================================================ */
+  function shot(body, env) {
+    const cfg = YAML.parse(body) || {};
+    const name = cfg.img;
+    if (!name) throw new Error('shot 积木需要 img: <名字>（对应 notes/<slug>/assets/<名字>.png）');
+    const slug = env && env.file ? (env.file.match(/^notes\/([^/]+)\//) || [])[1] : null;
+    if (!slug) throw new Error('shot 积木只能在 notes/<slug>/note.md 里用（拿不到 slug）');
+    const file = path.join(ROOT, 'notes', slug, 'assets', `${name}.png`);
+    if (!fs.existsSync(file)) {
+      throw new Error(
+        `找不到 notes/${slug}/assets/${name}.png。\n` +
+          '  把截图放进 assets/ 目录，名字和 img 字段对上。',
+      );
+    }
+    const b64 = fs.readFileSync(file).toString('base64');
+    const style = cfg.width ? ` style="max-width:${Number(cfg.width) || 720}px"` : '';
+    return `<figure class="shot"><img loading="lazy" src="data:image/png;base64,${b64}" alt="${esc(cfg.alt || name)}"${style}>${
+      cfg.caption ? `<figcaption>${inline(cfg.caption)}</figcaption>` : ''
+    }</figure>`;
+  }
+
   /* ===== 积木 8 · summary ===== */
   function summary(body) {
     const cfg = YAML.parse(body) || {};
@@ -754,6 +779,7 @@ const KIND_TONE = {
     quiz,
     demo,
     memmap,
+    shot,
     summary,
     raw: (body) => body,
   };
@@ -832,7 +858,7 @@ const KIND_TONE = {
       }
 
       try {
-        return render(token.content);
+        return render(token.content, env);
       } catch (e) {
         // 把 YAML 报错定位到具体文件和行号，并回显原始内容 ——
         // 这是 agent 自纠的唯一依据，不能只丢一个堆栈。

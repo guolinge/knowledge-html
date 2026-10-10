@@ -475,7 +475,17 @@ npm run build:standalone   # 产出 dist/*.html（内联全部资源，可直接
     所以写完一定要跑 npm run check，它会报「未知围栏语言」。
 ```
 
-## 16. `memmap` —— 地址空间 / 分区图
+## 16. `shot` —— 构建期内联的真实截图
+
+图先放进 `notes/<slug>/assets/`，构建时读出来转 base64 内联 —— 单文件发人不断链：
+
+```shot
+img: portrait-row
+alt: PortraitRow 真实渲染
+caption: 这张图是构建期从 assets/ 读进来内联的，不是外链。
+```
+
+## 17. `memmap` —— 地址空间 / 分区图
 
 适合：一段**连续空间**被切成几段，要说清各自的位置、大小和增长方向。
 `flow` 画「谁连谁」，它画「谁在哪一段」。
@@ -502,4 +512,4 @@ note: 分界线只有一条：**栈随线程走，其余全随进程走**。
 - **`mark` 那一列最值钱**：共享 / 独享这种属性竖着排一列，扫一眼就拿到边界了。
 - `dir: up` / `dir: down` 画增长方向，一眼看出栈和堆是面对面长的。
 
-## 17. `summary` / `raw`
+## 18. `summary` / `raw`
