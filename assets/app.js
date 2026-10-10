@@ -3362,7 +3362,7 @@
      左边是 MySQL 里的元数据行（可改），右边是照着它渲染出来的界面。
      点任一边，另一边高亮来源/去向。改左边的字，右边当场变。
      config:
-       rows: [{ key, zh, col, vt, on }]        元数据行（crm_dc_data_field）
+       rows: [{ key, zh, col, vt, on }]        元数据行（画像字段表，表名由 cfg.table 提供）
        conds: [{ key, op, val }]               初始条件行
        ops:  { valueType: [opKey, ...] }       类型 → 可用操作符（crm_dc_operator）
        opLabels: { opKey: 中文 }
@@ -3394,7 +3394,7 @@
     const left = el('div', 'c2u-pane');
     left.appendChild(el('div', 'c2u-head')).append(
       Object.assign(el('span', 'tag tone-violet', 'MySQL'), {}),
-      el('b', '', 'crm_dc_data_field'),
+      el('b', '', cfg.table || 'crm_dc_data_field'),
       el('span', 'sub', 'Data Admin 写这里'),
     );
     const recsBox = el('div', 'c2u-recs');
@@ -3504,7 +3504,7 @@
       // 结果表头（同一份元数据的另一种投影）
       const th = el('div', 'c2u-thead');
       th.setAttribute('data-from', '__head');
-      const tHead = el('div', 'c2u-thead-t', '结果表头 —— 同样来自那 46 条记录');
+      const tHead = el('div', 'c2u-thead-t', '结果表头 —— 同样来自那 ' + (cfg.facts && cfg.facts.total != null ? cfg.facts.total : '46') + ' 条记录');
       th.appendChild(tHead);
       const tr = el('div', 'c2u-tr');
       ['UID', '客户名称', '跟进人'].forEach((t) => tr.appendChild(el('span', 'c2u-th2 fixed', t)));
@@ -3532,7 +3532,7 @@
           '左边 <b>' + rows.length + '</b> 条记录，右边渲染出 <b>' + on.length +
           '</b> 个字段下拉 + <b>' + on.length + '</b> 列表头。<br>' +
           '真实表里有 <b>' + F.total + '</b> 条记录，但只有 <b>' + F.feature +
-          '</b> 条是画像字段进了下拉 —— 另外 <b>' + F.rel + '</b> 条是关系，走另一条路。<br>' +
+          '</b> 条是画像字段进了下拉 —— ' + (F.tail || ('另外 <b>' + F.rel + '</b> 条是关系，走另一条路。')) + '<br>' +
           '<span class="c2u-note-hi">前端代码从头到尾没多一行。</span>';
         uiBox.appendChild(note);
       }
@@ -3598,7 +3598,7 @@
        tabs: [{
          key,
          ui:     { label, src }                       界面那一格
-         field:  { rows: [[k,v]], hint }              crm_dc_data_field
+         field:  { rows: [[k,v]], hint }              字段表（cfg.fieldTable）
          source: { rows: [[k,v]], hint }              crm_dc_data_source
          table:  { name, cols: [[col,type,sample]], absent }   物理表
          code:   { rows: [[file,rule]] }              代码（不在数据库里）
@@ -3669,8 +3669,8 @@
 
       body.appendChild(arrow('前端不认识业务，照配置渲染', true));
 
-      // ② crm_dc_data_field
-      const L2 = layer('②', 'crm_dc_data_field', '元数据 · Data Admin 改这里', 'violet');
+      // ② 字段表（表名由 cfg.fieldTable 提供，默认保持旧名以兼容旧笔记）
+      const L2 = layer('②', cfg.fieldTable || 'crm_dc_data_field', '元数据 · Data Admin 改这里', 'violet');
       (t.field.rows || []).forEach((r) => L2.appendChild(row(r[0], r[1])));
       if (t.field.hint) L2.appendChild(el('div', 'fl-note', '← ' + t.field.hint));
       body.appendChild(L2);
