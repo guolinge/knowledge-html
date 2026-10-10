@@ -197,7 +197,7 @@ type _legalQueryIsDraft = Expect<InsightQuery extends DraftQuery ? true : false>
 
 ## 04 · Metadata：组件吃进去什么
 
-`metadata` prop 是一份 `AudienceMetadata`，由服务端从 `crm_dc_*` 那批表投影出来（那条线在[配置层那篇](notes/data-admin-to-ui.html)）。组件拿到的版本**没有表名和列名**，只有业务语义：
+`metadata` prop 是一份 `AudienceMetadata`，由服务端从 `crm_dc_*` 那批表投影出来（那条线在[配置层那篇](../data-admin-to-ui/)）。组件拿到的版本**没有表名和列名**，只有业务语义：
 
 ```cards
 cols: 3
@@ -334,8 +334,8 @@ UI 依赖是 element-plus（全套控件）和 vue-i18n（文案）。除此之�
 
 - [组件图鉴](../combination-components/)：11 个组件的真实渲染截图、每个的对外接口、拆分依据与五层数据流。
 - [机制篇](../combination-mechanics/)：受控数据流的实现、一行怎么长出来（幽灵行与 convert）、控件决策引擎、候选值三条管道、buildQuery 检查清单、scope 收窄，每节配可操作的交互。
-- [配置层那篇](notes/data-admin-to-ui.html)：Metadata 从 MySQL 到 `AudienceMetadata` 投影的那条线，含停用字段的回显规则。
-- [@insight/dsl 那篇](notes/insight-dsl.html)：`buildQuery` 产出的 DSL 之后怎么被校验、编译成 SQL。
+- [配置层那篇](../data-admin-to-ui/)：Metadata 从 MySQL 到 `AudienceMetadata` 投影的那条线，含停用字段的回显规则。
+- [@insight/dsl 那篇](../insight-dsl/)：`buildQuery` 产出的 DSL 之后怎么被校验、编译成 SQL。
 
 ```quiz
 - q: 组件里用户填到一半的条件（还没选操作符）存在哪？存在组件里吗？

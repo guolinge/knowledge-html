@@ -139,6 +139,21 @@ function lintNote(meta, src, warnings) {
   return issues;
 }
 
+/* ---------- 跨笔记链接的两种产物形态 ----------
+   note.md 里跨篇链接统一写 ../<slug>/（和「前置」区块同一个方言）：
+   · notes/<slug>/index.html：../<slug>/ 指向兄弟笔记目录，本来就对
+   · dist/<slug>.html：没有「上一层」这一说，改写成同目录单文件 <slug>.html
+   只认真实存在的笔记 slug，别的目录（assets/ plans/ …）不碰。
+   只改 href 属性值，保留可能的 # 锥点。
+   踩过：combination 两篇手写 ](notes/slug.html)、44 篇 dist 页的前置区块
+   都指向 dist/notes/… → 线上全 404。 */
+function distCrossLinks(html, noteSlugs) {
+  return html.replace(
+    /href="\.\.\/([a-z0-9-]+)\/([^"]*)"/g,
+    (m, dir, rest) => (noteSlugs.has(dir) ? `href="${dir}.html${rest}"` : m),
+  );
+}
+
 /* ---------- 主流程 ---------- */
 function main() {
   if (!fs.existsSync(NOTES)) {
@@ -146,12 +161,15 @@ function main() {
     process.exit(1);
   }
 
-  const slugs = fs
+  const allDirs = fs
     .readdirSync(NOTES, { withFileTypes: true })
     .filter((d) => d.isDirectory() && fs.existsSync(path.join(NOTES, d.name, 'note.md')))
-    .map((d) => d.name)
-    .filter((s) => !ONLY || s === ONLY)
-    .sort();
+    .map((d) => d.name);
+  /* 跨篇链接改写用的全量 slug 集 —— 不受 --only 影响，
+     否则单篇构建时指向其他篇的链接会被当成不认识的目录而跳过 */
+  const allNoteSlugs = new Set(allDirs);
+
+  const slugs = allDirs.filter((s) => !ONLY || s === ONLY).sort();
 
   const existingSlugs = new Set(slugs);
 
@@ -222,7 +240,8 @@ function main() {
     if (STANDALONE) {
       // 内联后不应再有任何外部资源标签，否则单文件分发会缺样式。
       // 注意：只查真实标签，正文里提到 assets/ 路径属于正常内容。
-      const standalone = inlineAssets(full);
+      // dist 版改写跨篇链接：../<slug>/ → 同目录单文件（notes 版保持原样）
+      const standalone = distCrossLinks(inlineAssets(full), allNoteSlugs);
       const leftover = standalone.match(
         /<(?:link|script)[^>]*(?:href|src)="[^"]*assets\/[^"]*"/g,
       );

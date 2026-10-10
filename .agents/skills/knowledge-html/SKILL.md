@@ -1326,6 +1326,7 @@ text: |
 | 两个边标签有没有叠在一起 | 叠成乱码（「podmup.pod重建down」） |
 | 有没有真的画出来 | 绘制抛异常 → 空 SVG，而布局检查全绿 |
 | **控件自己拼的几块之间有没有留白** | 没套那层带 `gap` 的 wrapper → 四块**紧贴着**，而所有检查都是绿的 |
+| **app.js 有没有真的跑起来** | 正文单元格里的字面 script 开标签吞掉后续 script 块 → 所有控件空着、所有图不画，而 check 与单块截图全绿（2026-10-09） |
 
 #### ⚠️ `visual-check` 曾经会串页 —— 真凶是共用的临时文件
 
@@ -2000,7 +2001,7 @@ text: |
 | `summary` | 小结 |
 | `raw` | 直接写 HTML |
 
-**交互控件 52 个**（在 `assets/app.js` 的 `WIDGETS` 里，供 `demo` 积木引用）：
+**交互控件 54 个**（在 `assets/app.js` 的 `WIDGETS` 里，供 `demo` 积木引用）：
 `polling-vs-cdc` `combination-count` `join-lab` `on-vs-where` `knex-chain`
 `stepper` `tuner` `diff` `stream-modes` `operator-lab` `hashring` `partition-prune`
 `dsl-lab` `null-lab` `config-to-ui` `field-lineage` `count-dedup-lab`
@@ -2012,6 +2013,7 @@ text: |
 `tri-logic-lab` `uid-set-lab` `dist-lab` `storage-anatomy` `prune-lab` `innodb-visual-lab`
 `ls-cost-lab` `atomic-lab` `rtt-lab`
 `combination-control-lab` `combination-values-lab` `combination-build-lab`
+`s3-list-lab` `ec-lab`
 
 **已知缺口**（按优先级）：
 
@@ -3354,6 +3356,7 @@ pre-push 会重建 + 量图。**它拦下来通常不是你的问题。**
 | 为普通笔记反复做移动端截图和调试 | 普通笔记只验收宽屏；共享积木最多一次窄屏冒烟，除非用户明确要求手机体验 |
 | 硬把内容塞进最接近的积木 | 组合 / 加字段 / 新建 / `raw` 直接写 —— 四条路任选 |
 | 编辑 `notes/*/index.html` | 那是产物，会被覆盖。只改 `note.md` |
+| 跨笔记链接写成 `notes/<slug>.html` 或根绝对路径 | 写 `../<slug>/`（和「前置」区块同一个方言）。渲染器按产物改写：notes 版指向兄弟笔记目录，dist 版自动改成同目录单文件 `<slug>.html`。手写相对路径只对一种产物成立，另一种必然 404（踩过：combination 两篇 + 44 篇 dist 页的前置区块） |
 | 在单篇 `note.md` 里塞 `<style>` | 改 `theme.css` / `blocks.css` —— 一次全站生效 |
 | 在正文写 `# 一级标题` | 标题只写在 `meta.json` 的 `title` |
 | `meta.json` 里自己填 `verified: "日期"` | 它会进页面的溯源条，==那是「有人核对过」的声明==。agent 生成的一律留空 |
@@ -3365,6 +3368,7 @@ pre-push 会重建 + 量图。**它拦下来通常不是你的问题。**
 | 图上有文字被压住 | ==字还在、只是读不通，所以最容易滑过去。== `npm run visual-check` 会报「文字压文字」，改完图必须跑 |
 | 把 SQL / 代码粘成一整行 | 一个子句一行，嵌套的缩进。原文本来就在一行时（如编译器输出）要注明「换行只是排版」 |
 | 把语法高亮当成分色 | 笔记里分的是**来源**（权限 / 条件 / 派生）—— 不要连 `SELECT` 都要上色 |
+| 在允许裸 HTML 的单元格 / 字段里写字面 HTML 标签（如展示示例代码） | 它会真的成为元素；script 开标签会吞掉 app.js 全页静默全灭。++展示标签一律写 `&lt;` `&gt;` 实体++ |
 | YAML 裸标量里出现 `: `（冒号+空格） | 加引号，或用 `|-` 块标量 |
 | YAML 裸标量以反引号 `` ` `` 开头 | 加引号 |
 | YAML 裸标量以 `*` `&` `!` `%` `@` 开头 | 加引号（会被当成别名/锚点/标签） |
