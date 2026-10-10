@@ -1,0 +1,1142 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-has-toc="1">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>MySQL 索引：两棵树上的所有规则</title>
+<meta name="description" content="图解《MySQL 索引原理与优化实践》：表数据长在主键 B+ 树上（聚簇索引），二级索引只存主键值。回表、覆盖、最左前缀、列顺序、失效排查——所有规则都从这两棵树推出来。四张带入口和导览的整体图，每张回答一个问题。" />
+<link rel="stylesheet" href="../../assets/theme.css?v=e6a9ffd3d6" />
+  <link rel="stylesheet" href="../../assets/blocks.css?v=aceff51526" />
+  <link rel="stylesheet" href="../../assets/archify-embed.css?v=68fec0b81b" />
+</head>
+<body>
+<div id="progress"></div>
+<div id="tocScrim"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
+    <a class="brand" href="../../index.html"><span class="dot"></span>知识笔记</a>
+    
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="toc" id="toc">
+      <p class="toc-title">目录</p>
+      <a href="../../index.html" class="sub">← 全部笔记</a>
+      <a href="#表数据存在哪innodb-用索引来组织数据本身">表数据存在哪：InnoDB 用索引来组织数据本身</a>
+      <a href="#聚簇索引主键就是数据本身" class="sub">聚簇索引：主键就是数据本身</a>
+      <a href="#两棵树二级索引为什么存主键值">两棵树：二级索引为什么存主键值</a>
+      <a href="#主键宽度税短主键自增主键是结构逼出来的" class="sub">主键宽度税：短主键、自增主键是结构逼出来的</a>
+      <a href="#覆盖索引把回表这一步省掉">覆盖索引：把回表这一步省掉</a>
+      <a href="#判定三类列全在同一个索引里" class="sub">判定：三类列全在同一个索引里</a>
+      <a href="#最左前缀排序数组的直接推论">最左前缀：排序数组的直接推论</a>
+      <a href="#范围列之后为什么断掉" class="sub">范围列之后，为什么「断掉」</a>
+      <a href="#列顺序设计四条规则与验证">列顺序设计：四条规则与验证</a>
+      <a href="#索引失效不是索引坏了是不选或用不了">索引失效：不是索引坏了，是「不选」或「用不了」</a>
+      <a href="#最危险的一种隐式类型转换既慢又错" class="sub">最危险的一种：隐式类型转换，既慢又错</a>
+      <a href="#explain-速查与兜底" class="sub">EXPLAIN 速查与兜底</a>
+      <a href="#收束一条物理事实推完全篇">收束：一条物理事实，推完全篇</a>
+      <a href="#一句话收束" class="sub">一句话收束</a>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow">● 数据库 · MySQL 索引</span>
+      <h1>MySQL 索引：两棵树上的所有规则</h1>
+      <p class="lede">图解《MySQL 索引原理与优化实践》：表数据长在主键 B+ 树上（聚簇索引），二级索引只存主键值。回表、覆盖、最左前缀、列顺序、失效排查——所有规则都从这两棵树推出来。四张带入口和导览的整体图，每张回答一个问题。</p>
+    </div>
+
+
+    <div class="provenance"><span><b>来源</b> 飞书文档《MySQL 索引原理与优化实践》 https://www.feishu.cn/docx/VqWEdknANo6vF4xVEb3cCnsznmg（revision 3） · MySQL 8.0 Reference Manual: InnoDB Clustered and Secondary Indexes — https://dev.mysql.com/doc/refman/8.0/en/innodb-index-types.html · MySQL 8.0 Reference Manual: Multiple-Column Indexes — https://dev.mysql.com/doc/refman/8.0/en/multiple-column-indexes.html · MySQL 8.0 Reference Manual: How MySQL Uses Indexes — https://dev.mysql.com/doc/refman/8.0/en/mysql-indexes.html · MySQL 8.0 Reference Manual: EXPLAIN Output Format — https://dev.mysql.com/doc/refman/8.0/en/explain-output.html · MySQL 8.0 Reference Manual: Index Hints / Optimizer Hints — https://dev.mysql.com/doc/refman/8.0/en/index-hints.html · MySQL 8.0 Reference Manual: InnoDB Statistics Estimation（innodb_stats_auto_recalc）— https://dev.mysql.com/doc/refman/8.0/en/innodb-parameters.html</span><span><b>生成</b> 2026-10-11</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">MySQL</span> <span class="tag tone-muted">InnoDB</span> <span class="tag tone-muted">索引</span> <span class="tag tone-muted">B+树</span> <span class="tag tone-muted">回表</span> <span class="tag tone-muted">覆盖索引</span> <span class="tag tone-muted">最左前缀</span> <span class="tag tone-muted">EXPLAIN</span></span></div>
+
+<p>线上排查慢查询，绕不开五个问题：聚簇索引和二级索引有什么区别？覆盖索引是不是一种新索引？最左前缀为什么必须从左？联合索引的字段顺序怎么定？为什么索引明明建了却没用？</p>
+<p>这五个问题看似独立，其实是同一条因果链上的五个站点。起点只有一个：<strong>InnoDB 用索引来组织数据本身</strong>。理解了「索引怎么存数据」，后面的所有规则都从这一个事实里长出来。</p>
+<div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;store&quot;,&quot;to&quot;:&quot;lookup&quot;},{&quot;from&quot;:&quot;lookup&quot;,&quot;to&quot;:&quot;prefix&quot;},{&quot;from&quot;:&quot;lookup&quot;,&quot;to&quot;:&quot;cover&quot;,&quot;label&quot;:&quot;省掉回表&quot;},{&quot;from&quot;:&quot;prefix&quot;,&quot;to&quot;:&quot;order&quot;},{&quot;from&quot;:&quot;prefix&quot;,&quot;to&quot;:&quot;fail&quot;,&quot;label&quot;:&quot;规则的失效面&quot;}]">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-blue" data-id="store">
+              
+              
+              <b>索引怎么存数据</b>
+              <small>聚簇索引 · 数据长在主键树上</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="lookup">
+              
+              
+              <b>二级索引与回表</b>
+              <small>叶子只存主键值 · 再查一棵树</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="prefix">
+              
+              
+              <b>最左前缀</b>
+              <small>排序数组的直接推论</small>
+            </div><div class="fnode tone-green" data-id="cover">
+              
+              
+              <b>覆盖索引</b>
+              <small>让第二趟树免掉</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="order">
+              
+              
+              <b>列顺序设计</b>
+              <small>等值前 · 范围后 · 高选择性靠前</small>
+            </div><div class="fnode tone-amber" data-id="fail">
+              
+              
+              <b>失效排查</b>
+              <small>优化器不选 vs 结构性用不了</small>
+            </div></div></div>
+      
+    </div><p>这篇按这条链走，配四张带导览的整体图。每张图回答一个问题，可以只看图和导览，也可以顺着正文读：</p>
+<div class="cards" data-cols="2"><div class="ccard tone-blue">
+          <span class="tag tone-blue">整体图</span>
+          <h4>两棵树（§02）</h4>
+          <p>一条查询在二级索引树和聚簇索引树之间怎么走。回表发生在哪条边上、覆盖省的是哪一趟、主键宽度税收在哪里，全在这张图上。</p>
+          
+          
+        </div><div class="ccard tone-violet">
+          <span class="tag tone-violet">整体图</span>
+          <h4>排序数组（§04）</h4>
+          <p>联合索引的「序」长什么样。哪些查询能二分定位、哪些只能逐条扫，从数组结构直接看出来。</p>
+          
+          
+        </div><div class="ccard tone-amber">
+          <span class="tag tone-amber">小图</span>
+          <h4>范围断列（§04）</h4>
+          <p>索引 (a, b, c) 遇到 b&gt;10 时，第三列 c 为什么突然接不上。</p>
+          
+          
+        </div><div class="ccard tone-amber">
+          <span class="tag tone-amber">整体图</span>
+          <h4>分诊地图（§06）</h4>
+          <p>EXPLAIN 里索引没被选中时，先分清「优化器不选」还是「结构性用不了」——两种病的药方相反。</p>
+          
+          
+        </div></div><h2 id="表数据存在哪innodb-用索引来组织数据本身"><span class="num">01</span>表数据存在哪：InnoDB 用索引来组织数据本身</h2>
+<p>先别急着背索引规则，问一个更底层的问题：一张表的行数据，物理上存在哪个文件、什么结构里？这个问题的答案决定后面一切。</p>
+<p>朴素的方案叫<strong>堆表</strong>：数据按插入顺序无序堆放，索引是独立文件，叶子存的是行指针。MyISAM 就是这么做的。它的麻烦出在主键查找上——先查索引拿到指针，再按指针去数据区捞行，两次 IO 起步；而且行一旦迁移，所有指向它的指针都得跟着改。</p>
+<p>InnoDB 否决了这条路，选择让整张表<strong>长</strong>在主键 B+ 树的叶子上：叶子节点直接内联完整行，索引页就是数据页，没有独立的数据区。官方称之为<strong>索引组织表</strong>。</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>同一件事「按主键取一行」</th><th>堆表（MyISAM）</th><th>索引组织表（InnoDB）</th></tr></thead><tbody><tr><th>主键查找</th><td data-label="堆表（MyISAM）">索引 → 指针 → 数据区，两跳两次 IO</td><td data-label="索引组织表（InnoDB）">主键树直达数据页，一跳</td></tr><tr><th>数据的组织</th><td data-label="堆表（MyISAM）">数据区按插入顺序无序堆放</td><td data-label="索引组织表（InnoDB）">整张表按主键排序，「排序」是本体</td></tr><tr><th>行迁移时</th><td data-label="堆表（MyISAM）">所有二级索引里的行指针都要改</td><td data-label="索引组织表（InnoDB）">二级索引存主键值，主键终身不变，行随便搬</td></tr><tr><th>主键范围扫描</th><td data-label="堆表（MyISAM）">回无序的数据区随机跳</td><td data-label="索引组织表（InnoDB）"><mark class="mk-blue">退化成顺序读</mark></td></tr><tr><th>表和索引的关系</th><td data-label="堆表（MyISAM）">两个独立文件，各自为政</td><td data-label="索引组织表（InnoDB）">主键树的叶子页就是数据页，物理上不可分割</td></tr></tbody></table></div><p>这个选择有一个现成的类比：文件系统的目录项找到 inode，再经间接块找到数据块，是多次间接寻址；InnoDB 押的是内联——对「按主键取行」这个最高频操作，找到索引项即找到数据，少一跳 IO 就是巨大的赢面。</p>
+<div class="callout tone-violet">
+      <span class="ic">🌳</span>
+      <div><p>这是全文的脊柱：<mark class="mk-blue">索引即数据</mark>。聚簇索引、二级索引、回表、覆盖索引、主键宽度税，
+全是这一刀在不同视角下的投影。理解了它，后面的名词不再是孤立术语。</p>
+</div>
+    </div><h3 id="聚簇索引主键就是数据本身">聚簇索引：主键就是数据本身</h3>
+<p>「整张表长在主键 B+ 树上」有个正式名字：<strong>聚簇索引</strong>。聚簇索引是存储行数据的那棵 B+ 树，有主键时通常就等同主键。</p>
+<p>那没有主键的表怎么办？InnoDB 的回退规则是一条决策链，每一步都在凑同一个硬条件——<strong>键必须唯一且非空</strong>，因为数据只能按一种键物理排一次：</p>
+<div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;pk&quot;,&quot;to&quot;:&quot;uniq&quot;,&quot;label&quot;:&quot;没有&quot;},{&quot;from&quot;:&quot;uniq&quot;,&quot;to&quot;:&quot;gen&quot;,&quot;label&quot;:&quot;也没有&quot;}]">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-green" data-id="pk">
+              
+              
+              <b>有 PRIMARY KEY？</b>
+              <small>用它做聚簇索引</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-blue" data-id="uniq">
+              
+              
+              <b>第一个全列 NOT NULL 的 UNIQUE 索引</b>
+              <small>索引键不能有 NULL，否则「唯一」名存实亡</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-amber" data-id="gen">
+              
+              
+              <b>都没有 → 隐藏的 GEN_CLUST_INDEX</b>
+              <small>6 字节单调递增 row id，行按插入顺序排</small>
+            </div></div></div>
+      
+    </div><p>两个推论直接从物理结构掉出来：</p>
+<ul>
+<li><strong>每张表有且只有一个聚簇索引。</strong> 行数据只能有一种物理排列顺序，第二个「聚簇」无处安放。「再加一个聚簇索引」在 InnoDB 里根本不存在。</li>
+<li><strong>主键最好在建表时就定好。</strong> 事后 <code>ALTER</code> 改主键等于把整张表按新键重排一遍，大表上是一次代价高昂的全表重建；依赖隐藏 row id 的表，后续任何主键变更都是在为当年的缺省补税。</li>
+</ul>
+<p>顺带澄清一个常见混淆：聚簇索引和主键<strong>通常等同但不是同一概念</strong>。有主键时，主键那棵树担任聚簇索引；没主键时，聚簇索引仍然存在（按回退规则产生）。聚簇索引是「存数据的树」这个角色，主键是扮演这个角色最常见的人选。</p>
+<h2 id="两棵树二级索引为什么存主键值"><span class="num">02</span>两棵树：二级索引为什么存主键值</h2>
+<p>主键之外的索引叫<strong>二级索引</strong>。它也是一棵独立的 B+ 树，但叶子存的是「索引列值 + 主键值」，不是完整行。为什么这样设计，回表是什么，宽度税收在哪里？下面这张整体图把两棵树放在同一张地图上。</p>
+<p>B+ 树本身怎么工作、一次页读取要经过哪些结构，<a href="../innodb-index-visual/">InnoDB 索引：一条查询的页读取旅程</a>已经讲过，本篇默认你知道「树越矮、定位越快」这一件事。</p>
+<figure class="archfig" data-arch data-pano data-parts='{"q0":{"label":"SELECT * FROM users WHERE id = 1","sub":"主键等值 · 最高频的查法","detail":"主键查询根本不碰二级索引树——==聚簇索引本身就是数据==，从根走到叶，叶子里躺的就是完整行。"},"q1":{"label":"SELECT * FROM users WHERE name = &#39;Jones&#39;","sub":"要整行 → 先查 idx_name，再回表","detail":"idx_name 只能告诉你「谁叫 Jones、主键是几」。要整行，==第二趟树躲不掉==——除非查询只要的列恰好都在叶子里。"},"q2":{"label":"SELECT name FROM users WHERE name = &#39;Jones&#39;","sub":"只要 name → 叶子里就有","detail":"这条查询在二级树上就地取值直接返回，==那条回表边根本不用走==——这就是覆盖索引（§03）。"},"opt":{"label":"优化器","sub":"挑一棵树，或干脆全表扫","detail":"同一条查询可能有三条路：聚簇树、二级树、全表扫描。优化器按代价挑——==「没走索引」不一定是坏事==（§06）。"},"sec_root":{"label":"idx_name · 根 / 内部页","sub":"只存 name 分隔键 + 页号","detail":"导航层，和聚簇树的内部页一样只管指路。区别在叶子存什么。"},"sec_leaf":{"label":"idx_name · 叶子页","sub":"Jones→1 · Smith→3 · 每条都带主键","detail":"每条记录 = 索引列值 + 主键值。==主键值是行定位的唯一线索==，也是宽度税的计税依据。主键有重复时它还兼任次级排序键——索引 (name) 实际等价于 (name, 主键)。"},"tax":{"label":"主键宽度税","sub":"主键宽 4 倍，二级索引每条胖 4 倍","detail":"每个二级索引的每条记录都复制一份主键。8 字节的 BIGINT 与 32 字节的 UUID，==每个二级索引的体积差 4 倍==。"},"pk_root":{"label":"聚簇树 · 根 / 内部页","sub":"主键分隔键 + 页号","detail":"回表就是从这里重新进树：拿二级索引给的主键值，按主键再走一遍 B+ 树。"},"pk_leaf":{"label":"聚簇树 · 叶子页 = 数据页","sub":"完整行 {id:1, name:&#39;Jones&#39;, …} 按主键有序","detail":"==索引页就是数据页==，没有第二个「数据区」。整张表按主键物理排序，这是「聚簇」二字的含义。"},"autoinc":{"label":"短主键 + 自增","sub":"新行总插最右端 · 页分裂少","detail":"自增主键让新行永远插在聚簇树最右端，写集中在少数热页上；随机主键（UUID）把插入点撒满全树，==页分裂频发==。"}}' data-anchors='[{"part":"q1","label":"一条查询"},{"part":"sec_leaf","label":"二级索引的叶子"},{"part":"pk_leaf","label":"表数据本身"},{"part":"tax","label":"主键宽度税"}]' data-tours='[{"id":"pk","label":"主键查询：一跳直达","steps":[{"at":["q0","opt"],"text":"WHERE id=1 的最高频查询，优化器==直接选聚簇树==，二级索引完全不参与。"},{"at":["pk_root","pk_leaf"],"text":"主键从根走到叶，==叶子里躺的就是完整行==——索引页=数据页，没有第二个「数据区」。"}]},{"id":"lookup","label":"二级索引 + 回表：两棵树各走一趟","steps":[{"at":["q1","opt"],"text":"WHERE name=&#39;Jones&#39; 要整行——idx_name 顶多告诉你谁叫 Jones。"},{"at":["sec_root","sec_leaf"],"text":"在 idx_name 上二分定位，叶子里拿到 ==Jones→1==：只有主键值，没有整行。"},{"at":["pk_root","pk_leaf"],"text":"==回表==：拿主键 1 回聚簇树再查一遍，才拿到完整行。==命中多少行，这一趟就走多少次==。"}]},{"id":"cover","label":"覆盖索引：第二趟免了","steps":[{"at":["q2","opt"],"text":"同一条 WHERE，只要 name 一个列。"},{"at":["sec_leaf"],"text":"name 就在叶子里，==就地取值直接返回==——那条回表边根本不用走。覆盖是查询与索引的匹配状态，不是一种可以 CREATE 出来的索引。"}]},{"id":"tax","label":"主键宽度税收在哪","steps":[{"at":["sec_leaf","tax"],"text":"每条二级记录都复制一份主键：8B 的 BIGINT 与 32B 的 UUID，1 亿行 × 5 个二级索引差出 ==约 14GB== 纯冗余。"},{"at":["pk_leaf","autoinc"],"text":"聚簇树这一侧，自增主键让新行总插最右端，==页分裂少、写路径稳==——「短、自增」是结构逼出来的默认解。"}]}]'>
+      <svg viewBox="0 0 894 842" role="img" aria-labelledby="archify-diagram-title archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
+        <title id="archify-diagram-title">两棵树：一条查询在 InnoDB 里怎么找到行</title>
+        <desc id="archify-diagram-description">左列是查询入口；中列是二级索引树；右列是聚簇索引树——回表、覆盖、宽度税都长在这张图上</desc>
+        <!-- Definitions -->
+        <defs>
+          <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-default" />
+          </marker>
+          <marker id="arrowhead-emphasis" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-emphasis" />
+          </marker>
+          <marker id="arrowhead-security" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-security" />
+          </marker>
+          <marker id="arrowhead-dashed" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-dashed" />
+          </marker>
+          <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+            <path d="M 40 0 L 0 0 0 40" class="c-grid" stroke-width="0.5"/>
+          </pattern>
+        </defs>
+
+        <!-- Background Grid -->
+        <rect width="100%" height="100%" fill="url(#grid)" />
+
+        <!-- Boundaries (behind everything) -->
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="0" x="112" y="372" width="296" height="402" rx="12" class="c-region" stroke-width="1"/>
+        <text x="120" y="390" class="t-cloud" font-size="9" font-weight="600">二级索引树 idx_name · 独立的一棵 B+ 树</text>
+
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="1" x="532" y="372" width="296" height="402" rx="12" class="c-region" stroke-width="1"/>
+        <text x="540" y="390" class="t-cloud" font-size="9" font-weight="600">聚簇索引树（主键）· 叶子页就是数据页</text>
+
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="2" x="86" y="346" width="768" height="428" rx="12" class="c-region" stroke-width="1"/>
+        <text x="94" y="364" class="t-cloud" font-size="9" font-weight="600">users.ibd · 表数据和它的索引在同一个文件里</text>
+
+        <!-- Connection paths (before components for correct z-order) -->
+        <path data-edge-from="q0" data-edge-to="opt" data-edge-label="提交" data-edge-key="0" data-edge-id="e1" data-composition-points="330,82;365,82;365,188;400,188" d="M 330 82 L 357 82 Q 365 82 365 90 L 365 180 Q 365 188 373 188 L 400 188" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="q1" data-edge-to="opt" data-edge-key="1" data-edge-id="e2" data-composition-points="330,202;400,202" d="M 330 202 L 400 202" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="q2" data-edge-to="opt" data-edge-key="2" data-edge-id="e3" data-composition-points="350,322;375,322;375,216;400,216" d="M 350 322 L 367 322 Q 375 322 375 314 L 375 224 Q 375 216 383 216 L 400 216" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="opt" data-edge-to="sec_root" data-edge-label="name → idx_name" data-edge-key="3" data-edge-id="e4" data-composition-points="503,234;503,376;260,376;260,400" d="M 503 234 L 503 368 Q 503 376 495 376 L 268 376 Q 260 376 260 384 L 260 400" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="opt" data-edge-to="pk_root" data-edge-label="id=1 → 直接用主键树" data-edge-key="4" data-edge-id="e5" data-composition-points="517,234;517,317;680,317;680,400" d="M 517 234 L 517 309 Q 517 317 525 317 L 672 317 Q 680 317 680 325 L 680 400" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="sec_root" data-edge-to="sec_leaf" data-edge-label="name 有序 · 二分定位" data-edge-key="5" data-edge-id="e6" data-composition-points="260,464;260,540" d="M 260 464 L 260 540" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="pk_root" data-edge-to="pk_leaf" data-edge-label="主键定位 · 一跳" data-edge-key="6" data-edge-id="e7" data-composition-points="680,464;680,540" d="M 680 464 L 680 540" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="sec_leaf" data-edge-to="pk_root" data-edge-label="回表 · 拿主键值再查一棵树" data-edge-key="7" data-edge-id="e8" data-composition-points="380,578;470,578;470,432;560,432" d="M 380 578 L 462 578 Q 470 578 470 570 L 470 440 Q 470 432 478 432 L 560 432" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="tax" data-edge-to="sec_leaf" data-edge-label="每条记录复制一份" data-edge-key="8" data-edge-id="e9" data-composition-points="260,690;260,616" d="M 260 690 L 260 616" class="a-dashed" stroke-width="1.5" marker-end="url(#arrowhead-dashed)"/>
+        <path data-edge-from="autoinc" data-edge-to="pk_leaf" data-edge-label="顺序插入" data-edge-key="9" data-edge-id="e10" data-composition-points="680,690;680,616" d="M 680 690 L 680 616" class="a-dashed" stroke-width="1.5" marker-end="url(#arrowhead-dashed)"/>
+
+        <!-- Components -->
+        <g id="node-q0" data-node-id="q0" data-node-label="SELECT * FROM users WHERE id = 1" tabindex="0" role="button" aria-label="Focus SELECT * FROM users WHERE id = 1, 主键等值 · 最高频的查法, Architecture component" aria-pressed="false" data-node-kind="external" data-node-sublabel="主键等值 · 最高频的查法" data-node-context="Architecture component">
+          <title>SELECT * FROM users WHERE id = 1 · 主键等值 · 最高频的查法 · Architecture component</title>
+          <rect x="60" y="50" width="270" height="64" rx="6" class="c-mask"/>
+          <rect x="60" y="50" width="270" height="64" rx="6" class="c-external" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="external" class="semantic-sigil s-external" transform="translate(66 56) scale(0.6875)">
+            <rect x="2.5" y="5" width="8.5" height="8" rx="1.5"/>
+            <path d="M8 2.5h5.5V8M13.5 2.5 7.5 8.5"/>
+          </g>
+          <text data-detail-anchor x="195" y="80" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">SELECT * FROM users WHERE id = 1</text>
+        <text data-detail="context" x="195" y="96" class="t-muted" font-size="9" text-anchor="middle">主键等值 · 最高频的查法</text>
+        </g>
+
+        <g id="node-q1" data-node-id="q1" data-node-label="SELECT * FROM users WHERE name = &#39;Jones&#39;" tabindex="0" role="button" aria-label="Focus SELECT * FROM users WHERE name = &#39;Jones&#39;, 要整行 → 先查 idx_name，再回表, Architecture component" aria-pressed="false" data-node-kind="external" data-node-sublabel="要整行 → 先查 idx_name，再回表" data-node-context="Architecture component">
+          <title>SELECT * FROM users WHERE name = &#39;Jones&#39; · 要整行 → 先查 idx_name，再回表 · Architecture component</title>
+          <rect x="60" y="170" width="270" height="64" rx="6" class="c-mask"/>
+          <rect x="60" y="170" width="270" height="64" rx="6" class="c-external" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="external" class="semantic-sigil s-external" transform="translate(66 176) scale(0.6875)">
+            <rect x="2.5" y="5" width="8.5" height="8" rx="1.5"/>
+            <path d="M8 2.5h5.5V8M13.5 2.5 7.5 8.5"/>
+          </g>
+          <text data-detail-anchor x="195" y="200" class="t-primary" font-size="10.9" font-weight="600" text-anchor="middle">SELECT * FROM users WHERE name = &#39;Jones&#39;</text>
+        <text data-detail="context" x="195" y="216" class="t-muted" font-size="9" text-anchor="middle">要整行 → 先查 idx_name，再回表</text>
+        </g>
+
+        <g id="node-q2" data-node-id="q2" data-node-label="SELECT name FROM users WHERE name = &#39;Jones&#39;" tabindex="0" role="button" aria-label="Focus SELECT name FROM users WHERE name = &#39;Jones&#39;, 只要 name → 叶子里就有, Architecture component" aria-pressed="false" data-node-kind="external" data-node-sublabel="只要 name → 叶子里就有" data-node-context="Architecture component">
+          <title>SELECT name FROM users WHERE name = &#39;Jones&#39; · 只要 name → 叶子里就有 · Architecture component</title>
+          <rect x="60" y="290" width="290" height="64" rx="6" class="c-mask"/>
+          <rect x="60" y="290" width="290" height="64" rx="6" class="c-external" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="external" class="semantic-sigil s-external" transform="translate(66 296) scale(0.6875)">
+            <rect x="2.5" y="5" width="8.5" height="8" rx="1.5"/>
+            <path d="M8 2.5h5.5V8M13.5 2.5 7.5 8.5"/>
+          </g>
+          <text data-detail-anchor x="205" y="320" class="t-primary" font-size="10.9" font-weight="600" text-anchor="middle">SELECT name FROM users WHERE name = &#39;Jones&#39;</text>
+        <text data-detail="context" x="205" y="336" class="t-muted" font-size="9" text-anchor="middle">只要 name → 叶子里就有</text>
+        </g>
+
+        <g id="node-opt" data-node-id="opt" data-node-label="优化器" tabindex="0" role="button" aria-label="Focus 优化器, 挑一棵树，或干脆全表扫, Architecture component" aria-pressed="false" data-node-kind="backend" data-node-sublabel="挑一棵树，或干脆全表扫" data-node-context="Architecture component">
+          <title>优化器 · 挑一棵树，或干脆全表扫 · Architecture component</title>
+          <rect x="400" y="170" width="220" height="64" rx="6" class="c-mask"/>
+          <rect x="400" y="170" width="220" height="64" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(406 176) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text data-detail-anchor x="510" y="200" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">优化器</text>
+        <text data-detail="context" x="510" y="216" class="t-muted" font-size="9" text-anchor="middle">挑一棵树，或干脆全表扫</text>
+        </g>
+
+        <g id="node-sec_root" data-node-id="sec_root" data-node-label="idx_name · 根 / 内部页" tabindex="0" role="button" aria-label="Focus idx_name · 根 / 内部页, 只存 name 分隔键 + 页号, users.ibd · 表数据和它的索引在同一个文件里 › 二级索引树 idx_name · 独立的一棵 B+ 树" aria-pressed="false" data-node-kind="database" data-node-sublabel="只存 name 分隔键 + 页号" data-node-context="users.ibd · 表数据和它的索引在同一个文件里 › 二级索引树 idx_name · 独立的一棵 B+ 树">
+          <title>idx_name · 根 / 内部页 · 只存 name 分隔键 + 页号 · users.ibd · 表数据和它的索引在同一个文件里 › 二级索引树 idx_name · 独立的一棵 B+ 树</title>
+          <rect x="140" y="400" width="240" height="64" rx="6" class="c-mask"/>
+          <rect x="140" y="400" width="240" height="64" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(146 406) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <text data-detail-anchor x="260" y="430" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">idx_name · 根 / 内部页</text>
+        <text data-detail="context" x="260" y="446" class="t-muted" font-size="9" text-anchor="middle">只存 name 分隔键 + 页号</text>
+        </g>
+
+        <g id="node-sec_leaf" data-node-id="sec_leaf" data-node-label="idx_name · 叶子页" tabindex="0" role="button" aria-label="Focus idx_name · 叶子页, Jones→1 · Smith→3 · 每条都带主键, users.ibd · 表数据和它的索引在同一个文件里 › 二级索引树 idx_name · 独立的一棵 B+ 树" aria-pressed="false" data-node-kind="database" data-node-sublabel="Jones→1 · Smith→3 · 每条都带主键" data-node-context="users.ibd · 表数据和它的索引在同一个文件里 › 二级索引树 idx_name · 独立的一棵 B+ 树">
+          <title>idx_name · 叶子页 · Jones→1 · Smith→3 · 每条都带主键 · users.ibd · 表数据和它的索引在同一个文件里 › 二级索引树 idx_name · 独立的一棵 B+ 树</title>
+          <rect x="140" y="540" width="240" height="76" rx="6" class="c-mask"/>
+          <rect x="140" y="540" width="240" height="76" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(146 546) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <text data-detail-anchor x="260" y="576" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">idx_name · 叶子页</text>
+        <text data-detail="context" x="260" y="592" class="t-muted" font-size="9" text-anchor="middle">Jones→1 · Smith→3 · 每条都带主键</text>
+        </g>
+
+        <g id="node-tax" data-node-id="tax" data-node-label="主键宽度税" tabindex="0" role="button" aria-label="Focus 主键宽度税, 主键宽 4 倍，二级索引每条胖 4 倍, users.ibd · 表数据和它的索引在同一个文件里 › 二级索引树 idx_name · 独立的一棵 B+ 树" aria-pressed="false" data-node-kind="backend" data-node-sublabel="主键宽 4 倍，二级索引每条胖 4 倍" data-node-context="users.ibd · 表数据和它的索引在同一个文件里 › 二级索引树 idx_name · 独立的一棵 B+ 树">
+          <title>主键宽度税 · 主键宽 4 倍，二级索引每条胖 4 倍 · users.ibd · 表数据和它的索引在同一个文件里 › 二级索引树 idx_name · 独立的一棵 B+ 树</title>
+          <rect x="140" y="690" width="240" height="64" rx="6" class="c-mask"/>
+          <rect x="140" y="690" width="240" height="64" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(146 696) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text data-detail-anchor x="260" y="720" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">主键宽度税</text>
+        <text data-detail="context" x="260" y="736" class="t-muted" font-size="9" text-anchor="middle">主键宽 4 倍，二级索引每条胖 4 倍</text>
+        </g>
+
+        <g id="node-pk_root" data-node-id="pk_root" data-node-label="聚簇树 · 根 / 内部页" tabindex="0" role="button" aria-label="Focus 聚簇树 · 根 / 内部页, 主键分隔键 + 页号, users.ibd · 表数据和它的索引在同一个文件里 › 聚簇索引树（主键）· 叶子页就是数据页" aria-pressed="false" data-node-kind="database" data-node-sublabel="主键分隔键 + 页号" data-node-context="users.ibd · 表数据和它的索引在同一个文件里 › 聚簇索引树（主键）· 叶子页就是数据页">
+          <title>聚簇树 · 根 / 内部页 · 主键分隔键 + 页号 · users.ibd · 表数据和它的索引在同一个文件里 › 聚簇索引树（主键）· 叶子页就是数据页</title>
+          <rect x="560" y="400" width="240" height="64" rx="6" class="c-mask"/>
+          <rect x="560" y="400" width="240" height="64" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(566 406) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <text data-detail-anchor x="680" y="430" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">聚簇树 · 根 / 内部页</text>
+        <text data-detail="context" x="680" y="446" class="t-muted" font-size="9" text-anchor="middle">主键分隔键 + 页号</text>
+        </g>
+
+        <g id="node-pk_leaf" data-node-id="pk_leaf" data-node-label="聚簇树 · 叶子页 = 数据页" tabindex="0" role="button" aria-label="Focus 聚簇树 · 叶子页 = 数据页, 完整行 {id:1, name:&#39;Jones&#39;, …} 按主键有序, users.ibd · 表数据和它的索引在同一个文件里 › 聚簇索引树（主键）· 叶子页就是数据页" aria-pressed="false" data-node-kind="database" data-node-sublabel="完整行 {id:1, name:&#39;Jones&#39;, …} 按主键有序" data-node-context="users.ibd · 表数据和它的索引在同一个文件里 › 聚簇索引树（主键）· 叶子页就是数据页">
+          <title>聚簇树 · 叶子页 = 数据页 · 完整行 {id:1, name:&#39;Jones&#39;, …} 按主键有序 · users.ibd · 表数据和它的索引在同一个文件里 › 聚簇索引树（主键）· 叶子页就是数据页</title>
+          <rect x="560" y="540" width="240" height="76" rx="6" class="c-mask"/>
+          <rect x="560" y="540" width="240" height="76" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(566 546) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <text data-detail-anchor x="680" y="576" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">聚簇树 · 叶子页 = 数据页</text>
+        <text data-detail="context" x="680" y="592" class="t-muted" font-size="9" text-anchor="middle">完整行 {id:1, name:&#39;Jones&#39;, …} 按主键有序</text>
+        </g>
+
+        <g id="node-autoinc" data-node-id="autoinc" data-node-label="短主键 + 自增" tabindex="0" role="button" aria-label="Focus 短主键 + 自增, 新行总插最右端 · 页分裂少, users.ibd · 表数据和它的索引在同一个文件里 › 聚簇索引树（主键）· 叶子页就是数据页" aria-pressed="false" data-node-kind="backend" data-node-sublabel="新行总插最右端 · 页分裂少" data-node-context="users.ibd · 表数据和它的索引在同一个文件里 › 聚簇索引树（主键）· 叶子页就是数据页">
+          <title>短主键 + 自增 · 新行总插最右端 · 页分裂少 · users.ibd · 表数据和它的索引在同一个文件里 › 聚簇索引树（主键）· 叶子页就是数据页</title>
+          <rect x="560" y="690" width="240" height="64" rx="6" class="c-mask"/>
+          <rect x="560" y="690" width="240" height="64" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(566 696) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text data-detail-anchor x="680" y="720" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">短主键 + 自增</text>
+        <text data-detail="context" x="680" y="736" class="t-muted" font-size="9" text-anchor="middle">新行总插最右端 · 页分裂少</text>
+        </g>
+
+        <!-- Connection labels -->
+        <g data-detail="context" data-edge-from="q0" data-edge-to="opt" data-edge-label="提交" data-edge-key="0" data-edge-id="e1">
+          <rect x="350" y="115" width="30" height="14" rx="3" class="c-mask"/>
+          <text x="365" y="125" class="t-muted" font-size="8" text-anchor="middle">提交</text>
+        </g>
+
+
+        <g data-detail="context" data-edge-from="opt" data-edge-to="sec_root" data-edge-label="name → idx_name" data-edge-key="3" data-edge-id="e4">
+          <rect x="340.5" y="356" width="82" height="14" rx="3" class="c-mask"/>
+          <text x="381.5" y="366" class="t-muted" font-size="8" text-anchor="middle">name → idx_name</text>
+        </g>
+        <g data-detail="context" data-edge-from="opt" data-edge-to="pk_root" data-edge-label="id=1 → 直接用主键树" data-edge-key="4" data-edge-id="e5">
+          <rect x="547.9" y="297" width="101.2" height="14" rx="3" class="c-mask"/>
+          <text x="598.5" y="307" class="t-muted" font-size="8" text-anchor="middle">id=1 → 直接用主键树</text>
+        </g>
+        <g data-detail="context" data-edge-from="sec_root" data-edge-to="sec_leaf" data-edge-label="name 有序 · 二分定位" data-edge-key="5" data-edge-id="e6">
+          <rect x="207" y="468" width="106" height="14" rx="3" class="c-mask"/>
+          <text x="260" y="478" class="t-muted" font-size="8" text-anchor="middle">name 有序 · 二分定位</text>
+        </g>
+        <g data-detail="context" data-edge-from="pk_root" data-edge-to="pk_leaf" data-edge-label="主键定位 · 一跳" data-edge-key="6" data-edge-id="e7">
+          <rect x="639" y="468" width="82" height="14" rx="3" class="c-mask"/>
+          <text x="680" y="478" class="t-muted" font-size="8" text-anchor="middle">主键定位 · 一跳</text>
+        </g>
+        <g data-detail="context" data-edge-from="sec_leaf" data-edge-to="pk_root" data-edge-label="回表 · 拿主键值再查一棵树" data-edge-key="7" data-edge-id="e8">
+          <rect x="405" y="485" width="130" height="14" rx="3" class="c-mask"/>
+          <text x="470" y="495" class="t-muted" font-size="8" text-anchor="middle">回表 · 拿主键值再查一棵树</text>
+        </g>
+        <g data-detail="context" data-edge-from="tax" data-edge-to="sec_leaf" data-edge-label="每条记录复制一份" data-edge-key="8" data-edge-id="e9">
+          <rect x="216.6" y="670" width="86.8" height="14" rx="3" class="c-mask"/>
+          <text x="260" y="680" class="t-messagebus" font-size="8" text-anchor="middle">每条记录复制一份</text>
+        </g>
+        <g data-detail="context" data-edge-from="autoinc" data-edge-to="pk_leaf" data-edge-label="顺序插入" data-edge-key="9" data-edge-id="e10">
+          <rect x="655.8" y="670" width="48.4" height="14" rx="3" class="c-mask"/>
+          <text x="680" y="680" class="t-messagebus" font-size="8" text-anchor="middle">顺序插入</text>
+        </g>
+
+        <!-- Legend -->
+        <g data-legend data-legend-bridge>
+          <text x="40" y="806" class="t-primary" font-size="12" font-weight="650">Legend</text>
+          <g data-legend-semantic-kind="backend" data-legend-kind="backend" data-legend-label="机制 / 选择" data-legend-x="40" data-legend-baseline="826" data-legend-width="98">
+            <rect x="40" y="817" width="16" height="10" rx="2.5" class="c-backend" stroke-width="1"/>
+            <text x="62" y="826" class="t-muted" font-size="10" font-weight="500">机制 / 选择</text>
+          </g>
+          <g data-legend-semantic-kind="database" data-legend-kind="database" data-legend-label="B+ 树页" data-legend-x="160" data-legend-baseline="826" data-legend-width="78">
+            <rect x="160" y="817" width="16" height="10" rx="2.5" class="c-database" stroke-width="1"/>
+            <text x="182" y="826" class="t-muted" font-size="10" font-weight="500">B+ 树页</text>
+          </g>
+          <g data-legend-semantic-kind="external" data-legend-kind="external" data-legend-label="查询" data-legend-x="260" data-legend-baseline="826" data-legend-width="63">
+            <rect x="260" y="817" width="16" height="10" rx="2.5" class="c-external" stroke-width="1"/>
+            <text x="282" y="826" class="t-muted" font-size="10" font-weight="500">查询</text>
+          </g>
+        </g>
+      </svg>
+      <figcaption>左列是查询入口，中列是二级索引树，右列是聚簇索引树。回表发生在两棵树之间的那条边上；覆盖查询就是<mark class="mk-blue">不走那条边</mark>；主键宽度税长在二级树叶子的每一条记录里。</figcaption>
+      <div class="pano-ui"></div>
+      <p class="arch-hint"><span class="idle">点头上的任意一个框看它的关系；或者从下面的「我熟悉」进去</span><span class="focused">再点一次空白处取消</span></p>
+    </figure><p><strong>为什么存主键值而不存行指针？</strong> 看看存行指针会发生什么：聚簇索引的叶子在页分裂、行迁移时物理位置会变，行每搬一次家，所有二级索引都得跟着改一遍——一笔看不见但持续在付的维护税，漏改就是数据损坏。存主键值则完全免疫：主键终身不变，行怎么搬，二级索引都不用动。</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>二级索引的叶子里放什么</th><th>存物理行指针</th><th>存主键值（InnoDB 的选择）</th></tr></thead><tbody><tr><th>行迁移时</th><td data-label="存物理行指针">指针失效，所有二级索引跟着改</td><td data-label="存主键值（InnoDB 的选择）">主键终身不变，引用不用动</td></tr><tr><th>写入成本</th><td data-label="存物理行指针">每次页分裂都要维护全部索引</td><td data-label="存主键值（InnoDB 的选择）">只多复制一份小主键</td></tr><tr><th>类比</th><td data-label="存物理行指针">用文件偏移量引用对象</td><td data-label="存主键值（InnoDB 的选择）"><mark class="mk-blue">git 用 content hash 引用对象</mark>，内容移动引用不失效</td></tr><tr><th>代价</th><td data-label="存物理行指针">——</td><td data-label="存主键值（InnoDB 的选择）">读多走一趟树（回表）</td></tr></tbody></table></div><p>存完整行也不行——那等于把表复制 N 份（N 个二级索引），写入成本爆炸。存主键值是<strong>写放大与读回表之间的平衡点</strong>：写入只多复制一份小主键，读取多跑一趟树。它还带来一个连带好处：二级索引叶子更小，同样的 16KB 页能装更多条记录，<mark class="mk-blue">二级索引树本身更矮</mark>，遍历更快。</p>
+<h3 id="主键宽度税短主键自增主键是结构逼出来的">主键宽度税：短主键、自增主键是结构逼出来的</h3>
+<p>机制直接给出一条成本公式：<strong>主键宽度税 = 主键宽度 × 二级索引数量 × 行数</strong>。官方原话：&quot;If the primary key is long, the secondary indexes use more space&quot;——这不是风格建议，是存储成本的直接换算。</p>
+<div class="cards" data-cols="3"><div class="ccard tone-green">
+          <span class="tag tone-green">8 字节</span>
+          <h4>BIGINT 主键</h4>
+          <p>短、自增，是默认最优解。</p>
+          
+          <pre>每条二级记录复制 8B</pre>
+        </div><div class="ccard tone-amber">
+          <span class="tag tone-amber">32~36 字节</span>
+          <h4>UUID 主键</h4>
+          <p>二级索引体积直接涨 4 倍，缓冲池被挤占，备份变大。</p>
+          
+          <pre>每条二级记录复制 32B+</pre>
+        </div><div class="ccard tone-red">
+          <span class="tag tone-red">算一遍账</span>
+          <h4>一亿行 × 5 个二级索引</h4>
+          <p>这笔税不写在任何账单里，实打实变成磁盘占用和缓存压力。</p>
+          
+          <pre>(36 − 8) B × 10⁸ × 5 ≈ 14 GB</pre>
+        </div></div><p>自增主键的第二层好处在<strong>插入位置</strong>：新行永远插在聚簇索引最右端，最后一页持续被填满再分裂，写集中在少数热页上，缓存友好；UUID 随机主键把插入点撒满全树，页分裂频发，同样的写入量 IO 模式劣化一个数量级。业务确实需要全局唯一时，常见的折中是<strong>有序 UUID</strong>（时间戳打头）：保住唯一性，又让插入近似顺序。主键设计是在唯一性、顺序性、宽度三个变量里找平衡——InnoDB 的结构已经把平衡点压到了「短、自增」这一端。</p>
+<p>还有一条容易被忽略的推论：<strong>二级索引里的主键值参与排序</strong>。索引列有重复值时（name 相同的多行），InnoDB 靠叶子里的主键值做次级排序，保证记录全序——单列索引 (name) 实际等价于 (name, 主键)。主键不只是顺带携带，还悄悄充当了索引的最终排序键。</p>
+<h2 id="覆盖索引把回表这一步省掉"><span class="num">03</span>覆盖索引：把回表这一步省掉</h2>
+<p>回表不是一次性的，是<strong>每命中一行回一次</strong>。二级索引每命中一行，就要额外走一趟聚簇索引树：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>命中行数</th><th>回表代价</th><th>后果</th></tr></thead><tbody><tr><th>命中 1 行</th><td data-label="回表代价">1 次回表</td><td data-label="后果">可忽略</td></tr><tr><th>命中 100 行</th><td data-label="回表代价">100 次回表</td><td data-label="后果">开始能感觉到</td></tr><tr><th>命中 1 万行</th><td data-label="回表代价">1 万次随机 IO 风暴</td><td data-label="后果"><mark class="mk-blue">优化器宁可全表顺序扫</mark>——顺序读吞吐高一个数量级</td></tr></tbody></table></div><p>假设一次二级索引定位 1ms、一次回表 1ms（都按磁盘随机读算），命中 1000 行的查询就是 1ms 定位加 1000ms 回表。这就是为什么有些查询走了索引反而更慢：索引帮你把行定位了，回表又把省下的 IO 加倍还了回去。</p>
+<p>先纠正一个最常见的误解：</p>
+<div class="callout tone-red">
+      <span class="ic">⚠</span>
+      <div><p><mark class="mk-blue">覆盖索引不是一种新的索引类型。</mark>它是「某个查询恰好被某个现有索引完全满足」的
+运行时状态——索引还是那个普通索引，只是这次查询要的列全在树里。
+同一个索引，对查询 A 是覆盖索引，对查询 B 就不是。<mark class="mk-blue">覆盖是查询与索引之间的匹配关系，不是索引自身的属性。</mark></p>
+</div>
+    </div><h3 id="判定三类列全在同一个索引里">判定：三类列全在同一个索引里</h3>
+<p>判定标准一句话：这个查询用到的全部列都在索引树里，就算覆盖。展开成三类：<strong>SELECT 的列、WHERE 过滤的列、ORDER BY 排序的列</strong>，三者全在同一个索引里才算覆盖。官方最小示例：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-sql">-- 假设有索引 (key_part1, key_part3)
+SELECT key_part3 FROM tbl_name WHERE key_part1 = 1;
+-- key_part1 用于定位，key_part3 就在索引树里 → 覆盖，无回表
+
+SELECT key_part2 FROM tbl_name WHERE key_part1 = 1;
+-- key_part2 不在树里 → 必须回表 → 不覆盖
+</code></pre></div>
+<p>两条查询的差别只有一列，结论天差地别。WHERE 列有<strong>两重身份</strong>：既是定位器（不在索引里则索引连用都用不上），又是覆盖判定的参与者。实践里最常见的破坏者是 <code>SELECT *</code>——除非索引恰好包含所有列，否则几乎不可能覆盖；想吃覆盖红利，就得精确列出所需列。</p>
+<p>InnoDB 还有一顿<strong>免费午餐</strong>：二级索引叶子天然携带主键列。所以 <code>SELECT id FROM t WHERE name='Jones'</code> 这类查询自动被覆盖——主键就躺在叶子里，回表查它自己纯属多余。<code>SELECT id, name FROM t WHERE name='Jones'</code> 同样覆盖。评估一个索引能覆盖哪些查询时，永远可以把主键列算进「索引已含列」清单。很多「只取 id」的查询 EXPLAIN 出来是 Using index，不是谁特意设计了覆盖索引，是 InnoDB 白送的。</p>
+<p>覆盖生效与否，EXPLAIN 的 Extra 字段会说话：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>Extra 里的值</th><th>含义</th><th>是不是覆盖</th></tr></thead><tbody><tr><th>Using index</th><td data-label="含义">纯从索引树取值，无回表</td><td data-label="是不是覆盖"><mark class="mk-blue">是</mark></td></tr><tr><th>Using index condition</th><td data-label="含义">ICP：部分条件下推到索引层先过滤</td><td data-label="是不是覆盖">不是——仍可能回表，排查时最常被读反的一行</td></tr><tr><th>（空）</th><td data-label="含义">走了索引但取了别的列</td><td data-label="是不是覆盖">不是——最普通的「走索引 + 回表」</td></tr></tbody></table></div><p>最后一层是权衡：为了覆盖某查询把一堆列塞进联合索引，会撑大索引、拖慢写入。官方也提醒过多索引损害性能。原则是在满足查询需求的前提下最小化列数。覆盖索引是甜点不是主食：高频查询值得专门设计，冷查询别为它扩张索引宽度；折中做法是只把「高频查询真正要的列」追加到已有索引尾部，追加一列的边际成本远低于新建一棵树。动手之前先用 EXPLAIN 盘点现有索引——你手里已有的索引可能早就覆盖了一批查询，只是没用精确列名去查。</p>
+<h2 id="最左前缀排序数组的直接推论"><span class="num">04</span>最左前缀：排序数组的直接推论</h2>
+<p>讲最左前缀之前，先建立官方文档里最好的心智模型：<strong>多列索引可以看作一个排序数组，每行的值 = 各索引列值按顺序拼接</strong>。下面这张图把它画出来：整体按第一列有序，第一列相同的组内再按第二列有序。</p>
+<figure class="archfig" data-arch data-pano data-parts='{"w1":{"label":"WHERE last_name = &#39;Jones&#39;","sub":"等值 · 第一列就能定位","detail":"第一列全局有序，==二分直接命中一个连续区块==。"},"w3":{"label":"…AND first_name >= &#39;M&#39; AND < &#39;N&#39;","sub":"接在 last_name=&#39;Jones&#39; 后面 · 能用","detail":"等值把范围收进区块之后，==段内第二列也有序==，范围可以继续收窄。范围用在最后一列没事。"},"c1":{"label":"Jones|John","sub":"排序数组的一格","detail":"值 = 两列拼接：Jones|John。==整体看第一列升序==。"},"c2":{"label":"Jones|Jon","sub":"排序数组的一格","detail":"和 c1 同组。==组内按第二列升序==：John < Jon。"},"c3":{"label":"Smith|Adam","sub":"排序数组的一格","detail":"换了第一列，==第二列重新开始排==——Adam 排在 Bob 前面，但和 Jon 之间没有大小关系可言。"},"c4":{"label":"Smith|Bob","sub":"排序数组的一格","detail":"同上。层级越深，==有序的范围越局部==。"},"c5":{"label":"Taylor|Ann","sub":"排序数组的一格","detail":"单独看第二列这一列的值：John、Jon、Adam、Bob、Ann——==全局乱序==。"},"sort":{"label":"ORDER BY a, b 的直觉","sub":"先按 a 排，a 相同再按 b","detail":"你写多字段排序时的直觉就是这个字典序。==数据库无非把这条 ORDER BY 物化到了磁盘结构里==——最左前缀不是数据库发明的怪规则，是字典序的自然推论。"},"w2":{"label":"WHERE first_name = &#39;John&#39;","sub":"只给第二列 · 不能用","detail":"John 散落在各组里，全局无序——==第一列没定，第二列的序就不存在==，只能逐条扫。"},"w4":{"label":"WHERE last_name=&#39;Jones&#39; OR first_name=&#39;John&#39;","sub":"两个起点 · 不能用","detail":"AND 是在同一个有序前缀上层层缩小；==OR 要两个互不相干的起点==，排序数组一次只能锚定一个连续区间。"},"merge":{"label":"Index Merge","sub":"各查一份再合并 · 另一条路","detail":"OR 时优化器可能转投 Index Merge：多个索引各查一份再合并，==而不是硬用这一棵树==。"}}' data-anchors='[{"part":"sort","label":"多字段排序（你天天在用）"},{"part":"w1","label":"一个能用的查询"},{"part":"c1","label":"排序数组的一格"}]' data-tours='[{"id":"eq","label":"等值怎么用上这个序","steps":[{"at":["w1","c1","c2"],"text":"last_name=&#39;Jones&#39; 在第一列上二分，==命中一个连续区块==——这是索引的资本。"},{"at":["c1","c2"],"text":"区块内第二列也有序（John < Jon），所以 ==AND first_name 还能继续收窄==。"}]},{"id":"broken","label":"只查第二列为什么废","steps":[{"at":["w2"],"text":"只给 first_name=&#39;John&#39;——跳过了第一列。"},{"at":["c1","c2","c3","c4","c5"],"text":"John 散落在各组里，==全局无序==，二分的前提没了——只能逐条扫。规则不是背的，是从排序结构直接看出来的。"}]},{"id":"orfail","label":"OR 为什么破坏前缀","steps":[{"at":["w4"],"text":"AND 层层缩小一个区间；==OR 同时要两个不相干的起点==，一次查找只能锚定一个连续区间。"},{"at":["merge"],"text":"优化器此时可能转投 ==Index Merge==——各查一份再合并。想深挖可查 Index Merge Optimization。"}]}]'>
+      <svg viewBox="0 0 1260 602" role="img" aria-labelledby="archify-diagram-title archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
+        <title id="archify-diagram-title">最左前缀：联合索引的「序」长什么样</title>
+        <desc id="archify-diagram-description">联合索引 (last_name, first_name) = 拼接后整体排序的数组；上面两个查询能用它，下面两个不能用——差别全在「序」够不够</desc>
+        <!-- Definitions -->
+        <defs>
+          <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-default" />
+          </marker>
+          <marker id="arrowhead-emphasis" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-emphasis" />
+          </marker>
+          <marker id="arrowhead-security" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-security" />
+          </marker>
+          <marker id="arrowhead-dashed" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-dashed" />
+          </marker>
+          <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+            <path d="M 40 0 L 0 0 0 40" class="c-grid" stroke-width="0.5"/>
+          </pattern>
+        </defs>
+
+        <!-- Background Grid -->
+        <rect width="100%" height="100%" fill="url(#grid)" />
+
+        <!-- Boundaries (behind everything) -->
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="0" x="84" y="224" width="352" height="106" rx="12" class="c-region" stroke-width="1"/>
+        <text x="92" y="242" class="t-cloud" font-size="9" font-weight="600">last_name=&#39;Jones&#39; 区块</text>
+
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="1" x="404" y="224" width="352" height="106" rx="12" class="c-region" stroke-width="1"/>
+        <text x="412" y="242" class="t-cloud" font-size="9" font-weight="600">last_name=&#39;Smith&#39; 区块</text>
+
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="2" x="724" y="224" width="192" height="106" rx="12" class="c-region" stroke-width="1"/>
+        <text x="732" y="242" class="t-cloud" font-size="9" font-weight="600">last_name=&#39;Taylor&#39; 区块</text>
+
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="3" x="60" y="200" width="880" height="130" rx="12" class="c-region" stroke-width="1"/>
+        <text x="68" y="218" class="t-cloud" font-size="9" font-weight="600">整体按 last_name 有序 · 组内再按 first_name 有序</text>
+
+        <!-- Connection paths (before components for correct z-order) -->
+        <path data-edge-from="w1" data-edge-to="c1" data-edge-label="二分定位到连续区块" data-edge-key="0" data-edge-id="f1" data-composition-points="205,124;205,187;180,187;180,250" d="M 205 124 L 205 179 Q 205 187 197 187 L 188 187 Q 180 187 180 195 L 180 250" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="w3" data-edge-to="c2" data-edge-label="再在段内用范围收窄" data-edge-key="1" data-edge-id="f2" data-composition-points="560,124;560,187;340,187;340,250" d="M 560 124 L 560 179 Q 560 187 552 187 L 348 187 Q 340 187 340 195 L 340 250" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="w2" data-edge-to="c1" data-edge-key="2" data-edge-id="f3" data-composition-points="252,470;252,390;180,390;180,310" d="M 252 470 L 252 398 Q 252 390 244 390 L 188 390 Q 180 390 180 382 L 180 310" class="a-dashed" stroke-width="1.5" marker-end="url(#arrowhead-dashed)"/>
+        <path data-edge-from="w2" data-edge-to="c2" data-edge-key="3" data-edge-id="f4" data-composition-points="266,470;266,390;340,390;340,310" d="M 266 470 L 266 398 Q 266 390 274 390 L 332 390 Q 340 390 340 382 L 340 310" class="a-dashed" stroke-width="1.5" marker-end="url(#arrowhead-dashed)"/>
+        <path data-edge-from="w2" data-edge-to="c3" data-edge-label="散落各处 → 只能逐条扫" data-edge-key="4" data-edge-id="f5" data-composition-points="280,470;280,390;500,390;500,310" d="M 280 470 L 280 398 Q 280 390 288 390 L 492 390 Q 500 390 500 382 L 500 310" class="a-dashed" stroke-width="1.5" marker-end="url(#arrowhead-dashed)"/>
+        <path data-edge-from="w2" data-edge-to="c4" data-edge-key="5" data-edge-id="f6" data-composition-points="294,470;294,390;660,390;660,310" d="M 294 470 L 294 398 Q 294 390 302 390 L 652 390 Q 660 390 660 382 L 660 310" class="a-dashed" stroke-width="1.5" marker-end="url(#arrowhead-dashed)"/>
+        <path data-edge-from="w2" data-edge-to="c5" data-edge-key="6" data-edge-id="f7" data-composition-points="308,470;308,390;820,390;820,310" d="M 308 470 L 308 398 Q 308 390 316 390 L 812 390 Q 820 390 820 382 L 820 310" class="a-dashed" stroke-width="1.5" marker-end="url(#arrowhead-dashed)"/>
+        <path data-edge-from="w4" data-edge-to="merge" data-edge-label="可能转投" data-edge-key="7" data-edge-id="f8" data-composition-points="860,502;960,502" d="M 860 502 L 960 502" class="a-dashed" stroke-width="1.5" marker-end="url(#arrowhead-dashed)"/>
+        <path data-edge-from="sort" data-edge-to="c5" data-edge-label="同一个字典序" data-edge-key="8" data-edge-id="f9" data-composition-points="980,280;890,280" d="M 980 280 L 890 280" class="a-dashed" stroke-width="1.5" marker-end="url(#arrowhead-dashed)"/>
+
+        <!-- Components -->
+        <g id="node-w1" data-node-id="w1" data-node-label="WHERE last_name = &#39;Jones&#39;" tabindex="0" role="button" aria-label="Focus WHERE last_name = &#39;Jones&#39;, 等值 · 第一列就能定位, Architecture component" aria-pressed="false" data-node-kind="external" data-node-sublabel="等值 · 第一列就能定位" data-node-context="Architecture component">
+          <title>WHERE last_name = &#39;Jones&#39; · 等值 · 第一列就能定位 · Architecture component</title>
+          <rect x="80" y="60" width="250" height="64" rx="6" class="c-mask"/>
+          <rect x="80" y="60" width="250" height="64" rx="6" class="c-external" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="external" class="semantic-sigil s-external" transform="translate(86 66) scale(0.6875)">
+            <rect x="2.5" y="5" width="8.5" height="8" rx="1.5"/>
+            <path d="M8 2.5h5.5V8M13.5 2.5 7.5 8.5"/>
+          </g>
+          <text data-detail-anchor x="205" y="90" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">WHERE last_name = &#39;Jones&#39;</text>
+        <text data-detail="context" x="205" y="106" class="t-muted" font-size="9" text-anchor="middle">等值 · 第一列就能定位</text>
+        </g>
+
+        <g id="node-w3" data-node-id="w3" data-node-label="…AND first_name &gt;= &#39;M&#39; AND &lt; &#39;N&#39;" tabindex="0" role="button" aria-label="Focus …AND first_name &gt;= &#39;M&#39; AND &lt; &#39;N&#39;, 接在 last_name=&#39;Jones&#39; 后面 · 能用, Architecture component" aria-pressed="false" data-node-kind="external" data-node-sublabel="接在 last_name=&#39;Jones&#39; 后面 · 能用" data-node-context="Architecture component">
+          <title>…AND first_name &gt;= &#39;M&#39; AND &lt; &#39;N&#39; · 接在 last_name=&#39;Jones&#39; 后面 · 能用 · Architecture component</title>
+          <rect x="400" y="60" width="320" height="64" rx="6" class="c-mask"/>
+          <rect x="400" y="60" width="320" height="64" rx="6" class="c-external" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="external" class="semantic-sigil s-external" transform="translate(406 66) scale(0.6875)">
+            <rect x="2.5" y="5" width="8.5" height="8" rx="1.5"/>
+            <path d="M8 2.5h5.5V8M13.5 2.5 7.5 8.5"/>
+          </g>
+          <text data-detail-anchor x="560" y="90" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">…AND first_name &gt;= &#39;M&#39; AND &lt; &#39;N&#39;</text>
+        <text data-detail="context" x="560" y="106" class="t-muted" font-size="9" text-anchor="middle">接在 last_name=&#39;Jones&#39; 后面 · 能用</text>
+        </g>
+
+        <g id="node-c1" data-node-id="c1" data-node-label="Jones|John" tabindex="0" role="button" aria-label="Focus Jones|John, ①, 整体按 last_name 有序 · 组内再按 first_name 有序 › last_name=&#39;Jones&#39; 区块" aria-pressed="false" data-node-kind="database" data-node-sublabel="①" data-node-context="整体按 last_name 有序 · 组内再按 first_name 有序 › last_name=&#39;Jones&#39; 区块">
+          <title>Jones|John · ① · 整体按 last_name 有序 · 组内再按 first_name 有序 › last_name=&#39;Jones&#39; 区块</title>
+          <rect x="110" y="250" width="140" height="60" rx="6" class="c-mask"/>
+          <rect x="110" y="250" width="140" height="60" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(116 256) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <text data-detail-anchor x="180" y="278" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">Jones|John</text>
+        <text data-detail="context" x="180" y="294" class="t-muted" font-size="9" text-anchor="middle">①</text>
+        </g>
+
+        <g id="node-c2" data-node-id="c2" data-node-label="Jones|Jon" tabindex="0" role="button" aria-label="Focus Jones|Jon, ②, 整体按 last_name 有序 · 组内再按 first_name 有序 › last_name=&#39;Jones&#39; 区块" aria-pressed="false" data-node-kind="database" data-node-sublabel="②" data-node-context="整体按 last_name 有序 · 组内再按 first_name 有序 › last_name=&#39;Jones&#39; 区块">
+          <title>Jones|Jon · ② · 整体按 last_name 有序 · 组内再按 first_name 有序 › last_name=&#39;Jones&#39; 区块</title>
+          <rect x="270" y="250" width="140" height="60" rx="6" class="c-mask"/>
+          <rect x="270" y="250" width="140" height="60" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(276 256) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <text data-detail-anchor x="340" y="278" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">Jones|Jon</text>
+        <text data-detail="context" x="340" y="294" class="t-muted" font-size="9" text-anchor="middle">②</text>
+        </g>
+
+        <g id="node-c3" data-node-id="c3" data-node-label="Smith|Adam" tabindex="0" role="button" aria-label="Focus Smith|Adam, ③, 整体按 last_name 有序 · 组内再按 first_name 有序 › last_name=&#39;Smith&#39; 区块" aria-pressed="false" data-node-kind="database" data-node-sublabel="③" data-node-context="整体按 last_name 有序 · 组内再按 first_name 有序 › last_name=&#39;Smith&#39; 区块">
+          <title>Smith|Adam · ③ · 整体按 last_name 有序 · 组内再按 first_name 有序 › last_name=&#39;Smith&#39; 区块</title>
+          <rect x="430" y="250" width="140" height="60" rx="6" class="c-mask"/>
+          <rect x="430" y="250" width="140" height="60" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(436 256) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <text data-detail-anchor x="500" y="278" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">Smith|Adam</text>
+        <text data-detail="context" x="500" y="294" class="t-muted" font-size="9" text-anchor="middle">③</text>
+        </g>
+
+        <g id="node-c4" data-node-id="c4" data-node-label="Smith|Bob" tabindex="0" role="button" aria-label="Focus Smith|Bob, ④, 整体按 last_name 有序 · 组内再按 first_name 有序 › last_name=&#39;Smith&#39; 区块" aria-pressed="false" data-node-kind="database" data-node-sublabel="④" data-node-context="整体按 last_name 有序 · 组内再按 first_name 有序 › last_name=&#39;Smith&#39; 区块">
+          <title>Smith|Bob · ④ · 整体按 last_name 有序 · 组内再按 first_name 有序 › last_name=&#39;Smith&#39; 区块</title>
+          <rect x="590" y="250" width="140" height="60" rx="6" class="c-mask"/>
+          <rect x="590" y="250" width="140" height="60" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(596 256) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <text data-detail-anchor x="660" y="278" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">Smith|Bob</text>
+        <text data-detail="context" x="660" y="294" class="t-muted" font-size="9" text-anchor="middle">④</text>
+        </g>
+
+        <g id="node-c5" data-node-id="c5" data-node-label="Taylor|Ann" tabindex="0" role="button" aria-label="Focus Taylor|Ann, ⑤, 整体按 last_name 有序 · 组内再按 first_name 有序 › last_name=&#39;Taylor&#39; 区块" aria-pressed="false" data-node-kind="database" data-node-sublabel="⑤" data-node-context="整体按 last_name 有序 · 组内再按 first_name 有序 › last_name=&#39;Taylor&#39; 区块">
+          <title>Taylor|Ann · ⑤ · 整体按 last_name 有序 · 组内再按 first_name 有序 › last_name=&#39;Taylor&#39; 区块</title>
+          <rect x="750" y="250" width="140" height="60" rx="6" class="c-mask"/>
+          <rect x="750" y="250" width="140" height="60" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(756 256) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <text data-detail-anchor x="820" y="278" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">Taylor|Ann</text>
+        <text data-detail="context" x="820" y="294" class="t-muted" font-size="9" text-anchor="middle">⑤</text>
+        </g>
+
+        <g id="node-sort" data-node-id="sort" data-node-label="ORDER BY a, b 的直觉" tabindex="0" role="button" aria-label="Focus ORDER BY a, b 的直觉, 先按 a 排，a 相同再按 b, Architecture component" aria-pressed="false" data-node-kind="backend" data-node-sublabel="先按 a 排，a 相同再按 b" data-node-context="Architecture component">
+          <title>ORDER BY a, b 的直觉 · 先按 a 排，a 相同再按 b · Architecture component</title>
+          <rect x="980" y="248" width="240" height="64" rx="6" class="c-mask"/>
+          <rect x="980" y="248" width="240" height="64" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(986 254) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text data-detail-anchor x="1100" y="278" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">ORDER BY a, b 的直觉</text>
+        <text data-detail="context" x="1100" y="294" class="t-muted" font-size="9" text-anchor="middle">先按 a 排，a 相同再按 b</text>
+        </g>
+
+        <g id="node-w2" data-node-id="w2" data-node-label="WHERE first_name = &#39;John&#39;" tabindex="0" role="button" aria-label="Focus WHERE first_name = &#39;John&#39;, 只给第二列 · 不能用, Architecture component" aria-pressed="false" data-node-kind="external" data-node-sublabel="只给第二列 · 不能用" data-node-context="Architecture component">
+          <title>WHERE first_name = &#39;John&#39; · 只给第二列 · 不能用 · Architecture component</title>
+          <rect x="140" y="470" width="280" height="64" rx="6" class="c-mask"/>
+          <rect x="140" y="470" width="280" height="64" rx="6" class="c-external" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="external" class="semantic-sigil s-external" transform="translate(146 476) scale(0.6875)">
+            <rect x="2.5" y="5" width="8.5" height="8" rx="1.5"/>
+            <path d="M8 2.5h5.5V8M13.5 2.5 7.5 8.5"/>
+          </g>
+          <text data-detail-anchor x="280" y="500" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">WHERE first_name = &#39;John&#39;</text>
+        <text data-detail="context" x="280" y="516" class="t-muted" font-size="9" text-anchor="middle">只给第二列 · 不能用</text>
+        </g>
+
+        <g id="node-w4" data-node-id="w4" data-node-label="WHERE last_name=&#39;Jones&#39; OR first_name=&#39;John&#39;" tabindex="0" role="button" aria-label="Focus WHERE last_name=&#39;Jones&#39; OR first_name=&#39;John&#39;, 两个起点 · 不能用, Architecture component" aria-pressed="false" data-node-kind="external" data-node-sublabel="两个起点 · 不能用" data-node-context="Architecture component">
+          <title>WHERE last_name=&#39;Jones&#39; OR first_name=&#39;John&#39; · 两个起点 · 不能用 · Architecture component</title>
+          <rect x="540" y="470" width="320" height="64" rx="6" class="c-mask"/>
+          <rect x="540" y="470" width="320" height="64" rx="6" class="c-external" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="external" class="semantic-sigil s-external" transform="translate(546 476) scale(0.6875)">
+            <rect x="2.5" y="5" width="8.5" height="8" rx="1.5"/>
+            <path d="M8 2.5h5.5V8M13.5 2.5 7.5 8.5"/>
+          </g>
+          <text data-detail-anchor x="700" y="500" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">WHERE last_name=&#39;Jones&#39; OR first_name=&#39;John&#39;</text>
+        <text data-detail="context" x="700" y="516" class="t-muted" font-size="9" text-anchor="middle">两个起点 · 不能用</text>
+        </g>
+
+        <g id="node-merge" data-node-id="merge" data-node-label="Index Merge" tabindex="0" role="button" aria-label="Focus Index Merge, 各查一份再合并 · 另一条路, Architecture component" aria-pressed="false" data-node-kind="backend" data-node-sublabel="各查一份再合并 · 另一条路" data-node-context="Architecture component">
+          <title>Index Merge · 各查一份再合并 · 另一条路 · Architecture component</title>
+          <rect x="960" y="470" width="230" height="64" rx="6" class="c-mask"/>
+          <rect x="960" y="470" width="230" height="64" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(966 476) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text data-detail-anchor x="1075" y="500" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">Index Merge</text>
+        <text data-detail="context" x="1075" y="516" class="t-muted" font-size="9" text-anchor="middle">各查一份再合并 · 另一条路</text>
+        </g>
+
+        <!-- Connection labels -->
+        <g data-detail="context" data-edge-from="w1" data-edge-to="c1" data-edge-label="二分定位到连续区块" data-edge-key="0" data-edge-id="f1">
+          <rect x="144.3" y="167" width="96.39999999999999" height="14" rx="3" class="c-mask"/>
+          <text x="192.5" y="177" class="t-muted" font-size="8" text-anchor="middle">二分定位到连续区块</text>
+        </g>
+        <g data-detail="context" data-edge-from="w3" data-edge-to="c2" data-edge-label="再在段内用范围收窄" data-edge-key="1" data-edge-id="f2">
+          <rect x="401.8" y="167" width="96.39999999999999" height="14" rx="3" class="c-mask"/>
+          <text x="450" y="177" class="t-muted" font-size="8" text-anchor="middle">再在段内用范围收窄</text>
+        </g>
+
+
+        <g data-detail="context" data-edge-from="w2" data-edge-to="c3" data-edge-label="散落各处 → 只能逐条扫" data-edge-key="4" data-edge-id="f5">
+          <rect x="334.6" y="394" width="110.8" height="14" rx="3" class="c-mask"/>
+          <text x="390" y="404" class="t-messagebus" font-size="8" text-anchor="middle">散落各处 → 只能逐条扫</text>
+        </g>
+
+
+        <g data-detail="context" data-edge-from="w4" data-edge-to="merge" data-edge-label="可能转投" data-edge-key="7" data-edge-id="f8">
+          <rect x="885.8" y="482" width="48.4" height="14" rx="3" class="c-mask"/>
+          <text x="910" y="492" class="t-messagebus" font-size="8" text-anchor="middle">可能转投</text>
+        </g>
+        <g data-detail="context" data-edge-from="sort" data-edge-to="c5" data-edge-label="同一个字典序" data-edge-key="8" data-edge-id="f9">
+          <rect x="901.2" y="304" width="67.6" height="14" rx="3" class="c-mask"/>
+          <text x="935" y="314" class="t-messagebus" font-size="8" text-anchor="middle">同一个字典序</text>
+        </g>
+
+        <!-- Legend -->
+        <g data-legend data-legend-bridge>
+          <text x="40" y="566" class="t-primary" font-size="12" font-weight="650">Legend</text>
+          <g data-legend-semantic-kind="backend" data-legend-kind="backend" data-legend-label="类比 / 另一条路" data-legend-x="40" data-legend-baseline="586" data-legend-width="118">
+            <rect x="40" y="577" width="16" height="10" rx="2.5" class="c-backend" stroke-width="1"/>
+            <text x="62" y="586" class="t-muted" font-size="10" font-weight="500">类比 / 另一条路</text>
+          </g>
+          <g data-legend-semantic-kind="database" data-legend-kind="database" data-legend-label="数组里的一格" data-legend-x="180" data-legend-baseline="586" data-legend-width="103">
+            <rect x="180" y="577" width="16" height="10" rx="2.5" class="c-database" stroke-width="1"/>
+            <text x="202" y="586" class="t-muted" font-size="10" font-weight="500">数组里的一格</text>
+          </g>
+          <g data-legend-semantic-kind="external" data-legend-kind="external" data-legend-label="查询" data-legend-x="305" data-legend-baseline="586" data-legend-width="63">
+            <rect x="305" y="577" width="16" height="10" rx="2.5" class="c-external" stroke-width="1"/>
+            <text x="327" y="586" class="t-muted" font-size="10" font-weight="500">查询</text>
+          </g>
+        </g>
+      </svg>
+      <figcaption>上面两个查询能用索引，下面两个不能用。差别不在写法好坏，在<mark class="mk-blue">序</mark>：这个数组只对从左开始的前缀有序。虚线扇出的那条，就是「序」不存在时唯一的办法——逐条扫。</figcaption>
+      <div class="pano-ui"></div>
+      <p class="arch-hint"><span class="idle">点头上的任意一个框看它的关系；或者从下面的「我熟悉」进去</span><span class="focused">再点一次空白处取消</span></p>
+    </figure><p>对照官方判定清单（索引 (last_name, first_name)）把「能 / 不能」背成结构，而不是背成条款：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>查询写法</th><th>能否用索引</th><th>原因</th></tr></thead><tbody><tr><th>WHERE last_name='Jones'</th><td data-label="能否用索引"><span class="tag tone-green">能</span></td><td data-label="原因">第一列即可定位</td></tr><tr><th>WHERE last_name='Jones' AND first_name='John'</th><td data-label="能否用索引"><span class="tag tone-green">能</span></td><td data-label="原因">两列连续前缀</td></tr><tr><th>WHERE last_name='Jones' AND first_name IN ('John','Jon')</th><td data-label="能否用索引"><span class="tag tone-green">能</span></td><td data-label="原因">first_name 在区间内枚举</td></tr><tr><th>WHERE last_name='Jones' AND first_name&gt;='M' AND first_name&lt;'N'</th><td data-label="能否用索引"><span class="tag tone-green">能</span></td><td data-label="原因">范围限定在同一 last_name 段内</td></tr><tr><th>WHERE first_name='John'</th><td data-label="能否用索引"><span class="tag tone-red">不能</span></td><td data-label="原因">跳过了 last_name</td></tr><tr><th>WHERE last_name='Jones' OR first_name='John'</th><td data-label="能否用索引"><span class="tag tone-red">不能</span></td><td data-label="原因">OR 破坏前缀</td></tr></tbody></table></div><p>一个高频误传顺手澄清：<code>WHERE first_name='John' AND last_name='Jones'</code>（条件顺序颠倒）<strong>同样能用</strong>——优化器会重排等值条件。能不能用看的是「列集合是否构成左前缀」，不是 WHERE 里的书写顺序。给 first_name 单独建索引当然也能服务只查 first_name 的查询，但那是另一棵树，和这棵联合索引无关。</p>
+<h3 id="范围列之后为什么断掉">范围列之后，为什么「断掉」</h3>
+<p>高频踩坑：索引 (a, b, c)，查询 <code>WHERE a=1 AND b&gt;10 AND c=5</code>：b 用了范围后，c 不再参与索引查找。物理原因和上面的「跳列」完全同构：</p>
+<figure class="archfig" data-arch data-pano data-parts='{"q":{"label":"WHERE a=1 AND b>10 AND c=5","sub":"索引 (a, b, c) · 三列条件","detail":"三列都有条件，==能参与索引定位的只有前两列==。"},"b1":{"label":"b = 1","sub":"c = 5","detail":"a=1 的区块里，b 全局有序：1, 5, 12, 20。"},"b2":{"label":"b = 5","sub":"c = 2","detail":"b 有序是==等值列一层层给出来的==。"},"b3":{"label":"b = 12","sub":"c = 8","detail":"b>10 命中连续区间 [12, 20]。==区间内 c 是 8, 1，乱序==——有序只到 b 为止。"},"b4":{"label":"b = 20","sub":"c = 1","detail":"同一段区间。c 的任何值都可能出现在任何位置，==没有排序保证==。"},"cut":{"label":"索引查找停在这里","sub":"区间内 c 乱序（8, 1）· 只能逐行过滤","detail":"==第一个范围列之后，索引列断掉==。c=5 仍会被执行，但降级成区间内逐行过滤，不是索引定位。"}}' data-anchors='[{"part":"q","label":"三列条件的查询"}]' data-tours='[{"id":"rangebreak","label":"三列是怎么断的","steps":[{"at":["b1","b2"],"text":"等值 a=1 把范围收进一个区块，区块里 b 有序：1, 5, 12, 20。"},{"at":["b3","b4"],"text":"b>10 命中一个连续区间——但==区间里 c 是 8, 1，乱序==。"},{"at":["cut"],"text":"引擎在第一个范围列之后停止用索引查找。==等值列没有这个问题==——等值把区间收成点，点上再往下找仍有确定顺序。"}]}]'>
+      <svg viewBox="0 0 750 542" role="img" aria-labelledby="archify-diagram-title archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
+        <title id="archify-diagram-title">范围列之后，索引为什么「断掉」</title>
+        <desc id="archify-diagram-description">索引 (a, b, c)，查询 a=1 AND b&gt;10 AND c=5：等值收成点，范围停在区间——区间里 c 乱序，索引只能帮到 b</desc>
+        <!-- Definitions -->
+        <defs>
+          <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-default" />
+          </marker>
+          <marker id="arrowhead-emphasis" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-emphasis" />
+          </marker>
+          <marker id="arrowhead-security" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-security" />
+          </marker>
+          <marker id="arrowhead-dashed" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-dashed" />
+          </marker>
+          <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+            <path d="M 40 0 L 0 0 0 40" class="c-grid" stroke-width="0.5"/>
+          </pattern>
+        </defs>
+
+        <!-- Background Grid -->
+        <rect width="100%" height="100%" fill="url(#grid)" />
+
+        <!-- Boundaries (behind everything) -->
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="0" x="92" y="262" width="236" height="212" rx="12" class="c-region" stroke-width="1"/>
+        <text x="100" y="280" class="t-cloud" font-size="9" font-weight="600">b &gt; 10 命中的连续区间 · 区间内 c 无序</text>
+
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="1" x="90" y="60" width="240" height="414" rx="12" class="c-region" stroke-width="1"/>
+        <text x="98" y="78" class="t-cloud" font-size="9" font-weight="600">a = 1 的区块（等值定位后，b 全局有序：1, 5, 12, 20）</text>
+
+        <!-- Connection paths (before components for correct z-order) -->
+        <path data-edge-from="q" data-edge-to="b3" data-edge-label="b&gt;10 从这里命中" data-edge-key="0" data-edge-id="g1" data-composition-points="430,212;365,212;365,315;300,315" d="M 430 212 L 373 212 Q 365 212 365 220 L 365 307 Q 365 315 357 315 L 300 315" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="b3" data-edge-to="cut" data-edge-key="1" data-edge-id="g2" data-composition-points="300,329;370,329;370,362;440,362" d="M 300 329 L 362 329 Q 370 329 370 337 L 370 354 Q 370 362 378 362 L 440 362" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="b4" data-edge-to="cut" data-edge-key="2" data-edge-id="g3" data-composition-points="300,422;575,422;575,394" d="M 300 422 L 567 422 Q 575 422 575 414 L 575 394" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+
+        <!-- Components -->
+        <g id="node-q" data-node-id="q" data-node-label="WHERE a=1 AND b&gt;10 AND c=5" tabindex="0" role="button" aria-label="Focus WHERE a=1 AND b&gt;10 AND c=5, 索引 (a, b, c) · 三列条件, Architecture component" aria-pressed="false" data-node-kind="external" data-node-sublabel="索引 (a, b, c) · 三列条件" data-node-context="Architecture component">
+          <title>WHERE a=1 AND b&gt;10 AND c=5 · 索引 (a, b, c) · 三列条件 · Architecture component</title>
+          <rect x="430" y="180" width="280" height="64" rx="6" class="c-mask"/>
+          <rect x="430" y="180" width="280" height="64" rx="6" class="c-external" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="external" class="semantic-sigil s-external" transform="translate(436 186) scale(0.6875)">
+            <rect x="2.5" y="5" width="8.5" height="8" rx="1.5"/>
+            <path d="M8 2.5h5.5V8M13.5 2.5 7.5 8.5"/>
+          </g>
+          <text data-detail-anchor x="570" y="210" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">WHERE a=1 AND b&gt;10 AND c=5</text>
+        <text data-detail="context" x="570" y="226" class="t-muted" font-size="9" text-anchor="middle">索引 (a, b, c) · 三列条件</text>
+        </g>
+
+        <g id="node-b1" data-node-id="b1" data-node-label="b = 1" tabindex="0" role="button" aria-label="Focus b = 1, c = 5, a = 1 的区块（等值定位后，b 全局有序：1, 5, 12, 20）" aria-pressed="false" data-node-kind="database" data-node-sublabel="c = 5" data-node-context="a = 1 的区块（等值定位后，b 全局有序：1, 5, 12, 20）">
+          <title>b = 1 · c = 5 · a = 1 的区块（等值定位后，b 全局有序：1, 5, 12, 20）</title>
+          <rect x="120" y="90" width="180" height="64" rx="6" class="c-mask"/>
+          <rect x="120" y="90" width="180" height="64" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(126 96) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <text data-detail-anchor x="210" y="120" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">b = 1</text>
+        <text data-detail="context" x="210" y="136" class="t-muted" font-size="9" text-anchor="middle">c = 5</text>
+        </g>
+
+        <g id="node-b2" data-node-id="b2" data-node-label="b = 5" tabindex="0" role="button" aria-label="Focus b = 5, c = 2, a = 1 的区块（等值定位后，b 全局有序：1, 5, 12, 20）" aria-pressed="false" data-node-kind="database" data-node-sublabel="c = 2" data-node-context="a = 1 的区块（等值定位后，b 全局有序：1, 5, 12, 20）">
+          <title>b = 5 · c = 2 · a = 1 的区块（等值定位后，b 全局有序：1, 5, 12, 20）</title>
+          <rect x="120" y="190" width="180" height="64" rx="6" class="c-mask"/>
+          <rect x="120" y="190" width="180" height="64" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(126 196) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <text data-detail-anchor x="210" y="220" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">b = 5</text>
+        <text data-detail="context" x="210" y="236" class="t-muted" font-size="9" text-anchor="middle">c = 2</text>
+        </g>
+
+        <g id="node-b3" data-node-id="b3" data-node-label="b = 12" tabindex="0" role="button" aria-label="Focus b = 12, c = 8, a = 1 的区块（等值定位后，b 全局有序：1, 5, 12, 20） › b &gt; 10 命中的连续区间 · 区间内 c 无序" aria-pressed="false" data-node-kind="database" data-node-sublabel="c = 8" data-node-context="a = 1 的区块（等值定位后，b 全局有序：1, 5, 12, 20） › b &gt; 10 命中的连续区间 · 区间内 c 无序">
+          <title>b = 12 · c = 8 · a = 1 的区块（等值定位后，b 全局有序：1, 5, 12, 20） › b &gt; 10 命中的连续区间 · 区间内 c 无序</title>
+          <rect x="120" y="290" width="180" height="64" rx="6" class="c-mask"/>
+          <rect x="120" y="290" width="180" height="64" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(126 296) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <text data-detail-anchor x="210" y="320" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">b = 12</text>
+        <text data-detail="context" x="210" y="336" class="t-muted" font-size="9" text-anchor="middle">c = 8</text>
+        </g>
+
+        <g id="node-b4" data-node-id="b4" data-node-label="b = 20" tabindex="0" role="button" aria-label="Focus b = 20, c = 1, a = 1 的区块（等值定位后，b 全局有序：1, 5, 12, 20） › b &gt; 10 命中的连续区间 · 区间内 c 无序" aria-pressed="false" data-node-kind="database" data-node-sublabel="c = 1" data-node-context="a = 1 的区块（等值定位后，b 全局有序：1, 5, 12, 20） › b &gt; 10 命中的连续区间 · 区间内 c 无序">
+          <title>b = 20 · c = 1 · a = 1 的区块（等值定位后，b 全局有序：1, 5, 12, 20） › b &gt; 10 命中的连续区间 · 区间内 c 无序</title>
+          <rect x="120" y="390" width="180" height="64" rx="6" class="c-mask"/>
+          <rect x="120" y="390" width="180" height="64" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(126 396) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <text data-detail-anchor x="210" y="420" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">b = 20</text>
+        <text data-detail="context" x="210" y="436" class="t-muted" font-size="9" text-anchor="middle">c = 1</text>
+        </g>
+
+        <g id="node-cut" data-node-id="cut" data-node-label="索引查找停在这里" tabindex="0" role="button" aria-label="Focus 索引查找停在这里, 区间内 c 乱序（8, 1）· 只能逐行过滤, Architecture component" aria-pressed="false" data-node-kind="backend" data-node-sublabel="区间内 c 乱序（8, 1）· 只能逐行过滤" data-node-context="Architecture component">
+          <title>索引查找停在这里 · 区间内 c 乱序（8, 1）· 只能逐行过滤 · Architecture component</title>
+          <rect x="440" y="330" width="270" height="64" rx="6" class="c-mask"/>
+          <rect x="440" y="330" width="270" height="64" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(446 336) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text data-detail-anchor x="575" y="360" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">索引查找停在这里</text>
+        <text data-detail="context" x="575" y="376" class="t-muted" font-size="9" text-anchor="middle">区间内 c 乱序（8, 1）· 只能逐行过滤</text>
+        </g>
+
+        <!-- Connection labels -->
+        <g data-detail="context" data-edge-from="q" data-edge-to="b3" data-edge-label="b&gt;10 从这里命中" data-edge-key="0" data-edge-id="g1">
+          <rect x="324" y="243.5" width="82" height="14" rx="3" class="c-mask"/>
+          <text x="365" y="253.5" class="t-muted" font-size="8" text-anchor="middle">b&gt;10 从这里命中</text>
+        </g>
+
+
+
+        <!-- Legend -->
+        <g data-legend data-legend-bridge>
+          <text x="40" y="506" class="t-primary" font-size="12" font-weight="650">Legend</text>
+          <g data-legend-semantic-kind="backend" data-legend-kind="backend" data-legend-label="机制" data-legend-x="40" data-legend-baseline="526" data-legend-width="63">
+            <rect x="40" y="517" width="16" height="10" rx="2.5" class="c-backend" stroke-width="1"/>
+            <text x="62" y="526" class="t-muted" font-size="10" font-weight="500">机制</text>
+          </g>
+          <g data-legend-semantic-kind="database" data-legend-kind="database" data-legend-label="有序数组的一格" data-legend-x="125" data-legend-baseline="526" data-legend-width="113">
+            <rect x="125" y="517" width="16" height="10" rx="2.5" class="c-database" stroke-width="1"/>
+            <text x="147" y="526" class="t-muted" font-size="10" font-weight="500">有序数组的一格</text>
+          </g>
+          <g data-legend-semantic-kind="external" data-legend-kind="external" data-legend-label="查询" data-legend-x="260" data-legend-baseline="526" data-legend-width="63">
+            <rect x="260" y="517" width="16" height="10" rx="2.5" class="c-external" stroke-width="1"/>
+            <text x="282" y="526" class="t-muted" font-size="10" font-weight="500">查询</text>
+          </g>
+        </g>
+      </svg>
+      <figcaption>等值收成点，范围停在区间。b&gt;10 命中一段连续区间，<mark class="mk-blue">区间里 c 乱序</mark>（8, 1）——引擎在第一个范围列之后停止用后续列做索引查找，c=5 降级成区间内的逐行过滤。</figcaption>
+      <div class="pano-ui"></div>
+      <p class="arch-hint"><span class="idle">点头上的任意一个框看它的关系；或者从下面的「我熟悉」进去</span><span class="focused">再点一次空白处取消</span></p>
+    </figure><p>两个补充把边界钉死：<strong>IN 算范围</strong>：<code>b IN (10,20,30)</code> 是多个点的集合而非一个点，命中后 c 同样接不上。<strong>等值链能走满</strong>：<code>WHERE a=1 AND b=10 AND c=5</code> 三个等值能一路用到 c。如果查询真的需要「b 范围 + c 等值」，把 c 挪到 b 前面（索引 (a, c, b)）三列全活。最左前缀的完整拼图到此齐了：<mark class="mk-blue">从左、连续、且前面全是等值</mark>。</p>
+<h2 id="列顺序设计四条规则与验证"><span class="num">05</span>列顺序设计：四条规则与验证</h2>
+<p>设计列顺序之前，先有两个量化指标。<strong>基数</strong>是列的去重值数量；<strong>选择性</strong>是 <code>COUNT(DISTINCT col) / COUNT(*)</code>，越接近 1，一个等值条件越能一刀砍掉更多行。优化器偏爱高选择性索引，本质是偏爱「一刀见血」。</p>
+<p>但<strong>平均选择性会骗人</strong>。100 万行里 99% 是 type='user'、1% 是 'admin'：type 列的平均选择性极低（去重只有 2 个值），优化器按平均值可能看不上它；可真查询 <code>WHERE type='admin'</code> 一击命中 1 万行，高度有效。</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>看哪个数字</th><th>列的平均选择性</th><th>具体谓词值的命中效果</th></tr></thead><tbody><tr><th>怎么算</th><td data-label="列的平均选择性">COUNT(DISTINCT col) / COUNT(*)</td><td data-label="具体谓词值的命中效果">SELECT COUNT(*) FROM orders WHERE status='pending'</td></tr><tr><th>数据偏斜时</th><td data-label="列的平均选择性">可能极低，优化器看不上</td><td data-label="具体谓词值的命中效果"><mark class="mk-blue">你为高频谓词值服务，不为平均统计服务</mark></td></tr><tr><th>配套动作</th><td data-label="列的平均选择性">SHOW INDEXES 的 Cardinality 列是 MySQL 维护的基数估算</td><td data-label="具体谓词值的命中效果">它是随机采样的，<mark class="mk-blue">差一个数量级就 ANALYZE TABLE 刷新</mark></td></tr></tbody></table></div><p>四条排序规则，按优先级排：</p>
+<div class="cards" data-cols="2"><div class="ccard tone-red">
+          <span class="tag tone-red">硬约束</span>
+          <h4>① 等值列在前，范围列在后</h4>
+          <p>范围列之后的列无法参与索引查找（§04）。范围列殿后，否则它后面的列全废。</p>
+          
+          
+        </div><div class="ccard tone-blue">
+          <span class="tag tone-blue">早砍行</span>
+          <h4>② 等值列之间，高选择性放前面</h4>
+          <p>先砍 90% 再砍 50%，中间结果比反过来小得多。收益是逐层叠加的。</p>
+          
+          
+        </div><div class="ccard tone-green">
+          <span class="tag tone-green">免 filesort</span>
+          <h4>③ ORDER BY 列紧跟等值列</h4>
+          <p>等值把结果收窄成一段连续区间，区间内行恰好按排序键排列，排序直接吃索引的有序性。中间夹一个范围列，区间内排序列就乱序了。</p>
+          
+          
+        </div><div class="ccard tone-violet">
+          <span class="tag tone-violet">业务规则</span>
+          <h4>④ 按最频繁的查询设计</h4>
+          <p>用慢查询日志或 performance_schema 找真实热点。列顺序只能伺候一种查询模式——让最高频的查询付出最小代价，为一个冷查询精心设计的索引是负资产。</p>
+          
+          
+        </div></div><p>一组反例正例把规则一、二、三串起来。订单表高频查询：<code>WHERE status='pending' AND customer_id=42 ORDER BY created_at</code>：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>两个候选</th><th>反例 (status</th><th>created_at</th><th>customer_id)</th><th>正例 (status</th><th>customer_id</th><th>created_at)</th></tr></thead><tbody><tr><th>结构</th><td data-label="反例 (status">范围列 created_at 夹在中间</td><td data-label="created_at">等值在前、范围在后</td></tr><tr><th>customer_id</th><td data-label="反例 (status">接不上，无法参与索引查找</td><td data-label="created_at"><mark class="mk-blue">三列全干活</mark></td></tr><tr><th>排序</th><td data-label="反例 (status">区间内 created_at 乱序 → Using filesort</td><td data-label="created_at">顺序读即有序，无 filesort</td></tr><tr><th>拆解</th><td data-label="反例 (status">同样的三个列</td><td data-label="created_at"><mark class="mk-blue">列顺序设计就是用同一组积木拼出能用的形状</mark></td></tr></tbody></table></div><p>filesort 是「排序要另起炉灶」的信号——索引本来有序，排序却被单独做了一遍。它不一定真写磁盘（小结果集在内存排），但「没吃到索引有序性」这一点是确定的。</p>
+<p>规则给出方向，EXPLAIN 当裁判。两个候选索引对同一批查询分别 EXPLAIN，对比三处：key（选中谁）、rows（估算扫描行数，越小越好）、Extra（有无 Using filesort）。A/B 结果只对这批查询有效，换一批查询结论可能反转；rows 是估算，两候选接近时分不出高下，上 EXPLAIN ANALYZE 跑真实耗时。验证完把落选的索引删掉，别留冗余。</p>
+<p>冗余索引是建索引前的最后一道检查：既然 (a, b) 能服务只查 a 的查询（最左前缀），已有 (a, b) 时再单建 (a) 就是纯浪费——白占空间，还拖慢每次写入。sys schema 的 <code>schema_redundant_indexes</code> 视图能帮你找出这类重复。</p>
+<ul class="check cross"><li>已有 (a, b)，再建 (a)——前缀已经覆盖只查 a 的场景</li><li>不看查询就消冗余：把还要单独支撑别的查询的单列索引删了</li></ul><p>反例也要认清：已有 (a, b) 再建 (b) <strong>不是</strong>冗余——(a, b) 帮不了只按 b 过滤的查询（最左前缀）。冗余判断看的是查询的谓词前缀，不是列集合。每多一个索引，写入就多一份维护成本；先查重，再新建。</p>
+<h2 id="索引失效不是索引坏了是不选或用不了"><span class="num">06</span>索引失效：不是索引坏了，是「不选」或「用不了」</h2>
+<p>「索引失效」是中文社区最被滥用的词。大多数时候索引并没有坏——它只是没被用。先把问题重新框定，排查才不会走偏：<strong>「我的索引没被用」只有两种原因</strong>：优化器按代价主动不选，或者查询写法破坏了索引成立的前提、索引压根没进候选名单。下面这张分诊地图把两个世界并排放：</p>
+<figure class="archfig" data-arch data-pano data-parts='{"ex":{"label":"EXPLAIN 这条慢查询","sub":"先看 possible_keys 里有没有它","detail":"==possible_keys 是分诊的第一刀==：它列出被考虑的全部索引候选，key 才是最终选中者。"},"g1":{"label":"possible_keys 里有它","sub":"优化器考虑过 → 是「不选」","detail":"索引本身没问题，是==代价模型算下来走它更慢==。三个典型原因见下面三条。"},"c1":{"label":"① 别的索引更优","sub":"有更 selective 的候选在","detail":"多个候选时优化器选「找到最少行数」的那个，别的自然落选。"},"c2":{"label":"② 取的行太多，全表扫更快","sub":"超约 15%~30% · 顺序 IO 完胜随机回表","detail":"走索引要先定位再逐行回表，回表是随机 IO；全表扫描是顺序 IO，单次成本差一个数量级。命中比例一高，顺序全表反而便宜。==经验值约 15%~30%，因表和缓冲池而异==。小表同理——几页就能装下的表，走索引纯属开销大于收益。"},"c3":{"label":"③ 统计信息过时","sub":"采样基数失真 · ANALYZE TABLE 先试","detail":"基数统计是随机采样估算的，表变化超过约 10% 才自动更新。大批量删除或导入后统计可能严重背离真实分布，==优化器拿着错误输入做决策==。ANALYZE TABLE 是最便宜的修复。"},"v1":{"label":"结论：索引没坏","sub":"刷新统计、对照 rows，多数时候接受它的判断","detail":"==优化器「不用索引」往往是判断对了==。先刷新统计、再对照 rows，别急着上 hint。"},"g2":{"label":"possible_keys 里没它","sub":"没进候选名单 → 是「用不了」","detail":"查询写法破坏了索引成立的前提——==排序或可比较性被破坏==。五种病根见下面五条，药方是改写法或补索引。"},"s1":{"label":"① 非左前缀","sub":"跳过第一列，后面的接不上","detail":"只查 (a, b, c) 里的 b 或 c，索引无从下手。==这就是 §04 最左前缀的失效面==。改法：调整索引列顺序贴合查询，或为这个查询单独补一个以 b 开头的索引——先看查询频率。"},"s2":{"label":"② LIKE 前置通配","sub":"%ron 全局无序 · ron% 能用","detail":"==前置通配才失效==，&#39;Aa%&#39; 后置通配完全能用。精确表述是「以通配符开头的 LIKE 才失效」，别把 LIKE 一棍子打死。真要按后缀匹配（如邮箱域），常见做法是单独存一列反转字符串，把后缀匹配翻成前缀匹配。"},"s3":{"label":"③ 函数包裹列","sub":"YEAR(col) 破坏原序 · 运算挪到值一侧","detail":"索引树里存的是列的原始值，树的有序性是原值的有序性。==YEAR() 把原值加工后，新值的顺序与原值不再一致==。常见包裹：日期函数（YEAR/MONTH/DATE）、字符串函数（LOWER/TRIM）、算术（price*0.9）。"},"s4":{"label":"④ 隐式类型转换","sub":"INT 列 = &#39;929f…&#39; → 被读成 929","detail":"==既用不了索引，又可能匹配错行==——下面单独讲。"},"s5":{"label":"⑤ JOIN 列类型不匹配","sub":"VARCHAR vs CHAR · 字符集不同","detail":"类型与大小必须一致，utf8mb4 与 latin1 不能直接比较。连接列「看着一样」不等于「可以比较」。多库合并、异构表关联的场景尤其要查——两端表结构独立演进，最容易在这埋雷。"},"v2":{"label":"结论：资格被剥夺","sub":"改写法，或按查询补索引","detail":"五种病的共同根因：==操作动了索引列本身==，破坏了列在索引里的有序性或可比较性。守住「列保持裸露」一条，能避开大半。"},"hint":{"label":"FORCE INDEX","sub":"临时止血，不是根治","detail":"只在确认优化器判断错了时用，==根因（统计过期、索引设计错）修好后立刻摘掉==——hint 写在 SQL 里长期生效，数据一变就从解药变毒药。8.0.20 起还有 INDEX / NO_INDEX 等索引级 hint 语法可选。"}}' data-anchors='[{"part":"ex","label":"一次 EXPLAIN"},{"part":"c2","label":"全表扫描更快"},{"part":"s4","label":"隐式类型转换（最危险）"}]' data-tours='[{"id":"diagnose","label":"从 EXPLAIN 开始分诊","steps":[{"at":["ex"],"text":"先看 ==possible_keys== 里有没有你的索引——这一刀把两个世界分开。"},{"at":["g1","c1","c2","c3"],"text":"有它：优化器考虑过又放弃，是「不选」。三个典型——别的候选更优、取行比例高、统计过时。"},{"at":["g2","s1","s2","s3","s4","s5"],"text":"没它：压根没进候选，是「用不了」。五种病根，共同点是==排序或可比较性被写法破坏=="}]},{"id":"implicit","label":"最危险的一种：隐式类型转换","steps":[{"at":["s4"],"text":"INT 列和字符串比较时，MySQL 把字符串解析到第一个非数字字符为止——==既用不了索引，又可能匹配到完全不相干的行==。"}]}]'>
+      <svg viewBox="0 0 1146 1132" role="img" aria-labelledby="archify-diagram-title archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
+        <title id="archify-diagram-title">「索引没用上」的分诊地图：不选，还是用不了</title>
+        <desc id="archify-diagram-description">先看 EXPLAIN 的 possible_keys：有它是「不选」（索引没坏，代价不划算），没它是「用不了」（写法破坏了前提）——两种病的药方相反</desc>
+        <!-- Definitions -->
+        <defs>
+          <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-default" />
+          </marker>
+          <marker id="arrowhead-emphasis" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-emphasis" />
+          </marker>
+          <marker id="arrowhead-security" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-security" />
+          </marker>
+          <marker id="arrowhead-dashed" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-dashed" />
+          </marker>
+          <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+            <path d="M 40 0 L 0 0 0 40" class="c-grid" stroke-width="0.5"/>
+          </pattern>
+        </defs>
+
+        <!-- Background Grid -->
+        <rect width="100%" height="100%" fill="url(#grid)" />
+
+        <!-- Boundaries (behind everything) -->
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="0" x="84" y="164" width="422" height="630" rx="12" class="c-region" stroke-width="1"/>
+        <text x="92" y="182" class="t-cloud" font-size="9" font-weight="600">世界一 · 优化器主动不选（代价算账）</text>
+
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="1" x="634" y="164" width="472" height="780" rx="12" class="c-region" stroke-width="1"/>
+        <text x="642" y="182" class="t-cloud" font-size="9" font-weight="600">世界二 · 结构性用不了（写法破坏前提）</text>
+
+        <!-- Connection paths (before components for correct z-order) -->
+        <path data-edge-from="ex" data-edge-to="g1" data-edge-key="0" data-edge-id="h1" data-composition-points="633,114;633,152;340,152;340,190" d="M 633 114 L 633 144 Q 633 152 625 152 L 348 152 Q 340 152 340 160 L 340 190" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="ex" data-edge-to="g2" data-edge-key="1" data-edge-id="h2" data-composition-points="647,114;647,152;940,152;940,190" d="M 647 114 L 647 144 Q 647 152 655 152 L 932 152 Q 940 152 940 160 L 940 190" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="hint" data-edge-to="v1" data-edge-label="对「不选」是打架" data-edge-key="2" data-edge-id="h3" data-composition-points="588,1000;588,887;275,887;275,774" d="M 588 1000 L 588 895 Q 588 887 580 887 L 283 887 Q 275 887 275 879 L 275 774" class="a-dashed" stroke-width="1.5" marker-end="url(#arrowhead-dashed)"/>
+        <path data-edge-from="hint" data-edge-to="v2" data-edge-label="对「用不了」没用" data-edge-key="3" data-edge-id="h4" data-composition-points="602,1000;602,962;825,962;825,924" d="M 602 1000 L 602 970 Q 602 962 610 962 L 817 962 Q 825 962 825 954 L 825 924" class="a-dashed" stroke-width="1.5" marker-end="url(#arrowhead-dashed)"/>
+
+        <!-- Components -->
+        <g id="node-ex" data-node-id="ex" data-node-label="EXPLAIN 这条慢查询" tabindex="0" role="button" aria-label="Focus EXPLAIN 这条慢查询, 先看 possible_keys 里有没有它, Architecture component" aria-pressed="false" data-node-kind="external" data-node-sublabel="先看 possible_keys 里有没有它" data-node-context="Architecture component">
+          <title>EXPLAIN 这条慢查询 · 先看 possible_keys 里有没有它 · Architecture component</title>
+          <rect x="490" y="50" width="300" height="64" rx="6" class="c-mask"/>
+          <rect x="490" y="50" width="300" height="64" rx="6" class="c-external" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="external" class="semantic-sigil s-external" transform="translate(496 56) scale(0.6875)">
+            <rect x="2.5" y="5" width="8.5" height="8" rx="1.5"/>
+            <path d="M8 2.5h5.5V8M13.5 2.5 7.5 8.5"/>
+          </g>
+          <text data-detail-anchor x="640" y="80" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">EXPLAIN 这条慢查询</text>
+        <text data-detail="context" x="640" y="96" class="t-muted" font-size="9" text-anchor="middle">先看 possible_keys 里有没有它</text>
+        </g>
+
+        <g id="node-g1" data-node-id="g1" data-node-label="possible_keys 里有它" tabindex="0" role="button" aria-label="Focus possible_keys 里有它, 优化器考虑过 → 是「不选」, 世界一 · 优化器主动不选（代价算账）" aria-pressed="false" data-node-kind="backend" data-node-sublabel="优化器考虑过 → 是「不选」" data-node-context="世界一 · 优化器主动不选（代价算账）">
+          <title>possible_keys 里有它 · 优化器考虑过 → 是「不选」 · 世界一 · 优化器主动不选（代价算账）</title>
+          <rect x="200" y="190" width="280" height="64" rx="6" class="c-mask"/>
+          <rect x="200" y="190" width="280" height="64" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(206 196) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text data-detail-anchor x="340" y="220" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">possible_keys 里有它</text>
+        <text data-detail="context" x="340" y="236" class="t-muted" font-size="9" text-anchor="middle">优化器考虑过 → 是「不选」</text>
+        </g>
+
+        <g id="node-c1" data-node-id="c1" data-node-label="① 别的索引更优" tabindex="0" role="button" aria-label="Focus ① 别的索引更优, 有更 selective 的候选在, 世界一 · 优化器主动不选（代价算账）" aria-pressed="false" data-node-kind="backend" data-node-sublabel="有更 selective 的候选在" data-node-context="世界一 · 优化器主动不选（代价算账）">
+          <title>① 别的索引更优 · 有更 selective 的候选在 · 世界一 · 优化器主动不选（代价算账）</title>
+          <rect x="110" y="330" width="330" height="64" rx="6" class="c-mask"/>
+          <rect x="110" y="330" width="330" height="64" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(116 336) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text data-detail-anchor x="275" y="360" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">① 别的索引更优</text>
+        <text data-detail="context" x="275" y="376" class="t-muted" font-size="9" text-anchor="middle">有更 selective 的候选在</text>
+        </g>
+
+        <g id="node-c2" data-node-id="c2" data-node-label="② 取的行太多，全表扫更快" tabindex="0" role="button" aria-label="Focus ② 取的行太多，全表扫更快, 超约 15%~30% · 顺序 IO 完胜随机回表, 世界一 · 优化器主动不选（代价算账）" aria-pressed="false" data-node-kind="backend" data-node-sublabel="超约 15%~30% · 顺序 IO 完胜随机回表" data-node-context="世界一 · 优化器主动不选（代价算账）">
+          <title>② 取的行太多，全表扫更快 · 超约 15%~30% · 顺序 IO 完胜随机回表 · 世界一 · 优化器主动不选（代价算账）</title>
+          <rect x="110" y="450" width="330" height="64" rx="6" class="c-mask"/>
+          <rect x="110" y="450" width="330" height="64" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(116 456) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text data-detail-anchor x="275" y="480" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">② 取的行太多，全表扫更快</text>
+        <text data-detail="context" x="275" y="496" class="t-muted" font-size="9" text-anchor="middle">超约 15%~30% · 顺序 IO 完胜随机回表</text>
+        </g>
+
+        <g id="node-c3" data-node-id="c3" data-node-label="③ 统计信息过时" tabindex="0" role="button" aria-label="Focus ③ 统计信息过时, 采样基数失真 · ANALYZE TABLE 先试, 世界一 · 优化器主动不选（代价算账）" aria-pressed="false" data-node-kind="backend" data-node-sublabel="采样基数失真 · ANALYZE TABLE 先试" data-node-context="世界一 · 优化器主动不选（代价算账）">
+          <title>③ 统计信息过时 · 采样基数失真 · ANALYZE TABLE 先试 · 世界一 · 优化器主动不选（代价算账）</title>
+          <rect x="110" y="570" width="330" height="64" rx="6" class="c-mask"/>
+          <rect x="110" y="570" width="330" height="64" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(116 576) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text data-detail-anchor x="275" y="600" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">③ 统计信息过时</text>
+        <text data-detail="context" x="275" y="616" class="t-muted" font-size="9" text-anchor="middle">采样基数失真 · ANALYZE TABLE 先试</text>
+        </g>
+
+        <g id="node-v1" data-node-id="v1" data-node-label="结论：索引没坏" tabindex="0" role="button" aria-label="Focus 结论：索引没坏, 刷新统计、对照 rows，多数时候接受它的判断, 世界一 · 优化器主动不选（代价算账）" aria-pressed="false" data-node-kind="backend" data-node-sublabel="刷新统计、对照 rows，多数时候接受它的判断" data-node-context="世界一 · 优化器主动不选（代价算账）">
+          <title>结论：索引没坏 · 刷新统计、对照 rows，多数时候接受它的判断 · 世界一 · 优化器主动不选（代价算账）</title>
+          <rect x="110" y="710" width="330" height="64" rx="6" class="c-mask"/>
+          <rect x="110" y="710" width="330" height="64" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(116 716) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text data-detail-anchor x="275" y="740" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">结论：索引没坏</text>
+        <text data-detail="context" x="275" y="756" class="t-muted" font-size="9" text-anchor="middle">刷新统计、对照 rows，多数时候接受它的判断</text>
+        </g>
+
+        <g id="node-g2" data-node-id="g2" data-node-label="possible_keys 里没它" tabindex="0" role="button" aria-label="Focus possible_keys 里没它, 没进候选名单 → 是「用不了」, 世界二 · 结构性用不了（写法破坏前提）" aria-pressed="false" data-node-kind="backend" data-node-sublabel="没进候选名单 → 是「用不了」" data-node-context="世界二 · 结构性用不了（写法破坏前提）">
+          <title>possible_keys 里没它 · 没进候选名单 → 是「用不了」 · 世界二 · 结构性用不了（写法破坏前提）</title>
+          <rect x="800" y="190" width="280" height="64" rx="6" class="c-mask"/>
+          <rect x="800" y="190" width="280" height="64" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(806 196) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text data-detail-anchor x="940" y="220" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">possible_keys 里没它</text>
+        <text data-detail="context" x="940" y="236" class="t-muted" font-size="9" text-anchor="middle">没进候选名单 → 是「用不了」</text>
+        </g>
+
+        <g id="node-s1" data-node-id="s1" data-node-label="① 非左前缀" tabindex="0" role="button" aria-label="Focus ① 非左前缀, 跳过第一列，后面的接不上, 世界二 · 结构性用不了（写法破坏前提）" aria-pressed="false" data-node-kind="backend" data-node-sublabel="跳过第一列，后面的接不上" data-node-context="世界二 · 结构性用不了（写法破坏前提）">
+          <title>① 非左前缀 · 跳过第一列，后面的接不上 · 世界二 · 结构性用不了（写法破坏前提）</title>
+          <rect x="660" y="330" width="330" height="64" rx="6" class="c-mask"/>
+          <rect x="660" y="330" width="330" height="64" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(666 336) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text data-detail-anchor x="825" y="360" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">① 非左前缀</text>
+        <text data-detail="context" x="825" y="376" class="t-muted" font-size="9" text-anchor="middle">跳过第一列，后面的接不上</text>
+        </g>
+
+        <g id="node-s2" data-node-id="s2" data-node-label="② LIKE 前置通配" tabindex="0" role="button" aria-label="Focus ② LIKE 前置通配, &#39;%ron&#39; 全局无序 · &#39;ron%&#39; 能用, 世界二 · 结构性用不了（写法破坏前提）" aria-pressed="false" data-node-kind="backend" data-node-sublabel="&#39;%ron&#39; 全局无序 · &#39;ron%&#39; 能用" data-node-context="世界二 · 结构性用不了（写法破坏前提）">
+          <title>② LIKE 前置通配 · &#39;%ron&#39; 全局无序 · &#39;ron%&#39; 能用 · 世界二 · 结构性用不了（写法破坏前提）</title>
+          <rect x="660" y="428" width="330" height="64" rx="6" class="c-mask"/>
+          <rect x="660" y="428" width="330" height="64" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(666 434) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text data-detail-anchor x="825" y="458" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">② LIKE 前置通配</text>
+        <text data-detail="context" x="825" y="474" class="t-muted" font-size="9" text-anchor="middle">&#39;%ron&#39; 全局无序 · &#39;ron%&#39; 能用</text>
+        </g>
+
+        <g id="node-s3" data-node-id="s3" data-node-label="③ 函数包裹列" tabindex="0" role="button" aria-label="Focus ③ 函数包裹列, YEAR(col) 破坏原序 · 运算挪到值一侧, 世界二 · 结构性用不了（写法破坏前提）" aria-pressed="false" data-node-kind="backend" data-node-sublabel="YEAR(col) 破坏原序 · 运算挪到值一侧" data-node-context="世界二 · 结构性用不了（写法破坏前提）">
+          <title>③ 函数包裹列 · YEAR(col) 破坏原序 · 运算挪到值一侧 · 世界二 · 结构性用不了（写法破坏前提）</title>
+          <rect x="660" y="526" width="330" height="64" rx="6" class="c-mask"/>
+          <rect x="660" y="526" width="330" height="64" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(666 532) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text data-detail-anchor x="825" y="556" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">③ 函数包裹列</text>
+        <text data-detail="context" x="825" y="572" class="t-muted" font-size="9" text-anchor="middle">YEAR(col) 破坏原序 · 运算挪到值一侧</text>
+        </g>
+
+        <g id="node-s4" data-node-id="s4" data-node-label="④ 隐式类型转换" tabindex="0" role="button" aria-label="Focus ④ 隐式类型转换, INT 列 = &#39;929f…&#39; → 被读成 929, 世界二 · 结构性用不了（写法破坏前提）" aria-pressed="false" data-node-kind="backend" data-node-sublabel="INT 列 = &#39;929f…&#39; → 被读成 929" data-node-context="世界二 · 结构性用不了（写法破坏前提）">
+          <title>④ 隐式类型转换 · INT 列 = &#39;929f…&#39; → 被读成 929 · 世界二 · 结构性用不了（写法破坏前提）</title>
+          <rect x="660" y="624" width="330" height="64" rx="6" class="c-mask"/>
+          <rect x="660" y="624" width="330" height="64" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(666 630) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text data-detail-anchor x="825" y="654" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">④ 隐式类型转换</text>
+        <text data-detail="context" x="825" y="670" class="t-muted" font-size="9" text-anchor="middle">INT 列 = &#39;929f…&#39; → 被读成 929</text>
+        </g>
+
+        <g id="node-s5" data-node-id="s5" data-node-label="⑤ JOIN 列类型不匹配" tabindex="0" role="button" aria-label="Focus ⑤ JOIN 列类型不匹配, VARCHAR vs CHAR · 字符集不同, 世界二 · 结构性用不了（写法破坏前提）" aria-pressed="false" data-node-kind="backend" data-node-sublabel="VARCHAR vs CHAR · 字符集不同" data-node-context="世界二 · 结构性用不了（写法破坏前提）">
+          <title>⑤ JOIN 列类型不匹配 · VARCHAR vs CHAR · 字符集不同 · 世界二 · 结构性用不了（写法破坏前提）</title>
+          <rect x="660" y="722" width="330" height="64" rx="6" class="c-mask"/>
+          <rect x="660" y="722" width="330" height="64" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(666 728) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text data-detail-anchor x="825" y="752" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">⑤ JOIN 列类型不匹配</text>
+        <text data-detail="context" x="825" y="768" class="t-muted" font-size="9" text-anchor="middle">VARCHAR vs CHAR · 字符集不同</text>
+        </g>
+
+        <g id="node-v2" data-node-id="v2" data-node-label="结论：资格被剥夺" tabindex="0" role="button" aria-label="Focus 结论：资格被剥夺, 改写法，或按查询补索引, 世界二 · 结构性用不了（写法破坏前提）" aria-pressed="false" data-node-kind="backend" data-node-sublabel="改写法，或按查询补索引" data-node-context="世界二 · 结构性用不了（写法破坏前提）">
+          <title>结论：资格被剥夺 · 改写法，或按查询补索引 · 世界二 · 结构性用不了（写法破坏前提）</title>
+          <rect x="660" y="860" width="330" height="64" rx="6" class="c-mask"/>
+          <rect x="660" y="860" width="330" height="64" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(666 866) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text data-detail-anchor x="825" y="890" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">结论：资格被剥夺</text>
+        <text data-detail="context" x="825" y="906" class="t-muted" font-size="9" text-anchor="middle">改写法，或按查询补索引</text>
+        </g>
+
+        <g id="node-hint" data-node-id="hint" data-node-label="FORCE INDEX" tabindex="0" role="button" aria-label="Focus FORCE INDEX, 临时止血，不是根治, Architecture component" aria-pressed="false" data-node-kind="backend" data-node-sublabel="临时止血，不是根治" data-node-context="Architecture component">
+          <title>FORCE INDEX · 临时止血，不是根治 · Architecture component</title>
+          <rect x="430" y="1000" width="330" height="64" rx="6" class="c-mask"/>
+          <rect x="430" y="1000" width="330" height="64" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(436 1006) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text data-detail-anchor x="595" y="1030" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">FORCE INDEX</text>
+        <text data-detail="context" x="595" y="1046" class="t-muted" font-size="9" text-anchor="middle">临时止血，不是根治</text>
+        </g>
+
+        <!-- Connection labels -->
+
+
+        <g data-detail="context" data-edge-from="hint" data-edge-to="v1" data-edge-label="对「不选」是打架" data-edge-key="2" data-edge-id="h3">
+          <rect x="388.1" y="867" width="86.8" height="14" rx="3" class="c-mask"/>
+          <text x="431.5" y="877" class="t-messagebus" font-size="8" text-anchor="middle">对「不选」是打架</text>
+        </g>
+        <g data-detail="context" data-edge-from="hint" data-edge-to="v2" data-edge-label="对「用不了」没用" data-edge-key="3" data-edge-id="h4">
+          <rect x="670.1" y="942" width="86.8" height="14" rx="3" class="c-mask"/>
+          <text x="713.5" y="952" class="t-messagebus" font-size="8" text-anchor="middle">对「用不了」没用</text>
+        </g>
+
+        <!-- Legend -->
+        <g data-legend data-legend-bridge>
+          <text x="40" y="1096" class="t-primary" font-size="12" font-weight="650">Legend</text>
+          <g data-legend-semantic-kind="backend" data-legend-kind="backend" data-legend-label="病症 / 结论" data-legend-x="40" data-legend-baseline="1116" data-legend-width="98">
+            <rect x="40" y="1107" width="16" height="10" rx="2.5" class="c-backend" stroke-width="1"/>
+            <text x="62" y="1116" class="t-muted" font-size="10" font-weight="500">病症 / 结论</text>
+          </g>
+          <g data-legend-semantic-kind="external" data-legend-kind="external" data-legend-label="排查入口" data-legend-x="160" data-legend-baseline="1116" data-legend-width="83">
+            <rect x="160" y="1107" width="16" height="10" rx="2.5" class="c-external" stroke-width="1"/>
+            <text x="182" y="1116" class="t-muted" font-size="10" font-weight="500">排查入口</text>
+          </g>
+        </g>
+      </svg>
+      <figcaption>分诊入口是 EXPLAIN 的 possible_keys：<mark class="mk-blue">有它是「不选」，没它是「用不了」</mark>。对「不选」加 FORCE INDEX 是和优化器打架，对「用不了」加 FORCE INDEX 毫无作用——两条错路都通向更慢。</figcaption>
+      <div class="pano-ui"></div>
+      <p class="arch-hint"><span class="idle">点头上的任意一个框看它的关系；或者从下面的「我熟悉」进去</span><span class="focused">再点一次空白处取消</span></p>
+    </figure><h3 id="最危险的一种隐式类型转换既慢又错">最危险的一种：隐式类型转换，既慢又错</h3>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-sql">-- 危险：id 是 INT，传入 UUID 字符串
+SELECT * FROM user WHERE id = '929f9152-0000-0000-0000-000000000000';
+-- MySQL 把字符串解析到第一个非数字字符 → 实际比较 id = 929
+-- 查询不报错，但可能匹配到完全不相干的一行
+
+-- 正确：参数类型与列一致
+SELECT * FROM user WHERE id = 929;
+</code></pre></div>
+<p>它同时是性能问题和正确性问题：索引用不了（比较的是转换后的列值，不是索引里存的原值），还可能悄悄读错行。类型转换规则不对称——字符串与数字比较时字符串转数字，所以坑藏在「列是 INT 还 VARCHAR」的不对称里。防御在应用层：<strong>列是什么类型，参数就传什么类型</strong>；ORM 尤其要盯紧，框架自动把数字序列化成字符串的链路正是高发区，排查时沿序列化链路往上游追。一句话：类型不一致的查询，最坏的情况不是慢，是悄无声息地错。</p>
+<h3 id="explain-速查与兜底">EXPLAIN 速查与兜底</h3>
+<div class="spec tone-muted">
+      <div class="spec-head"><b>EXPLAIN 关键字段速查</b><span>健康值对照危险值，五列看完落案</span></div>
+      <div class="spec-body"><div class="srow">
+          <div class="sk">possible_keys</div>
+          <div class="sv"><p>被考虑的索引候选。<mark class="mk-blue">有它没选 = 不选；没它 = 用不了</mark></p>
+</div>
+        </div><div class="srow">
+          <div class="sk">key</div>
+          <div class="sv"><p>实际选中的索引。健康：你期望的索引名；危险：NULL</p>
+</div>
+        </div><div class="srow">
+          <div class="sk">type</div>
+          <div class="sv"><p>const / ref / range 健康；<mark class="mk-blue">ALL（全表扫描）</mark>危险</p>
+</div>
+        </div><div class="srow">
+          <div class="sk">rows</div>
+          <div class="sv"><p>估算扫描行数，越小越好；接近全表行数 = 索引白走</p>
+</div>
+        </div><div class="srow">
+          <div class="sk">Extra</div>
+          <div class="sv"><p>Using index（覆盖）健康；Using filesort / Using index condition 要对照语义看</p>
+</div>
+        </div></div>
+    </div><p>排查流程收成三步：先 EXPLAIN 看 key / type / rows / Extra 定位嫌疑；再对照上面的病根清单找结构性问题；还解释不通就开 optimizer trace 看优化器的代价账，或用 EXPLAIN ANALYZE 拿真实执行耗时；前者解释「为什么这么选」，后者验证「事实慢在哪」。三步走完，绝大多数「索引为什么没生效」都能落案。</p>
+<h2 id="收束一条物理事实推完全篇"><span class="num">07</span>收束：一条物理事实，推完全篇</h2>
+<p>把五个问题放回最初那条因果链，每个答案都是同一句话的展开：<strong>数据按索引键排序，一切索引规则都从这条物理事实推导出来</strong>。</p>
+<div class="summary">
+      <h3 id="一句话收束">一句话收束</h3>
+      <p>聚簇索引把整张表按主键排好序；二级索引另排一棵、只存主键值，
+于是有了回表；覆盖索引把回表省掉；最左前缀是拼接排序数组的直接推论；
+列顺序设计是让等值、范围、排序各就各位；而「失效」，
+多半是这个序被查询写法破坏，或者被优化器按代价放弃。</p>
+
+    </div><div class="compare-wrap"><table class="compare"><thead><tr><th>五连问</th><th>一句话答案</th><th>出处</th></tr></thead><tbody><tr><th>聚簇索引和二级索引有什么区别？</th><td data-label="一句话答案">聚簇索引=数据本身；二级索引存「索引列值+主键值」</td><td data-label="出处">§01 §02</td></tr><tr><th>覆盖索引是不是一种新索引？</th><td data-label="一句话答案">不是。是查询恰好被现有索引完全满足的运行时状态</td><td data-label="出处">§03</td></tr><tr><th>最左前缀为什么必须从左？</th><td data-label="一句话答案">序只存在于从左开始、连续、等值打头的前缀里</td><td data-label="出处">§04</td></tr><tr><th>联合索引字段顺序怎么定？</th><td data-label="一句话答案">等值前、范围后、高选择性靠前、排序列紧跟等值，按最频繁查询设计</td><td data-label="出处">§05</td></tr><tr><th>为什么索引明明建了却没用？</th><td data-label="一句话答案">先分诊：优化器不选（接受或刷新统计），还是结构性用不了（改写法）</td><td data-label="出处">§06</td></tr></tbody></table></div><p>想继续深挖，原文留了三个钩子：Index Condition Pushdown（在回表前先过滤，进一步削减回表次数）、Index Merge Optimization（多个索引如何协同）、EXPLAIN ANALYZE 与 optimizer trace（真实耗时与完整决策链）。</p>
+<div class="quiz"><details>
+        <summary>SELECT name FROM users WHERE name='Jones' 走 (name) 索引，Extra 是什么？换成 SELECT age 呢？</summary>
+        <div class="a"><p>Using index——二级索引叶子天然携带 name 和主键值，这条查询被覆盖。换成 age：age 不在树里，必须回表取整行，Extra 为空（或出现回表相关标记），命中多少行走多少趟。</p>
+</div>
+      </details><details>
+        <summary>索引 (a, b, c)，WHERE a=1 AND c=5 能用到几列？WHERE a=1 AND b&gt;10 AND c=5 呢？</summary>
+        <div class="a"><p>前者只用 a——跳过 b 之后 c 接不上（前缀必须连续）；后者用到 a、b——b 是范围，区间内 c 乱序，c=5 降级为区间内逐行过滤。有序只存在于「从左、连续、等值打头」的前缀上。</p>
+</div>
+      </details><details>
+        <summary>EXPLAIN 里 possible_keys 有 idx_x 但 key 是 NULL，该立刻 FORCE INDEX 吗？</summary>
+        <div class="a"><p>不。这属于「不选」：先 ANALYZE TABLE 刷新统计，再对照 rows——取行比例高时全表扫本来就更快，FORCE INDEX 是和代价模型打架。如果 possible_keys 里根本没有 idx_x，才是「用不了」，改写法或补索引，加 hint 毫无作用。</p>
+</div>
+      </details></div>
+
+    <footer>
+      <span>MySQL 索引：两棵树上的所有规则</span>
+      <span>最后更新 2026-10-11 · 单文件可离线打开</span>
+    </footer>
+  </main>
+</div>
+
+<script src="../../assets/app.js?v=ab028576a4"></script>
+</body>
+</html>
