@@ -148,10 +148,16 @@ function lintNote(meta, src, warnings) {
    踩过：combination 两篇手写 ](notes/slug.html)、44 篇 dist 页的前置区块
    都指向 dist/notes/… → 线上全 404。 */
 function distCrossLinks(html, noteSlugs) {
-  return html.replace(
-    /href="\.\.\/([a-z0-9-]+)\/([^"]*)"/g,
-    (m, dir, rest) => (noteSlugs.has(dir) ? `href="${dir}.html${rest}"` : m),
-  );
+  /* dist 版比 notes/<slug>/ 版浅一层：站点根链接（返回/首页、skill 页）
+     在 notes 版写 ../../，dist 版必须降成 ../ —— 不降的话
+     brand/返回链接会跳出站点根（guolinge.github.io/index.html）→ 404。
+     踩过：全部 70 篇 dist 页的 logo 都跳根域名，被用户点出来。 */
+  return html
+    .replace(/(href|src)="\.\.\/\.\.\//g, '$1="../')
+    .replace(
+      /href="\.\.\/([a-z0-9-]+)\/([^"]*)"/g,
+      (m, dir, rest) => (noteSlugs.has(dir) ? `href="${dir}.html${rest}"` : m),
+    );
 }
 
 /* ---------- 主流程 ---------- */
