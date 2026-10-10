@@ -1013,6 +1013,105 @@ function flankBlocked(before, next, isOpening, treatCjkPunctAsLetter) {
 }
 
 function cjkStrongPlugin(md) {
+  /* 本行里所有「长度恰为 2」的 ** 串的位置。
+     跳过更长的星号串（*** / ****）和反引号 code span 里的 ** ——
+     后者不查的话，模拟会把 code 里的假 ** 当成配对对象。 */
+  function scanRuns(state) {
+    const src = state.src;
+    const runs = [];
+    let i = 0;
+    while (i < state.posMax) {
+      const c = src.charCodeAt(i);
+      if (c === 0x0a) break; // 只看本行
+      if (c === 0x60) {
+        // 反引号串：找到等长的收尾，整段当 code 跳过（近似 markdown-it 的 code span 规则）
+        let n = 0;
+        while (src.charCodeAt(i + n) === 0x60) n++;
+        let j = i + n;
+        let close = -1;
+        while (j < state.posMax) {
+          if (src.charCodeAt(j) === 0x60) {
+            let m = 0;
+            while (src.charCodeAt(j + m) === 0x60) m++;
+            if (m === n) {
+              close = j;
+              break;
+            }
+            j += m;
+          } else j++;
+        }
+        i = close >= 0 ? close + n : i + n;
+        continue;
+      }
+      if (
+        c === 0x2a &&
+        src.charCodeAt(i + 1) === 0x2a &&
+        src[i - 1] !== '*' &&
+        src[i + 2] !== '*'
+      ) {
+        runs.push(i);
+        i += 2;
+        continue;
+      }
+      i++;
+    }
+    return runs;
+  }
+
+  /* 整行从左到右模拟「原生 emphasis 会怎么配对」，决定哪些 ** 需要接管。
+
+     ==为什么不能只看当前位置这一对== —— 踩过的坑：
+
+       A**甲乙**。C**丁戊**。
+
+     旧逻辑在收尾 **（乙**。）上做「它能不能当开头」的检查：后面跟着中文句号、
+     前面是汉字 → 标准 flanking 拦下、宽松放行 → 误判成「需要接管的开头」，
+     把前面那组原生本来会配好的对拆散，整行渲染成嵌套 <strong>。
+
+     正确做法：先模拟原生怎么配（能关就先关，关不掉再当开），
+     只在「标准开不了、宽松开得了」且后面还有 ** 能收尾时才接管。 */
+  function planLine(state) {
+    const src = state.src;
+    const runs = scanRuns(state);
+    const capsOf = (p) => {
+      const before = p > 0 ? src[p - 1] : undefined;
+      const next = src[p + 2];
+      return {
+        openStd: !flankBlocked(before, next, true, false),
+        openLax: !flankBlocked(before, next, true, true),
+        closeStd: !flankBlocked(before, next, false, false),
+        closeLax: !flankBlocked(before, next, false, true),
+      };
+    };
+    const consumed = new Set();
+    const takeovers = new Map(); // 开头位置 → 收尾位置
+    const stack = []; // 原生会当 opener 用、还没被关掉的 **
+    for (let idx = 0; idx < runs.length; idx++) {
+      const p = runs[idx];
+      if (consumed.has(p)) continue;
+      const c = capsOf(p);
+      // ① 它能按标准规则闭合前面某个 opener —— 原生会配对，不要抢
+      if (c.closeStd && stack.length) {
+        consumed.add(stack.pop());
+        consumed.add(p);
+        continue;
+      }
+      // ② 标准开不了、宽松开得了 → 后面下一个 ** 能收尾就接管这一对
+      if (!c.openStd && c.openLax && idx + 1 < runs.length) {
+        const j = runs[idx + 1];
+        const cj = capsOf(j);
+        if (cj.closeStd || cj.closeLax) {
+          takeovers.set(p, j);
+          consumed.add(p);
+          consumed.add(j);
+          continue;
+        }
+      }
+      if (c.openStd) stack.push(p);
+    }
+    return takeovers;
+  }
+
   function rule(state, silent) {
     const src = state.src;
     const start = state.pos;
@@ -1020,37 +1119,8 @@ function cjkStrongPlugin(md) {
     if (src.charCodeAt(start) !== 0x2a || src.charCodeAt(start + 1) !== 0x2a) return false;
     if (src[start - 1] === '*') return false; // 属于更长的星号串，不插手
 
-    const before = start > 0 ? src[start - 1] : undefined;
-    const next = src[start + 2];
-
-    // 先把配对的收尾 ** 找出来（不跨行，且不是更长星号串的一部分）
-    let end = -1;
-    for (let i = start + 3; i < state.posMax - 1; i++) {
-      const c = src.charCodeAt(i);
-      if (c === 0x0a) break;
-      if (c === 0x2a && src.charCodeAt(i + 1) === 0x2a) {
-        if (src[i - 1] !== '*' && src[i + 2] !== '*') { end = i; break; }
-        i++;
-      }
-    }
-    if (end < 0 || end === start + 2) return false;
-
-    // 开分隔符和收分隔符都要查 —— 两边都可能被 CJK 标点卡住
-    const closeBefore = src[end - 1];
-    const closeNext = end + 2 < state.posMax ? src[end + 2] : undefined;
-
-    const pairs = [
-      [before, next, true],
-      [closeBefore, closeNext, false],
-    ];
-
-    let needsHelp = false;
-    for (const [b, n, isOpen] of pairs) {
-      if (!flankBlocked(b, n, isOpen, false)) continue; // 标准能过
-      if (flankBlocked(b, n, isOpen, true)) return false; // 宽松也过不了，不是 CJK 的问题
-      needsHelp = true;
-    }
-    if (!needsHelp) return false; // 两边标准都能过，交给原生 emphasis
+    const end = planLine(state).get(start);
+    if (end === undefined) return false; // 原生 emphasis 自己能配对，不插手
 
     if (!silent) {
       state.push('strong_open', 'strong', 1);

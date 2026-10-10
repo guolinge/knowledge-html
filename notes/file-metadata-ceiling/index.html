@@ -4,10 +4,10 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>文件存储的天花板：为什么「目录」这么贵</title>
-<meta name="description" content="一个目录装一亿个文件会发生什么？为什么 rename 要加锁？为什么跨机房之后成本「指数级」上升？这一页把「元数据的中心瓶颈」拆成四步：数据可以复制、名字不能复制；目录其实就是一张「名字 → inode」的表；这张表只能有一个当前状态，所以总得有个地方串行;跨一层边界，往返次数就乘一层。最后回到对象存储：它是靠放弃目录和原子 rename 才换到无限扩展的。" />
-<link rel="stylesheet" href="../../assets/theme.css" />
-  <link rel="stylesheet" href="../../assets/blocks.css" />
-  <link rel="stylesheet" href="../../assets/archify-embed.css" />
+<meta name="description" content="一个目录装一亿个文件会发生什么？为什么 rename 要加锁？为什么跨机房之后成本「指数级」上升？这一页把「元数据的中心瓶颈」拆成四步：数据可以复制、名字不能复制；目录其实就是一张「名字 → inode」的表；这张表只能有一个当前状态，所以总得有个地方串行；跨一层边界，往返次数就乘一层。最后回到对象存储：它是靠放弃目录和原子 rename 才换到无限扩展的。" />
+<link rel="stylesheet" href="../../assets/theme.css?v=e6a9ffd3d6" />
+  <link rel="stylesheet" href="../../assets/blocks.css?v=5977cfd9e7" />
+  <link rel="stylesheet" href="../../assets/archify-embed.css?v=68fec0b81b" />
 </head>
 <body>
 <div id="progress"></div>
@@ -42,7 +42,7 @@
     <div class="hero">
       <span class="eyebrow">● 从零理解 · 机制</span>
       <h1>文件存储的天花板：为什么「目录」这么贵</h1>
-      <p class="lede">一个目录装一亿个文件会发生什么？为什么 rename 要加锁？为什么跨机房之后成本「指数级」上升？这一页把「元数据的中心瓶颈」拆成四步：数据可以复制、名字不能复制；目录其实就是一张「名字 → inode」的表；这张表只能有一个当前状态，所以总得有个地方串行;跨一层边界，往返次数就乘一层。最后回到对象存储：它是靠放弃目录和原子 rename 才换到无限扩展的。</p>
+      <p class="lede">一个目录装一亿个文件会发生什么？为什么 rename 要加锁？为什么跨机房之后成本「指数级」上升？这一页把「元数据的中心瓶颈」拆成四步：数据可以复制、名字不能复制；目录其实就是一张「名字 → inode」的表；这张表只能有一个当前状态，所以总得有个地方串行；跨一层边界，往返次数就乘一层。最后回到对象存储：它是靠放弃目录和原子 rename 才换到无限扩展的。</p>
     </div>
 
 
@@ -161,9 +161,9 @@
 </div>
     </div><hr>
 <h2 id="一亿个文件放在一个目录里"><span class="num">03</span>一亿个文件放在一个目录里</h2>
-<p>先算一下这张表有多大。每条目录项大致是「固定头 + 名字」：固定头约 8 字节（inode 号、长度、类型），名字按 4 字节对齐。</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">名字 12 个字符  →  8 + 12 = 20  →  对齐到 24 字节左右
-按 32 字节一条估算（留点余量）
+<p>先算一下这张表有多大。每条目录项大致是「固定头 + 名字」：固定头约 8 字节（inode 号、长度、类型），整条按 4 字节对齐。</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">名字 12 个字符  →  8 + 12 = 20  →  按 4 字节对齐 = 20 字节
+算上块尾空隙，按 32 字节一条估算（留余量）
 
    1 亿条  ×  32 B  ≈  3.2 GB
 </code></pre></div>
@@ -188,7 +188,7 @@
               
               <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5L3 8l3 4.5M10 3.5L13 8l-3 4.5"/></svg>
               <b>拿到 1 亿个名字</b>
-              <small>readdir 没有「只看前 100 条」的语义 —— 要全部就得全部读</small>
+              <small>readdir 是从头到尾的游标 —— 要全量名单，就得走完整个 3.2 GB</small>
             </div></div><div class="flowd-row"><div class="fnode tone-amber" data-id="c">
               
               <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5L3 8l3 4.5M10 3.5L13 8l-3 4.5"/></svg>
@@ -220,7 +220,7 @@
       <span class="ic">🎯</span>
       <div><p><strong>「收敛在少数元数据节点上」说的是哪件事。</strong></p>
 <p>目录表可以按名字哈希拆到很多台机器上（下一节就拆给你看）。
-但拆完之后：<code>ls</code> 要问完所有分片再合并，创建同名文件要跨分片仲裁，
+但拆完之后：<code>ls</code> 要问完所有分片再合并，一次改名的两端可能落在不同分片，
 分片迁移时查询不能丢。</p>
 <p><mark class="mk-blue">协调点从「一张表」变成了「一套规则」，它没有消失。</mark></p>
 </div>
@@ -228,10 +228,10 @@
 <div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">✗  /logs/access-20261010-00001.log      ← 一个目录放上亿个
 ✓  /logs/2026/10/10/ab/access-00001.log ← 三层，每个目录几百到几千个
 </code></pre></div>
-<p>按天（再加两位 hash 前缀）分层之后，每个目录里只有几百个文件，<code>ls</code> 读 32 KB 就回来了。切同样的控件换成「分层」看一眼：</p>
+<p>按天（再加两位 hash 前缀）分层之后，每个目录里只剩一千个上下，<code>ls</code> 读几十 KB 就回来了。切同样的控件换成「分层」看一眼：</p>
 <div class="demo" data-widget="ls-cost-lab" data-config="{&quot;mode&quot;:&quot;tiered&quot;}">
       <div class="demo-head">
-        <span class="title">同样一亿个文件，分层之后每个目录只装几百个</span>
+        <span class="title">同样一亿个文件，分层之后每个目录只装一千上下</span>
         <span class="status" data-status></span>
         <span class="spacer"></span>
         
@@ -239,7 +239,7 @@
       <div class="demo-body custom" data-mount></div>
     </div><div class="callout tone-muted">
       <span class="ic">🧮</span>
-      <div><p><mark class="mk-blue">分层不减少文件总数，它只是把「一次要数清的条目」从 1 亿变成了 1000。</mark></p>
+      <div><p><mark class="mk-blue">分层不减少文件总数，它只是把「一次要数清的条目」从 1 亿变成了 1000 上下。</mark></p>
 <p>代价是你要事先想好按什么维度切（时间、租户、hash 前缀），
 而且按别的维度查就得自己拼路径 —— 目录树的「随便怎么查都行」这件事，
 本来就是靠一份全局索引换来的。</p>
@@ -318,13 +318,13 @@
     </div><p><mark class="mk-blue">「原子」这个词的全部含义就是：这个持锁区间不能被外面看见。</mark> 它不便宜 —— 一次 <code>rename</code> = 两次表修改 + 一次加锁 / 解锁。</p>
 <hr>
 <h2 id="把目录拆开之后慢的地方换了位置"><span class="num">05</span>把目录拆开之后，慢的地方换了位置</h2>
-<p>既然一张表太大，那就把它拆到 4 台元数据节点上：<code>hash(文件名的父目录)</code> 决定谁管。看起来很自然。</p>
+<p>既然一张表太大，那就把这张大表按 <code>hash(完整路径)</code> 拆到 4 台元数据节点上：每条「名字 → inode」落在哪台，是算出来的。看起来很自然。</p>
 <div class="cards" data-cols="2"><div class="ccard tone-green">
           
           <h4>拆完确实得到了什么</h4>
           <p>容量和并发都上去了</p>
           <div class="cbody"><ul>
-<li>每个节点只装 1/4 的表，单节点不再 3 GB</li>
+<li>每个节点只装 1/4 的条目，单节点不再 3 GB</li>
 <li>四个节点可以并行响应不同的请求</li>
 <li>加机器 = 迁移一部分分片</li>
 </ul>
@@ -337,13 +337,13 @@
           <div class="cbody"><ul>
 <li><code>ls</code>：要<strong>同时问 4 个分片</strong>，拿到 4 份部分结果再合并、去重、排序</li>
 <li>新建文件：得先算出「这个名字属于哪个分片」，再路由过去</li>
-<li><strong>两个客户端同时建同名文件</strong>：落在同一个分片还好办，跨分片就要仲裁</li>
+<li><strong>两个客户端同时建同名文件</strong>：同名一定落在同一个分片，由它串行化谁成功 —— 这是拆完之后剩下的简单情况</li>
 <li>改名的两端落在不同分片：一次操作变成<strong>分布式事务</strong></li>
 <li>分片迁移时：正在进行的查询不能看到「一半有、一半没有」</li>
 </ul>
 </div>
           
-        </div></div><div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;c&quot;,&quot;to&quot;:&quot;r&quot;},{&quot;from&quot;:&quot;r&quot;,&quot;to&quot;:&quot;s1&quot;,&quot;label&quot;:&quot;1 : N&quot;},{&quot;from&quot;:&quot;r&quot;,&quot;to&quot;:&quot;s2&quot;},{&quot;from&quot;:&quot;r&quot;,&quot;to&quot;:&quot;s3&quot;},{&quot;from&quot;:&quot;r&quot;,&quot;to&quot;:&quot;s4&quot;},{&quot;from&quot;:&quot;s1&quot;,&quot;to&quot;:&quot;m&quot;},{&quot;from&quot;:&quot;s2&quot;,&quot;to&quot;:&quot;m&quot;},{&quot;from&quot;:&quot;s3&quot;,&quot;to&quot;:&quot;m&quot;},{&quot;from&quot;:&quot;s4&quot;,&quot;to&quot;:&quot;m&quot;},{&quot;from&quot;:&quot;m&quot;,&quot;to&quot;:&quot;x&quot;,&quot;label&quot;:&quot;顺带暴露出来的下一层问题&quot;,&quot;dashed&quot;:true}]">
+        </div></div><div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;c&quot;,&quot;to&quot;:&quot;r&quot;},{&quot;from&quot;:&quot;r&quot;,&quot;to&quot;:&quot;s1&quot;},{&quot;from&quot;:&quot;r&quot;,&quot;to&quot;:&quot;s2&quot;},{&quot;from&quot;:&quot;r&quot;,&quot;to&quot;:&quot;s3&quot;},{&quot;from&quot;:&quot;r&quot;,&quot;to&quot;:&quot;s4&quot;},{&quot;from&quot;:&quot;s1&quot;,&quot;to&quot;:&quot;m&quot;},{&quot;from&quot;:&quot;s2&quot;,&quot;to&quot;:&quot;m&quot;},{&quot;from&quot;:&quot;s3&quot;,&quot;to&quot;:&quot;m&quot;},{&quot;from&quot;:&quot;s4&quot;,&quot;to&quot;:&quot;m&quot;}]">
       <svg class="flowd-svg" aria-hidden="true">
         <defs>
           <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
@@ -388,11 +388,6 @@
               <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5L3 8l3 4.5M10 3.5L13 8l-3 4.5"/></svg>
               <b>合并 + 排序</b>
               <small>慢的那一片决定整体时延</small>
-            </div></div><div class="flowd-row"><div class="fnode tone-red" data-id="x">
-              
-              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2.2l4.8 1.9v4c0 2.9-2.1 4.8-4.8 5.7-2.7-.9-4.8-2.8-4.8-5.7v-4z"/></svg>
-              <b>跨分片 rename</b>
-              <small>两张表在两台机器上 → 要分布式事务或两把分布式锁</small>
             </div></div></div>
       
     </div><div class="callout tone-violet">
@@ -413,7 +408,7 @@
                         3 个往返
 </code></pre></div>
 <p>光在光纤里大约每毫秒走 200 公里，所以<strong>距离直接换算成时间</strong>：</p>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>两端的位置</th><th>一个往返（RTT）大约</th><th>这次 rename 要多久</th></tr></thead><tbody><tr><th>同一台机器（锁在内存里）</th><td data-label="一个往返（RTT）大约"><span class="tag tone-green">≈ 0.01 ms</span></td><td data-label="这次 rename 要多久">≈ 0.03 ms</td></tr><tr><th>同机房不同机器</th><td data-label="一个往返（RTT）大约"><span class="tag tone-green">≈ 0.2 ms</span></td><td data-label="这次 rename 要多久">≈ 0.6 ms</td></tr><tr><th>同城两个机房</th><td data-label="一个往返（RTT）大约"><span class="tag tone-amber">≈ 10 ms</span></td><td data-label="这次 rename 要多久">≈ 30 ms</td></tr><tr><th>跨洲（上海 ↔ 美西）</th><td data-label="一个往返（RTT）大约"><span class="tag tone-red">≈ 120 ms（直线一万公里，光速下限约 100 ms）</span></td><td data-label="这次 rename 要多久">≈ 360 ms</td></tr></tbody></table></div><div class="demo" data-widget="rtt-lab" data-config="{&quot;place&quot;:&quot;rack&quot;,&quot;rounds&quot;:3}">
+<div class="compare-wrap"><table class="compare"><thead><tr><th>两端的位置</th><th>一个往返（RTT）大约</th><th>这次 rename 要多久</th></tr></thead><tbody><tr><th>同一台机器（锁在内存里）</th><td data-label="一个往返（RTT）大约"><span class="tag tone-green">≈ 0.01 ms</span></td><td data-label="这次 rename 要多久">≈ 0.03 ms</td></tr><tr><th>同机房不同机器</th><td data-label="一个往返（RTT）大约"><span class="tag tone-green">≈ 0.2 ms</span></td><td data-label="这次 rename 要多久">≈ 0.6 ms</td></tr><tr><th>同城两个机房</th><td data-label="一个往返（RTT）大约"><span class="tag tone-amber">≈ 2 ms</span></td><td data-label="这次 rename 要多久">≈ 6 ms</td></tr><tr><th>跨洲（上海 ↔ 美西）</th><td data-label="一个往返（RTT）大约"><span class="tag tone-red">≈ 130 ms（海底光缆不走直线，光速下限约 100 ms）</span></td><td data-label="这次 rename 要多久">≈ 390 ms</td></tr></tbody></table></div><div class="demo" data-widget="rtt-lab" data-config="{&quot;place&quot;:&quot;rack&quot;,&quot;rounds&quot;:3}">
       <div class="demo-head">
         <span class="title">距离一拉开，这个目录一秒能做几次改名</span>
         <span class="status" data-status></span>
@@ -421,15 +416,15 @@
         
       </div>
       <div class="demo-body custom" data-mount></div>
-    </div><p>数字有点刺眼的地方在这里：<strong>锁的持有时间 = 排队时间</strong>。</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">跨洲一次 rename 要 360 ms，而且这期间两把锁都拿在手里
+    </div><p>数字有点刺眼的地方在这里：<strong>锁要一直握到最后一个往返结束 —— 别人排的队，就是这段时间。</strong></p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">跨洲一次 rename 要 390 ms，而且这期间两把锁都拿在手里
 
-  这个目录每秒最多完成： 1000 ms ÷ 360 ms ≈ 2.8 次
+  这个目录每秒最多完成： 1000 ms ÷ 390 ms ≈ 2.6 次
   同机房同样两把锁：     1000 ms ÷ 0.6 ms ≈ 1660 次
 
-  差了 600 倍 —— 而这个差距不是硬盘慢了，是光跑得就那么快。
+  差了 650 倍 —— 而这个差距不是硬盘慢了，是光跑得就那么快。
 </code></pre></div>
-<p>再叠一层：真正复杂的操作不止跨两个目录，还要跨<strong>分片、副本、地域<strong>。每多一层协调，就多一组往返和一次「谁先谁后」的约定。这就是「非线性急剧上升」的来源 —— 它不是一条曲线，是</strong>每一层都在乘一遍</strong>。</p>
+<p>再叠一层：真正复杂的操作不止跨两个目录，还要跨<strong>分片、副本、地域</strong>。每多一层协调，就多一组往返和一次「谁先谁后」的约定。这就是「非线性急剧上升」的来源 —— 它不是一条曲线，是<strong>每一层都在乘一遍</strong>。</p>
 <div class="callout tone-red">
       <span class="ic">🌐</span>
       <div><p>跨机房还带来一个躲不开的选择题。</p>
@@ -478,7 +473,7 @@
     </div><hr>
 <h2 id="对象存储绕过了哪一条"><span class="num">08</span>对象存储绕过了哪一条</h2>
 <p>回到这张表，对象存储的选择是最后一行的<strong>全部四条都放弃</strong>：</p>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>它放弃的</th><th>于是得到了什么</th></tr></thead><tbody><tr><th>没有目录</th><td data-label="于是得到了什么">只有 key 字符串，<code>photos/2024/a.jpg</code> 里的 <code>/</code> 是个普通字符；快就是真的快，不需要维护索引</td></tr><tr><th>没有原子 rename</th><td data-label="于是得到了什么">改名 = copy 到新 key + delete 旧 key，允许中间态 —— 因为对象本身不可变，不存在「改坏一半」</td></tr><tr><th>没有文件锁</th><td data-label="于是得到了什么">对象是写一次读多次的整块替换，不存在「两个人同时改一个字节」</td></tr><tr><th>list 不是索引</th><td data-label="于是得到了什么">前缀列举是<strong>查询时才算</strong>的，没有一份「必须保持一致」的全局索引</td></tr></tbody></table></div><div class="callout tone-green">
+<div class="compare-wrap"><table class="compare"><thead><tr><th>它放弃的</th><th>于是得到了什么</th></tr></thead><tbody><tr><th>没有目录</th><td data-label="于是得到了什么">只有 key 字符串，<code>photos/2024/a.jpg</code> 里的 <code>/</code> 是个普通字符；快就是真的快，不需要维护索引</td></tr><tr><th>没有原子 rename</th><td data-label="于是得到了什么">改名 = copy 到新 key + delete 旧 key，允许中间态 —— 因为对象本身不可变，不存在「改坏一半」</td></tr><tr><th>没有文件锁</th><td data-label="于是得到了什么">对象只能整块替换（PUT 覆盖整个对象），最后写入者赢，不存在「两个人同时改一个字节」</td></tr><tr><th>list 不用维护目录</th><td data-label="于是得到了什么">前缀列举 = 按 key 字典序走一个扁平索引；没有「每个目录一份、改动必须原子生效」的结构要维护</td></tr></tbody></table></div><div class="callout tone-green">
       <span class="ic">🪣</span>
       <div><p>结果是：真正需要「必须有一个人说了算」的东西，只剩下一件 —— <strong>key 该落到哪个分片</strong>。</p>
 <p>而这件事用哈希就能算：<mark class="mk-blue">谁算都是同一个答案，不需要问任何人。</mark></p>
@@ -512,13 +507,13 @@ POSIX 要求外部只能看到「操作前」或「操作后」，所以必须�
         <div class="a"><p>因为分片解决的是「表太大」，不能解决「同名只能有一个」。
 只要还承诺强一致的目录语义，就一定有个地方要串行仲裁（跨分片时是分布式事务/两阶段提交）。
 拆开之后 <code>ls</code> 还要扇出到多个分片再合并、慢的那片决定整体时延。
-协调点只是从一张表换成了 一套规则。</p>
+协调点只是从一张表换成了一套规则。</p>
 </div>
       </details><details>
         <summary>「跨机房后一致性成本指数级增长」—— 用一句人话说是什么？</summary>
         <div class="a"><p>一次操作要几个网络来回，来回的时间由距离决定（光速下限）。
 锁要一直握到来回结束，所以距离越远，同一个目录每秒能完成的改名次数越少 ——
-同机房约 1600 次/秒，跨洲约 3 次/秒。
+同机房约 1600 次/秒，跨洲不到 3 次/秒。
 再叠上分层（目录、分片、副本、地域），每一层都要一轮协调，成本是一层乘一层上来的。</p>
 </div>
       </details></div>
@@ -530,6 +525,6 @@ POSIX 要求外部只能看到「操作前」或「操作后」，所以必须�
   </main>
 </div>
 
-<script src="../../assets/app.js"></script>
+<script src="../../assets/app.js?v=777fc4cabe"></script>
 </body>
 </html>

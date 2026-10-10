@@ -9,6 +9,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import MarkdownIt from 'markdown-it';
 import { blocksPlugin, addAnchors, lintFences, lintLinkifyStars, lintRawHtml } from './lib/blocks.mjs';
@@ -72,13 +73,40 @@ function stripLeadingH1(src) {
 function inlineAssets(html) {
   return html
     .replace(
-      /<link\s+rel="stylesheet"\s+href="[^"]*assets\/([\w.-]+)"\s*\/?>/g,
+      /<link\s+rel="stylesheet"\s+href="[^"]*assets\/([\w.-]+)(?:\?v=[\w.-]+)?"\s*\/?>/g,
       (m, f) => `<style>\n${read(path.join(ROOT, 'assets', f))}\n</style>`,
     )
     .replace(
-      /<script\s+src="[^"]*assets\/app\.js"\s*>\s*<\/script>/g,
+      /<script\s+src="[^"]*assets\/app\.js(?:\?v=[\w.-]+)?"\s*>\s*<\/script>/g,
       () => `<script>\n${read(path.join(ROOT, 'assets', 'app.js'))}\n</script>`,
     );
+}
+
+/* ---------- 共享资源的 cache-busting ----------
+
+   踩过：页面先推、JS 也同批推，但浏览器还揣着上一次的 app.js（Pages 的
+   Cache-Control: max-age=600 内浏览器可以继续用旧缓存）—— 结果新页面里
+   demo 的壳在、控件代码是旧的没注册，页面上一排空控件，控制台报「未注册」。
+
+   修法：给每个 assets 链接拼上 ?v=<内容哈希前 10 位>。内容一变 URL 就变，
+   浏览器缓存自然失效；内容没变则哈希不变，缓存照样命中。 */
+const ASSET_FILES = ['theme.css', 'blocks.css', 'archify-embed.css', 'app.js'];
+const ASSET_VERSIONS = Object.fromEntries(
+  ASSET_FILES.map((f) => {
+    const buf = fs.readFileSync(path.join(ROOT, 'assets', f));
+    return [f, crypto.createHash('md5').update(buf).digest('hex').slice(0, 10)];
+  }),
+);
+
+/** 给页面里指向 assets/ 的 link/script 链接拼上版本号（已有版本号则替换，幂等） */
+function versionAssets(html) {
+  return html.replace(
+    /((?:src|href)="[^"]*assets\/)([\w.-]+\.(?:css|js))(?:\?v=[\w.-]+)?"/g,
+    (m, head, file) => {
+      const v = ASSET_VERSIONS[file];
+      return v ? `${head}${file}?v=${v}"` : m;
+    },
+  );
 }
 
 /* ---------- 校验 ---------- */
@@ -178,14 +206,16 @@ function main() {
       }
     }
 
-    const full = renderPage({
-      meta: { site: '知识笔记', ...meta, title: meta.title || h1 || slug },
-      body: anchored,
-      toc,
-      needs,
-      assetPrefix: '../../',
-      backHref: '../../index.html',
-    });
+    const full = versionAssets(
+      renderPage({
+        meta: { site: '知识笔记', ...meta, title: meta.title || h1 || slug },
+        body: anchored,
+        toc,
+        needs,
+        assetPrefix: '../../',
+        backHref: '../../index.html',
+      }),
+    );
 
     write(path.join(dir, 'index.html'), full);
 
@@ -239,7 +269,7 @@ function main() {
   const allEntries = [...byslug.values()].sort((a, b) => a.slug.localeCompare(b.slug));
   write(
     path.join(ROOT, 'index.html'),
-    renderHome(allEntries, { site: '知识笔记', assetPrefix: '', plans }),
+    versionAssets(renderHome(allEntries, { site: '知识笔记', assetPrefix: '', plans })),
   );
   console.log(`  ✓ index.html (${allEntries.length} 篇)`);
 

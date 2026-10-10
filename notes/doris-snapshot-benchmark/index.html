@@ -5,9 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Doris 人群快照基准：为什么最后是「一张共享表」</title>
 <meta name="description" content="设计文档赌的是「一个快照一张表」，三轮实测把它和 Unique 都淘汰了。这篇讲清楚两次淘汰各自的原因：Unique 输在写入路径，分表输在元数据随快照数线性增长，而共享表靠「按天分区 + 主键前缀」把 14 亿行压成一次只扫 100 万行。" />
-<link rel="stylesheet" href="../../assets/theme.css" />
-  <link rel="stylesheet" href="../../assets/blocks.css" />
-  <link rel="stylesheet" href="../../assets/archify-embed.css" />
+<link rel="stylesheet" href="../../assets/theme.css?v=e6a9ffd3d6" />
+  <link rel="stylesheet" href="../../assets/blocks.css?v=5977cfd9e7" />
+  <link rel="stylesheet" href="../../assets/archify-embed.css?v=68fec0b81b" />
 </head>
 <body>
 <div id="progress"></div>
@@ -53,7 +53,7 @@
     <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">Doris</span> <span class="tag tone-muted">数据仓库</span> <span class="tag tone-muted">基准测试</span> <span class="tag tone-muted">人群圈选</span></span></div>
 
 <h2 id="每天-100-份人群快照存-14-天"><span class="num">01</span>每天 100 份人群快照，存 14 天</h2>
-<p>运营要做<strong>人群圈选<strong>：提交一个条件（「最近 7 天加购过、AUM 大于 50 万的香港客户」），系统把符合条件的人圈出来。圈出来的这份名单叫</strong>快照</strong>。</p>
+<p>运营要做<strong>人群圈选</strong>：提交一个条件（「最近 7 天加购过、AUM 大于 50 万的香港客户」），系统把符合条件的人圈出来。圈出来的这份名单叫<strong>快照</strong>。</p>
 <p>快照要每天存、留 14 天，用来做对比（「今天比昨天多了多少人」）和回溯（「上周三圈的是哪些人」）。</p>
 <p>数据量是这么长的：</p>
 <div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">1 个快照  = 100 万人        （就是一堆 user_id）
@@ -68,7 +68,7 @@ snapshot_14000    100 万行        ← 1400 张表
 </code></pre></div>
 <p>这个想法很自然 —— 像文件一样，一个快照一份。删起来一句 <code>DROP TABLE</code> 干净利落，一个快照写坏了也不影响别人。</p>
 <p>另外两种候选是把它塞进<strong>一张表</strong>，用一列标明「这一行属于哪个快照」，区别只在表模型：</p>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>怎么存</th><th>① 共享 Duplicate 表</th><th>② 共享 Unique 表</th><th>③ 一快照一表</th></tr></thead><tbody><tr><th>表数量</th><td data-label="① 共享 Duplicate 表"><span class="tag tone-green">1 张</span></td><td data-label="② 共享 Unique 表"><span class="tag tone-green">1 张</span></td><td data-label="③ 一快照一表"><span class="tag tone-amber">1400 张</span></td></tr><tr><th>怎么区分快照</th><td data-label="① 共享 Duplicate 表">靠 <code>snapshot_id</code> 这一列</td><td data-label="② 共享 Unique 表">靠 <code>snapshot_id</code> 这一列</td><td data-label="③ 一快照一表">一张表就是快照本身</td></tr><tr><th>同一批人写两次</th><td data-label="① 共享 Duplicate 表"><span class="tag tone-red">叠成两行</span></td><td data-label="② 共享 Unique 表"><span class="tag tone-green">只留一行</span></td><td data-label="③ 一快照一表"><span class="tag tone-red">叠成两行</span></td></tr><tr><th>删掉一天的数据</th><td data-label="① 共享 Duplicate 表">一条命令</td><td data-label="② 共享 Unique 表">一条命令</td><td data-label="③ 一快照一表">要删 100 张表</td></tr></tbody></table></div><p>这张表里埋着三个概念 —— <strong>表模型<strong>、</strong>分区<strong>、</strong>tablet</strong>。<mark class="mk-blue">后面每一条结论都从它们长出来。</mark></p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>怎么存</th><th>① 共享 Duplicate 表</th><th>② 共享 Unique 表</th><th>③ 一快照一表</th></tr></thead><tbody><tr><th>表数量</th><td data-label="① 共享 Duplicate 表"><span class="tag tone-green">1 张</span></td><td data-label="② 共享 Unique 表"><span class="tag tone-green">1 张</span></td><td data-label="③ 一快照一表"><span class="tag tone-amber">1400 张</span></td></tr><tr><th>怎么区分快照</th><td data-label="① 共享 Duplicate 表">靠 <code>snapshot_id</code> 这一列</td><td data-label="② 共享 Unique 表">靠 <code>snapshot_id</code> 这一列</td><td data-label="③ 一快照一表">一张表就是快照本身</td></tr><tr><th>同一批人写两次</th><td data-label="① 共享 Duplicate 表"><span class="tag tone-red">叠成两行</span></td><td data-label="② 共享 Unique 表"><span class="tag tone-green">只留一行</span></td><td data-label="③ 一快照一表"><span class="tag tone-red">叠成两行</span></td></tr><tr><th>删掉一天的数据</th><td data-label="① 共享 Duplicate 表">一条命令</td><td data-label="② 共享 Unique 表">一条命令</td><td data-label="③ 一快照一表">要删 100 张表</td></tr></tbody></table></div><p>这张表里埋着三个概念 —— <strong>表模型</strong>、<strong>分区</strong>、<strong>tablet</strong>。<mark class="mk-blue">后面每一条结论都从它们长出来。</mark></p>
 <p>在建表之前得先知道这三个是什么。</p>
 <h2 id="先把三个概念说清楚"><span class="num">02</span>先把三个概念说清楚</h2>
 <h3 id="表模型duplicate-和-unique">表模型：Duplicate 和 Unique</h3>
@@ -482,7 +482,7 @@ Unique 慢 4 倍、分表先撞 FE 内存、共享表 tablet 数不随快照数�
         <div class="a"><p>因为这是一台单机：Apple M4、1 FE + 1 BE、<code>replication_num = 1</code>。
 生产是多 BE 集群，版本数、compaction 队列、FE 内存的表现都会不一样。</p>
 <p>能带走的不是「233 ms」这个数，而是<strong>倍数关系</strong>（Unique 慢 4 倍）
-和<strong>「先撞到什么上限」</strong>（分表先撞 FE 内存，共享表 tablet 数不涨）。</p>
+和**「先撞到什么上限」**（分表先撞 FE 内存，共享表 tablet 数不涨）。</p>
 </div>
       </details></div>
 
@@ -493,6 +493,6 @@ Unique 慢 4 倍、分表先撞 FE 内存、共享表 tablet 数不随快照数�
   </main>
 </div>
 
-<script src="../../assets/app.js"></script>
+<script src="../../assets/app.js?v=777fc4cabe"></script>
 </body>
 </html>
