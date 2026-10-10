@@ -66,7 +66,7 @@
 
 for (;;) {
     conn_fd = accept(listen_fd, ...);          // 没有新连接 → 卡在这
-    pthread_create(&amp;t, NULL, handle, conn_fd); // 每条连接配一个线程
+    pthread_create(&amp;t, NULL, handle, conn_fd); // ← 线程在这里创建：每 accept 一次，造一个
 }
 
 void handle(int fd) {
@@ -76,7 +76,8 @@ void handle(int fd) {
 }
 </code></pre></div>
 <p>现在（这一篇，非阻塞 + 一个线程轮询）：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">listen_fd = socket(...);  bind(...);  listen(listen_fd, 128);
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">// 全程没有 pthread_create：跑轮询的就是进程自带的那个主线程
+listen_fd = socket(...);  bind(...);  listen(listen_fd, 128);
 fcntl(listen_fd, F_SETFL, O_NONBLOCK);        // ① 监听 fd 也别挂起我
 
 for (;;) {
@@ -115,8 +116,9 @@ for (;;) {
 </table>
 <p><mark class="mk-blue">除了这两处，一个字都没换</mark>：<code>read</code> 还是那个 <code>read</code>，连接 socket 还是那些连接 socket，缓冲区、四元组，一个都没动。</p>
 </div>
-    </div><p><strong>所以「底层是怎么转换的」这个问法，本身就问错了 —— 底层什么都没转换。</strong> 真正变的，是 <code>read</code> 在「数据没到」那一刻走的那条分支：</p>
-<figure class="archfig" data-arch data-pano data-parts='{"tA":{"label":"线程 A","sub":"上一篇的一个执行单位","detail":"它调了 `read(连接 1)`，那一刻缓冲区是空的。==阻塞的 read 不会返回==：内核把这条执行流挂到连接 1 的等待队列上、让它让出 CPU。数据到来之前它什么都干不了 —— 连「去问问连接 2」都做不到。"},"tB":{"label":"线程 B","sub":"一模一样的处境","detail":"和线程 A 一样，只是挂在了连接 2 上。==500 条连接就是 500 个这样的线程==，绝大部分时间在睡。"},"c1":{"label":"连接 1 · socket","sub":"没变的东西","detail":"四元组、接收缓冲区、等待队列 —— 和右边那个「连接 1 · socket」是**同一个东西**。变的不是它，是等它的人的等法。"},"c2":{"label":"连接 2 · socket","sub":"同上","detail":"同一个 socket，另一条连接；它的等待队列上睡着线程 B。"},"cpuL":{"label":"CPU","sub":"此刻不在跑你的代码","detail":"500 个线程全在睡，CPU 在跑别的进程。==这就是上一篇那句「用执行资源去买等待」==：买来的就是这一片睡眠。"},"tX":{"label":"线程 X","sub":"这一篇唯一的一个","detail":"它也调 `read`、也面对空缓冲区 —— 但 fd 上有 `O_NONBLOCK`，==内核不挂它，直接把 EAGAIN 还给它==。它拿回一句「还没好」，转头去问下一个。"},"cR1":{"label":"连接 1 · socket","sub":"被问的其中一个","detail":"缓冲区是空的，这次 read 的全部产出就是一句 EAGAIN。==注意它自己什么都没变==：缓冲区、等待队列都在，只是这会儿队列上没有睡觉的人。"},"cR2":{"label":"连接 2 · socket","sub":"同上","detail":"也是空的，也是一句 EAGAIN。一轮里大部分的问都落在这种格子上。"},"cR3":{"label":"连接 3 · socket","sub":"这一轮唯一有数据的","detail":"缓冲区里有 200 字节 —— 这次 read 把数据带回来，线程处理它，然后继续问下一个。==一轮几百次系统调用，有收获的可能就这一两次== —— 正是接下来两节要算的账。"},"cpuR":{"label":"CPU","sub":"从头到尾跑的都是它","detail":"线程 X 永远在跑：问、问、问、处理、问。==同一台机器，左边它在跑别人，右边它一直在跑你== —— 「等待不再占用执行资源」落到机器上就是这个样子。"}}' data-anchors='[{"part":"tA","label":"线程"},{"part":"c1","label":"连接 socket"},{"part":"cpuR","label":"CPU 核"}]' data-tours='[{"id":"two-endings","label":"一次 read 的两种结局","steps":[{"at":["tA","c1"],"text":"线程 A 调 `read(连接 1)`，缓冲区是空的。阻塞模式下==内核把它挂到连接 1 的等待队列上、让它让出 CPU== —— 这次 read 要等数据来了才有返回。"},{"at":["tA","cpuL"],"text":"于是线程 A 睡了。==它不是「慢」，是不在场==：CPU 在跑别人的代码。"},{"at":["tB","c2"],"text":"线程 B 的处境一模一样。500 条连接就要 500 个这样的线程 —— ==因为一个被挂走的线程，连「去问问别的连接」都做不到==。"},{"at":["tX","cR1"],"text":"换到这一篇：线程 X 也问连接 1，缓冲区也是空的 —— 但 `O_NONBLOCK` 让内核不挂它，==立刻把 EAGAIN 还给它==。"},{"at":["tX","cR3"],"text":"拿回一句「还没好」，它转头去问下一个。问到连接 3，缓冲区里有数据 —— 这次 read 真的把数据带回来了。"},{"at":["tX","cpuR"],"text":"全程线程 X 没离开过 CPU。==同一台机器、同一批 socket，变的只有「数据没到」那一刻内核走哪条分支== —— 这就是两个世界的全部差别。"}]},{"id":"what-changed","label":"什么变了，什么没变","steps":[{"at":["c1","cR1"],"text":"先看没变的：两边的「连接 1 · socket」是同一个东西 —— 四元组、接收缓冲区、等待队列一样不少。==底层没有「转换」这回事。=="},{"at":["tA","tX"],"text":"变的是人：左边每条连接配一个线程，右边 500 条连接共用一个。"},{"at":["cpuL","cpuR"],"text":"落到 CPU 上看得最清楚：左边它跑的是别人（你的线程全在睡），右边它从头到尾跑你的这一个。"},{"at":["tX","cR3"],"text":"代价也已经在这张图上了：==每一问都是一次系统调用==，右边这一轮 3 问里 2 问是白问 —— 下一节就算这笔账。"}]}]'>
+    </div><p>还有一处消失了的要看见：<strong>右边那段代码里 <code>pthread_create</code> 整个没了。</strong> 左边的线程是 accept 时造的，一条连接造一个；右边跑轮询的线程<mark class="mk-blue">不是为哪条连接造的</mark>，就是进程启动时自带的那个主线程 —— 以前它卡在 <code>accept</code> 上等新连接，现在它把「问」也干了。<mark class="mk-blue">线程数从「跟着连接数涨」变成「跟连接数无关」</mark>，这就是这一节标题那句话的本来面目。</p>
+<p><strong>所以「底层是怎么转换的」这个问法，本身就问错了 —— 底层什么都没转换。</strong> 真正变的，是 <code>read</code> 在「数据没到」那一刻走的那条分支：</p>
+<figure class="archfig" data-arch data-pano data-parts='{"tA":{"label":"线程 A","sub":"上一篇的一个执行单位","detail":"它是 ==accept 返回那一刻 `pthread_create` 造出来的== —— 一条连接配一个，造它的唯一理由就是让它在 `read` 上站着等。那一刻缓冲区是空的，==阻塞的 read 不会返回==：内核把这条执行流挂到连接 1 的等待队列上、让它让出 CPU。数据到来之前它什么都干不了。"},"tB":{"label":"线程 B","sub":"一模一样的处境","detail":"也是 accept 时 `pthread_create` 造的，只是挂在了连接 2 上。==500 条连接就是 500 次 pthread_create、500 个这样的线程==，绝大部分时间在睡。"},"c1":{"label":"连接 1 · socket","sub":"没变的东西","detail":"四元组、接收缓冲区、等待队列 —— 和右边那个「连接 1 · socket」是**同一个东西**。变的不是它，是等它的人的等法。"},"c2":{"label":"连接 2 · socket","sub":"同上","detail":"同一个 socket，另一条连接；它的等待队列上睡着线程 B。"},"cpuL":{"label":"CPU","sub":"此刻不在跑你的代码","detail":"500 个线程全在睡，CPU 在跑别的进程。==这就是上一篇那句「用执行资源去买等待」==：买来的就是这一片睡眠。"},"tX":{"label":"线程 X","sub":"这一篇唯一的一个","detail":"==它不是为哪条连接造的：整个进程里 `pthread_create` 一次都没调==，跑轮询的就是进程启动时自带的那个主线程 —— 以前它卡在 `accept` 上等新连接，现在它把「问」也干了。它也调 `read`、也面对空缓冲区，但 fd 上有 `O_NONBLOCK`，==内核不挂它，直接把 EAGAIN 还给它==。"},"cR1":{"label":"连接 1 · socket","sub":"被问的其中一个","detail":"缓冲区是空的，这次 read 的全部产出就是一句 EAGAIN。==注意它自己什么都没变==：缓冲区、等待队列都在，只是这会儿队列上没有睡觉的人。"},"cR2":{"label":"连接 2 · socket","sub":"同上","detail":"也是空的，也是一句 EAGAIN。一轮里大部分的问都落在这种格子上。"},"cR3":{"label":"连接 3 · socket","sub":"这一轮唯一有数据的","detail":"缓冲区里有 200 字节 —— 这次 read 把数据带回来，线程处理它，然后继续问下一个。==一轮几百次系统调用，有收获的可能就这一两次== —— 正是接下来两节要算的账。"},"cpuR":{"label":"CPU","sub":"从头到尾跑的都是它","detail":"线程 X 永远在跑：问、问、问、处理、问。==同一台机器，左边它在跑别人，右边它一直在跑你== —— 「等待不再占用执行资源」落到机器上就是这个样子。"}}' data-anchors='[{"part":"tA","label":"线程"},{"part":"c1","label":"连接 socket"},{"part":"cpuR","label":"CPU 核"}]' data-tours='[{"id":"two-endings","label":"一次 read 的两种结局","steps":[{"at":["tA","c1"],"text":"上一篇的世界从 accept 开始：==每回来一条连接，`pthread_create` 造一个线程==，让它去调 `read(连接 1)`。缓冲区是空的 → 内核把它挂到连接 1 的等待队列上、让出 CPU —— 这次 read 要等数据来了才有返回。"},{"at":["tA","cpuL"],"text":"于是线程 A 睡了。==它不是「慢」，是不在场==：CPU 在跑别人的代码。"},{"at":["tB","c2"],"text":"线程 B 的处境一模一样 —— 它也是 accept 时造出来的。500 条连接就要 500 次 `pthread_create` ==因为一个被挂走的线程，连「去问问别的连接」都做不到==。"},{"at":["tX"],"text":"换到这一篇，先看这个线程是从哪来的：==不是新造的==。整个进程里 `pthread_create` 一次都没调 —— 跑轮询的就是进程启动时自带的那个主线程，以前它卡在 accept 上，现在它把「问」也干了。==线程数从此跟连接数无关。=="},{"at":["tX","cR1"],"text":"它也问连接 1，缓冲区也是空的 —— 但 `O_NONBLOCK` 让内核不挂它，==立刻把 EAGAIN 还给它==。"},{"at":["tX","cR3"],"text":"拿回一句「还没好」，它转头去问下一个。问到连接 3，缓冲区里有数据 —— 这次 read 真的把数据带回来了。"},{"at":["tX","cpuR"],"text":"全程线程 X 没离开过 CPU。==同一台机器、同一批 socket，变的只有「数据没到」那一刻内核走哪条分支== —— 这就是两个世界的全部差别。"}]},{"id":"what-changed","label":"什么变了，什么没变","steps":[{"at":["c1","cR1"],"text":"先看没变的：两边的「连接 1 · socket」是同一个东西 —— 四元组、接收缓冲区、等待队列一样不少。==底层没有「转换」这回事。=="},{"at":["tA","tX"],"text":"变的是人，而且是两边不同时辰出现的：左边的线程 ==accept 时 pthread_create 造==，一条连接一个；右边这个线程 ==进程一起来就在==，500 条连接共用它。"},{"at":["cpuL","cpuR"],"text":"落到 CPU 上看得最清楚：左边它跑的是别人（你的线程全在睡），右边它从头到尾跑你的这一个。"},{"at":["tX","cR3"],"text":"代价也已经在这张图上了：==每一问都是一次系统调用==，右边这一轮 3 问里 2 问是白问 —— 下一节就算这笔账。"}]}]'>
       <svg viewBox="0 0 1428 572" role="img" aria-labelledby="archify-diagram-title archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
         <title id="archify-diagram-title">同一次 read，两种结局：线程被挂到哪，决定一个线程能招呼几条连接</title>
         <desc id="archify-diagram-description">连接 socket、缓冲区、四元组一个都没变，变的只有「数据没到」那一刻的分支</desc>
@@ -157,26 +159,26 @@ for (;;) {
         <path data-edge-from="tX" data-edge-to="cR3" data-edge-label="好了吗 → 有数据，读走" data-edge-key="4" data-edge-id="p3" data-composition-points="900,234;900,258;1116,258;1116,332;1140,332" d="M 900 234 L 900 250 Q 900 258 908 258 L 1108 258 Q 1116 258 1116 266 L 1116 324 Q 1116 332 1124 332 L 1140 332" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
 
         <!-- Components -->
-        <g id="node-tA" data-node-id="tA" data-node-label="线程 A" tabindex="0" role="button" aria-label="Focus 线程 A, read(连接 1)：没数据 → 被挂起, 上一篇 · 阻塞 + 一连接一线程：500 条连接 = 500 个线程" aria-pressed="false" data-node-kind="backend" data-node-sublabel="read(连接 1)：没数据 → 被挂起" data-node-context="上一篇 · 阻塞 + 一连接一线程：500 条连接 = 500 个线程">
-          <title>线程 A · read(连接 1)：没数据 → 被挂起 · 上一篇 · 阻塞 + 一连接一线程：500 条连接 = 500 个线程</title>
+        <g id="node-tA" data-node-id="tA" data-node-label="线程 A" tabindex="0" role="button" aria-label="Focus 线程 A, accept 来一条，pthread_create 造一个, 上一篇 · 阻塞 + 一连接一线程：500 条连接 = 500 个线程" aria-pressed="false" data-node-kind="backend" data-node-sublabel="accept 来一条，pthread_create 造一个" data-node-context="上一篇 · 阻塞 + 一连接一线程：500 条连接 = 500 个线程">
+          <title>线程 A · accept 来一条，pthread_create 造一个 · 上一篇 · 阻塞 + 一连接一线程：500 条连接 = 500 个线程</title>
           <rect x="80" y="110" width="200" height="64" rx="6" class="c-mask"/>
           <rect x="80" y="110" width="200" height="64" rx="6" class="c-backend" stroke-width="1.5"/>
           <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(86 116) scale(0.6875)">
             <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
           </g>
           <text data-detail-anchor x="180" y="140" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">线程 A</text>
-        <text data-detail="context" x="180" y="156" class="t-muted" font-size="9" text-anchor="middle">read(连接 1)：没数据 → 被挂起</text>
+        <text data-detail="context" x="180" y="156" class="t-muted" font-size="8.8" text-anchor="middle">accept 来一条，pthread_create 造一个</text>
         </g>
 
-        <g id="node-tB" data-node-id="tB" data-node-label="线程 B" tabindex="0" role="button" aria-label="Focus 线程 B, read(连接 2)：没数据 → 被挂起, 上一篇 · 阻塞 + 一连接一线程：500 条连接 = 500 个线程" aria-pressed="false" data-node-kind="backend" data-node-sublabel="read(连接 2)：没数据 → 被挂起" data-node-context="上一篇 · 阻塞 + 一连接一线程：500 条连接 = 500 个线程">
-          <title>线程 B · read(连接 2)：没数据 → 被挂起 · 上一篇 · 阻塞 + 一连接一线程：500 条连接 = 500 个线程</title>
+        <g id="node-tB" data-node-id="tB" data-node-label="线程 B" tabindex="0" role="button" aria-label="Focus 线程 B, accept 来一条，pthread_create 造一个, 上一篇 · 阻塞 + 一连接一线程：500 条连接 = 500 个线程" aria-pressed="false" data-node-kind="backend" data-node-sublabel="accept 来一条，pthread_create 造一个" data-node-context="上一篇 · 阻塞 + 一连接一线程：500 条连接 = 500 个线程">
+          <title>线程 B · accept 来一条，pthread_create 造一个 · 上一篇 · 阻塞 + 一连接一线程：500 条连接 = 500 个线程</title>
           <rect x="80" y="220" width="200" height="64" rx="6" class="c-mask"/>
           <rect x="80" y="220" width="200" height="64" rx="6" class="c-backend" stroke-width="1.5"/>
           <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(86 226) scale(0.6875)">
             <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
           </g>
           <text data-detail-anchor x="180" y="250" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">线程 B</text>
-        <text data-detail="context" x="180" y="266" class="t-muted" font-size="9" text-anchor="middle">read(连接 2)：没数据 → 被挂起</text>
+        <text data-detail="context" x="180" y="266" class="t-muted" font-size="8.8" text-anchor="middle">accept 来一条，pthread_create 造一个</text>
         </g>
 
         <g id="node-c1" data-node-id="c1" data-node-label="连接 1 · socket" tabindex="0" role="button" aria-label="Focus 连接 1 · socket, 缓冲区空 · 线程 A 睡在它的等待队列上, 上一篇 · 阻塞 + 一连接一线程：500 条连接 = 500 个线程" aria-pressed="false" data-node-kind="database" data-node-sublabel="缓冲区空 · 线程 A 睡在它的等待队列上" data-node-context="上一篇 · 阻塞 + 一连接一线程：500 条连接 = 500 个线程">
@@ -214,15 +216,15 @@ for (;;) {
         <text data-detail="context" x="380" y="376" class="t-muted" font-size="9" text-anchor="middle">此刻在跑别人的代码</text>
         </g>
 
-        <g id="node-tX" data-node-id="tX" data-node-label="线程 X" tabindex="0" role="button" aria-label="Focus 线程 X, 手里一份 fd 名单，挨个问, 这一篇 · 非阻塞 + 一个线程轮询：500 条连接还是 1 个线程" aria-pressed="false" data-node-kind="backend" data-node-sublabel="手里一份 fd 名单，挨个问" data-node-context="这一篇 · 非阻塞 + 一个线程轮询：500 条连接还是 1 个线程">
-          <title>线程 X · 手里一份 fd 名单，挨个问 · 这一篇 · 非阻塞 + 一个线程轮询：500 条连接还是 1 个线程</title>
+        <g id="node-tX" data-node-id="tX" data-node-label="线程 X" tabindex="0" role="button" aria-label="Focus 线程 X, 进程起来时就有的主线程，不是新造的, 这一篇 · 非阻塞 + 一个线程轮询：500 条连接还是 1 个线程" aria-pressed="false" data-node-kind="backend" data-node-sublabel="进程起来时就有的主线程，不是新造的" data-node-context="这一篇 · 非阻塞 + 一个线程轮询：500 条连接还是 1 个线程">
+          <title>线程 X · 进程起来时就有的主线程，不是新造的 · 这一篇 · 非阻塞 + 一个线程轮询：500 条连接还是 1 个线程</title>
           <rect x="800" y="170" width="200" height="64" rx="6" class="c-mask"/>
           <rect x="800" y="170" width="200" height="64" rx="6" class="c-backend" stroke-width="1.5"/>
           <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(806 176) scale(0.6875)">
             <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
           </g>
           <text data-detail-anchor x="900" y="200" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">线程 X</text>
-        <text data-detail="context" x="900" y="216" class="t-muted" font-size="9" text-anchor="middle">手里一份 fd 名单，挨个问</text>
+        <text data-detail="context" x="900" y="216" class="t-muted" font-size="9" text-anchor="middle">进程起来时就有的主线程，不是新造的</text>
         </g>
 
         <g id="node-cpuR" data-node-id="cpuR" data-node-label="CPU" tabindex="0" role="button" aria-label="Focus CPU, 从头到尾都在跑这一个线程, 这一篇 · 非阻塞 + 一个线程轮询：500 条连接还是 1 个线程" aria-pressed="false" data-node-kind="cloud" data-node-sublabel="从头到尾都在跑这一个线程" data-node-context="这一篇 · 非阻塞 + 一个线程轮询：500 条连接还是 1 个线程">
@@ -311,7 +313,7 @@ for (;;) {
           </g>
         </g>
       </svg>
-      <figcaption>左边是上一篇的世界：每个被等的连接睡着一个线程，CPU 在跑别人。右边是这一篇的世界：一个线程从头到尾在跑，挨个问。<mark class="mk-blue">两边的连接 socket 是同样的东西</mark> —— 变的只有「数据没到」那一刻内核走哪条分支。</figcaption>
+      <figcaption>左边是上一篇的世界：每个被等的连接睡着一个线程 —— <mark class="mk-blue">那是 accept 时 pthread_create 造的，一条连接造一个</mark>。右边是这一篇的世界：跑轮询的线程是进程起来时就有的那一个，<mark class="mk-blue">没有为任何连接 pthread_create 过</mark>。两边的连接 socket 是同样的东西 —— 变的只有「数据没到」那一刻内核走哪条分支。</figcaption>
       <div class="pano-ui"></div>
       <p class="arch-hint"><span class="idle">点头上的任意一个框看它的关系；或者从下面的「我熟悉」进去</span><span class="focused">再点一次空白处取消</span></p>
     </figure><p>一句话收束：</p>
@@ -451,6 +453,6 @@ for (;;) {
   </main>
 </div>
 
-<script src="../../assets/app.js?v=d25485cfe8"></script>
+<script src="../../assets/app.js?v=46090e06d4"></script>
 </body>
 </html>
