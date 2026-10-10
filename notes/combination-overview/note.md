@@ -12,7 +12,7 @@ text: |
   - 「受控组件」「草稿」「DSL」「Metadata」这几个词各自指什么？
   - 包里的 22 个文件怎么分工？
 
-  每个控件怎么决策、候选值怎么加载、草稿怎么被检查，在[机制篇](notes/combination-mechanics.html)。
+  每个控件怎么决策、候选值怎么加载、草稿怎么被检查，在[机制篇](../combination-mechanics/)。
 ```
 
 ## 01 · 它在哪条链路上
@@ -332,8 +332,8 @@ UI 依赖是 element-plus（全套控件）和 vue-i18n（文案）。除此之�
 
 ## 06 · 继续往下
 
-- [组件图鉴](notes/combination-components.html)：11 个组件的真实渲染截图、每个的对外接口、拆分依据与五层数据流。
-- [机制篇](notes/combination-mechanics.html)：受控数据流的实现、一行怎么长出来（幽灵行与 convert）、控件决策引擎、候选值三条管道、buildQuery 检查清单、scope 收窄，每节配可操作的交互。
+- [组件图鉴](../combination-components/)：11 个组件的真实渲染截图、每个的对外接口、拆分依据与五层数据流。
+- [机制篇](../combination-mechanics/)：受控数据流的实现、一行怎么长出来（幽灵行与 convert）、控件决策引擎、候选值三条管道、buildQuery 检查清单、scope 收窄，每节配可操作的交互。
 - [配置层那篇](notes/data-admin-to-ui.html)：Metadata 从 MySQL 到 `AudienceMetadata` 投影的那条线，含停用字段的回显规则。
 - [@insight/dsl 那篇](notes/insight-dsl.html)：`buildQuery` 产出的 DSL 之后怎么被校验、编译成 SQL。
 
