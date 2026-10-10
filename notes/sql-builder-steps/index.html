@@ -5,9 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>SQL Builder 的四步：每层吃什么、吐什么</title>
 <meta name="description" content="《技术方案》4.2 与 4.3 两节，按四个步骤拆成可讲的形状：Validate 分两段是因为一段不需要字段字典；Resolve 把名字换成物理位置，关系属性要在所属关系内查；Compile 把三类叶子编成五种 SQL 形状；Assemble 拿同一段 WHERE 套出四条语句。另收三处最容易被挑的扭转、扩展时各要改哪里，以及 4.2 / 4.3 与当前代码对不上的地方（名字对不上、同样输入产出不同、方案写了代码里没有）。" />
-<link rel="stylesheet" href="../../assets/theme.css" />
-  <link rel="stylesheet" href="../../assets/blocks.css" />
-  <link rel="stylesheet" href="../../assets/archify-embed.css" />
+<link rel="stylesheet" href="../../assets/theme.css?v=e6a9ffd3d6" />
+  <link rel="stylesheet" href="../../assets/blocks.css?v=ab68e75c08" />
+  <link rel="stylesheet" href="../../assets/archify-embed.css?v=68fec0b81b" />
 </head>
 <body>
 <div id="progress"></div>
@@ -728,7 +728,7 @@ LIMIT 10
 <div class="compare-wrap"><table class="compare"><thead><tr><th>写法</th><th>一个人持 5 个标的会怎样</th><th>结论</th></tr></thead><tbody><tr><th>LEFT JOIN</th><td data-label="一个人持 5 个标的会怎样"><span class="tag tone-red">JOIN 之后这个人变成 5 行，<code>COUNT(*)</code> 把 1 个人数成 5 个人</span></td><td data-label="结论">不能用</td></tr><tr><th><code>IN</code> 子查询</th><td data-label="一个人持 5 个标的会怎样">只回答「这个 uid 在不在结果集里」，一行对应一个人</td><td data-label="结论">采用</td></tr></tbody></table></div><p>方案在这里补了一句容易被忽略的话：<mark class="mk-blue">子查询里只写 <code>SELECT uid</code> 不会去重</mark>，去重需要 <code>DISTINCT</code> 或 <code>GROUP BY</code>。而本设计是<mark class="mk-blue">从语句形状上避免重复行的产生</mark>，不是在统计时去重。 这正是 countSql 那一层不写 <code>DISTINCT</code> 的前提。</p>
 <h3 id="扭转二notin-编译成-not-exists">扭转二：<code>not_in</code> 编译成 <code>NOT EXISTS</code></h3>
 <p>这个坑值得单独演示一遍。三个人，条件都写「不持有腾讯」：</p>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>人</th><th>他的关系记录</th><th>正确写法 <code>NOT EXISTS( object = 腾讯 )</code></th><th>错误写法 <code>object NOT IN ('腾讯')</code></th></tr></thead><tbody><tr><th>A</th><td data-label="他的关系记录">腾讯、阿里</td><td data-label="正确写法 `NOT EXISTS( object = 腾讯 )`"><span class="tag tone-green">排除（他确实有腾讯那条记录）</span></td><td data-label="错误写法 `object NOT IN ('腾讯')`"><span class="tag tone-red"><strong>留下</strong> —— 因为他还有一条阿里记录</span></td></tr><tr><th>B</th><td data-label="他的关系记录">阿里</td><td data-label="正确写法 `NOT EXISTS( object = 腾讯 )`">留下</td><td data-label="错误写法 `object NOT IN ('腾讯')`">留下</td></tr><tr><th>C</th><td data-label="他的关系记录">（无持仓）</td><td data-label="正确写法 `NOT EXISTS( object = 腾讯 )`">留下</td><td data-label="错误写法 `object NOT IN ('腾讯')`">留下</td></tr></tbody></table></div><p><code>not_in</code> 表达的是<strong>关系集合级的否定<strong>：不存在这个人与腾讯的关系记录。改写成对象列上的 <code>NOT IN</code> 就变成了</strong>行级否定</strong>，只判断「某一行是不是腾讯」。同时持有腾讯和阿里的人因为还有一行阿里，就被错误地留下了。</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>人</th><th>他的关系记录</th><th>正确写法 <code>NOT EXISTS( object = 腾讯 )</code></th><th>错误写法 <code>object NOT IN ('腾讯')</code></th></tr></thead><tbody><tr><th>A</th><td data-label="他的关系记录">腾讯、阿里</td><td data-label="正确写法 `NOT EXISTS( object = 腾讯 )`"><span class="tag tone-green">排除（他确实有腾讯那条记录）</span></td><td data-label="错误写法 `object NOT IN ('腾讯')`"><span class="tag tone-red"><strong>留下</strong> —— 因为他还有一条阿里记录</span></td></tr><tr><th>B</th><td data-label="他的关系记录">阿里</td><td data-label="正确写法 `NOT EXISTS( object = 腾讯 )`">留下</td><td data-label="错误写法 `object NOT IN ('腾讯')`">留下</td></tr><tr><th>C</th><td data-label="他的关系记录">（无持仓）</td><td data-label="正确写法 `NOT EXISTS( object = 腾讯 )`">留下</td><td data-label="错误写法 `object NOT IN ('腾讯')`">留下</td></tr></tbody></table></div><p><code>not_in</code> 表达的是<strong>关系集合级的否定</strong>：不存在这个人与腾讯的关系记录。改写成对象列上的 <code>NOT IN</code> 就变成了<strong>行级否定</strong>，只判断「某一行是不是腾讯」。同时持有腾讯和阿里的人因为还有一行阿里，就被错误地留下了。</p>
 <p>对应的真实 SQL 形状也完全不同：</p>
 <div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-sql">-- 不是：WHERE object_id NOT IN ('腾讯')
 NOT EXISTS (
@@ -813,6 +813,6 @@ LEFT JOIN 会让一个人持 5 个标的变成 5 行，<code>COUNT(*)</code> 就
   </main>
 </div>
 
-<script src="../../assets/app.js"></script>
+<script src="../../assets/app.js?v=20be6c4ef6"></script>
 </body>
 </html>

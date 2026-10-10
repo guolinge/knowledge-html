@@ -6533,7 +6533,7 @@ LIMIT 10
 <div class="compare-wrap"><table class="compare"><thead><tr><th>写法</th><th>一个人持 5 个标的会怎样</th><th>结论</th></tr></thead><tbody><tr><th>LEFT JOIN</th><td data-label="一个人持 5 个标的会怎样"><span class="tag tone-red">JOIN 之后这个人变成 5 行，<code>COUNT(*)</code> 把 1 个人数成 5 个人</span></td><td data-label="结论">不能用</td></tr><tr><th><code>IN</code> 子查询</th><td data-label="一个人持 5 个标的会怎样">只回答「这个 uid 在不在结果集里」，一行对应一个人</td><td data-label="结论">采用</td></tr></tbody></table></div><p>方案在这里补了一句容易被忽略的话：<mark class="mk-blue">子查询里只写 <code>SELECT uid</code> 不会去重</mark>，去重需要 <code>DISTINCT</code> 或 <code>GROUP BY</code>。而本设计是<mark class="mk-blue">从语句形状上避免重复行的产生</mark>，不是在统计时去重。 这正是 countSql 那一层不写 <code>DISTINCT</code> 的前提。</p>
 <h3 id="扭转二notin-编译成-not-exists">扭转二：<code>not_in</code> 编译成 <code>NOT EXISTS</code></h3>
 <p>这个坑值得单独演示一遍。三个人，条件都写「不持有腾讯」：</p>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>人</th><th>他的关系记录</th><th>正确写法 <code>NOT EXISTS( object = 腾讯 )</code></th><th>错误写法 <code>object NOT IN ('腾讯')</code></th></tr></thead><tbody><tr><th>A</th><td data-label="他的关系记录">腾讯、阿里</td><td data-label="正确写法 `NOT EXISTS( object = 腾讯 )`"><span class="tag tone-green">排除（他确实有腾讯那条记录）</span></td><td data-label="错误写法 `object NOT IN ('腾讯')`"><span class="tag tone-red"><strong>留下</strong> —— 因为他还有一条阿里记录</span></td></tr><tr><th>B</th><td data-label="他的关系记录">阿里</td><td data-label="正确写法 `NOT EXISTS( object = 腾讯 )`">留下</td><td data-label="错误写法 `object NOT IN ('腾讯')`">留下</td></tr><tr><th>C</th><td data-label="他的关系记录">（无持仓）</td><td data-label="正确写法 `NOT EXISTS( object = 腾讯 )`">留下</td><td data-label="错误写法 `object NOT IN ('腾讯')`">留下</td></tr></tbody></table></div><p><code>not_in</code> 表达的是<strong>关系集合级的否定<strong>：不存在这个人与腾讯的关系记录。改写成对象列上的 <code>NOT IN</code> 就变成了</strong>行级否定</strong>，只判断「某一行是不是腾讯」。同时持有腾讯和阿里的人因为还有一行阿里，就被错误地留下了。</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>人</th><th>他的关系记录</th><th>正确写法 <code>NOT EXISTS( object = 腾讯 )</code></th><th>错误写法 <code>object NOT IN ('腾讯')</code></th></tr></thead><tbody><tr><th>A</th><td data-label="他的关系记录">腾讯、阿里</td><td data-label="正确写法 `NOT EXISTS( object = 腾讯 )`"><span class="tag tone-green">排除（他确实有腾讯那条记录）</span></td><td data-label="错误写法 `object NOT IN ('腾讯')`"><span class="tag tone-red"><strong>留下</strong> —— 因为他还有一条阿里记录</span></td></tr><tr><th>B</th><td data-label="他的关系记录">阿里</td><td data-label="正确写法 `NOT EXISTS( object = 腾讯 )`">留下</td><td data-label="错误写法 `object NOT IN ('腾讯')`">留下</td></tr><tr><th>C</th><td data-label="他的关系记录">（无持仓）</td><td data-label="正确写法 `NOT EXISTS( object = 腾讯 )`">留下</td><td data-label="错误写法 `object NOT IN ('腾讯')`">留下</td></tr></tbody></table></div><p><code>not_in</code> 表达的是<strong>关系集合级的否定</strong>：不存在这个人与腾讯的关系记录。改写成对象列上的 <code>NOT IN</code> 就变成了<strong>行级否定</strong>，只判断「某一行是不是腾讯」。同时持有腾讯和阿里的人因为还有一行阿里，就被错误地留下了。</p>
 <p>对应的真实 SQL 形状也完全不同：</p>
 <div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-sql">-- 不是：WHERE object_id NOT IN ('腾讯')
 NOT EXISTS (
@@ -7905,7 +7905,10 @@ LEFT JOIN 会让一个人持 5 个标的变成 5 行，<code>COUNT(*)</code> 就
           n.classList.toggle('is-hot', on);
         });
         edges.forEach(function (e) {
-          var on = want[e.getAttribute('data-edge-from')] && want[e.getAttribute('data-edge-to')];
+          /* 必须布尔化：want 里没有的键是 undefined，
+             而 toggle(name, undefined) 是「翻转」不是「移除」——
+             clear() 刚拔掉的 is-hot 会被翻回来，导览下所有边永远全亮。 */
+          var on = !!(want[e.getAttribute('data-edge-from')] && want[e.getAttribute('data-edge-to')]);
           e.classList.toggle('is-hot', on);
         });
         fig.setAttribute('data-focus', 'tour');
@@ -14034,8 +14037,8 @@ LEFT JOIN 会让一个人持 5 个标的变成 5 行，<code>COUNT(*)</code> 就
     const PLACES = [
       { id: 'mem', name: '同一台机器', sub: '锁在内存里', rtt: 0.01, tone: 'ok' },
       { id: 'rack', name: '同机房', sub: '不同机器', rtt: 0.2, tone: 'ok' },
-      { id: 'city', name: '同城两机房', sub: '约 20 公里', rtt: 10, tone: 'bad' },
-      { id: 'world', name: '跨洲', sub: '上海 ↔ 美西', rtt: 120, tone: 'bad' },
+      { id: 'city', name: '同城两机房', sub: '约 20~50 公里', rtt: 2, tone: 'bad' },
+      { id: 'world', name: '跨洲', sub: '上海 ↔ 美西', rtt: 130, tone: 'bad' },
     ];
     const st = { place: cfg.place || 'rack', rounds: cfg.rounds || 3 };
     const wrap = H('div', 'rtl-wrap');
