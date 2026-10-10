@@ -122,6 +122,24 @@ setTimeout(function () {
     }
   });
 
+  /* ⓪ app.js 到底跑没跑：每个 [data-mount] 都该被控件填满。
+     踩过（2026-10-09）：compare 单元格里写了字面的 script 开标签（<script src=...>，构建期不会转义），
+     单元格允许裸 HTML → 它成了**真标签**，把后面 app.js 的 <script>
+     整个吞掉 → 全页 JS 没跑、所有控件空着、所有 flow/seq 没画 ——
+     而 check 全绿、单块截图全正常（单块预览页不含全页脚本顺序，
+     掩护了这个 bug）。挂载检查是这类事故的兜底。 */
+  var mountsAll = document.querySelectorAll('[data-mount]');
+  if (mountsAll.length) {
+    var emptyMounts = 0;
+    mountsAll.forEach(function (m) { if (m.children.length === 0) emptyMounts++; });
+    if (emptyMounts === mountsAll.length) {
+      problems.push(
+        '全部 ' + mountsAll.length + ' 个 [data-mount] 都是空的 —— app.js 没跑或中途断了'
+        + '（常见根因：正文单元格出现了字面的 script 开标签，吞掉了后面的 app.js）',
+      );
+    }
+  }
+
   // ③ 区域框之间有没有重叠 / 有没有盖住非成员节点
   document.querySelectorAll('[data-flow]').forEach(function (root, i) {
     var boxes = Array.from(root.querySelectorAll('[data-group-box]')).filter(function (b) { return !b.hidden; });
