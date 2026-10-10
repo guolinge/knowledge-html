@@ -129,13 +129,35 @@ WIDGETS.myWidget = (root) => {
 };
 ```
 
-三个现成的工具函数（已定义在 app.js 顶部）：
+**三个现成的工具函数（已定义在 app.js 顶部）：**
 
 | 函数 | 作用 |
 |---|---|
 | `el(tag, cls, text)` | 建元素，省掉 createElement + className + textContent 三行 |
 | `cfgOf(root)` | 读并解析 `data-config` |
 | `mountOf(root)` | 拿到 `[data-mount]` 容器 |
+
+````callout
+tone: red
+icon: ⚠
+text: |
+  ==`el` 的第三参只收**字符串**，不是 children。==
+
+  写控件时最容易顺手写成 `el('div', 'head', el('span', 'tag', '标签'))` ——
+  它不报错，渲染出来的是字面的 `[object HTMLSpanElement]`
+  （textContent = String(元素)）。要在盒子里塞多个节点，
+  只能建完再 `append`：
+
+  ```js
+  const head = el('div', 'head');
+  head.append(el('span', 'tag', '标签'), el('span', '', '说明'));
+  pane.appendChild(head);
+  ```
+
+  同一段里的另一个坑：==DOM 的 `append()` 返回 `undefined`==，
+  `a.append(x).append(y)` 会在第二个 append 上直接抛 TypeError。
+  这次写 combination-control-lab 两个坑都踩了，`check` 全绿，只有截图看得见。
+````
 
 **三条约定**：
 
