@@ -80,6 +80,51 @@ text: |
   ==除了这两处，一个字都没换==：`read` 还是那个 `read`，连接 socket 还是那些连接 socket，缓冲区、四元组，一个都没动。
 ```
 
+这段代码的形状就是一个==永不停的圈==：外圈问「有没有新连接」，内圈把名单挨个问一遍，问完回外圈。只有两条路会跳出「问」这个动作，而且==没有一条是「睡」==：
+
+```flow
+grid: true
+legend: true
+nodes:
+  - { id: acc,   label: accept(listen_fd), sub: "有新连接吗", row: 0, kind: backend, tone: blue }
+  - { id: none,  label: EAGAIN：没有, sub: "不卡，接着往下走", row: 1, tone: muted }
+  - { id: got,   label: 有 → 新 fd, sub: "设 O_NONBLOCK（不继承）→ 进名单", row: 1, tone: green }
+  - { id: ask,   label: "内圈 for：read(fds[i])", sub: "名单上每个都问一遍「好了吗」", row: 2, kind: backend, tone: blue }
+  - { id: skip,  label: EAGAIN：还没好, sub: "i++，问下一个", row: 3, tone: muted }
+  - { id: handle,label: r > 0：有数据, sub: "handle(fd) 处理它", row: 3, tone: green }
+  - { id: round, label: 名单走完，回到外圈, sub: "一圈 = 1 次 accept + n 次 read", row: 4, kind: backend, tone: violet }
+edges:
+  - { from: acc, to: none, label: 绝大多数圈 }
+  - { from: acc, to: got, label: 偶尔
+  }
+  - { from: got, to: ask }
+  - { from: none, to: ask }
+  - { from: ask, to: skip, label: 大部分问是这个结果 }
+  - { from: ask, to: handle, label: 少数 }
+  - { from: skip, to: round, dashed: true }
+  - { from: handle, to: round }
+  - { from: round, to: acc, label: 永不停，也永不睡, dashed: true, anim: true }
+```
+
+光看形状还是抽象的 —— 拿一组真实状态，把这段代码一圈走完：
+
+```demo
+widget: stepper
+title: 一圈是怎么转完的
+hint: 点「下一步」，盯住 conn_fd / r / 名单这三个东西怎么变
+config:
+  steps:
+    - { label: 进程启动, code: "listen_fd = socket(...); bind(...); listen(listen_fd, 128);\nfcntl(listen_fd, F_SETFL, O_NONBLOCK);   // 别挂起我", note: "从 main 进来的是==进程自带的那个主线程==，全程不会有第二条。最后一行把监听 fd 声明成非阻塞：以后 accept 没等到新连接，它不把线程挂起，只回一句「没有」。" }
+    - { label: 外圈第 1 件事：问 accept, code: "for (;;) {\n    conn_fd = accept(listen_fd, ...);   // 这会儿没有新连接", note: "for(;;) 就是永远转。每圈第一件事：问内核「有新连接吗」。阻塞模式下这一行==会把线程卡住==；非阻塞下它拿到 -1 和 EAGAIN，==马上往下走==。" }
+    - { label: conn_fd = -1 → if 不进, code: "conn_fd = -1\nif (conn_fd > 0) { … }   // 不成立，整个 if 被跳过", note: "线程此刻没等任何东西 —— 它只是问了一句、被回了一句。这就是「不卡」的具体样子。" }
+    - { label: 进内圈：名单有 3 条, code: "// 名单里是之前 accept 进来的三条连接\nfor (i = 0; i < n; i++) {\n    r = read(fds[i], buf, sizeof buf);   // n = 3", note: "这就是 ②「循环形状变了」的那一行：==一份名单挨个问==。i 从 0 开始。" }
+    - { label: i=0：连接 1 没说话, code: "r = read(fds[0], …);   // → -1, EAGAIN\nelse  /* EAGAIN：还没好，问下一个 */;", note: "fds[0] 的缓冲区是空的。read ==立刻==带回 EAGAIN —— 内核没有挂起线程，它落在 else 分支什么也不做，==i++ 去问下一个==。" }
+    - { label: i=1：连接 2 也没说话, code: "r = read(fds[1], …);   // → -1, EAGAIN", note: "同样的一句 EAGAIN。==两次白问==，但每次都没付「睡一觉」的代价。" }
+    - { label: i=2：连接 3 有数据, code: "r = read(fds[2], …);   // → 200\nif (r > 0)  handle(fds[2]);            // 谁好了处理谁", note: "fds[2] 的缓冲区里有 200 字节 —— 这次 read 真把数据带回来了，r>0，==handle 处理它==，处理完 i++ 继续问剩下的。" }
+    - { label: 名单走完 → 回外圈, code: "}   // 内圈走完\n}   // 回到 for(;;) 的开头，再去 accept", note: "一圈 = ==1 次 accept + n 次 read==。问完了回到外圈开头，再去问「有新连接吗」—— 永不停。" }
+    - { label: 回头看：线程睡过吗, code: "// 整个循环里没有一行让线程睡：\n//   阻塞 read → 内核把线程挂到等待队列 → 没有了\n//   EAGAIN → 立刻返回，线程接着跑 → 就靠这个", note: "==从头到尾线程都没睡过==：每次问都是「立刻回话」。这就是「一个线程招呼很多连接」的全部秘密 —— ==也是白问的来源==：这一圈 3 次 read 里 2 次白问（下一节算这笔账）。" }
+```
+
 还有一处消失了的要看见：**右边那段代码里 `pthread_create` 整个没了。** 左边的线程是 accept 时造的，一条连接造一个；右边跑轮询的线程==不是为哪条连接造的==，就是进程启动时自带的那个主线程 —— 以前它卡在 `accept` 上等新连接，现在它把「问」也干了。==线程数从「跟着连接数涨」变成「跟连接数无关」==，这就是这一节标题那句话的本来面目。
 
 **所以「底层是怎么转换的」这个问法，本身就问错了 —— 底层什么都没转换。** 真正变的，是 `read` 在「数据没到」那一刻走的那条分支：

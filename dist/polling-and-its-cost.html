@@ -6105,6 +6105,66 @@ for (;;) {
 </table>
 <p><mark class="mk-blue">除了这两处，一个字都没换</mark>：<code>read</code> 还是那个 <code>read</code>，连接 socket 还是那些连接 socket，缓冲区、四元组，一个都没动。</p>
 </div>
+    </div><p>这段代码的形状就是一个<mark class="mk-blue">永不停的圈</mark>：外圈问「有没有新连接」，内圈把名单挨个问一遍，问完回外圈。只有两条路会跳出「问」这个动作，而且<mark class="mk-blue">没有一条是「睡」</mark>：</p>
+<div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;acc&quot;,&quot;to&quot;:&quot;none&quot;,&quot;label&quot;:&quot;绝大多数圈&quot;},{&quot;from&quot;:&quot;acc&quot;,&quot;to&quot;:&quot;got&quot;,&quot;label&quot;:&quot;偶尔&quot;},{&quot;from&quot;:&quot;got&quot;,&quot;to&quot;:&quot;ask&quot;},{&quot;from&quot;:&quot;none&quot;,&quot;to&quot;:&quot;ask&quot;},{&quot;from&quot;:&quot;ask&quot;,&quot;to&quot;:&quot;skip&quot;,&quot;label&quot;:&quot;大部分问是这个结果&quot;},{&quot;from&quot;:&quot;ask&quot;,&quot;to&quot;:&quot;handle&quot;,&quot;label&quot;:&quot;少数&quot;},{&quot;from&quot;:&quot;skip&quot;,&quot;to&quot;:&quot;round&quot;,&quot;dashed&quot;:true},{&quot;from&quot;:&quot;handle&quot;,&quot;to&quot;:&quot;round&quot;},{&quot;from&quot;:&quot;round&quot;,&quot;to&quot;:&quot;acc&quot;,&quot;label&quot;:&quot;永不停，也永不睡&quot;,&quot;dashed&quot;:true,&quot;anim&quot;:true}]">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-blue" data-id="acc">
+              
+              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5L3 8l3 4.5M10 3.5L13 8l-3 4.5"/></svg>
+              <b>accept(listen_fd)</b>
+              <small>有新连接吗</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-muted" data-id="none">
+              
+              
+              <b>EAGAIN：没有</b>
+              <small>不卡，接着往下走</small>
+            </div><div class="fnode tone-green" data-id="got">
+              
+              
+              <b>有 → 新 fd</b>
+              <small>设 O_NONBLOCK（不继承）→ 进名单</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-blue" data-id="ask">
+              
+              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5L3 8l3 4.5M10 3.5L13 8l-3 4.5"/></svg>
+              <b>内圈 for：read(fds[i])</b>
+              <small>名单上每个都问一遍「好了吗」</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-muted" data-id="skip">
+              
+              
+              <b>EAGAIN：还没好</b>
+              <small>i++，问下一个</small>
+            </div><div class="fnode tone-green" data-id="handle">
+              
+              
+              <b>r &gt; 0：有数据</b>
+              <small>handle(fd) 处理它</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="round">
+              
+              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5L3 8l3 4.5M10 3.5L13 8l-3 4.5"/></svg>
+              <b>名单走完，回到外圈</b>
+              <small>一圈 = 1 次 accept + n 次 read</small>
+            </div></div></div>
+      <div class="flegend"><span class="fleg-item tone-green">
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"
+                     stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5L3 8l3 4.5M10 3.5L13 8l-3 4.5"/></svg>
+                backend <em>3</em></span></div>
+    </div><p>光看形状还是抽象的 —— 拿一组真实状态，把这段代码一圈走完：</p>
+<div class="demo" data-widget="stepper" data-config="{&quot;steps&quot;:[{&quot;label&quot;:&quot;进程启动&quot;,&quot;code&quot;:&quot;listen_fd = socket(...); bind(...); listen(listen_fd, 128);\nfcntl(listen_fd, F_SETFL, O_NONBLOCK);   // 别挂起我&quot;,&quot;note&quot;:&quot;从 main 进来的是==进程自带的那个主线程==，全程不会有第二条。最后一行把监听 fd 声明成非阻塞：以后 accept 没等到新连接，它不把线程挂起，只回一句「没有」。&quot;},{&quot;label&quot;:&quot;外圈第 1 件事：问 accept&quot;,&quot;code&quot;:&quot;for (;;) {\n    conn_fd = accept(listen_fd, ...);   // 这会儿没有新连接&quot;,&quot;note&quot;:&quot;for(;;) 就是永远转。每圈第一件事：问内核「有新连接吗」。阻塞模式下这一行==会把线程卡住==；非阻塞下它拿到 -1 和 EAGAIN，==马上往下走==。&quot;},{&quot;label&quot;:&quot;conn_fd = -1 → if 不进&quot;,&quot;code&quot;:&quot;conn_fd = -1\nif (conn_fd &gt; 0) { … }   // 不成立，整个 if 被跳过&quot;,&quot;note&quot;:&quot;线程此刻没等任何东西 —— 它只是问了一句、被回了一句。这就是「不卡」的具体样子。&quot;},{&quot;label&quot;:&quot;进内圈：名单有 3 条&quot;,&quot;code&quot;:&quot;// 名单里是之前 accept 进来的三条连接\nfor (i = 0; i &lt; n; i++) {\n    r = read(fds[i], buf, sizeof buf);   // n = 3&quot;,&quot;note&quot;:&quot;这就是 ②「循环形状变了」的那一行：==一份名单挨个问==。i 从 0 开始。&quot;},{&quot;label&quot;:&quot;i=0：连接 1 没说话&quot;,&quot;code&quot;:&quot;r = read(fds[0], …);   // → -1, EAGAIN\nelse  /* EAGAIN：还没好，问下一个 */;&quot;,&quot;note&quot;:&quot;fds[0] 的缓冲区是空的。read ==立刻==带回 EAGAIN —— 内核没有挂起线程，它落在 else 分支什么也不做，==i++ 去问下一个==。&quot;},{&quot;label&quot;:&quot;i=1：连接 2 也没说话&quot;,&quot;code&quot;:&quot;r = read(fds[1], …);   // → -1, EAGAIN&quot;,&quot;note&quot;:&quot;同样的一句 EAGAIN。==两次白问==，但每次都没付「睡一觉」的代价。&quot;},{&quot;label&quot;:&quot;i=2：连接 3 有数据&quot;,&quot;code&quot;:&quot;r = read(fds[2], …);   // → 200\nif (r &gt; 0)  handle(fds[2]);            // 谁好了处理谁&quot;,&quot;note&quot;:&quot;fds[2] 的缓冲区里有 200 字节 —— 这次 read 真把数据带回来了，r&gt;0，==handle 处理它==，处理完 i++ 继续问剩下的。&quot;},{&quot;label&quot;:&quot;名单走完 → 回外圈&quot;,&quot;code&quot;:&quot;}   // 内圈走完\n}   // 回到 for(;;) 的开头，再去 accept&quot;,&quot;note&quot;:&quot;一圈 = ==1 次 accept + n 次 read==。问完了回到外圈开头，再去问「有新连接吗」—— 永不停。&quot;},{&quot;label&quot;:&quot;回头看：线程睡过吗&quot;,&quot;code&quot;:&quot;// 整个循环里没有一行让线程睡：\n//   阻塞 read → 内核把线程挂到等待队列 → 没有了\n//   EAGAIN → 立刻返回，线程接着跑 → 就靠这个&quot;,&quot;note&quot;:&quot;==从头到尾线程都没睡过==：每次问都是「立刻回话」。这就是「一个线程招呼很多连接」的全部秘密 —— ==也是白问的来源==：这一圈 3 次 read 里 2 次白问（下一节算这笔账）。&quot;}]}">
+      <div class="demo-head">
+        <span class="title">一圈是怎么转完的</span>
+        <span class="status" data-status>点「下一步」，盯住 conn_fd / r / 名单这三个东西怎么变</span>
+        <span class="spacer"></span>
+        <button class="btn" data-run>▶ 开始模拟</button><button class="btn ghost" data-reset>重置</button>
+      </div>
+      <div class="demo-body custom" data-mount></div>
     </div><p>还有一处消失了的要看见：<strong>右边那段代码里 <code>pthread_create</code> 整个没了。</strong> 左边的线程是 accept 时造的，一条连接造一个；右边跑轮询的线程<mark class="mk-blue">不是为哪条连接造的</mark>，就是进程启动时自带的那个主线程 —— 以前它卡在 <code>accept</code> 上等新连接，现在它把「问」也干了。<mark class="mk-blue">线程数从「跟着连接数涨」变成「跟连接数无关」</mark>，这就是这一节标题那句话的本来面目。</p>
 <p><strong>所以「底层是怎么转换的」这个问法，本身就问错了 —— 底层什么都没转换。</strong> 真正变的，是 <code>read</code> 在「数据没到」那一刻走的那条分支：</p>
 <figure class="archfig" data-arch data-pano data-parts='{"tA":{"label":"线程 A","sub":"上一篇的一个执行单位","detail":"它是 ==accept 返回那一刻 `pthread_create` 造出来的== —— 一条连接配一个，造它的唯一理由就是让它在 `read` 上站着等。那一刻缓冲区是空的，==阻塞的 read 不会返回==：内核把这条执行流挂到连接 1 的等待队列上、让它让出 CPU。数据到来之前它什么都干不了。"},"tB":{"label":"线程 B","sub":"一模一样的处境","detail":"也是 accept 时 `pthread_create` 造的，只是挂在了连接 2 上。==500 条连接就是 500 次 pthread_create、500 个这样的线程==，绝大部分时间在睡。"},"c1":{"label":"连接 1 · socket","sub":"没变的东西","detail":"四元组、接收缓冲区、等待队列 —— 和右边那个「连接 1 · socket」是**同一个东西**。变的不是它，是等它的人的等法。"},"c2":{"label":"连接 2 · socket","sub":"同上","detail":"同一个 socket，另一条连接；它的等待队列上睡着线程 B。"},"cpuL":{"label":"CPU","sub":"此刻不在跑你的代码","detail":"500 个线程全在睡，CPU 在跑别的进程。==这就是上一篇那句「用执行资源去买等待」==：买来的就是这一片睡眠。"},"tX":{"label":"线程 X","sub":"这一篇唯一的一个","detail":"==它不是为哪条连接造的：整个进程里 `pthread_create` 一次都没调==，跑轮询的就是进程启动时自带的那个主线程 —— 以前它卡在 `accept` 上等新连接，现在它把「问」也干了。它也调 `read`、也面对空缓冲区，但 fd 上有 `O_NONBLOCK`，==内核不挂它，直接把 EAGAIN 还给它==。"},"cR1":{"label":"连接 1 · socket","sub":"被问的其中一个","detail":"缓冲区是空的，这次 read 的全部产出就是一句 EAGAIN。==注意它自己什么都没变==：缓冲区、等待队列都在，只是这会儿队列上没有睡觉的人。"},"cR2":{"label":"连接 2 · socket","sub":"同上","detail":"也是空的，也是一句 EAGAIN。一轮里大部分的问都落在这种格子上。"},"cR3":{"label":"连接 3 · socket","sub":"这一轮唯一有数据的","detail":"缓冲区里有 200 字节 —— 这次 read 把数据带回来，线程处理它，然后继续问下一个。==一轮几百次系统调用，有收获的可能就这一两次== —— 正是接下来两节要算的账。"},"cpuR":{"label":"CPU","sub":"从头到尾跑的都是它","detail":"线程 X 永远在跑：问、问、问、处理、问。==同一台机器，左边它在跑别人，右边它一直在跑你== —— 「等待不再占用执行资源」落到机器上就是这个样子。"}}' data-anchors='[{"part":"tA","label":"线程"},{"part":"c1","label":"连接 socket"},{"part":"cpuR","label":"CPU 核"}]' data-tours='[{"id":"two-endings","label":"一次 read 的两种结局","steps":[{"at":["tA","c1"],"text":"上一篇的世界从 accept 开始：==每回来一条连接，`pthread_create` 造一个线程==，让它去调 `read(连接 1)`。缓冲区是空的 → 内核把它挂到连接 1 的等待队列上、让出 CPU —— 这次 read 要等数据来了才有返回。"},{"at":["tA","cpuL"],"text":"于是线程 A 睡了。==它不是「慢」，是不在场==：CPU 在跑别人的代码。"},{"at":["tB","c2"],"text":"线程 B 的处境一模一样 —— 它也是 accept 时造出来的。500 条连接就要 500 次 `pthread_create` ==因为一个被挂走的线程，连「去问问别的连接」都做不到==。"},{"at":["tX"],"text":"换到这一篇，先看这个线程是从哪来的：==不是新造的==。整个进程里 `pthread_create` 一次都没调 —— 跑轮询的就是进程启动时自带的那个主线程，以前它卡在 accept 上，现在它把「问」也干了。==线程数从此跟连接数无关。=="},{"at":["tX","cR1"],"text":"它也问连接 1，缓冲区也是空的 —— 但 `O_NONBLOCK` 让内核不挂它，==立刻把 EAGAIN 还给它==。"},{"at":["tX","cR3"],"text":"拿回一句「还没好」，它转头去问下一个。问到连接 3，缓冲区里有数据 —— 这次 read 真的把数据带回来了。"},{"at":["tX","cpuR"],"text":"全程线程 X 没离开过 CPU。==同一台机器、同一批 socket，变的只有「数据没到」那一刻内核走哪条分支== —— 这就是两个世界的全部差别。"}]},{"id":"what-changed","label":"什么变了，什么没变","steps":[{"at":["c1","cR1"],"text":"先看没变的：两边的「连接 1 · socket」是同一个东西 —— 四元组、接收缓冲区、等待队列一样不少。==底层没有「转换」这回事。=="},{"at":["tA","tX"],"text":"变的是人，而且是两边不同时辰出现的：左边的线程 ==accept 时 pthread_create 造==，一条连接一个；右边这个线程 ==进程一起来就在==，500 条连接共用它。"},{"at":["cpuL","cpuR"],"text":"落到 CPU 上看得最清楚：左边它跑的是别人（你的线程全在睡），右边它从头到尾跑你的这一个。"},{"at":["tX","cR3"],"text":"代价也已经在这张图上了：==每一问都是一次系统调用==，右边这一轮 3 问里 2 问是白问 —— 下一节就算这笔账。"}]}]'>
@@ -7954,7 +8014,10 @@ for (;;) {
         dot.classList.toggle('done', n < i);
       });
       code.textContent = s.code || '';
-      note.textContent = s.note || '';
+      /* note 走 richText（和 arch 面板同一套）：步骤说明里可以用 ==高亮== / **加粗 / 行内代码。
+         踩过：原来用 textContent，作者按习惯写了 ==…== 就按字面显示。 */
+      note.textContent = '';
+      richText(note, s.note || '');
       code.hidden = !s.code;
       note.hidden = !s.note;
       prev.disabled = i === 0;
