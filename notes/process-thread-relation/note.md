@@ -317,7 +317,59 @@ note: 分界线画在「随线程走 / 随进程走」：栈每条执行流一�
 
 ```arch
 svg: pt-mm
-caption: ==左边有墙，右边没有。== 左边两个进程各有各的页表，同一个虚拟地址 0x601000 查表落到不同物理帧，同名同址的变量互不相干。右边三条线程共用一张页表，所以 T1 的野指针能直接写进 T2 的栈，页表拦不住。墙的判定标准只有一条：查的是哪张表。
+caption: ==左边有墙，右边没有。== 左边两个进程各有各的页表，同一个虚拟地址 0x601000 查表落到不同物理帧，同名同址的变量互不相干。右边三条线程共用一张页表，所以 T1 的野指针能直接写进 T2 的栈，页表拦不住。墙的判定标准只有一条：查的是哪张表。每个零件里也写着自己那几行：谁指向它、TLB 缓存了什么、隔壁那根栈谁能写。
+bodies:
+  procA:
+    badge: 进程 A
+    rows:
+      - { k: x 的地址, v: 0x601000（虚拟） }
+      - { k: 它以为, v: 这就是真实位置, tip: 进程给出的永远是虚拟地址：它以为的地址，不是物理位置 }
+  ptA:
+    badge: A 的翻译器
+    rows:
+      - { k: 谁指向它, v: PTBR 寄存器, tip: 上下文切换换页表，等于给 CPU 换一个翻译器 }
+      - { k: 谁在用, v: 只有进程 A }
+  frame42:
+    badge: 物理帧 42
+    rows:
+      - { k: 住着, v: A 的 x = 1 }
+      - { k: TLB, v: 把这条翻译缓存起来, tip: TLB 摊薄「每次访存都查表」的开销 }
+  procB:
+    badge: 进程 B
+    rows:
+      - { k: x 的地址, v: 也是 0x601000 }
+      - { k: 含义, v: 同名同址，毫不相干 }
+  ptB:
+    badge: 另一张表
+    rows:
+      - { k: 谁在用, v: 只有进程 B }
+      - { k: 切换成本, v: PCID / ASID 给 TLB 项打标签, tip: 所以进程切换不必全量刷 TLB —— 没有直觉里那么贵 }
+  frame87:
+    badge: 物理帧 87
+    rows:
+      - { k: 住着, v: B 的 x = 2 }
+      - { k: 和帧 42, v: 毫无关系 }
+  t1s:
+    badge: T1 的栈
+    rows:
+      - { k: 私有, v: 约定，不是硬件墙 }
+      - { k: 隔壁, v: T2 的栈 }
+  t2s:
+    badge: T2 的栈
+    rows:
+      - { k: 摆在, v: T1 栈隔壁 }
+      - { k: 谁能写, v: T1 的野指针能直接写进来, tip: 权限上同进程任何线程都能读写任何栈区 }
+  t3s:
+    badge: T3 的栈
+    rows:
+      - { k: 在哪, v: 同一张页表之下 }
+      - { k: 谁管的, v: mmap 出来的一块 }
+  sharedheap:
+    badge: 全组一份
+    rows:
+      - { k: 共享, v: 直接读写，不用 IPC }
+      - { k: 代价, v: 数据竞争 · 内存可见性, tip: 省了序列化和拷贝，换来锁与原子操作 }
+    note: 连显式的消息边界都没有
 parts:
   procA:
     label: 进程 A
@@ -387,7 +439,55 @@ tours:
 
 ```arch
 svg: pt-run
-caption: ==调度器在两条队列之间搬任务。== A 在核上全速直跑时内核不在场；时钟中断到点，调度器从运行队列挑下一个上核，A 回队尾。A 调 read 时是自己走进等待队列的；数据到了，中断把它移回去。阻塞高效的原因就写在图上：等待队列里的任务不占「等核」的名额。
+caption: ==调度器在两条队列之间搬任务。== A 在核上全速直跑时内核不在场；时钟中断到点，调度器从运行队列挑下一个上核，A 回队尾。A 调 read 时是自己走进等待队列的；数据到了，中断把它移回去。阻塞高效的原因就写在图上：等待队列里的任务不占「等核」的名额。两条队列这次画成了==一排格子== —— 谁在队里、还剩几个空位，一眼看得见。
+bodies:
+  taskA:
+    badge: 用户态 · 全速直跑
+    rows:
+      - { k: 此刻, v: 在核上执行，内核不在场 }
+      - { k: PC / 寄存器, v: 在它自己的现场里 }
+    note: 能被收走，靠的是下面那三样硬件机制
+  sched:
+    badge: 内核
+    rows:
+      - { k: 挑谁, v: 从运行队列里选一个 }
+      - { k: 怎么挑, v: 优先级 / 公平性 / 缓存亲和 }
+    note: 动作只有一件事：选一个 —— 规则可以很复杂
+  runq:
+    badge: 排队的才有资格上核
+    cells:
+      - { label: A, sub: 在跑, tone: blue }
+      - { label: B, sub: 等核 }
+      - { label: C, sub: 等核 }
+      - { label: 空, tone: idle, tip: 排进这条队列的才有资格上核 }
+    note: SMP 下每个 CPU 一条自己的运行队列
+  waitq:
+    badge: 调度器看都不看
+    cells:
+      - { label: D, sub: 等 read }
+      - { label: E, sub: 等锁 }
+      - { label: 空, tone: idle }
+      - { label: 空, tone: idle }
+    note: 不占「等核」的名额 —— 阻塞高效的原因就写在这
+  timer:
+    badge: 硬件
+    rows:
+      - { k: 周期, v: CONFIG_HZ（常见 250 / 1000） }
+      - { k: 到点了, v: 时间片尽，强制换人 }
+  cpu:
+    badge: 并行只在这发生
+    cells:
+      - { label: 核 0, sub: 跑 A, tone: blue, tip: 同一时刻，一个核只跑一条执行流 }
+      - { label: 核 1, sub: 跑别的 }
+      - { label: 核 2, sub: 空闲, tone: idle }
+      - { label: 核 3, sub: 空闲, tone: idle }
+    note: 核数决定同一时刻真正并行几条
+  dev:
+    badge: 硬件
+    rows:
+      - { k: 数据到了, v: 设备发中断 }
+      - { k: 中断处理, v: 把等它的任务移回运行队列 }
+    note: 阻塞的任务由中断叫回来，不靠轮询
 parts:
   taskA:
     label: 任务 A
@@ -577,7 +677,53 @@ Linux 内核里根本没有「线程对象」。只有一种对象 task_struct�
 
 ```arch
 svg: pt-clone
-caption: ==fork 和 pthread_create 落到同一个调用 clone()。== 左边开关全关：资源整套复制（COW 打折），出来的是两个资源域，也就是进程。右边开关全开：资源一份不复制，只新建一个执行流，也就是线程。往反方向拧（CLONE_NEW*）：资源照旧各一份，再另立命名空间，也就是容器。
+caption: ==fork 和 pthread_create 落到同一个调用 clone()。== 左边开关全关：资源整套复制（COW 打折），出来的是两个资源域，也就是进程。右边开关全开：资源一份不复制，只新建一个执行流，也就是线程。往反方向拧（CLONE_NEW*）：资源照旧各一份，再另立命名空间，也就是容器。中间那个框里列的==就是四个开关本身==。
+bodies:
+  taskA:
+    badge: 父 task
+    rows:
+      - { k: 握着的, v: mm · files · sighand 指针 }
+      - { k: 要点, v: 复制指针 = 共享；复制资源 = 隔离, tip: 「指针味」是理解这张图的钥匙 }
+  clone:
+    badge: 同一扇门
+    cells:
+      - { label: CLONE_VM, sub: 地址空间, tip: 带上 = 页表指针复用，不带 = 复制一套 }
+      - { label: CLONE_FILES, sub: fd 表 }
+      - { label: CLONE_FS, sub: cwd / umask }
+      - { label: CLONE_SIGHAND, sub: 信号处置 }
+    note: 全不带 → fork；全带上 → pthread_create
+  taskBf:
+    badge: fork
+    rows:
+      - { k: getpid, v: 不同 }
+      - { k: 从哪继续, v: fork 的下一行 }
+      - { k: 返回值, v: 父拿到子的 PID，子拿到 0 }
+    note: 从此谁也看不见谁
+  resBf:
+    badge: 资源 ×2 套
+    cells:
+      - { label: 页表, sub: 各一份 }
+      - { label: 文件表, sub: 各一份 }
+      - { label: 信号, sub: 各一份 }
+    note: COW 打折：第一次写才真复制那一页
+  taskTp:
+    badge: pthread_create
+    rows:
+      - { k: getpid, v: 相同 · tid 不同 }
+      - { k: 真正新建的, v: 栈 · 寄存器现场 · 内核栈 · TLS · 掩码 }
+    note: 其余全是引用
+  resSp:
+    badge: 资源 ×1 套
+    rows:
+      - { k: mm / files / sighand, v: 还是 A 那份（指针）, tip: 创建便宜的全部原因就在这：几个指针加一个新内核栈 }
+    note: NPTL 时代线程创建比旧实现快约 7 倍
+  container:
+    badge: 反向开关 NEW*
+    cells:
+      - { label: CLONE_NEWNS, sub: 挂载点 }
+      - { label: CLONE_NEWIPC, sub: IPC }
+      - { label: CLONE_NEWNET, sub: 网络 }
+    note: 带标志 = 「另立一个」：资源照旧各一份，命名空间也切开
 parts:
   taskA:
     label: task A · 父
