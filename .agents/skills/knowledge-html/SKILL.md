@@ -2061,7 +2061,7 @@ text: |
 | `summary` | 小结 |
 | `raw` | 直接写 HTML |
 
-**交互控件 54 个**（在 `assets/app.js` 的 `WIDGETS` 里，供 `demo` 积木引用）：
+**交互控件 56 个**（在 `assets/app.js` 的 `WIDGETS` 里，供 `demo` 积木引用）：
 `polling-vs-cdc` `combination-count` `join-lab` `on-vs-where` `knex-chain`
 `stepper` `tuner` `diff` `stream-modes` `operator-lab` `hashring` `partition-prune`
 `dsl-lab` `null-lab` `config-to-ui` `field-lineage` `count-dedup-lab`
@@ -2073,7 +2073,7 @@ text: |
 `tri-logic-lab` `uid-set-lab` `dist-lab` `storage-anatomy` `prune-lab` `innodb-visual-lab`
 `ls-cost-lab` `atomic-lab` `rtt-lab`
 `combination-control-lab` `combination-values-lab` `combination-build-lab`
-`s3-list-lab` `ec-lab`
+`s3-list-lab` `ec-lab` `mysql-2pc-crash` `join-driver-lab`
 
 **已知缺口**（按优先级）：
 
@@ -3546,7 +3546,7 @@ text: |
 | **`npm run block -- <slug> <n>`** | **只看第 n 个积木**：量高 + 截图，打印截图路径。==默认不开浏览器==（人要看加 `--open`） |
 | `npm run block -- <slug> --list` | 列出这一篇的块（编号 + 行号 + 语言） |
 | `npm run build:standalone` | 重建全部产物（`dist/*.html` + 首页） |
-| **`node tools/render.mjs --standalone --only <slug>`** | **只重建这一篇的 `dist/`** —— 量图回路从 ~70s 降到 0.2s，而且**不会动别人的产物**（共用目录里尤其重要）。跑完接 `npm run visual-check <slug>` |
+| **`node tools/render.mjs --standalone --only <slug>`** | **只重建这一篇的 `dist/`** —— 量图回路从 ~70s 降到 0.2s，而且**不会动别人的产物**（共用目录里尤其重要）。跑完接 `npm run visual-check <slug>`。⚠ 它的前置区块会把其它篇显示成「待产出」（`existingSlugs` 只含本篇），==以全量 `build:standalone` 为准==，不是自己的问题 |
 | `npm run visual-check [slug]` | 用 **1280×900 宽屏视口**量每个积木有没有溢出。==读的是 `dist/`==，不是 `notes/`；给了 slug 就只量那一篇 |
 | `npm run build` | 只重建 `notes/*/index.html` —— **`visual-check` 不看这个** |
 | `npm run skill` | 把这份 skill 渲染到 **`skill/`**（**进仓库**，首页链得到）+ 三个页面互链。默认不开浏览器，加 `--open` |
