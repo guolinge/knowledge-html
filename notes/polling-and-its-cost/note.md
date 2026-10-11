@@ -92,7 +92,7 @@ nodes:
   - { id: ask,   label: "内圈 for：read(fds[i])", sub: "名单上每个都问一遍「好了吗」", row: 2, kind: backend, tone: blue }
   - { id: skip,  label: EAGAIN：还没好, sub: "i++，问下一个", row: 3, tone: muted }
   - { id: handle,label: r > 0：有数据, sub: "handle(fd) 处理它", row: 3, tone: green }
-  - { id: round, label: 名单走完，回到外圈, sub: "一圈 = 1 次 accept + n 次 read", row: 4, kind: backend, tone: violet }
+  - { id: round, label: 回到 accept，再来一圈, sub: "一圈 = 1 次 accept + n 次 read · 永不停，也永不睡", row: 4, kind: backend, tone: violet }
 edges:
   - { from: acc, to: none, label: 绝大多数圈 }
   - { from: acc, to: got, label: 偶尔
@@ -103,7 +103,6 @@ edges:
   - { from: ask, to: handle, label: 少数 }
   - { from: skip, to: round, dashed: true }
   - { from: handle, to: round }
-  - { from: round, to: acc, label: 永不停，也永不睡, dashed: true, anim: true }
 ```
 
 光看形状还是抽象的 —— 拿一组真实状态，把这段代码一圈走完：
