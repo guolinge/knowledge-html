@@ -66,43 +66,100 @@ for (;;) {
 }
 ```
 
+先把 ① 里最容易被一笔带过的那句展开 —— ==「监听 fd 也别挂起我」到底是什么意思==：那行 `fcntl` 改的是 **`accept` 的行为**。
+
+```compare
+first: 设置
+head: [队列里没有新连接时，accept 干了什么]
+rows:
+  - 阻塞（默认）: ["==卡住==，线程被挂起，直到有客户端连进来"]
+  - 非阻塞（`O_NONBLOCK`）: [{ text: "立刻回 -1，errno = EAGAIN（和 EWOULDBLOCK 同值）", tone: red }, "这不是错误，是「这会儿没有，稍后再试」"]
+```
+
+所以监听 fd 不设的话，主线程照样卡在「等新连接」上 —— ==事件循环不能为等一个新连接，把整条线程押上去==。真实的事件循环里，常见写法是==把队列一口气取空==（取到 EAGAIN 为止）再去干别的，因为取一个只要一次系统调用，卡住一次的代价是整条线程：
+
+```text
+for (;;) {
+    conn_fd = accept(listen_fd, NULL, NULL);
+    if (conn_fd < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK)
+            break;                           // 队列取空了，不是错
+        perror("accept");
+        break;
+    }
+    fcntl(conn_fd, F_SETFL, O_NONBLOCK);     // 新 fd 不继承，得单独设
+    fds[n++] = conn_fd;
+}
+```
+
+两个生产细节：① 设非阻塞更稳妥的写法是先 `F_GETFL` 取出原 flag 再 `| O_NONBLOCK`，别把别的标记冲掉；② Linux 上 accept 回来的新 fd 不继承 —— 用 `accept4(..., SOCK_NONBLOCK)`，或者像上面那样单独再设一次。
+
+变的只有两处：
+
 ```callout
 tone: blue
 icon: ✏
 text: |
-  变的只有两处：
-
   | | 干的事 |
   |---|---|
-  | ① 每个 fd 声明成 `O_NONBLOCK`（连监听 fd 也要） | 把上一节那句「数据没到就立刻返回」真的打开 —— 监听 fd 不设的话，主线程照样卡在「等新连接」上；Linux 上 accept 回来的新 socket **不继承**这个标记，得再设一次 |
+  | ① 每个 fd 声明成 `O_NONBLOCK`（连监听 fd 也要，==为什么见上面的展开==） | 把上一节那句「数据没到就立刻返回」真的打开 |
   | ② 循环形状：从「每条连接一个线程，各等各的」变成「一个线程、一份名单、挨个问」 | 「轮询」两个字的本来面目 |
 
   ==除了这两处，一个字都没换==：`read` 还是那个 `read`，连接 socket 还是那些连接 socket，缓冲区、四元组，一个都没动。
 ```
 
-这段代码的形状就是一个==永不停的圈==：外圈问「有没有新连接」，内圈把名单挨个问一遍，问完回外圈。只有两条路会跳出「问」这个动作，而且==没有一条是「睡」==：
+这段代码落到机器上，就是下面这几个对象之间的一圈行走：外圈问「有没有新连接」，内圈把名单挨个问一遍，问完回外圈。==只有两条路会跳出「问」这个动作，而且没有一条是「睡」==：
 
-```flow
-grid: true
-legend: true
-nodes:
-  - { id: acc,   label: accept(listen_fd), sub: "有新连接吗", row: 0, kind: backend, tone: blue }
-  - { id: none,  label: EAGAIN：没有, sub: "不卡，接着往下走", row: 1, tone: muted }
-  - { id: got,   label: 有 → 新 fd, sub: "设 O_NONBLOCK（不继承）→ 进名单", row: 1, tone: green }
-  - { id: ask,   label: "内圈 for：read(fds[i])", sub: "名单上每个都问一遍「好了吗」", row: 2, kind: backend, tone: blue }
-  - { id: skip,  label: EAGAIN：还没好, sub: "i++，问下一个", row: 3, tone: muted }
-  - { id: handle,label: r > 0：有数据, sub: "handle(fd) 处理它", row: 3, tone: green }
-  - { id: round, label: 回到 accept，再来一圈, sub: "一圈 = 1 次 accept + n 次 read · 永不停，也永不睡", row: 4, kind: backend, tone: violet }
-edges:
-  - { from: acc, to: none, label: 绝大多数圈 }
-  - { from: acc, to: got, label: 偶尔
-  }
-  - { from: got, to: ask }
-  - { from: none, to: ask }
-  - { from: ask, to: skip, label: 大部分问是这个结果 }
-  - { from: ask, to: handle, label: 少数 }
-  - { from: skip, to: round, dashed: true }
-  - { from: handle, to: round }
+```arch
+svg: poll-round
+caption: 一圈 = ① accept 问监听 socket（绝大多数圈：EAGAIN，不卡）+ ② 内圈把名单挨个 read（绝大多数是 EAGAIN，偶尔有数据就地 handle）。**整圈没有任何一步会让线程睡着** —— 这就是「一个线程能招呼很多连接」的全部机制。点的零件看它和别人的关系，想按顺序走一遍用下面的「导览」。
+parts:
+  thread:
+    label: 主线程
+    sub: 进程自带的那个
+    detail: ==它就是跑这段代码的线程==：进程启动时就有，全程没有 pthread_create。一圈里它只干两件事：① 问监听 socket「有新连接吗」，② 把名单挨个问一遍。
+  list:
+    label: 你的数组 fds[]
+    sub: ② 遍历的就是它
+    detail: accept 每取到一个新 fd，先给它设上 `O_NONBLOCK`（Linux 上新 fd 不继承监听 fd 的标记），再记进这个数组。==内圈 for 遍历的就是它== —— 数组第 i 个元素就是第 i 条连接。
+  lsock:
+    label: 监听 socket · 非阻塞
+    sub: ① 的对象
+    detail: 队列里有没有「握手完成」的连接，accept 一问便知。==设了 O_NONBLOCK==：没有就立刻回 EAGAIN，线程不卡；有就取走一个。
+  accq:
+    label: accept 队列
+    sub: 新连接先到这
+    detail: 三次握手完成的==那一刻==，内核就把连接 socket 建好、放进这个队列 —— 不等你的程序。accept 做的只是「取走一个」：这也是首图说的「交付，不是创建」。
+  crest:
+    label: 连接 1 · 连接 2 · ……
+    sub: 绝大多数问是它们
+    detail: 缓冲区都是空的，read 一律立刻回 EAGAIN。==一次问不花什么，但一圈要问 n 次== —— 白问就是这么来的（下一节算这笔账）。
+  c3:
+    label: 连接 3 · socket
+    sub: 这一圈唯一的收获
+    detail: 缓冲区里有 200 字节。read 这次把数据带回来，r>0，==handle 就地处理它==，处理完 i++ 继续问剩下的。
+anchors:
+  - { part: thread, label: "主线程" }
+  - { part: crest, label: "被问的连接" }
+  - { part: list, label: "fd 名单" }
+tours:
+  - id: one-round
+    label: "①② 两步走一圈"
+    steps:
+      - { at: [thread], text: "先认清 actor：==这条线程进程一起来就有==，下面每个动作都是它做的 —— 整个进程没有第二条线程。" }
+      - { at: [thread, lsock], text: "① accept(监听 fd)：有新连接吗？监听 socket 设了非阻塞 —— ==队列空就立刻回 EAGAIN==，线程不卡，直接进 ②。" }
+      - { at: [lsock, accq], text: "新连接在见你之前就存在了：握手完成那一刻内核把它建好、放进 accept 队列。accept ==取走一个==，得到新 fd。" }
+      - { at: [thread, list], text: "新 fd 设上 O_NONBLOCK（Linux 上不继承，得单独设），==记进数组== —— 名单就是这样一圈圈长起来的。" }
+      - { at: [thread, crest], text: "② 内圈 for：read(fds[i])。绝大多数连接的缓冲区是空的 → ==一律 EAGAIN，i++ 问下一个==。白问，但不睡。" }
+      - { at: [thread, c3], text: "问到连接 3：缓冲区里有 200 字节 —— read 把数据带回来，==handle 就地处理==，然后继续。" }
+      - { at: [list], text: "名单走完 → 回到 ①。==一圈 = 1 次 accept + n 次 read==，永不停，也永不睡。" }
+  - id: listen-fd
+    label: "监听 fd 为什么要设非阻塞"
+    steps:
+      - { at: [thread, lsock], text: "假如不设：accept 会==卡在「等新连接」上== —— 队列空的时候，整条线程被挂起，名单上一万多条连接没人问。" }
+      - { at: [lsock, accq], text: "设了之后：队列空 → 立刻回 EAGAIN（==这不是错误==，是「这会儿没有，稍后再试」）；队列里有 → 取走一个，得到新 fd。" }
+      - { at: [thread, list], text: "真实的事件循环里更常见的是==把队列一口气取空==：accept 到 EAGAIN 为止，再去干别的 —— 取一个只要一次系统调用，卡住一次的代价是整条线程。" }
+      - { at: [list], text: "两个生产细节：设非阻塞先 `F_GETFL` 取出原 flag 再 `| O_NONBLOCK`，别把别的标记冲掉；Linux 上 accept 回来的新 fd 不继承 —— 用 `accept4(…, SOCK_NONBLOCK)` 或单独再设一次。" }
 ```
 
 光看形状还是抽象的 —— 拿一组真实状态，把这段代码一圈走完：
