@@ -21,7 +21,7 @@ items:
 
 ## 02 · 整体图：一条 SQL 穿过哪些关卡
 
-一张图装下全部主线：实线是 select 的读路径，①②③ 是 update 多出来的剧情，紫色虚线是查询缓存的命中短路。Server 层五道关卡各管一段，跨过 handler 接口才碰到数据和存储。
+一张图装下全部主线：实线是 select 的读路径；虚线里 ①→⑤ 标出 update 的时序——==先改页、再记 redo、写 binlog、redo 才 commit、从库重放==；另一条虚线是查询缓存的命中短路。Server 层五道关卡各管一段，跨过 handler 接口才碰到数据和存储。
 
 ```arch
 svg: mysql-journey
@@ -62,7 +62,7 @@ parts:
   bp:
     label: ⑥ Buffer Pool
     sub: 16KB 数据页 · 命中内存/读盘
-    detail: InnoDB 把数据页（每页 ==16KB==）缓在内存里：命中直接返回，未命中才读磁盘。update 改的是内存页，改完的页叫==脏页==，由后台线程择机刷回磁盘。
+    detail: InnoDB 把数据页（每页 ==16KB==）缓在内存里：命中直接返回，未命中才读磁盘。update 改的是内存页（图上 ①，先改页），改完的页叫==脏页==，由后台线程择机刷回磁盘。
   redo:
     label: redo log
     sub: InnoDB 物理日志 · 循环写
@@ -96,11 +96,11 @@ tours:
   - id: update
     label: "update 多出来的剧情"
     steps:
-      - { at: [executor, bp], text: "update 走完同样的前五站，在执行器把 Buffer Pool 里的页==改成脏页==。" }
-      - { at: [redo], text: "InnoDB 先把修改==顺序追加进 redo log、标记 prepare==：随机写变顺序写，崩溃后靠它重放找回数据。" }
-      - { at: [binlog], text: "Server 层再把逻辑变更==追加写入 binlog==。这一步是 redo 从 prepare 走到 commit 的==前提==。" }
-      - { at: [redo, binlog], text: "binlog 写完，redo 才标记 ==commit==。两份日志的「生效」被绑成一个原子动作，==两阶段提交==，§07 展开三个崩溃点。" }
-      - { at: [replica], text: "从库拉取 binlog 重放。==binlog 写完整的事务从库一定有；没写完整的主库自己会回滚==。" }
+      - { at: [executor, bp], text: "update 走完同样的前五站，==先改 Buffer Pool 里的页==（①）——改完的页叫脏页。" }
+      - { at: [bp, redo], text: "紧接着把这次的修改==顺序追加进 redo log、标记 prepare==（②）：随机写变顺序写，崩溃后靠重放找回数据。" }
+      - { at: [executor, binlog], text: "然后 Server 层==写 binlog==（③），完整事件、以 XID 收尾。" }
+      - { at: [binlog, redo], text: "binlog 落盘，redo 才标记 ==commit==（④）。两份日志的「生效」绑成一个原子动作——==两阶段提交==，§07 展开三个崩溃点。" }
+      - { at: [binlog, replica], text: "从库拉取 binlog 重放（⑤）。==binlog 写完整的事务从库一定有；没写完整的主库自己会回滚==。" }
   - id: slow
     label: "一条 SQL 为什么时快时慢"
     steps:
