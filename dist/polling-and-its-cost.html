@@ -6103,6 +6103,7 @@ svg[data-preset="blueprint"] .c-security-group,
       <a href="#病二名单每次都要重新交一遍">病二：名单每次都要重新交一遍</a>
       <a href="#病灶不在谁在遍历在内核不记得">病灶不在「谁在遍历」，在「内核不记得」</a>
       <a href="#那要治它需要什么">那要治它，需要什么</a>
+      <a href="#你真正缺的那一块一个能让线程睡着的位置">你真正缺的那一块：一个能让线程睡着的位置</a>
   </aside>
 
   <main>
@@ -6176,7 +6177,7 @@ for (;;) {
     fds[n++] = conn_fd;
 }
 </code></pre></div>
-<p>两个生产细节：① 设非阻塞更稳妥的写法是先 <code>F_GETFL</code> 取出原 flag 再 <code>| O_NONBLOCK</code>，别把别的标记冲掉；② Linux 上 accept 回来的新 fd 不继承 —— 用 <code>accept4(..., SOCK_NONBLOCK)</code>，或者像上面那样单独再设一次。</p>
+<p>这三个生产细节：① 设非阻塞更稳妥的写法是先 <code>F_GETFL</code> 取出原 flag 再 <code>| O_NONBLOCK</code>，别把别的标记冲掉；② Linux 上 accept 回来的新 fd 不继承 —— 用 <code>accept4(..., SOCK_NONBLOCK)</code>，或者像上面那样单独再设一次；③ <code>errno == EINTR</code>（信号打断了本次调用）不是错误，<mark class="mk-blue">重试</mark>就行，别当失败退出。</p>
 <p>变的只有两处：</p>
 <div class="callout tone-blue">
       <span class="ic">✏</span>
@@ -6644,6 +6645,33 @@ for (;;) {
           
         </div></div><p>这三条正好对应下一篇要讲的三样东西。而其中<strong>第二条会引出一个很多人没想清的词：「就绪」。</strong> 那是再下一篇的事。</p>
 <hr>
+<h2 id="你真正缺的那一块一个能让线程睡着的位置"><span class="num">08</span>你真正缺的那一块：一个能让线程睡着的位置</h2>
+<p>讲到这里停下来，把你手里那几段代码摆在一起看 —— 你会发现自己一直缺的不是细节，是一个视角：<strong>线程睡在哪。</strong></p>
+<p>先看你现在这个圈（本篇的轮询）的完整形状：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">for (;;) {                     // ← 事件循环：永远转
+    accept(listen_fd)          // ① 有新连接吗（EAGAIN 就没有）
+    for (i = 0; i &lt; n; i++)
+        read(fds[i])           // ② 名单挨个问（EAGAIN 就下一个）
+}                              // ← 转回来，立刻再来一圈
+</code></pre></div>
+<p>它有一个致命的性质：<mark class="mk-blue">整个圈里没有任何一个能让线程睡着的位置</mark>。每一圈都是实打实的系统调用，一圈转完立刻转下一圈 —— 哪怕一万条连接全都没事。这就是上一节说的忙等。</p>
+<p>要让它能睡，圈里必须有一个专门的等待点。下一篇 epoll 装的就是它：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">for (;;) {                         // 事件循环：还是永远转
+    就绪 = epoll_wait(...);        // ← 唯一的睡处：线程在这睡着
+    处理就绪的那几个               // ← 被内核叫醒才会走到这
+}
+</code></pre></div>
+<p>圈还是那个圈，但多了一个「睡点」。线程在 <code>epoll_wait</code> 上睡着（<mark class="mk-blue">真睡，不占 CPU</mark>），内核保证「有事先叫醒」，醒来时手里的就是就绪的那几个 —— ①② 那些问，全都由内核替你做完了。</p>
+<p>把三代等待摆在一起，代价的差异一目了然：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>形态</th><th>线程睡在哪</th><th>睡/不睡的时候 CPU 在干什么</th><th>代价</th></tr></thead><tbody><tr><th>一连接一线程（阻塞）</th><td data-label="线程睡在哪"><mark class="mk-blue">每条连接自己的等待队列</mark>：一万个睡处</td><td data-label="睡/不睡的时候 CPU 在干什么">真睡，不占 CPU</td><td data-label="代价">一万个线程、一万个执行单位（上一篇的账）</td></tr><tr><th>本篇：一个线程轮询</th><td data-label="线程睡在哪"><mark class="mk-blue">没有睡处</mark>：一圈问完立刻问下一圈</td><td data-label="睡/不睡的时候 CPU 在干什么"><mark class="mk-blue">满负荷空转</mark></td><td data-label="代价">白问：n-1 次系统调用白花（本篇的账）</td></tr><tr><th>epoll（下一篇）</th><td data-label="线程睡在哪"><mark class="mk-blue">唯一的一个睡处</mark>：epoll_wait</td><td data-label="睡/不睡的时候 CPU 在干什么">真睡，不占 CPU</td><td data-label="代价">一次唤醒，处理就绪的那几个</td></tr></tbody></table></div><p><mark class="mk-blue">三代的关系不是「谁更快」，是「睡处从一个变成没有、再变成刚好一个」。</mark> 形态一睡得着但睡得太贵；形态二不睡了但开始烧 CPU；形态三把两者同时解决 —— 睡得着，且只睡一处。</p>
+<p>再回头看那个 <code>break</code>。同一段「取到 EAGAIN 就 break」的取空队列代码，<mark class="mk-blue">break 之后去哪，取决于外面套的是哪个圈</mark>：</p>
+<ul>
+<li>套在本篇的轮询圈里：break 回来的下一站还是 <code>accept</code> —— 圈立刻又转起来，<mark class="mk-blue">忙等照旧</mark>；</li>
+<li>套在 epoll 的事件循环里：break 回来的下一站是 <code>epoll_wait</code> —— <mark class="mk-blue">线程在那睡着，等内核下一次叫醒</mark>。</li>
+</ul>
+<p>所以那段「取到 EAGAIN 就 break」的代码总是和 epoll 一起出现：它不是「不再收连接了」，是「这一轮收完了，回去睡，有事叫我」。也正因为如此，<mark class="mk-blue">边缘触发（EPOLLET）下取空不是优化而是必须</mark>：通知只发一次，不取空就没人再叫你（LT/ET 那笔账在<a href="readiness-and-buffers.html">「就绪」那篇</a>）。</p>
+<p>「等待不该占用执行资源」这句话，走到形态三才算兑现：等待还是要发生的 —— <mark class="mk-blue">但线程只睡在一处，而且是内核保证「有事先叫醒」的睡</mark>。这篇的圈缺的就是那个睡点；下一篇把它装上，顺便把「内核怎么知道有事」讲清。</p>
+<hr>
 <div class="quiz"><details>
         <summary><code>O_NONBLOCK</code> 让 I/O 变快了吗？</summary>
         <div class="a"><p>没有。它一个字都没提「快」：不减少拷贝、不减少系统调用，只是把
@@ -6686,6 +6714,25 @@ for (;;) {
         <div class="a"><p>① 内核得记住我关心哪些 fd（登记一次，长期有效）；
 ② 内核得只把就绪的那几个还给我（返回量不随连接总数涨）；
 ③ 等待不能再占用执行资源（这是最根本的一条，前两条是它的实现手段）。</p>
+</div>
+      </details><details>
+        <summary>轮询的圈和 epoll 的事件循环，差在哪一个位置？</summary>
+        <div class="a"><p>差一个「能让线程睡着的等待点」。
+轮询圈里每一圈都是实打实的系统调用，没有睡处 —— 一万条连接全没事它也在转，
+这就是忙等。
+epoll 的圈里多了一个 epoll_wait：线程在这唯一的一个睡处睡着（真睡，不占 CPU），
+内核保证有事先叫醒，醒来时手里就是就绪的那几个 ——
+一代等待的演进就是「睡处从一个变成没有，再变成刚好一个」。</p>
+</div>
+      </details><details>
+        <summary>「取到 EAGAIN 就 break」的取空队列循环，break 之后去哪？</summary>
+        <div class="a"><p>取决于外面套的是哪个圈。
+套在本篇的轮询圈里，break 回来的下一站还是 accept —— 圈立刻又转起来，忙等照旧。
+套在 epoll 的事件循环里，break 回来的下一站是 epoll_wait ——
+线程在那睡着，等内核下一次叫醒。
+所以这段代码总是和 epoll 一起出现：它不是「不再收连接了」，
+是「这一轮收完了，回去睡，有事叫我」。
+另外边缘触发（EPOLLET）下取空是必须的：通知只发一次，不取空就没人再叫你。</p>
 </div>
       </details></div>
 
