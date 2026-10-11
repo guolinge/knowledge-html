@@ -1360,6 +1360,8 @@
           richText(d, m.detail);
           panel.append(d);
         }
+        /* 零件说明可带一段代码（parts 的 code 字段），放在说明之后、关系列表之前。 */
+        if (m.code) panel.append(el('pre', 'pano-pcode', m.code));
         /* archify 的 SVG 里，一条边的**标签**是另一个元素，也带着
            data-edge-from/to —— 直接遍历会把同一条边数两遍（面板里出现两行一样的）。
            所以按 from|to 去重：一头一尾只算一条关系。 */
@@ -1399,6 +1401,9 @@
         var d = el('p', 'pano-pdetail');
         richText(d, st.text);
         panel.append(d);
+        /* 导览步可带一段代码（st.code）—— 写整体图时每步对应代码落哪，
+           和 stepper 控件同一个思路：说明文字走 richText，代码走纯文本。 */
+        if (st.code) panel.append(el('pre', 'pano-pcode', st.code));
         var nav = el('div', 'pano-nav');
         var prev = el('button', 'pano-nb', '‹ 上一步');
         prev.type = 'button';
