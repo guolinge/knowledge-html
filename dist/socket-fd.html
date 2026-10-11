@@ -5621,6 +5621,62 @@ a.need:hover { color: var(--blue); }
 }
 .p2c-line:last-child { border-bottom: 0; }
 
+/* ── 控件 join-driver-lab（2026-10-11，kh-join-driver）──
+   嵌套循环连接的成本沙盘：两个对数滑块 + 索引开关，
+   两种驱动方向并排算账。滑块值走 --jd-tone。 */
+.jd-ctrls { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px 22px; align-items: end; margin-bottom: 18px; }
+.jd-sl { display: grid; grid-template-columns: 1fr; gap: 8px; }
+.jd-sl-lab { font: 500 12.5px/1.4 var(--sans); color: var(--text-2); }
+.jd-range { width: 100%; accent-color: var(--blue); }
+.jd-sl-val { font: 650 13px/1 var(--mono); color: var(--blue); }
+
+.jd-toggle { display: grid; gap: 8px; }
+.jd-toggle-btns { display: flex; gap: 8px; }
+.jd-toggle-btns button {
+  font: 600 12.5px/1 var(--sans); color: var(--text-2);
+  padding: 7px 14px; border-radius: 100px; cursor: pointer;
+  border: 1px solid var(--border); background: var(--surface);
+}
+.jd-toggle-btns button.on {
+  color: var(--blue); border-color: color-mix(in srgb, var(--blue) 45%, var(--border));
+  background: color-mix(in srgb, var(--blue) 10%, transparent);
+}
+
+.jd-plans { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 16px; }
+.jd-plan {
+  border: 1px solid color-mix(in srgb, var(--jd-tone) 30%, var(--border));
+  border-left: 3px solid var(--jd-tone);
+  border-radius: 11px; padding: 13px 15px; background: var(--surface);
+}
+.jd-plan.is-win { background: color-mix(in srgb, var(--jd-tone) 7%, var(--surface)); }
+.jd-plan-no { font: 650 12px/1 var(--mono); color: var(--jd-tone); letter-spacing: .06em; margin-bottom: 9px; }
+.jd-plan-drive { font: 650 15px/1.4 var(--sans); margin-bottom: 2px; }
+.jd-plan-inner { font-size: 12.5px; line-height: 1.5; color: var(--text-2); margin-bottom: 11px; }
+.jd-plan-cost { display: grid; gap: 6px; border-top: 1px dashed var(--border); padding-top: 10px; }
+.jd-plan-loop, .jd-plan-per { font-size: 12.5px; line-height: 1.6; color: var(--text-2); }
+.jd-plan-total { font-size: 13px; line-height: 1.6; }
+
+.jd-bars { display: grid; gap: 9px; margin-bottom: 16px; }
+.jd-bar-row { display: grid; grid-template-columns: 92px 1fr 84px; align-items: center; gap: 12px; }
+.jd-bar-name { font: 600 12px/1 var(--mono); color: var(--jd-tone); text-align: right; }
+.jd-bar-track { height: 16px; border-radius: 4px; background: var(--surface-2, var(--surface)); border: 1px solid var(--border); overflow: hidden; }
+.jd-bar { height: 100%; min-width: 4px; border-radius: 3px 0 0 3px; background: var(--jd-tone); transition: width .22s ease-out; }
+.jd-bar-total { font: 650 12.5px/1 var(--mono); color: var(--jd-tone); }
+
+.jd-verdict {
+  border: 1px solid color-mix(in srgb, var(--jd-tone) 30%, var(--border));
+  border-left: 3px solid var(--jd-tone);
+  border-radius: 10px; padding: 11px 14px;
+  background: color-mix(in srgb, var(--jd-tone) 6%, transparent);
+  font-size: 13px; line-height: 1.7;
+}
+
+@media (max-width: 860px) {
+  .jd-ctrls { grid-template-columns: 1fr; }
+  .jd-plans { grid-template-columns: 1fr; }
+  .jd-bar-row { grid-template-columns: 76px 1fr 72px; }
+}
+
 </style>
   <style>
 /* ==========================================================
@@ -14759,6 +14815,159 @@ WIDGETS['mysql-2pc-crash'] = (root) => {
   });
   setMode(MODES[1], modesBox.querySelectorAll('button')[1]);
 };
+
+  /* —— 控件：join-driver-lab ——
+     嵌套循环连接的成本沙盘。两个滑块（两侧「过滤后」的行数）+ 一个开关
+     （orders.user_id 有没有索引），两种驱动方向并排算账：
+       users 驱动 → 内层到 orders 找匹配：有索引走 B+ 树（约 3 次页访问），没索引每次全扫 orders
+       orders 驱动 → 内层到 users 找匹配：users.id 是主键，永远有索引
+     要让读者亲手看到两件事：
+       ① 有索引时，总成本跟着「驱动侧行数」走 —— 小表驱动大表的小，是过滤后的行数
+       ② 没索引时，users 驱动的方向直接 n×m 爆炸 —— 换顺序救不了，缺的是索引
+     无随机、无动画依赖：同一组参数每次渲染同一画面。 */
+  WIDGETS['join-driver-lab'] = (root) => {
+    const cfg = cfgOf(root);
+    const box = mountOf(root);
+    const PAGES = cfg.pages || 3;   // B+ 树一次点查的页访问数（千万行级通常 3 层，示意值）
+
+    const richIn = (tag, cls, text) => {
+      const n = el(tag, cls);
+      richText(n, text);
+      return n;
+    };
+
+    /* 对数滑块：0~100 → 10^(1+m)，取整成统计口径的行数 */
+    const niceRound = (n) => (n < 1000 ? Math.max(10, Math.round(n / 10) * 10) : Math.round(n / 1000) * 1000);
+    const logVal = (v, m) => niceRound(Math.pow(10, 1 + (v / 100) * m));
+    const trim = (x) => (x >= 100 ? String(Math.round(x)) : (Math.round(x * 10) / 10).toFixed(1).replace(/\.0$/, ''));
+    const fmt = (n) => {
+      if (n < 10000) return String(Math.round(n));
+      if (n < 1e8) return trim(n / 1e4) + ' 万';
+      if (n < 1e12) return trim(n / 1e8) + ' 亿';
+      return trim(n / 1e12) + ' 万亿';
+    };
+
+    const sl = (label, mag, def) => {
+      const w = el('div', 'jd-sl');
+      w.append(el('span', 'jd-sl-lab', label));
+      const r = el('input', 'jd-range');
+      r.type = 'range'; r.min = '0'; r.max = '100'; r.step = '1'; r.value = String(def);
+      const v = el('b', 'jd-sl-val');
+      w.append(r, v);
+      return { w, r, v, mag };
+    };
+    const sA = sl('users 过滤后行数', 4, 75);   // 10 ~ 10 万，默认 1 万
+    const sB = sl('orders 过滤后行数', 5, 100); // 10 ~ 100 万，默认 100 万
+
+    const tg = el('div', 'jd-toggle');
+    tg.append(el('span', 'jd-sl-lab', 'orders.user_id 上有没有索引'));
+    const tWrap = el('div', 'jd-toggle-btns');
+    const btnYes = el('button', 'on', '有索引');
+    const btnNo = el('button', null, '没索引');
+    tWrap.append(btnYes, btnNo);
+    tg.append(tWrap);
+
+    const ctrls = el('div', 'jd-ctrls');
+    ctrls.append(sA.w, sB.w, tg);
+
+    const mkPlan = (no, tone, drive, inner) => {
+      const p = el('div', 'jd-plan');
+      p.style.setProperty('--jd-tone', 'var(--' + tone + ')');
+      p.append(el('div', 'jd-plan-no', no));
+      p.append(richIn('div', 'jd-plan-drive', drive));
+      p.append(richIn('div', 'jd-plan-inner', inner));
+      const cost = el('div', 'jd-plan-cost');
+      p.append(cost);
+      return { p, cost };
+    };
+    const plans = el('div', 'jd-plans');
+    const p1 = mkPlan('方案 ①', 'blue', 'users 驱动', '内层到 orders 找匹配');
+    const p2 = mkPlan('方案 ②', 'violet', 'orders 驱动', '内层到 users 找匹配');
+    plans.append(p1.p, p2.p);
+
+    const mkBar = (tone, name) => {
+      const row = el('div', 'jd-bar-row');
+      row.style.setProperty('--jd-tone', 'var(--' + tone + ')');
+      row.append(el('span', 'jd-bar-name', name));
+      const track = el('div', 'jd-bar-track');
+      const bar = el('div', 'jd-bar');
+      track.append(bar);
+      const total = el('b', 'jd-bar-total');
+      row.append(track, total);
+      return { row, bar, total };
+    };
+    const bars = el('div', 'jd-bars');
+    const b1 = mkBar('blue', 'users 驱动');
+    const b2 = mkBar('violet', 'orders 驱动');
+    bars.append(b1.row, b2.row);
+
+    const verdict = el('div', 'jd-verdict');
+
+    box.append(ctrls, plans, bars, verdict);
+
+    let hasIdx = true;
+
+    function render() {
+      const nA = logVal(+sA.r.value, sA.mag);
+      const nB = logVal(+sB.r.value, sB.mag);
+      sA.v.textContent = fmt(nA) + ' 行';
+      sB.v.textContent = fmt(nB) + ' 行';
+
+      /* 方案 ①：users 驱动。内层每次查找的成本取决于 orders.user_id 有没有索引。 */
+      const per1 = hasIdx ? PAGES : nB;
+      const per1Txt = hasIdx
+        ? '走索引，约 ' + PAGES + ' 次页访问'
+        : '没索引，**全表扫描 orders**（' + fmt(nB) + ' 行）';
+      const cost1 = nA * per1;
+      /* 方案 ②：orders 驱动。users.id 是主键，永远有索引。 */
+      const cost2 = nB * PAGES;
+
+      p1.cost.textContent = '';
+      p1.cost.append(richIn('div', 'jd-plan-loop', '外层循环 **' + fmt(nA) + '** 行 → 内层被查 **' + fmt(nA) + '** 次'));
+      p1.cost.append(richIn('div', 'jd-plan-per', '每次查找：' + per1Txt));
+      p1.cost.append(richIn('div', 'jd-plan-total', '总成本 ≈ ' + fmt(nA) + ' × ' + fmt(per1) + ' = ==' + fmt(cost1) + '=='));
+      p2.cost.textContent = '';
+      p2.cost.append(richIn('div', 'jd-plan-loop', '外层循环 **' + fmt(nB) + '** 行 → 内层被查 **' + fmt(nB) + '** 次'));
+      p2.cost.append(richIn('div', 'jd-plan-per', '每次查找：走 users.id 主键索引，约 ' + PAGES + ' 次页访问'));
+      p2.cost.append(richIn('div', 'jd-plan-total', '总成本 ≈ ' + fmt(nB) + ' × ' + fmt(PAGES) + ' = ==' + fmt(cost2) + '=='));
+
+      /* 对数刻度条形：范围 10 ~ 10^11.5（最坏 10万 × 100万 = 10^11） */
+      const pct = (c) => Math.min(100, Math.max(2, ((Math.log10(c) - 1) / 10.5) * 100));
+      b1.bar.style.width = pct(cost1) + '%';
+      b2.bar.style.width = pct(cost2) + '%';
+      b1.total.textContent = fmt(cost1);
+      b2.total.textContent = fmt(cost2);
+
+      verdict.textContent = '';
+      if (!hasIdx) {
+        verdict.style.setProperty('--jd-tone', 'var(--red)');
+        verdict.append(richIn('div', null,
+          'orders.user_id 没索引：users 驱动一次 ==内层就要全扫 ' + fmt(nB) + ' 行==，两种方向加起来都是 n×m 量级。'
+          + '换顺序救不了 —— 出路是给 orders.user_id 建索引，或者等优化器改走 hash join。'));
+      } else if (nA === nB) {
+        verdict.style.setProperty('--jd-tone', 'var(--muted)');
+        verdict.append(richIn('div', null, '两边过滤后行数一样多，顺序影响不大 —— 这才是真正需要优化器细算的情形。'));
+      } else {
+        const win = nA < nB ? p1 : p2;
+        const small = nA < nB ? 'users' : 'orders';
+        const big = nA < nB ? 'orders' : 'users';
+        const ratio = nA < nB ? nB / nA : nA / nB;
+        verdict.style.setProperty('--jd-tone', 'var(--green)');
+        verdict.append(richIn('div', null,
+          '**' + small + '** 过滤后只有 ' + fmt(Math.min(nA, nB)) + ' 行 → 让它驱动，内层只查 ' + fmt(Math.min(nA, nB)) + ' 次；'
+          + '反方向要查 ' + fmt(Math.max(nA, nB)) + ' 次，差 **' + trim(ratio) + ' 倍**。'
+          + big + ' 虽然总行数可能更大，但它只被「查」，不被「遍历」。'));
+        win.p.classList.add('is-win');
+      }
+      (nA < nB ? p1.p : p2.p).classList.toggle('is-win', hasIdx && nA !== nB);
+    }
+
+    btnYes.addEventListener('click', () => { hasIdx = true; btnYes.classList.add('on'); btnNo.classList.remove('on'); render(); });
+    btnNo.addEventListener('click', () => { hasIdx = false; btnNo.classList.add('on'); btnYes.classList.remove('on'); render(); });
+    sA.r.addEventListener('input', render);
+    sB.r.addEventListener('input', render);
+    render();
+  };
 
   /* ---------- 挂载 ---------- */
   document.querySelectorAll('[data-widget]').forEach((root) => {

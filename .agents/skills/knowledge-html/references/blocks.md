@@ -87,6 +87,19 @@ rows:
    然后开 **http://localhost:5173/ **。
 ```
 
+### 坑：标签里的 `u.id` 会变成假链接
+
+linkify 不只认 `http://`，它认**所有像域名的串** —— 而 `.id` 是真 TLD。
+图标签里写裸的 `u.id`（或任何 `x.id`），页面上会变成一条蓝色下划线的假链接。
+
+```text
+❌ label: ON u.id = o.user_id        → 「u.id」被渲染成链接
+✅ label: "ON `u.id` = `o.user_id`"  → 反引号阻止 linkify，渲染成代码 chip
+```
+
+同样的还有 `.io`、`.ai`、`.so`、`.sh` 这类一字符/两字符 TLD。
+++标签里写标识符，顺手都套反引号，不额外费心记哪些后缀是真 TLD。++
+
 ```callout
 tone: amber
 icon: ⚠
