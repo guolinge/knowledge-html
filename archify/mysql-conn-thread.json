@@ -1,0 +1,283 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "四千条连接，在机器里变成了几十个线程",
+    "subtitle": "左边是默认模型的路，右边是线程池的路——同一批连接，两种命运",
+    "output": "mysql-conn-thread.html",
+    "quality_profile": "showcase"
+  },
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "客户端 · 连接这一侧",
+      "wraps": [
+        "connpool",
+        "conn"
+      ],
+      "pad": 24
+    },
+    {
+      "kind": "region",
+      "label": "服务端 · 默认模型（1:1）",
+      "wraps": [
+        "threadA",
+        "waitA",
+        "cliff"
+      ],
+      "pad": 28
+    },
+    {
+      "kind": "region",
+      "label": "服务端 · 线程池模型（M:N）",
+      "wraps": [
+        "tg",
+        "recv",
+        "queue",
+        "worker"
+      ],
+      "pad": 28
+    },
+    {
+      "kind": "region",
+      "label": "硬件 · 这些线程最后落到哪",
+      "wraps": [
+        "cpu"
+      ],
+      "pad": 28
+    }
+  ],
+  "components": [
+    {
+      "id": "connpool",
+      "type": "backend",
+      "label": "连接池 HikariCP / Druid",
+      "sublabel": "借 / 还 / 定期换血 · 客户端侧",
+      "pos": [
+        120,
+        60
+      ],
+      "size": [
+        250,
+        64
+      ]
+    },
+    {
+      "id": "conn",
+      "type": "external",
+      "label": "连接 ×4096",
+      "sublabel": "大促瞬间全部醒来 · 平时大多在 Sleep",
+      "pos": [
+        520,
+        60
+      ],
+      "size": [
+        250,
+        64
+      ]
+    },
+    {
+      "id": "threadA",
+      "type": "backend",
+      "label": "OS 线程 ×4096",
+      "sublabel": "默认模型：一条连接独占一个",
+      "pos": [
+        120,
+        220
+      ],
+      "size": [
+        250,
+        64
+      ]
+    },
+    {
+      "id": "waitA",
+      "type": "backend",
+      "label": "三种等待让线程空转",
+      "sublabel": "等 mutex · 等对象锁 · 等 IO",
+      "pos": [
+        120,
+        360
+      ],
+      "size": [
+        250,
+        64
+      ]
+    },
+    {
+      "id": "cliff",
+      "type": "security",
+      "label": "TPS 跌到约 2000",
+      "sublabel": "CPU 全耗在切换上 · 活锁雪崩",
+      "pos": [
+        120,
+        500
+      ],
+      "size": [
+        250,
+        64
+      ]
+    },
+    {
+      "id": "tg",
+      "type": "backend",
+      "label": "Thread Group ×16",
+      "sublabel": "round-robin 分配 · 数量对齐核数",
+      "pos": [
+        820,
+        220
+      ],
+      "size": [
+        250,
+        64
+      ]
+    },
+    {
+      "id": "recv",
+      "type": "database",
+      "label": "Receiver ×16",
+      "sublabel": "epoll 盯住几千条连接 · 没数据就休眠",
+      "pos": [
+        820,
+        360
+      ],
+      "size": [
+        250,
+        64
+      ]
+    },
+    {
+      "id": "queue",
+      "type": "database",
+      "label": "任务队列",
+      "sublabel": "连接只占一个槽位 · 削峰填谷",
+      "pos": [
+        820,
+        500
+      ],
+      "size": [
+        250,
+        64
+      ]
+    },
+    {
+      "id": "worker",
+      "type": "backend",
+      "label": "Worker ×几十",
+      "sublabel": "每组 2~4 个 · 真正干活的只有他们",
+      "pos": [
+        820,
+        640
+      ],
+      "size": [
+        250,
+        64
+      ]
+    },
+    {
+      "id": "cpu",
+      "type": "cloud",
+      "label": "CPU 核 ×16 · 各带 cache",
+      "sublabel": "谁在上面跑，决定 cache 热不热",
+      "pos": [
+        520,
+        800
+      ],
+      "size": [
+        250,
+        64
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "c1",
+      "from": "connpool",
+      "to": "conn",
+      "label": "借出长连接",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "c2",
+      "from": "conn",
+      "to": "threadA",
+      "label": "一连接一线程",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelDy": 36
+    },
+    {
+      "id": "c3",
+      "from": "conn",
+      "to": "tg",
+      "label": "先分到 16 个组",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelDy": 36
+    },
+    {
+      "id": "c4",
+      "from": "threadA",
+      "to": "waitA",
+      "label": "抢不到就挂起",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelDy": 24
+    },
+    {
+      "id": "c5",
+      "from": "waitA",
+      "to": "cliff",
+      "label": "切换吃光 CPU",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelDy": 24
+    },
+    {
+      "id": "c6",
+      "from": "tg",
+      "to": "recv",
+      "label": "每组建一个",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelDy": 24
+    },
+    {
+      "id": "c7",
+      "from": "recv",
+      "to": "queue",
+      "label": "有数据的连接变成任务",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelDy": 24
+    },
+    {
+      "id": "c8",
+      "from": "queue",
+      "to": "worker",
+      "label": "取出执行",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelDy": 24
+    },
+    {
+      "id": "c9",
+      "from": "worker",
+      "to": "cpu",
+      "label": "几十个线程铺满核 · cache 常热",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelDy": 24
+    },
+    {
+      "id": "c10",
+      "from": "waitA",
+      "to": "cpu",
+      "label": "几千个线程轮流上核 · 每次换人冲刷 cache",
+      "fromSide": "right",
+      "toSide": "top",
+      "labelDy": 60
+    }
+  ]
+}
