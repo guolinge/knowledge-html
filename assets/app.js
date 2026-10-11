@@ -1190,6 +1190,10 @@
 
       var nodes = Array.prototype.slice.call(svg.querySelectorAll('[data-node-id]'));
       var edges = Array.prototype.slice.call(svg.querySelectorAll('[data-edge-from]'));
+      /* 「对比」模式的状态。放在这儿（而不是语义层里）是因为点击处理要用它；
+         语义层可能因为没配 data-pano 提前 return。 */
+      var compareOn = false;
+      var picked = [];
 
       function clear() {
         fig.removeAttribute('data-focus');
@@ -1198,6 +1202,15 @@
           n.setAttribute('aria-pressed', 'false');
         });
         edges.forEach(function (e) { e.classList.remove('is-hot'); });
+        if (typeof markSpot === 'function') markSpot(null);
+      }
+
+      /* 场景与对比入口的初始化放在最后 —— 它们会用到 showPart / focus / drawBar，
+         那两个函数都定义在这个 IIFE 的后半段。 */
+      function initModes() {
+        if (scenarios.length) applyScenario(fig.getAttribute('data-scenario') || scenarios[0].id);
+        drawModes();
+        drawCompare();
       }
 
       function focus(id) {
@@ -1224,7 +1237,77 @@
         fig.setAttribute('data-focus', id);
       }
 
+      /* ---------- 节点内部的「格子」也能点 ----------
+         tools/lib/node-body.mjs 把节点里的一行 / 一格 / 一段渲染成
+         data-nb-spot + data-nb-link + data-nb-tip。于是入口从「整个零件」
+         细化到「零件里的一行」：悬停先给一句话，点一下跳到它指向的对象。
+         （没有这些属性的图完全不受影响。） */
+      var spots = Array.prototype.slice.call(svg.querySelectorAll('[data-nb-spot]'));
+      var tipBox = null;
+      var spotHot = null;
+      if (spots.length) {
+        tipBox = el('div', 'nb-tip');
+        fig.append(tipBox);
+      }
+
+      function tipTo(node, ev) {
+        if (!tipBox) return;
+        var text = node && node.getAttribute('data-nb-tip');
+        if (!text) { tipBox.classList.remove('on'); return; }
+        tipBox.textContent = text;
+        tipBox.classList.add('on');
+        /* 贴着指针放，但不能探出图外 —— 探出去就被 visual-check 判溢出 */
+        var box = fig.getBoundingClientRect();
+        var w = tipBox.offsetWidth, h = tipBox.offsetHeight;
+        var x = ev ? ev.clientX - box.left + 14 : 12;
+        var y = ev ? ev.clientY - box.top + 16 : 12;
+        x = Math.max(4, Math.min(x, box.width - w - 4));
+        y = Math.max(4, Math.min(y, box.height - h - 4));
+        tipBox.style.left = Math.round(x) + 'px';
+        tipBox.style.top = Math.round(y) + 'px';
+      }
+
+      function markSpot(node) {
+        if (spotHot) spotHot.classList.remove('is-spot');
+        spotHot = node || null;
+        if (spotHot) spotHot.classList.add('is-spot');
+      }
+
+      svg.addEventListener('mousemove', function (ev) {
+        var s = ev.target.closest && ev.target.closest('[data-nb-spot]');
+        if (!s && spotHot) return;      // 点住的那个格子的说明留着，别被滑过去就吹掉
+        tipTo(s);
+      });
+      svg.addEventListener('mouseleave', function () { markSpot(null); tipTo(null); });
+
+      /* 点一个格子：聚焦它指向的零件（没写 link 就聚焦它所在的零件），
+         格子和零件同时亮 —— 读者就看清了「这一行属于谁、跑去哪」。 */
+      function hitSpot(spot) {
+        var host = spot.closest('[data-node-id]');
+        var target = spot.getAttribute('data-nb-link') || (host && host.getAttribute('data-node-id'));
+        /* 顺序很重要：focus() 内部第一件事就是 clear()，
+           而 clear() 会把格子的高亮一起清掉 —— 所以先聚焦、后点亮格子。
+           （踩过一次：反着写，点完格子亮一下就被清掉，看着像没反应。） */
+        if (target) {
+          focus(target);
+          if (partsMeta[target]) { showPart(target); drawBar(); drawTabs(); }
+        }
+        markSpot(spot);
+        /* 点的时候把说明钉在那儿，不靠鼠标停着 —— 触屏 / 键盘也看得到 */
+        if (spot.getAttribute('data-nb-tip')) {
+          var r = spot.getBoundingClientRect();
+          tipTo(spot, { clientX: r.left, clientY: r.bottom });
+        }
+      }
+
       svg.addEventListener('click', function (ev) {
+        /* 对比模式：点节点是「选中它」，不是聚焦 */
+        if (compareOn) {
+          var gp = ev.target.closest && ev.target.closest('[data-node-id]');
+          if (gp) { pickNode(gp.getAttribute('data-node-id')); return; }
+        }
+        var spot = ev.target.closest && ev.target.closest('[data-nb-spot]');
+        if (spot) { uiClear(); hitSpot(spot); return; }
         var g = ev.target.closest && ev.target.closest('[data-node-id]');
         var id = g && g.getAttribute('data-node-id');
         // 点同一个再取消
@@ -1240,6 +1323,8 @@
       // 键盘可达 —— archify 的节点本来就带 tabindex 和 role="button"
       svg.addEventListener('keydown', function (ev) {
         if (ev.key !== 'Enter' && ev.key !== ' ') return;
+        var spot = ev.target.closest && ev.target.closest('[data-nb-spot]');
+        if (spot) { ev.preventDefault(); uiClear(); hitSpot(spot); return; }
         var g = ev.target.closest && ev.target.closest('[data-node-id]');
         if (!g) return;
         ev.preventDefault();
@@ -1280,21 +1365,151 @@
       if (!mount) return;
 
       var meta = {};
-      ['parts', 'anchors', 'tours'].forEach(function (k) {
+      ['parts', 'anchors', 'tours', 'scenarios'].forEach(function (k) {
         try { meta[k] = JSON.parse(fig.getAttribute('data-' + k) || 'null'); }
         catch (e) { meta[k] = null; }
       });
       var partsMeta = meta.parts || {};
       var anchors = meta.anchors || [];
       var tours = meta.tours || [];
+      var scenarios = meta.scenarios || [];
       var tourIdx = -1, stepIdx = 0;
 
       var bar = el('div', 'pano-anchors');
+      var modes = el('div', 'pano-modes');
       var tabs = el('div', 'pano-tabs');
       var panel = el('div', 'pano-panel');
-      mount.append(bar, tabs, panel);
+      var cmpBox = el('div', 'pano-compare');
+      mount.append(bar, modes, tabs, panel, cmpBox);
       // UI 区里的点击不参与「点空白取消」—— 它和图是两件事
       mount.addEventListener('click', function (ev) { ev.stopPropagation(); });
+
+      /* ============================================================
+         场景开关：同一张地图演两种状态（单线程 / 多线程）
+         ------------------------------------------------------------
+         节点里写 `when: 'multi'` 的内容带上了 data-when，切场景就显/隐；
+         场景还能声明 dim（哪些零件在这个状态下还没出现）。
+         ============================================================ */
+      var scenarioNote = el('span', 'pano-modes-note', '');
+
+      function applyScenario(sid) {
+        fig.setAttribute('data-scenario', sid);
+        Array.prototype.forEach.call(svg.querySelectorAll('[data-when]'), function (n) {
+          var ok = (' ' + n.getAttribute('data-when') + ' ').indexOf(' ' + sid + ' ') >= 0;
+          n.style.display = ok ? '' : 'none';
+        });
+        var sc = scenarios.filter(function (s) { return s.id === sid; })[0] || {};
+        var dim = sc.dim || [];
+        nodes.forEach(function (n) {
+          n.classList.toggle('is-dim', dim.indexOf(n.getAttribute('data-node-id')) >= 0);
+        });
+        scenarioNote.textContent = sc.note || '';
+        Array.prototype.forEach.call(modes.querySelectorAll('[data-scenario]'), function (b) {
+          var on = b.getAttribute('data-scenario') === sid;
+          b.classList.toggle('on', on);
+          b.setAttribute('aria-pressed', on ? 'true' : 'false');
+        });
+      }
+
+      /* ============================================================
+         对比：挑两个零件，给出一张对照表
+         ------------------------------------------------------------
+         对照的几行来自 parts.<id>.facts —— 作者声明，不靠猜。
+         这张表回答的正是这个仓库里反复出现的那个问题：
+         「A 和 B 有什么联系和区别」。
+         ============================================================ */
+      var FACT_ORDER = [];
+      function factKeys() {
+        if (FACT_ORDER.length) return FACT_ORDER;
+        Object.keys(partsMeta).forEach(function (id) {
+          Object.keys((partsMeta[id] && partsMeta[id].facts) || {}).forEach(function (k) {
+            if (FACT_ORDER.indexOf(k) < 0) FACT_ORDER.push(k);
+          });
+        });
+        return FACT_ORDER;
+      }
+
+      function drawCompare() {
+        cmpBox.hidden = !compareOn;
+        if (!compareOn) return;
+        cmpBox.textContent = '';
+        cmpBox.append(el('p', 'pano-cmp-head',
+          picked.length < 2
+            ? '点两个零件（已经选了 ' + picked.length + ' 个），这里给出它们的对照'
+            : '再点一个零件可以换掉它'));
+        if (!picked.length) return;
+        var keys = factKeys();
+        var table = el('table', 'pano-cmp-table');
+        var thead = el('thead');
+        var hr = el('tr');
+        hr.append(el('th', 'pano-cmp-key', ''));
+        picked.forEach(function (id) {
+          var th = el('th', '', (partsMeta[id] && partsMeta[id].label) || id);
+          th.append(el('span', 'pano-cmp-sub', (partsMeta[id] && partsMeta[id].sub) || ''));
+          hr.append(th);
+        });
+        thead.append(hr);
+        table.append(thead);
+        var tbody = el('tbody');
+        keys.forEach(function (k) {
+          var tr = el('tr');
+          tr.append(el('td', 'pano-cmp-key', k));
+          picked.forEach(function (id) {
+            var v = ((partsMeta[id] && partsMeta[id].facts) || {})[k];
+            var td = el('td', v ? '' : 'pano-cmp-none', v || '—');
+            tr.append(td);
+          });
+          tbody.append(tr);
+        });
+        table.append(tbody);
+        cmpBox.append(table);
+        picked.forEach(function (id) { focus(id); });
+      }
+
+      function pickNode(id) {
+        var i = picked.indexOf(id);
+        if (i >= 0) picked.splice(i, 1);
+        else { picked.push(id); if (picked.length > 2) picked.shift(); }
+        nodes.forEach(function (n) {
+          n.classList.toggle('is-picked', picked.indexOf(n.getAttribute('data-node-id')) >= 0);
+        });
+        fig.removeAttribute('data-focus');
+        drawCompare();
+        drawModes();
+      }
+
+      function drawModes() {
+        modes.textContent = '';
+        if (!scenarios.length && !factKeys().length) { modes.hidden = true; return; }
+        modes.hidden = false;
+        modes.append(el('span', 'pano-modes-label', scenarios.length > 1 ? '场景' : ''));
+        scenarios.forEach(function (s) {
+          var b = el('button', 'pano-chip');
+          b.type = 'button';
+          b.setAttribute('data-scenario', s.id);
+          b.setAttribute('aria-pressed', 'false');
+          b.textContent = s.label;
+          b.addEventListener('click', function () { applyScenario(s.id); });
+          modes.append(b);
+        });
+        modes.append(scenarioNote);
+        if (factKeys().length) {
+          var cb = el('button', 'pano-chip pano-chip-cmp');
+          cb.type = 'button';
+          cb.textContent = compareOn ? '结束对比' : '对比两个零件';
+          cb.classList.toggle('on', compareOn);
+          cb.addEventListener('click', function () {
+            compareOn = !compareOn;
+            if (!compareOn) {
+              picked = [];
+              nodes.forEach(function (n) { n.classList.remove('is-picked'); });
+            }
+            drawCompare();
+            drawModes();
+          });
+          modes.append(cb);
+        }
+      }
 
       /** 点亮一组节点（导览用）。和 focus 的区别：focus 是「一个 + 它的邻居」，这里是「指定的几个」 */
       function focusMany(ids) {
@@ -1466,6 +1681,7 @@
 
       drawBar();
       drawTabs();
+      initModes();
       showHint();
     });
   })();

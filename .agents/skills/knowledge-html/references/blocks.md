@@ -1454,6 +1454,97 @@ tours:
 写法上代码要短（几行到十几行）、带中文注释、用真实函数名；代码里的注释想强调就用 `// ←` 这种箭头，
 别往里写 `==`（不会解析，会按字面显示）。
 
+**`bodies` 字段（2026-10-11 加）：往节点矩形里装内容。**
+
+==archify 的节点只认三行居中文字（label / sublabel / tag）。== 于是一张整体图不管多少零件，
+画出来都是「一堆小矩形 + 一行字 + 一些线」—— 读者拿到的是一张**目录**，不是地图。
+
+而节点该说的话往往不止一句：fd 表里有哪几个 fd、CPU 四个核在跑几个、
+地址空间从高到低分成哪几段、一个 task 的现场存了哪几样。
+那些是**结构**和**量**，塞进一行 sublabel 就只剩名词。
+
+```yaml
+bodies:
+  files:
+    badge: ② 全组共享
+    cells:                                   # 小格子：有几个、哪个在跑
+      - { label: fd 0, sub: stdin }
+      - { label: fd 3, sub: socket, tip: A 线程 open 的 fd，B 立刻看得见 }
+    note: 进程里任何一条执行流都能用这些 fd
+  mm:
+    badge: 每进程一张表
+    stack:                                   # 高低段：带地址、带方向的结构
+      - { label: 栈 · 向下长, mark: 0x7fff…, link: ustacks, tip: 线程栈是 mmap 出来的另一块 }
+      - { label: 堆 · 向上长（brk）, link: heap }
+    pairs:                                   # 左右映射：这边是什么，那边变成什么
+      - { from: VA 0x601000, to: 帧 42, note: A 的 x = 1 }
+```
+
+| 内容 | 用来讲 | 字段 |
+|---|---|---|
+| `badge` | 右上角一个短标记（全组共享 / 每线程一根） | 字符串 |
+| `rows` | 键值行：一个对象有哪几样字段 | `[{k, v}]` 或 `[[k, v]]` |
+| `cells` | 有几个、哪个在跑、哪个空着（`tone: idle` 是空位） | `[{label, sub, tone}]` |
+| `bars` | 按比例分的东西（一条横条带） | `[{label, weight, tone}]` |
+| `stack` | 有地址、有方向的段（地址空间、栈） | `[{label, mark, tone}]` |
+| `pairs` | 左右两栏 + 一条箭头（VA → 物理帧） | `[{from, to, note}]` |
+| `meter` | 用了多少 / 一共多少 | `{label, value, total, text}` |
+| `code` | 一行真实代码，把机制对到函数名 | 字符串 |
+| `note` | 末行小字 | 字符串；或 `notes: [{when, text}]` 按场景各写一句 |
+
+**每一项都能变成「可点的格子」**：给它 `link`（跳到哪个零件）和 `tip`（悬停的一句话），
+渲染出来带 `data-nb-spot` / `data-nb-link` / `data-nb-tip`，`app.js` 接上 hover 提示与点击聚焦。
+于是入口从「整个零件」细化到「零件里的一行」：点 `mm` 里的「mmap 区」→ 三根线程栈亮起。
+
+**`scenarios` + `when`：同一张地图演两种状态。**
+
+```yaml
+scenarios:
+  - { id: one,   label: 1 条执行流, note: execve 刚返回，只有主线程, dim: [task1, task2] }
+  - { id: multi, label: 3 条执行流, note: pthread_create 之后 }
+bodies:
+  cpu:
+    cells:
+      - { label: T0, sub: 在跑 }
+      - { label: T1, sub: 在跑, when: multi }
+      - { label: 空闲, tone: idle, when: one }
+    title:
+      - { when: multi, text: 用户栈 ×3 }
+      - { when: one,   text: 用户栈 ×1 }
+```
+
+`when` 能加在任何一项上（row / cell / seg / stack 段 / pair / note），也能加在 `title` 上。
+==切场景不是把元素藏起来，而是按场景各排一遍版== —— 藏起来会留下空洞（一排格子少一个就歪了）。
+节点高度取最胖的那一版。场景还能声明 `dim: [零件id]`：这个状态下**还没出现**的零件变淡（不消失）。
+
+**`facts`：挑两个零件比一比。**
+
+```yaml
+parts:
+  heap:
+    facts: { 归属: 全组共享, 份数: 一份, 跟着谁走: 随进程, 隔离: 同一张页表——谁也不挡谁 }
+  ustacks:
+    facts: { 归属: 每条执行流一根, 份数: 3 根, 跟着谁走: 随线程, 隔离: 同一张页表——私有只是约定 }
+```
+
+页面就多出一个「对比两个零件」按钮：点两个零件，下面出一张对照表（顺序按声明先后）。
+==键名要跨零件通用==（归属 / 份数 / 谁在用…），否则表格里全是「—」。
+
+```compare
+first: 这三个字段共同的坑
+head: [症状, 怎么办]
+rows:
+  - 内容装不下:
+      - "渲染到框外，看着对、其实挤出去了"
+      - "==构建期直接报错==，并告诉你 size 第二项该给多少。改 `archify/<图>.json` 的 size"
+  - "写了 `when` 却没写 `scenarios`":
+      - "图会按「所有情况都画上」排，页面却没有开关能切"
+      - "构建期报错。要么补 `scenarios`，要么去掉 `when`"
+  - 行高看着很空:
+      - "内容少、框很高"
+      - "内容会垂直居中 + 末行小字钉底部；实在空就先删内容，或按 `requiredHeight` 把 size 改小"
+```
+
 **三个都依赖「零件 id 和 archify spec 里的组件 id 一致」。** 写错的表现是：
 按钮点了没反应、或者面板里显示成 id。
 ==所以改图的时候，`archify/*.json` 和 note 里的这三段要一起改。==

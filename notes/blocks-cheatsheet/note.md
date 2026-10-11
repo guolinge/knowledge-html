@@ -228,6 +228,64 @@ caption: packages/core 的组成与数据流
 - `tools/archify.mjs` 会自动抠 SVG + 给 CSS 变量加 `--af-` 前缀（不加会覆盖我们的主题）。
 - 两边都用 `data-theme`，所以深浅色天然同步。
 
+### 节点里装什么：`bodies`
+
+==archify 的节点只认三行居中文字（label / sublabel / tag）。== 于是不管多少零件，
+画出来都是「一堆小矩形 + 一行字 + 一些线」—— 读者拿到的是一张**目录**，不是地图。
+
+而节点该说的话往往不止一句：fd 表里有哪几个 fd、CPU 四个核在跑几个、
+地址空间从高到低分成哪几段、一个 task 的现场存了哪几样。
+那些是**结构**和**量**，塞进一行 sublabel 就只剩名词。
+
+```arch
+svg: cheatsheet-node-body
+caption: ==八种内容，一次看清。== 每一格都能带 `link`（点它跳到哪个零件）和 `tip`（一句话说明），于是入口从「整个零件」细化到「零件里的一行」。
+bodies:
+  rows:
+    badge: 键值行
+    rows:
+      - { k: fd 0, v: stdin }
+      - { k: fd 3, v: socket, link: cells, tip: 每一行都能带 link 和 tip }
+  cells:
+    badge: 格子
+    cells:
+      - { label: T0, sub: 在跑, link: bars }
+      - { label: 空闲, tone: idle, tip: 虚线 = 空位 / 不共享 }
+  bars:
+    badge: 比例条带
+    bars:
+      - { label: .text, weight: 4 }
+      - { label: .bss, weight: 2, tone: idle }
+  stack:
+    badge: 高低段
+    stack:
+      - { label: 栈 · 向下长, mark: 0x7fff…, link: pairs }
+      - { label: .text, mark: 0x400000 }
+  pairs:
+    badge: 左右映射
+    pairs:
+      - { from: VA 0x601000, to: 帧 42, note: A 的 x = 1, link: meter }
+  meter:
+    badge: 计量 + 代码
+    meter: { label: 内核栈, value: 3.2, total: 16, text: 3.2 / 16 KB }
+    code: THREAD_SIZE = 4 * PAGE_SIZE
+```
+
+| 内容 | 用来讲 | 字段 |
+|---|---|---|
+| `badge` | 右上角一个短标记（全组共享 / 每线程一根） | 字符串 |
+| `rows` | 键值行：一个对象有哪几样字段 | `[{k, v}]` 或 `[[k, v]]` |
+| `cells` | 有几个、哪个在跑、哪个空着 | `[{label, sub, tone}]` |
+| `bars` | 按比例分的东西（一条横条带） | `[{label, weight, tone}]` |
+| `stack` | 有地址、有方向的段（地址空间、栈） | `[{label, mark, tone}]` |
+| `pairs` | 左右两栏 + 一条箭头（VA → 物理帧） | `[{from, to, note}]` |
+| `meter` | 用了多少 / 一共多少 | `{label, value, total, text}` |
+| `code` | 一行真实代码，把机制对到函数名 | 字符串 |
+| `note` | 末行小字 | 字符串；或 `notes: [{when, text}]` 按场景各写一句 |
+
+**每一项都可以是「可点的格子」**：给它 `link`（跳到哪个零件）和 `tip`（悬停显示的一句话），
+渲染出来就带 `data-nb-spot` / `data-nb-link` / `data-nb-tip`，`app.js` 接上 hover 提示与点击聚焦。
+
 ## 08 · journey —— 每一步的形态快照
 
 适合：一个东西（一行数据、一个请求、一次支付）在流转过程中**长什么样**的变化。

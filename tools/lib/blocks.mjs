@@ -15,6 +15,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import YAML from 'yaml';
+import { applyNodeBodies } from './node-body.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 
@@ -634,7 +635,20 @@ const KIND_TONE = {
           `  先生成：node tools/archify.mjs archify/${name}.json ${name}`,
       );
     }
-    const svg = fs.readFileSync(file, 'utf8');
+    /* 写了 when（按场景显隐）却没声明 scenarios —— 那就是作者搞错了：
+       图会按「所有 when 的内容都画上」排，页面却没有任何开关能切。构建期直接报错。 */
+    if (cfg.bodies && !cfg.scenarios) {
+      const bad = Object.entries(cfg.bodies)
+        .filter(([, b]) => JSON.stringify(b).includes('"when"'))
+        .map(([id]) => id);
+      if (bad.length) {
+        throw new Error(
+          `${name} 的 bodies.${bad.join(' / ')} 里用了 when（按场景显隐），但整个积木没有 scenarios。\n` +
+            `    → 要么补上 scenarios: [{ id: ..., label: ... }]，要么去掉 when。`,
+        );
+      }
+    }
+    const svg = applyNodeBodies(fs.readFileSync(file, 'utf8'), cfg.bodies, name, cfg.scenarios);
 
     /* 可选的交互数据。
        ------------------------------------------------------------
@@ -655,6 +669,7 @@ const KIND_TONE = {
     put('parts', cfg.parts);
     put('anchors', cfg.anchors);
     put('tours', cfg.tours);
+    put('scenarios', cfg.scenarios);
 
     /* 零件 id 的校验。
        ------------------------------------------------------------
@@ -683,8 +698,14 @@ const KIND_TONE = {
     }
 
     const hasUI = cfg.anchors || cfg.tours || cfg.parts;
+    /* 提示要说清这张图多能干。能力是作者声明的（bodies / scenarios / facts），
+       所以提示也能跟着长 —— 没声明的图一个字都不多。 */
+    const extra = [];
+    if (svg.includes('data-nb-spot')) extra.push('框里的每一行 / 每个格子都能点，跳到它指向的零件');
+    if (cfg.scenarios && cfg.scenarios.length) extra.push('用「场景」切换同一张图的两种状态');
+    if (Object.values(cfg.parts || {}).some((p) => p && p.facts)) extra.push('用「对比两个零件」出一张对照表');
     const hint = hasUI
-      ? `<span class="idle">点头上的任意一个框看它的关系；或者从下面的「我熟悉」进去</span>`
+      ? `<span class="idle">点头上的任意一个框看它的关系；${extra.length ? extra.join('；') + '；' : ''}或者从下面的「我熟悉」进去</span>`
         + `<span class="focused">再点一次空白处取消</span>`
       : `<span class="idle">点头上的任意一个框，只看它和它连出去的关系</span>`
         + `<span class="focused">再点一次空白处取消</span>`;

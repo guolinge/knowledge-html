@@ -7,80 +7,217 @@
 - **进程回答「拥有什么」**：一块地址空间、一张打开文件表、一套凭证和命名空间。这一整份叫**资源域**。
 - **线程回答「从哪里继续执行」**：一个程序计数器、一组寄存器、一根栈。这一套叫**执行流**。
 
-一个多线程进程，就是「一份资源域 + 多条执行流」。下面这张图把两列东西同时摊开：左边一列是全组共享的那份，右边一列是每条执行流自己那份。点图上的框可以从任何你熟悉的零件进去看它的关系，底下三条导览各讲一个问题。
+一个多线程进程，就是「一份资源域 + 多条执行流」。下面这张图分两层：
+
+- **顶行是「出生」**：静态字节 → `execve` → 进程实例。§02 讲的三件事就列在中间那个框里。
+- **下面两行是「结构」**：左边一列是全组共享的那份，右边一列是每条执行流自己那份。
+
+怎么玩：==点矩形里的任意一行 / 一个格子 / 一段==，会跳到它指向的那个零件（比如点 `mm` 里的「mmap 区」，会亮起三根线程栈）；用「场景」在 **1 条 ↔ 3 条执行流** 之间切换，看多线程到底多了什么；用「对比两个零件」挑两个（比如**堆**和**用户栈**）出一张对照表。底下三条导览各讲一个问题。
 
 ```arch
 svg: pt-map
-caption: ==从左到右读：资源域在左，执行流在右。== 三条 task 各带一份执行现场（PC、寄存器、内核栈），却共同指向左边同一组资源对象，这就是「一份资源、多条执行流」在内核里的样子。隔离的墙在最底下：每进程一张页表，翻译之后才落到物理内存。
+caption: ==最上面一行是「出生」，下面两行是「结构」。== 顶行从磁盘上的静态字节走起：execve 一次做完三件事（① 按段映射进新地址空间 ② 初始化 fd 表 / 信号 / 凭证 ③ 创建至少一条执行流），返回时它已经是一个进程。下面两行才是「一份资源、多条执行流」在内核里的样子：左边一列是全组共享的那份，右边一列是每条执行流自己那份。==矩形里的每一行、每个格子、每段都能点== —— 点了会跳到它指向的那个零件。
+bodies:
+  elf:
+    badge: 静态 · 不执行
+    bars:
+      - { label: ELF 头, weight: 2 }
+      - { label: .text, weight: 4, link: text, tip: 只读代码段。加载时按 PT_LOAD 建一段 VMA；同一程序跑多份，可共享同一批物理页 }
+      - { label: .data, weight: 2 }
+      - { label: .bss, weight: 2, tone: idle, tip: .bss 是未初始化全局变量，在文件里不占空间，加载时补零 }
+      - { label: 段表, weight: 2 }
+    note: 按段映射，不是整块拷进内存
+  loader:
+    badge: 三件事
+    rows:
+      - { k: "①", v: 按段映射进新地址空间, link: text, tip: 把 ELF 的段映射成一块全新地址空间里的 VMA }
+      - { k: "②", v: 初始化 fd 表 / 信号 / 凭证, link: files, tip: files_struct、sighand_struct 这些内核对象在这一步建好 }
+      - { k: "③", v: 创建至少一条执行流, link: task0, tip: 主线程：第一个 task_struct，带 PC、寄存器现场和内核栈 }
+    code: 'execve("./a.out", argv, envp)'
+    note: 返回时，静态字节已经是一个进程
+  text:
+    badge: ① 全组共享
+    rows:
+      - { k: 权限, v: r-x 只读可执行 }
+      - { k: 物理页, v: 多实例共享同一批, tip: 同一个二进制跑 N 份，text 的物理页只有一份——只读是省法，不是约束 }
+    code: load_elf_binary()
+  heap:
+    badge: ① 全组共享
+    rows:
+      - { k: malloc, v: "↑ 向上长，free 回缩" }
+      - { k: brk / mmap, v: 内核调容量 }
+    note: 全组只有一份，多线程改它要想锁
+  ustacks:
+    title:
+      - { when: multi, text: 用户栈 ×3 }
+      - { when: one, text: 用户栈 ×1 }
+    badge: 每线程一根
+    cells:
+      - { label: T0 栈, sub: 默认 8MB, link: task0, tip: 主线程的栈。它有个特别之处：只有主线程的栈能动态变大 }
+      - { label: T1 栈, sub: 默认 8MB, link: task1, when: multi, tip: pthread_create 新开的栈从 mmap 区划出来，创建后大小固定 }
+      - { label: T2 栈, sub: 默认 8MB, link: task2, when: multi, tip: 三根栈摆在同一块地址空间里，「私有」是约定，不是硬件隔离 }
+    notes:
+      - { when: multi, text: 三根栈在同一张页表之下相邻摆放 }
+      - { when: one, text: 只有主线程一根栈，大小由 RLIMIT_STACK 决定（常见 8MB） }
+  files:
+    badge: ② 全组共享
+    cells:
+      - { label: fd 0, sub: stdin }
+      - { label: fd 1, sub: stdout }
+      - { label: fd 2, sub: stderr }
+      - { label: fd 3, sub: socket, tip: A 线程 open 出来的 fd，B 线程立刻可见——连读写偏移量都是同一份 }
+    note: 进程里任何一条执行流都能用这些 fd
+  sighand:
+    badge: ② 全组共享
+    cells:
+      - { label: 处置, sub: 全组共享, tip: SIGTERM 挂哪个函数，改一处全组立即可见 }
+      - { label: 掩码, sub: 每线程一份, tone: idle, tip: 屏蔽哪些信号是这条执行流自己的选择，不共享 }
+    note: 一张表里，两半分属不同层级
+  mm:
+    badge: 每进程一张表
+    stack:
+      - { label: 栈 · 向下长, mark: 0x7fff…, link: ustacks, tip: 主线程的栈在这；线程栈是 mmap 出来的另一块 }
+      - { label: mmap 区 · 线程栈在这, link: ustacks, when: multi, tip: 共享库、文件映射，以及每条线程的栈都从这划 }
+      - { label: mmap 区 · 共享库 / 文件映射, when: one, tip: 还没有线程，这块暂时只放共享库和文件映射 }
+      - { label: 堆 · 向上长（brk）, link: heap, tip: malloc 在这里长；全组一份 }
+      - { label: .data / .bss / .text, mark: 0x400000, link: text, tip: 从 ELF 映射来的那几段 }
+    pairs:
+      - { from: VA 0x601000, to: 帧 42, note: A 的 x = 1, tip: 同一个虚拟地址，两个进程各自查表，落到不同的物理帧 }
+    note: 页表把 VA 翻成物理帧
+  task0:
+    badge: ③ 主线程
+    rows:
+      - { k: PC / 寄存器, v: 16 × 8 字节 }
+      - { k: 内核栈, v: 16KB · 4 页, tip: x86-64 上 THREAD_SIZE = 4 × PAGE_SIZE = 16KB，切换时落脚的地方 }
+      - { k: task_struct, v: 约 8KB · 155 字段 }
+    note: 第 1 条执行流，execve 亲手造的
+  task1:
+    badge: pthread_create
+    rows:
+      - { k: tid, v: 1025 }
+      - { k: 新建的, v: 栈 + 寄存器现场 }
+      - { k: 复用的, v: mm / files / sighand 指针, link: files, tip: 资源一份没复制，只多了几个引用——这就是线程便宜的全部原因 }
+    code: clone(CLONE_VM|CLONE_FILES|CLONE_FS|CLONE_SIGHAND)
+  task2:
+    badge: 同组
+    rows:
+      - { k: tid, v: 1026 }
+      - { k: getpid, v: 和 T0 / T1 相同, tip: getpid 返回的是线程组 ID；ps -eLf 的 LWP 列才是 tid }
+    code: gettid()  // 各不相同
+  pmem:
+    badge: 4KB 一页
+    cells:
+      - { label: 帧 42, sub: A 的 x = 1 }
+      - { label: 帧 87, sub: B 的 x = 2 }
+    note: 物理内存只有一条，分区不存在
+  cpu:
+    badge: 核 ×4
+    cells:
+      - { label: T0, sub: 在跑, link: task0 }
+      - { label: T1, sub: 在跑, link: task1, when: multi }
+      - { label: T2, sub: 在跑, link: task2, when: multi }
+      - { label: 空闲, tone: idle, when: multi, tip: 调度器面前没有进程，只有 task——挑谁上核是 task 级的事 }
+      - { label: 空闲, tone: idle, when: one, tip: 只有一条执行流，另外三个核闲着 }
+      - { label: 空闲, tone: idle, when: one }
+      - { label: 空闲, tone: idle, when: one }
+    notes:
+      - { when: multi, text: 4 个核，3 个在跑 }
+      - { when: one, text: 4 个核，1 个在跑 }
 parts:
   elf:
     label: 可执行文件 a.out
     sub: 1 份 · 静态字节
     detail: 磁盘上的 ELF 文件：只读代码段、数据段、映射元数据。==它不执行，也不持有任何「进行中」的状态。== 同一个文件可以被加载 N 次，变成 N 个互不相干的实例。
+    facts: { 归属: 磁盘（不在任何进程里）, 份数: 一份静态字节, 跟着谁走: 不随任何东西, 隔离: 不参与 }
+  loader:
+    label: execve：加载器
+    sub: 三件事一次做完
+    detail: 内核里的加载器。它做的三件事正好对应这张图下面三个区：==① 造地址空间 ② 建内核资源 ③ 造第一条执行流==。做完返回用户态时，「程序」这个词已经变成「进程」了。
+    facts: { 归属: 内核代码, 份数: 一次调用, 跟着谁走: 不随任何东西, 隔离: "—" }
   text:
     label: 代码段 / 全局数据
     sub: 映射自 ELF
     detail: execve 把 ELF 的各段映射进一块全新的虚拟地址空间。text 只读不是约束而是省法：==同一程序的多个实例可以共享同一批物理页。==
+    facts: { 归属: 全组共享, 份数: 一份映射, 跟着谁走: 随进程, 隔离: 同一张页表——往外有墙，对内没墙 }
   heap:
     label: 堆
     sub: 1 份 · 全组共用
     detail: malloc 向上长，free 回缩；容量调整最终由内核经 brk/mmap 完成。==全组只有一份==，所以多线程改它要想锁。
+    facts: { 归属: 全组共享, 份数: 一份, 跟着谁走: 随进程, 隔离: 同一张页表——谁也不挡谁 }
   ustacks:
-    label: 用户栈 ×3
+    label: 用户栈
     sub: 每条执行流一根
     detail: 三根栈在==同一块地址空间里相邻摆放==。「私有」是约定（各线程只维护自己的栈），不是硬件隔离——野指针可以跨栈踩，见 §03。
+    facts: { 归属: 每条执行流一根, 份数: 3 根（单线程时 1 根）, 跟着谁走: 随线程, 隔离: 同一张页表——私有只是约定 }
   files:
     label: files_struct · fd 表
     sub: 1 份 · 偏移量都共享
     detail: 线程 A open 出来的 fd，线程 B ==立刻可见==，连读写偏移量都是同一份。两个线程对同一个 fd 交替 read，会各读各的片段——共享的能力，也是共享的坑。
+    facts: { 归属: 全组共享, 份数: 一份, 跟着谁走: 随进程, 隔离: 连读写偏移量都共享 }
   sighand:
-    label: sighand_struct · 信号处置
-    sub: 1 份 · 改一处全组可见
+    label: sighand_struct · 信号
+    sub: 处置共享，掩码私有
     detail: 任一线程改了 SIGTERM 的处置函数，全组立即可见。信号掩码反而是每线程私有的——屏蔽哪些信号是「这条执行流自己的选择」。
+    facts: { 归属: 处置共享 / 掩码私有, 份数: 一份 + 每线程一份掩码, 跟着谁走: 混合, 隔离: "—" }
   mm:
     label: mm_struct · 地址空间
     sub: 1 份 · 页表 + 各段 VMA
-    detail: 第 1 章「独立地址空间」的实体：页表加各段 VMA（虚拟内存区域）的描述。==每进程一张页表==，翻译之后才落到物理内存。内核线程没有它（mm 为 null），因为没有用户态内存可管。
+    detail: §01 说的「独立地址空间」的实体：页表加各段 VMA（虚拟内存区域）的描述。==每进程一张页表==，翻译之后才落到物理内存。内核线程没有它（mm 为 null），因为没有用户态内存可管。
+    facts: { 归属: 每进程一份, 份数: 一份（页表 + VMA）, 跟着谁走: 随进程, 隔离: 每进程一张表 = 有墙 }
   task0:
     label: task T0 · 主线程
     sub: execve 造出第一个
     detail: 内核描述「一个任务」的结构叫 task_struct，实测约 8KB、155 个字段。==它存的是指针，不是资源本体==——PC、寄存器、内核栈才是它自己的东西。
+    facts: { 归属: 每条执行流一份, 份数: 一个 task_struct, 跟着谁走: 随线程, 隔离: 资源全是引用 }
   task1:
     label: task T1
     sub: pthread_create 造出
     detail: 和 T0 平级的另一个 task。创建它没有复制任何资源，只复制了几个指针外加一个新内核栈（§06 算这笔账）。
+    facts: { 归属: 每条执行流一份, 份数: 一个 task_struct, 跟着谁走: 随线程, 隔离: 资源全是引用 }
   task2:
     label: task T2
     sub: 同组 · getpid 相同
     detail: 同一线程组的 task 共享 PID、各持自己的 tid。==getpid 返回的是线程组 ID==，`ps -eLf` 的 LWP 列就是这些 tid。
+    facts: { 归属: 每条执行流一份, 份数: 一个 task_struct, 跟着谁走: 随线程, 隔离: 资源全是引用 }
   pmem:
     label: 物理内存
     sub: 翻译后的落点
     detail: 页表既是翻译器也是隔离墙：两个进程的同一个虚拟地址，翻译到不同的物理帧（§03 展开）。
+    facts: { 归属: 硬件, 份数: 一条物理内存, 跟着谁走: 不随任何东西, 隔离: 同不同靠页表分 }
   cpu:
-    label: CPU 核 ×几个
+    label: CPU 核
     sub: task 轮流上
     detail: ==调度器面前没有进程，只有 task。== 三条执行流各自排队、各自上核，这是并行的来源（§04 展开）。
+    facts: { 归属: 硬件, 份数: 4 个核, 跟着谁走: 不随任何东西, 隔离: task 轮流上 }
 anchors:
   - { part: task0, label: "task（执行流的本体）" }
   - { part: mm, label: "地址空间" }
   - { part: files, label: "fd 表" }
   - { part: elf, label: "程序（还没跑的）" }
+  - { part: loader, label: "execve 那三件事" }
+scenarios:
+  - id: multi
+    label: 3 条执行流
+    note: pthread_create 之后：多了两条执行流，资源一份没多
+  - id: one
+    label: 1 条执行流
+    note: execve 刚返回：只有主线程。淡掉的那两个零件这时还没被创建
+    dim: [task1, task2]
 tours:
   - id: become
     label: "从程序到一个进程"
     steps:
-      - { at: [elf], text: "磁盘上只有一份静态字节：ELF 文件。它不执行，也不持有任何「进行中」的状态。" }
-      - { at: [text, heap], text: "execve 把各段映射进一块==全新的虚拟地址空间==——代码段从 ELF 来，堆是空的，等着 malloc 长出来。" }
-      - { at: [mm], text: "内核为这块空间建==一张页表==。地址都是虚拟的，每次访存都要经它翻译成物理地址。" }
-      - { at: [task0], text: "最后创建至少一条执行流：==主线程==。到这里程序变成了进程——静态字节有了寄存器、栈和内存里的状态。" }
-      - { at: [elf, pmem], text: "同一个 ELF 加载 N 次，就是 N 个这样的实例：==各自一张页表、各自一份资源==，跑的是同一份字节，互不相干。PID 标识的是一次运行实例，不是程序。" }
+      - { at: [elf, loader], text: "磁盘上只有一份静态字节。execve 把它交给内核里的加载器——==它不执行，也不持有任何「进行中」的状态==。" }
+      - { at: [text, heap, ustacks], text: "第一件事：==按段映射进一块全新的地址空间==。代码段从 ELF 来，堆是空的等着 malloc 长，栈等着函数调用压。" }
+      - { at: [files, sighand], text: "第二件事：==初始化内核资源== —— fd 表、信号处置、凭证。注意这一步还没有任何线程，这些对象先建好、就位。" }
+      - { at: [task0], text: "第三件事：==创建至少一条执行流==。到这里程序变成了进程：静态字节有了 PC、寄存器和内核栈。" }
+      - { at: [mm, pmem], text: "同一条路径再走一遍之前，先记住一件事：==每进程一张页表==。同一个 ELF 加载 N 次，就是 N 个各自独立的实例。" }
   - id: threads
     label: "多出来的线程从哪来"
     steps:
       - { at: [task0, task1], text: "pthread_create 不复制任何资源。它在内核里新建一个 ==task==——右边这样一个执行现场，然后把它加进 T0 的线程组。" }
       - { at: [mm, files, sighand], text: "新 task 的 mm、files、sighand 指针==直接指向 T0 那几份对象==。资源没有翻倍，多出来的只是引用。" }
-      - { at: [ustacks], text: "真正新建的只有==栈和寄存器现场==。三根栈摆在同一块地址空间里，相邻挨着。" }
+      - { at: [ustacks], text: "真正新建的只有==栈和寄存器现场==。切到「1 条执行流」看看少的是什么，就明白多线程多在哪了。" }
       - { at: [cpu], text: "调度器面前==没有进程，只有 task==。三条执行流各自排队、各自上核——这就是并行的来源。" }
   - id: ownership
     label: "什么东西归谁"
@@ -88,7 +225,7 @@ tours:
       - { at: [text, heap], text: "代码和堆：==全组一份==。线程间共享数据不用走 IPC（进程间通信），直接读写——代价是数据竞争要自己加锁。" }
       - { at: [ustacks], text: "栈：每条执行流一根。但三根栈都在==同一张页表之下==，「私有」是约定，不是硬件隔离。" }
       - { at: [files], text: "fd 表：A 打开的 fd，B ==立刻看得见==，连偏移量都是共享的。" }
-      - { at: [sighand, mm], text: "信号处置、地址空间同理。==归进程所有的东西，线程组里人人共享==——这就是 4.2 那张清单的来源。" }
+      - { at: [sighand, mm], text: "信号处置、地址空间同理。==归进程所有的东西，线程组里人人共享==——这就是下面那张清单的来源。" }
 ```
 
 这张图同时纠正一个直觉：进程不是「一块大内存」。
@@ -106,40 +243,13 @@ rows:
 
 ## 02 · 从程序到进程：加载器做了三件事
 
-execve 把静态文件变成进程，做了三件事：把可执行文件的各段映射进一块全新的虚拟地址空间；初始化文件表、信号处理、凭证这些内核资源；创建至少一条执行流（主线程）。
+这三件事不用另画一张图 —— ==§01 那张图的顶行就是它==：左边的 ELF 进去，中间的「加载器」按 ①②③ 列着三件事，右下角那条线接到主线程。这里只补图里放不下的部分。
 
-```journey
-- tag: ① 磁盘上
-  tone: muted
-  name: a.out (ELF)
-  badge: 静态
-  fields:
-    - { k: 内容, v: "text / data / bss + 映射元数据" }
-    - { k: 状态, v: "无", note: 不执行、无进度 }
-  note: 内容基本固定，躺着不动。它只是「一次运行」的原料。
-  next: "execve :: 加载器接管"
+**① 按段映射进新地址空间。** 映射的单位是段，不是整个文件：`text` 只读，所以同一程序的多个实例能共享同一批物理页；`bss` 在文件里根本不占空间，映射时补零。这一步建的是**一张全新的页表**，不是从谁那里复制来的——复制页表是 fork 的事，而且有 COW 打折（§06）。
 
-- tag: ② 加载
-  tone: blue
-  name: 全新的虚拟地址空间
-  badge: 三件事之一
-  fields:
-    - { k: text, v: "只读代码段，映射自 ELF", tone: ok }
-    - { k: data/bss, v: "全局变量，bss 运行时清零" }
-    - { k: heap/stack, v: "一空一虚，等着长" }
-  note: 同一文件加载 N 次，就是 N 块互不相干的空间，每块配一张页表。
-  next: "初始化内核资源 :: ::"
+**② 初始化内核资源。** 文件表、信号处置、凭证、命名空间各就各位。注意这一步里**有继承、也有重置**：fd 表默认继承（0 / 1 / 2 就是 shell 递过来的），凭证据说继承；而==被 `catch` 过的信号会被重置成默认处置==，只有本来就设成 `SIG_IGN` 的保持忽略（`SIGCHLD` 是个特例）。所以 execve 之后的程序不会莫名其妙撞上一个自己没设过的信号处理函数。
 
-- tag: ③ 进程实例
-  tone: green
-  name: PID 1024
-  badge: 动态
-  fields:
-    - { k: 地址空间, v: "页表 + 各段 VMA" }
-    - { k: 内核资源, v: "文件表 / 信号 / 凭证" }
-    - { k: 执行流, v: "主线程 ×1", note: 至少一条 }
-  note: 寄存器、栈、打开文件，「进行中」的状态全在这。程序与进程的距离就是这三行。
-```
+**③ 创建至少一条执行流。** 主线程的寄存器现场被设置成「从 ELF 头里记的入口点开始执行」。所以 execve 成功之后，代码**不是**从 C 的 `main` 开始跑的——`main` 是 C 运行时库接手的，内核眼里只有 ELF 那个入口地址。
 
 这个「静态内容 vs 运行实例」的关系，和 git 里 commit 与 working tree 同构：
 
