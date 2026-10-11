@@ -705,6 +705,12 @@ items:
 
 **① 在 `assets/app.js` 里注册控件：**
 
+!!注册代码必须放在文件里「`/* ---------- 挂载 ---------- */`」那一段**之前**。!!
+挂载段在脚本加载时就跑 `querySelectorAll('[data-widget]')` 逐个查注册表；
+把新控件追加到文件末尾（挂载段之后），加载到挂载行时它还没注册，
+控件全空、只有一条 `console.warn('[widget] 未注册')`，页面看着正常。
+踩过一次（mysql-2pc-crash，2026-10-11）：追加到末尾后 demo 全空，探针才抓到。
+
 ```js
 WIDGETS['my-widget'] = (root) => {
   const log = root.querySelector('[data-log="main"]');   // 对应下面的 log: main
@@ -1453,6 +1459,15 @@ text: |
     任何跨带的纵向连接都会被判 `proper-crossing`。出路只有两条：
     ==让有关系的两个零件在纵向上相邻，或者不画那条边== ——
     关系交给 `parts` 面板和导览去说。
+
+  画整体图时又踩的三个坑（`mysql-btree-why`，2026-10-11）：
+
+  - **`labelAt` 是标签矩形的中心点**，不是左上角 —— 想把标签挪到某个位置时按中心算。
+  - **`via` 的第一段必须垂直于 `fromSide`。** 从组件顶部出边，第一段就得竖直向上，
+    否则报 `endpoint-side-direction`；航点接着拐就行。
+  - **组件出口贴着 region 边框会报 `container-border-run`。** region 的 pad 会把边框
+    推到组件外约 24px，==从侧边出边时让边先横向穿过边框（垂直相交），别顺着框走==；
+    用 `via` 把线引到离框十几像素外的走廊里再下行。
 ```
 
 **生成步骤**：
