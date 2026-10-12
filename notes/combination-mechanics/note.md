@@ -1,6 +1,18 @@
 [全景篇](../combination-overview/)讲了这个包的位置和地图，[组件图鉴](../combination-components/)里有每个组件的真实渲染截图。这一篇往下钻一层：草稿更新的具体写法、一行条件的诞生过程、控件怎么决策、候选值怎么加载、坏草稿在哪里被拦。三处交互里的错误码、操作符表、控件形态，都是 2026-10-10 用 `tsx` 实跑包内源码得到的输出，不是照文档抄的。
 
 ```callout
+tone: amber
+icon: 🕒
+text: |
+  **时效提示（2026-10-12）**：本篇基于 crm-dsl-stru @ e7fdf40，此后代码有五类变化影响本篇：
+  ①`ops.ts` 并入 `@insight/dsl`（OP_LABELS 现从 dsl 重导出，新组件 TemporalOps 在用 opLabel）；
+  ②日期时间的 DSL 值从毫秒改为==秒级== Unix 时间戳；③新增 `eq_default/neq_default` 无值操作符
+  （03 节决策表多一族）；④动态候选改走 `resolver-options`、新增 `lookupValuesKey` 注入；
+  ⑤buildQuery 现住 `@insight/dsl`、validateStructure 现住 `@insight/sql-builder`。
+  协议层的更新版以[草稿协议篇](../combination-draft/)为准。
+```
+
+```callout
 tone: blue
 icon: 🧭
 text: |
