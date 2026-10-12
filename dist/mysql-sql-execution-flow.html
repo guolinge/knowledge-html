@@ -1674,9 +1674,10 @@ mark.mk-green { background: var(--green-soft); color: var(--green); }
 
 /* ============================================================
    积木 16 · arch —— 内联 archify 生成的图
-   SVG 自带 viewBox，所以 max-width:100% 就能响应式缩放
+   SVG 按 viewBox 尺度封顶，只缩小不自动放大；正文宽屏布局不受影响。
    ============================================================ */
 .archfig { margin: 0 0 20px; }
+.arch-canvas { width: 100%; max-width: var(--arch-max-width, 100%); margin-inline: auto; }
 .archfig svg {
   display: block; width: 100%; height: auto; max-width: 100%;
   border-radius: 12px; background: var(--surface-2);
@@ -1685,6 +1686,37 @@ mark.mk-green { background: var(--green-soft); color: var(--green); }
 .archfig figcaption {
   margin-top: 10px; font-size: 12.5px; color: var(--muted);
   text-align: center; line-height: 1.6;
+}
+
+/* 多层框沿用获批原型的层次、虚线和留白，不改变节点与连线布局。 */
+.arch-boundary-ui { max-width: var(--arch-max-width); margin: 0 auto 20px; }
+.arch-boundary-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 8px 0 14px; }
+.arch-boundary-label { font-size: 12px; color: var(--muted); margin-right: 4px; }
+.arch-boundary-toolbar button {
+  border: 1px solid var(--border); background: var(--surface); color: var(--text-2);
+  border-radius: 999px; padding: 8px 14px; cursor: pointer; font: 13px/1.4 var(--sans);
+}
+.arch-boundary-toolbar button[aria-pressed="true"] {
+  border-color: var(--blue); color: var(--blue);
+  background: color-mix(in srgb, var(--blue) 8%, var(--surface));
+}
+.arch-address-box { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 12px 16px; font-size: 12px; }
+[data-arch-address] { color: var(--text); font-weight: 600; line-height: 1.7; }
+[data-arch-frame-detail] { color: var(--muted); margin-top: 5px; line-height: 1.6; }
+.archfig svg .arch-frame { cursor: pointer; }
+.arch-frame .c-region { fill: color-mix(in srgb, var(--af-cloud-stroke) 2%, transparent); stroke: var(--af-cloud-stroke); stroke-dasharray: 8 5; }
+.arch-frame[data-depth="1"] .c-region { stroke-width: 1.5; }
+.arch-frame[data-depth="2"] .c-region { stroke: color-mix(in srgb, var(--af-cloud-stroke) 76%, var(--muted)); stroke-dasharray: 7 5; }
+.arch-frame:not([data-depth="1"]):not([data-depth="2"]) .c-region { stroke: color-mix(in srgb, var(--af-cloud-stroke) 82%, var(--muted)); stroke-dasharray: 4 4; fill: transparent; }
+.arch-frame text { fill: var(--af-cloud-stroke); }
+.arch-frame:hover .c-region, .arch-frame.is-current .c-region { stroke-width: 2; }
+.arch-frame:focus-visible { outline: none; }
+.arch-frame:focus-visible .c-region { stroke: var(--blue); stroke-width: 2; }
+.archfig[data-boundaries="flat"] .arch-frame[data-frame-flat="false"] { display: none; }
+.archfig[data-focus] svg .arch-frame { opacity: 1; }
+@media (max-width: 700px) {
+  .archfig[data-frames] .arch-canvas { overflow-x: auto; }
+  .archfig[data-frames] .arch-canvas > svg { min-width: min(1080px, var(--arch-max-width)); }
 }
 
 /* arch 积木的「聚焦」—— 点一个节点，只留它、它的邻居和相连的边。
@@ -6286,8 +6318,9 @@ svg[data-preset="blueprint"] .c-security-group,
           
         </div></div><h2 id="整体图一条-sql-穿过哪些关卡"><span class="num">02</span>整体图：一条 SQL 穿过哪些关卡</h2>
 <p>一张图装下全部主线：实线是 select 的读路径；虚线里 ①→⑤ 标出 update 的时序——<mark class="mk-blue">先改页、再记 redo、写 binlog、redo 才 commit、从库重放</mark>；另一条虚线是查询缓存的命中短路。Server 层五道关卡各管一段，跨过 handler 接口才碰到数据和存储。</p>
-<figure class="archfig" data-arch data-pano data-parts='{"client":{"label":"客户端","sub":"发出 SQL","detail":"一条 `select * from user where id=1` 从这里发出，走 TCP（或 Unix socket）进 MySQL。==结果集最后也沿这条连接原路返回。=="},"conn":{"label":"① 连接器","sub":"认证 · 全局权限固化 · 一连接一线程","detail":"TCP 三次握手只负责把水管接上，连接器管==你是谁==：校验用户名密码（8.0 起默认 `caching_sha2_password`），然后读权限表——==全局权限和密码固化进这条连接==，表 / 列级每次请求查全局缓存（§03 讲三档生效时点）。它是一连接一线程模型，「连接很贵」的第一层原因在这里。"},"qcache":{"label":"② 查询缓存","sub":"key 是 SQL 全文 · 8.0 已移除","detail":"按==逐字节==匹配 SQL 文本，命中直接返回结果集、短路后面所有站。大小写、多一个空格、换个参数值都算 miss。==8.0 里它已经被整体删除==，画出来是为了对齐老资料，§04 讲它怎么死的。"},"parser":{"label":"③ 分析器","sub":"词法/语法 → 解析树 · ERROR 1064","detail":"把字符串切成 token、按 SQL 文法组装成解析树。==著名的 `ERROR 1064` 在这一站抛出==，语句根本没进引擎，是「翻译」阶段就被拦下了。收尾还要确认表和列真实存在、把 `select *` 展开成全部列。"},"optimizer":{"label":"④ 优化器","sub":"代价估算 · 选执行计划","detail":"同一条 SQL 往往有多条等价路径：==用哪个索引、join 谁做驱动表==。优化器按统计信息估算每条路径的代价、挑最便宜的，==`EXPLAIN` 看到的就是它的决定==。统计信息过期，它就会自信地选错。"},"executor":{"label":"⑤ 执行器","sub":"precheck 权限 · 迭代器逐行取数","detail":"先做 ==precheck==（表、列级权限的第二次校验，连接时还查不到「这张表的这些列」），然后按计划调引擎接口==一行一行==取数、做 where 过滤、组装结果集。循环转多少圈，就是这条 SQL 的代价。"},"handler":{"label":"handler 接口","sub":"两层的契约","detail":"引擎以插件形式实现这套接口。执行器懂 SQL 不懂存储，引擎懂存储不懂 SQL，==两者只靠「给我下一行」这一个动词对话==。InnoDB 能从 5.5 起当默认引擎而 Server 层一行不改，靠的就是它。"},"binlog":{"label":"binlog","sub":"Server 层逻辑日志 · 追加写","detail":"记录「哪条语句或哪行数据怎么变」，所有引擎共用。用途是==主从复制和数据恢复==：从库重放 binlog 得到和主库一样的数据。"},"bp":{"label":"⑥ Buffer Pool","sub":"16KB 数据页 · 命中内存/读盘","detail":"InnoDB 把数据页（每页 ==16KB==）缓在内存里：命中直接返回，未命中才读磁盘。update 改的是内存页（图上 ①，先改页），改完的页叫==脏页==，由后台线程择机刷回磁盘。"},"redo":{"label":"redo log","sub":"InnoDB 物理日志 · 循环写","detail":"InnoDB 特有。把「哪个页做了什么修改」==顺序追加==进日志（WAL），随机写变顺序写；崩溃后重放它找回没刷盘的数据，这就是 ==crash-safe==。文件固定大小、写满回头覆盖，能覆盖的前提是被覆盖位置的脏页已刷盘（checkpoint）。"},"disk":{"label":"磁盘 .ibd","sub":"数据真正躺的地方","detail":"脏页迟早刷回这里。整条链路上大量的设计（WAL、Buffer Pool）都是为了==少碰它==。"},"replica":{"label":"从库","sub":"另一台机器","detail":"拉取主库的 binlog 重放。==binlog 写完整的事务从库一定有；没写完整的主库自己会回滚==，主从就这样对齐（§07 的恢复规则）。"}}' data-tours='[{"id":"select","label":"select 的旅程","steps":[{"at":["client","conn"],"text":"客户端发出 SQL，经 TCP 进入 MySQL。==TCP 三次握手只是把水管接上==，之后全是连接器的事。"},{"at":["conn"],"text":"==认证==（8.0 起默认 `caching_sha2_password`），然后把全局权限和密码固化进连接；表 / 列级每次请求查全局缓存，§03 讲三档生效时点。"},{"at":["qcache"],"text":"==查询缓存==按 SQL 全文逐字节找结果集，命中就地返回。今天画它是为了对齐老资料，==8.0 已整体移除==。"},{"at":["parser"],"text":"==分析器==把字符串切成 token、组装成解析树。SQL 拼错在这里就报 `ERROR 1064`，==根本没碰到数据==。"},{"at":["optimizer"],"text":"==优化器==从等价方案里挑最便宜的：用哪个索引、join 谁驱动。它按==统计信息==估算代价，`EXPLAIN` 看到的就是它的决定。"},{"at":["executor"],"text":"==执行器==先补一次表/列级权限校验（precheck），再按计划==一行一行==向引擎要数据、做 where 过滤。"},{"at":["handler","bp"],"text":"对话走 ==handler 接口==：引擎从 ==Buffer Pool== 的 16KB 数据页里找行，命中内存、未命中才读磁盘。"},{"at":["disk"],"text":"数据最终躺在磁盘的 `.ibd` 文件里。==前面所有站都在想办法少碰它==，这也是 WAL 和 Buffer Pool 的动机。"}]},{"id":"update","label":"update 多出来的剧情","steps":[{"at":["executor","bp"],"text":"update 走完同样的前五站，==先改 Buffer Pool 里的页==（①）——改完的页叫脏页。"},{"at":["bp","redo"],"text":"紧接着把这次的修改==顺序追加进 redo log、标记 prepare==（②）：随机写变顺序写，崩溃后靠重放找回数据。"},{"at":["executor","binlog"],"text":"然后 Server 层==写 binlog==（③），完整事件、以 XID 收尾。"},{"at":["binlog","redo"],"text":"binlog 落盘，redo 才标记 ==commit==（④）。两份日志的「生效」绑成一个原子动作——==两阶段提交==，§07 展开三个崩溃点。"},{"at":["binlog","replica"],"text":"从库拉取 binlog 重放（⑤）。==binlog 写完整的事务从库一定有；没写完整的主库自己会回滚==。"}]},{"id":"slow","label":"一条 SQL 为什么时快时慢","steps":[{"at":["conn"],"text":"先排除连接层：连接数打满会被直接拒绝；空闲超过 `wait_timeout`（默认 8 小时）被掐掉；==全局权限改了要重连才生效==。"},{"at":["optimizer"],"text":"==统计信息过期==时，优化器会自信地选错索引，毫秒变分钟。`EXPLAIN` 的 type / rows / key 是第一眼。"},{"at":["executor"],"text":"执行器的循环圈数==就是这条 SQL 的代价==：索引退化、区分度崩了，圈数暴涨。"},{"at":["bp","disk"],"text":"Buffer Pool 装不下热数据时，==每次读都要碰磁盘==，内存不够是慢的另一种形态。"},{"at":["qcache"],"text":"别再指望查询缓存兜底，==8.0 里它已经不存在了==。慢查询请按前四步排查。"}]},{"id":"auth","label":"权限在哪两道闸被拦","steps":[{"at":["conn"],"text":"第一道在==连接器==：认证，并把全局权限固化进连接。它管「你能不能连」，粒度粗。"},{"at":["executor"],"text":"第二道在==执行器开工前==（precheck）：分析器解析出表名、列名之后，才查得了「这张表的这些列你碰不碰」。"},{"at":["qcache"],"text":"边角：查询缓存命中会==跳过分析器==，没解析出表名列名，所以命中路径在返回结果前要==单独做一次权限校验==。"}]}]'>
-      <svg viewBox="0 0 1556 944" role="img" aria-labelledby="archify-diagram-title archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
+<figure class="archfig" data-arch style="--arch-max-width:1556px" data-pano data-parts='{"client":{"label":"客户端","sub":"发出 SQL","detail":"一条 `select * from user where id=1` 从这里发出，走 TCP（或 Unix socket）进 MySQL。==结果集最后也沿这条连接原路返回。=="},"conn":{"label":"① 连接器","sub":"认证 · 全局权限固化 · 一连接一线程","detail":"TCP 三次握手只负责把水管接上，连接器管==你是谁==：校验用户名密码（8.0 起默认 `caching_sha2_password`），然后读权限表——==全局权限和密码固化进这条连接==，表 / 列级每次请求查全局缓存（§03 讲三档生效时点）。它是一连接一线程模型，「连接很贵」的第一层原因在这里。"},"qcache":{"label":"② 查询缓存","sub":"key 是 SQL 全文 · 8.0 已移除","detail":"按==逐字节==匹配 SQL 文本，命中直接返回结果集、短路后面所有站。大小写、多一个空格、换个参数值都算 miss。==8.0 里它已经被整体删除==，画出来是为了对齐老资料，§04 讲它怎么死的。"},"parser":{"label":"③ 分析器","sub":"词法/语法 → 解析树 · ERROR 1064","detail":"把字符串切成 token、按 SQL 文法组装成解析树。==著名的 `ERROR 1064` 在这一站抛出==，语句根本没进引擎，是「翻译」阶段就被拦下了。收尾还要确认表和列真实存在、把 `select *` 展开成全部列。"},"optimizer":{"label":"④ 优化器","sub":"代价估算 · 选执行计划","detail":"同一条 SQL 往往有多条等价路径：==用哪个索引、join 谁做驱动表==。优化器按统计信息估算每条路径的代价、挑最便宜的，==`EXPLAIN` 看到的就是它的决定==。统计信息过期，它就会自信地选错。"},"executor":{"label":"⑤ 执行器","sub":"precheck 权限 · 迭代器逐行取数","detail":"先做 ==precheck==（表、列级权限的第二次校验，连接时还查不到「这张表的这些列」），然后按计划调引擎接口==一行一行==取数、做 where 过滤、组装结果集。循环转多少圈，就是这条 SQL 的代价。"},"handler":{"label":"handler 接口","sub":"两层的契约","detail":"引擎以插件形式实现这套接口。执行器懂 SQL 不懂存储，引擎懂存储不懂 SQL，==两者只靠「给我下一行」这一个动词对话==。InnoDB 能从 5.5 起当默认引擎而 Server 层一行不改，靠的就是它。"},"binlog":{"label":"binlog","sub":"Server 层逻辑日志 · 追加写","detail":"记录「哪条语句或哪行数据怎么变」，所有引擎共用。用途是==主从复制和数据恢复==：从库重放 binlog 得到和主库一样的数据。"},"bp":{"label":"⑥ Buffer Pool","sub":"16KB 数据页 · 命中内存/读盘","detail":"InnoDB 把数据页（每页 ==16KB==）缓在内存里：命中直接返回，未命中才读磁盘。update 改的是内存页（图上 ①，先改页），改完的页叫==脏页==，由后台线程择机刷回磁盘。"},"redo":{"label":"redo log","sub":"InnoDB 物理日志 · 循环写","detail":"InnoDB 特有。把「哪个页做了什么修改」==顺序追加==进日志（WAL），随机写变顺序写；崩溃后重放它找回没刷盘的数据，这就是 ==crash-safe==。文件固定大小、写满回头覆盖，能覆盖的前提是被覆盖位置的脏页已刷盘（checkpoint）。"},"disk":{"label":"磁盘 .ibd","sub":"数据真正躺的地方","detail":"脏页迟早刷回这里。整条链路上大量的设计（WAL、Buffer Pool）都是为了==少碰它==。"},"replica":{"label":"从库","sub":"另一台机器","detail":"拉取主库的 binlog 重放。==binlog 写完整的事务从库一定有；没写完整的主库自己会回滚==，主从就这样对齐（§07 的恢复规则）。"}}' data-tours='[{"id":"select","label":"select 的旅程","steps":[{"at":["client","conn"],"text":"客户端发出 SQL，经 TCP 进入 MySQL。==TCP 三次握手只是把水管接上==，之后全是连接器的事。"},{"at":["conn"],"text":"==认证==（8.0 起默认 `caching_sha2_password`），然后把全局权限和密码固化进连接；表 / 列级每次请求查全局缓存，§03 讲三档生效时点。"},{"at":["qcache"],"text":"==查询缓存==按 SQL 全文逐字节找结果集，命中就地返回。今天画它是为了对齐老资料，==8.0 已整体移除==。"},{"at":["parser"],"text":"==分析器==把字符串切成 token、组装成解析树。SQL 拼错在这里就报 `ERROR 1064`，==根本没碰到数据==。"},{"at":["optimizer"],"text":"==优化器==从等价方案里挑最便宜的：用哪个索引、join 谁驱动。它按==统计信息==估算代价，`EXPLAIN` 看到的就是它的决定。"},{"at":["executor"],"text":"==执行器==先补一次表/列级权限校验（precheck），再按计划==一行一行==向引擎要数据、做 where 过滤。"},{"at":["handler","bp"],"text":"对话走 ==handler 接口==：引擎从 ==Buffer Pool== 的 16KB 数据页里找行，命中内存、未命中才读磁盘。"},{"at":["disk"],"text":"数据最终躺在磁盘的 `.ibd` 文件里。==前面所有站都在想办法少碰它==，这也是 WAL 和 Buffer Pool 的动机。"}]},{"id":"update","label":"update 多出来的剧情","steps":[{"at":["executor","bp"],"text":"update 走完同样的前五站，==先改 Buffer Pool 里的页==（①）——改完的页叫脏页。"},{"at":["bp","redo"],"text":"紧接着把这次的修改==顺序追加进 redo log、标记 prepare==（②）：随机写变顺序写，崩溃后靠重放找回数据。"},{"at":["executor","binlog"],"text":"然后 Server 层==写 binlog==（③），完整事件、以 XID 收尾。"},{"at":["binlog","redo"],"text":"binlog 落盘，redo 才标记 ==commit==（④）。两份日志的「生效」绑成一个原子动作——==两阶段提交==，§07 展开三个崩溃点。"},{"at":["binlog","replica"],"text":"从库拉取 binlog 重放（⑤）。==binlog 写完整的事务从库一定有；没写完整的主库自己会回滚==。"}]},{"id":"slow","label":"一条 SQL 为什么时快时慢","steps":[{"at":["conn"],"text":"先排除连接层：连接数打满会被直接拒绝；空闲超过 `wait_timeout`（默认 8 小时）被掐掉；==全局权限改了要重连才生效==。"},{"at":["optimizer"],"text":"==统计信息过期==时，优化器会自信地选错索引，毫秒变分钟。`EXPLAIN` 的 type / rows / key 是第一眼。"},{"at":["executor"],"text":"执行器的循环圈数==就是这条 SQL 的代价==：索引退化、区分度崩了，圈数暴涨。"},{"at":["bp","disk"],"text":"Buffer Pool 装不下热数据时，==每次读都要碰磁盘==，内存不够是慢的另一种形态。"},{"at":["qcache"],"text":"别再指望查询缓存兜底，==8.0 里它已经不存在了==。慢查询请按前四步排查。"}]},{"id":"auth","label":"权限在哪两道闸被拦","steps":[{"at":["conn"],"text":"第一道在==连接器==：认证，并把全局权限固化进连接。它管「你能不能连」，粒度粗。"},{"at":["executor"],"text":"第二道在==执行器开工前==（precheck）：分析器解析出表名、列名之后，才查得了「这张表的这些列你碰不碰」。"},{"at":["qcache"],"text":"边角：查询缓存命中会==跳过分析器==，没解析出表名列名，所以命中路径在返回结果前要==单独做一次权限校验==。"}]}]'>
+      
+      <div class="arch-canvas"><svg viewBox="0 0 1556 944" role="img" aria-labelledby="archify-diagram-title archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
         <title id="archify-diagram-title">一条 SQL 的旅程：从客户端到数据，经过谁的手</title>
         <desc id="archify-diagram-description">实线是 select 的读路径；虚线 ①→⑤ 标出 update 的时序；另一条虚线是命中短路</desc>
         <!-- Definitions -->
@@ -6563,7 +6596,7 @@ svg[data-preset="blueprint"] .c-security-group,
             <text x="462" y="928" class="t-muted" font-size="10" font-weight="500">External</text>
           </g>
         </g>
-      </svg>
+      </svg></div>
       <figcaption><mark class="mk-blue">从客户端到磁盘，一条 SQL 的旅程。</mark>点图上任意一个框，只看它和它的邻居，从你认识的那个框进去；四条导览各讲一个问题。</figcaption>
       <div class="pano-ui"></div>
       <p class="arch-hint"><span class="idle">点头上的任意一个框看它的关系</span><span class="focused">再点一次空白处取消</span></p>
@@ -8119,6 +8152,63 @@ REVOKE 执行的那一刻这份缓存就被重建了。「要重连才生效」�
          语义层可能因为没配 data-pano 提前 return。 */
       var compareOn = false;
       var picked = [];
+      var frames = [];
+      try { frames = JSON.parse(fig.getAttribute('data-frames') || '[]'); }
+      catch (e) { frames = []; }
+      var frameNodes = Array.prototype.slice.call(svg.querySelectorAll('[data-frame]'));
+      var address = fig.querySelector('[data-arch-address]');
+      var frameDetail = fig.querySelector('[data-arch-frame-detail]');
+      var frameDefault = frameDetail && frameDetail.textContent;
+
+      function frameContext(ids, text, detail) {
+        if (!address) return;
+        frameNodes.forEach(function (node) {
+          var f = frames.filter(function (f) { return f.id === node.getAttribute('data-frame'); })[0];
+          var hit = !!f && f.members.some(function (id) { return ids.indexOf(id) >= 0; });
+          node.classList.toggle('is-current', hit);
+          node.setAttribute('aria-pressed', hit ? 'true' : 'false');
+        });
+        address.textContent = text || '点一个零件，看完整归属路径；点一个区域标题，看这一层的含义。';
+        frameDetail.textContent = detail || frameDefault;
+      }
+
+      function nodeAddress(id) {
+        var chain = frames.filter(function (f) { return f.members.indexOf(id) >= 0; })
+          .sort(function (a, b) { return a.depth - b.depth; }).map(function (f) { return f.label; });
+        var node = nodes.filter(function (n) { return n.getAttribute('data-node-id') === id; })[0];
+        chain.push(node ? node.getAttribute('data-node-label') : id);
+        frameContext([id], chain.join(' / '), '选中一个零件后，它的祖先边界仍然保留。点击区域标题，可以看这一层为什么这样分组。');
+      }
+
+      function resetMap() {
+        compareOn = false; picked = [];
+        nodes.forEach(function (n) { n.classList.remove('is-picked'); });
+        uiClear(); clear();
+        if (typeof drawTabs === 'function' && mount) { drawTabs(); drawModes(); drawCompare(); showHint(); }
+      }
+
+      function focusFrame(id) {
+        var f = frames.filter(function (f) { return f.id === id; })[0];
+        if (!f) return;
+        resetMap();
+        focusMany(f.members);
+        fig.setAttribute('data-focus', 'region');
+        frameContext(f.members, f.label, f.detail);
+      }
+
+      var boundaryUI = fig.querySelector('.arch-boundary-ui');
+      if (boundaryUI) {
+        boundaryUI.addEventListener('click', function (ev) {
+          var mode = ev.target.closest('[data-boundary-mode]');
+          if (mode) {
+            fig.setAttribute('data-boundaries', mode.getAttribute('data-boundary-mode'));
+            Array.prototype.forEach.call(boundaryUI.querySelectorAll('[data-boundary-mode]'), function (b) {
+              b.setAttribute('aria-pressed', b === mode ? 'true' : 'false');
+            });
+          }
+          if (ev.target.closest('[data-arch-reset]')) resetMap();
+        });
+      }
 
       function clear() {
         fig.removeAttribute('data-focus');
@@ -8128,6 +8218,7 @@ REVOKE 执行的那一刻这份缓存就被重建了。「要重连才生效」�
         });
         edges.forEach(function (e) { e.classList.remove('is-hot'); });
         if (typeof markSpot === 'function') markSpot(null);
+        frameContext([]);
       }
 
       /* 场景与对比入口的初始化放在最后 —— 它们会用到 showPart / focus，
@@ -8160,6 +8251,7 @@ REVOKE 执行的那一刻这份缓存就被重建了。「要重连才生效」�
 
         // 一个节点都没连出去也要能聚焦（否则点了像没反应）
         fig.setAttribute('data-focus', id);
+        nodeAddress(id);
       }
 
       /* ---------- 节点内部的「格子」也能点 ----------
@@ -8226,6 +8318,8 @@ REVOKE 执行的那一刻这份缓存就被重建了。「要重连才生效」�
       }
 
       svg.addEventListener('click', function (ev) {
+        var frame = ev.target.closest && ev.target.closest('[data-frame]');
+        if (frame) { focusFrame(frame.getAttribute('data-frame')); return; }
         /* 对比模式：点节点是「选中它」，不是聚焦 */
         if (compareOn) {
           var gp = ev.target.closest && ev.target.closest('[data-node-id]');
@@ -8248,6 +8342,8 @@ REVOKE 执行的那一刻这份缓存就被重建了。「要重连才生效」�
       // 键盘可达 —— archify 的节点本来就带 tabindex 和 role="button"
       svg.addEventListener('keydown', function (ev) {
         if (ev.key !== 'Enter' && ev.key !== ' ') return;
+        var frame = ev.target.closest && ev.target.closest('[data-frame]');
+        if (frame) { ev.preventDefault(); focusFrame(frame.getAttribute('data-frame')); return; }
         var spot = ev.target.closest && ev.target.closest('[data-nb-spot]');
         if (spot) { ev.preventDefault(); uiClear(); hitSpot(spot); return; }
         var g = ev.target.closest && ev.target.closest('[data-node-id]');
@@ -8451,6 +8547,7 @@ REVOKE 执行的那一刻这份缓存就被重建了。「要重连才生效」�
           e.classList.toggle('is-hot', on);
         });
         fig.setAttribute('data-focus', 'tour');
+        frameContext(ids, '导览：当前对象的祖先边界仍然可见');
       }
 
       function uiClear() { tourIdx = -1; stepIdx = 0; }

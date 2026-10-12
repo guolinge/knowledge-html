@@ -1194,6 +1194,63 @@
          语义层可能因为没配 data-pano 提前 return。 */
       var compareOn = false;
       var picked = [];
+      var frames = [];
+      try { frames = JSON.parse(fig.getAttribute('data-frames') || '[]'); }
+      catch (e) { frames = []; }
+      var frameNodes = Array.prototype.slice.call(svg.querySelectorAll('[data-frame]'));
+      var address = fig.querySelector('[data-arch-address]');
+      var frameDetail = fig.querySelector('[data-arch-frame-detail]');
+      var frameDefault = frameDetail && frameDetail.textContent;
+
+      function frameContext(ids, text, detail) {
+        if (!address) return;
+        frameNodes.forEach(function (node) {
+          var f = frames.filter(function (f) { return f.id === node.getAttribute('data-frame'); })[0];
+          var hit = !!f && f.members.some(function (id) { return ids.indexOf(id) >= 0; });
+          node.classList.toggle('is-current', hit);
+          node.setAttribute('aria-pressed', hit ? 'true' : 'false');
+        });
+        address.textContent = text || '点一个零件，看完整归属路径；点一个区域标题，看这一层的含义。';
+        frameDetail.textContent = detail || frameDefault;
+      }
+
+      function nodeAddress(id) {
+        var chain = frames.filter(function (f) { return f.members.indexOf(id) >= 0; })
+          .sort(function (a, b) { return a.depth - b.depth; }).map(function (f) { return f.label; });
+        var node = nodes.filter(function (n) { return n.getAttribute('data-node-id') === id; })[0];
+        chain.push(node ? node.getAttribute('data-node-label') : id);
+        frameContext([id], chain.join(' / '), '选中一个零件后，它的祖先边界仍然保留。点击区域标题，可以看这一层为什么这样分组。');
+      }
+
+      function resetMap() {
+        compareOn = false; picked = [];
+        nodes.forEach(function (n) { n.classList.remove('is-picked'); });
+        uiClear(); clear();
+        if (typeof drawTabs === 'function' && mount) { drawTabs(); drawModes(); drawCompare(); showHint(); }
+      }
+
+      function focusFrame(id) {
+        var f = frames.filter(function (f) { return f.id === id; })[0];
+        if (!f) return;
+        resetMap();
+        focusMany(f.members);
+        fig.setAttribute('data-focus', 'region');
+        frameContext(f.members, f.label, f.detail);
+      }
+
+      var boundaryUI = fig.querySelector('.arch-boundary-ui');
+      if (boundaryUI) {
+        boundaryUI.addEventListener('click', function (ev) {
+          var mode = ev.target.closest('[data-boundary-mode]');
+          if (mode) {
+            fig.setAttribute('data-boundaries', mode.getAttribute('data-boundary-mode'));
+            Array.prototype.forEach.call(boundaryUI.querySelectorAll('[data-boundary-mode]'), function (b) {
+              b.setAttribute('aria-pressed', b === mode ? 'true' : 'false');
+            });
+          }
+          if (ev.target.closest('[data-arch-reset]')) resetMap();
+        });
+      }
 
       function clear() {
         fig.removeAttribute('data-focus');
@@ -1203,6 +1260,7 @@
         });
         edges.forEach(function (e) { e.classList.remove('is-hot'); });
         if (typeof markSpot === 'function') markSpot(null);
+        frameContext([]);
       }
 
       /* 场景与对比入口的初始化放在最后 —— 它们会用到 showPart / focus，
@@ -1235,6 +1293,7 @@
 
         // 一个节点都没连出去也要能聚焦（否则点了像没反应）
         fig.setAttribute('data-focus', id);
+        nodeAddress(id);
       }
 
       /* ---------- 节点内部的「格子」也能点 ----------
@@ -1301,6 +1360,8 @@
       }
 
       svg.addEventListener('click', function (ev) {
+        var frame = ev.target.closest && ev.target.closest('[data-frame]');
+        if (frame) { focusFrame(frame.getAttribute('data-frame')); return; }
         /* 对比模式：点节点是「选中它」，不是聚焦 */
         if (compareOn) {
           var gp = ev.target.closest && ev.target.closest('[data-node-id]');
@@ -1323,6 +1384,8 @@
       // 键盘可达 —— archify 的节点本来就带 tabindex 和 role="button"
       svg.addEventListener('keydown', function (ev) {
         if (ev.key !== 'Enter' && ev.key !== ' ') return;
+        var frame = ev.target.closest && ev.target.closest('[data-frame]');
+        if (frame) { ev.preventDefault(); focusFrame(frame.getAttribute('data-frame')); return; }
         var spot = ev.target.closest && ev.target.closest('[data-nb-spot]');
         if (spot) { ev.preventDefault(); uiClear(); hitSpot(spot); return; }
         var g = ev.target.closest && ev.target.closest('[data-node-id]');
@@ -1526,6 +1589,7 @@
           e.classList.toggle('is-hot', on);
         });
         fig.setAttribute('data-focus', 'tour');
+        frameContext(ids, '导览：当前对象的祖先边界仍然可见');
       }
 
       function uiClear() { tourIdx = -1; stepIdx = 0; }

@@ -228,6 +228,33 @@ caption: packages/core 的组成与数据流
 - `tools/archify.mjs` 会自动抠 SVG + 给 CSS 变量加 `--af-` 前缀（不加会覆盖我们的主题）。
 - 两边都用 `data-theme`，所以深浅色天然同步。
 
+### 节点外部装什么：多层 `frames`
+
+完整参照见 [进程 / 线程首图](../process-thread-relation/)：最外层进程逻辑资源域，
+中间层用户态 / 关联内核对象，内层共享区 / 线程组。CPU 和物理内存在进程框外。
+
+`boundary` 对应 spec.boundaries 的 0 起始下标；`parent` 是父区域 id；`kind` 标清包含、
+分类、共享或逻辑域；`detail` 解释每层分组。`flat: true` 决定一层视图保留的区域。
+节点不动，边不动，切换只影响框；点零件后祖先框保持可见。
+
+```arch
+svg: pt-map
+maxScale: 0.87
+caption: 多层区域的可运行示例。点区域标题看分组依据，点零件看祖先路径；切换一层 / 多层时不重排。
+frames:
+  - { id: process, boundary: 0, kind: logical, label: 进程 A · 逻辑资源域, detail: 逻辑资源域包含映射和关联对象，不是一块连续内存。 }
+  - { id: user, boundary: 1, parent: process, kind: classification, flat: true, label: 用户态 · 虚拟地址空间, detail: 代码、堆与用户栈在同一个地址空间。 }
+  - { id: user-shared, boundary: 2, parent: user, kind: shared, label: 全组共享, detail: 共享是访问关系，不是隔离边界。 }
+  - { id: user-stacks, boundary: 3, parent: user, kind: contains, label: 用户栈 · 各维护一根, detail: 各自维护不代表地址空间隔离。 }
+  - { id: kernel, boundary: 4, parent: process, kind: classification, flat: true, label: 内核态 · 关联对象, detail: 只是与这个进程关联的内核对象，不是整个内核。 }
+  - { id: resources, boundary: 5, parent: kernel, kind: shared, label: 共享资源对象, detail: 资源独立存在，由三个 task 引用。 }
+  - { id: threads, boundary: 6, parent: kernel, kind: contains, label: 线程组 · task 平级, detail: 主线程不包含其他线程。 }
+  - { id: hardware, boundary: 7, kind: classification, flat: true, label: 硬件 · 在进程框外, detail: 进程使用硬件，不拥有硬件。 }
+```
+
+`maxScale` 默认 1，图按原画布封顶，不随宽屏放大；这个示例保留获批首图的 0.87 倍尺度。
+不要只改 SVG 文字字号，否则原先排好的标题、badge 和命中区会失配。
+
 ### 节点里装什么：`bodies`
 
 ==archify 的节点只认三行居中文字（label / sublabel / tag）。== 于是不管多少零件，

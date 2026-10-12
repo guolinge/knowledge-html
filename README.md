@@ -77,9 +77,25 @@ npm run build:standalone   # 额外产出 dist/<slug>.html（单文件，可直�
 | `checklist` | 正例 / 反例清单 |
 | `quiz` | 折叠式自测 |
 | `demo` | 可交互模拟 |
+| `arch` | 整体地图：丰富节点、多层归属框、祖先路径、场景、对比与导览 |
 | `summary` / `raw` | 收尾总结卡 / HTML 逃生口 |
 
 完整语法和可运行示例见 **[`notes/blocks-cheatsheet/`](notes/blocks-cheatsheet/note.md)**。
+
+### 整体图：节点内外都有结构
+
+`bodies` 把键值行、格子、条带、地址段等装进节点；`frames` 把节点外部的归属逐层展开。
+进程 / 线程的首图是完整参照：进程逻辑资源域 → 用户态 / 关联内核对象 → 共享区 / 线程组，
+硬件在进程框外。点区域看分组依据，点零件看完整祖先路径。
+
+保留宽屏正文版面（shell 2400、prose 1200、main 随视口）；SVG 按 viewBox × `maxScale`
+封顶，默认 1，避免文字被一起放大。获批的进程首图用 0.87 保留临时页的尺度。
+字段细节见 [blocks.md](.agents/skills/knowledge-html/references/blocks.md)。
+
+```bash
+node --test tools/lib/arch-frames.test.mjs
+node tools/probe-arch.mjs process-thread-relation
+```
 
 ### 为什么是「积木」而不是「模板」
 

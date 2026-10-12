@@ -16,6 +16,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import YAML from 'yaml';
 import { applyNodeBodies } from './node-body.mjs';
+import { applyArchFrames, archWidth } from './arch-frames.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 
@@ -648,7 +649,9 @@ const KIND_TONE = {
         );
       }
     }
-    const svg = applyNodeBodies(fs.readFileSync(file, 'utf8'), cfg.bodies, name, cfg.scenarios);
+    const framed = applyArchFrames(fs.readFileSync(file, 'utf8'), cfg.frames);
+    const svg = applyNodeBodies(framed.svg, cfg.bodies, name, cfg.scenarios);
+    const width = archWidth(svg, cfg.maxScale);
 
     /* 可选的交互数据。
        ------------------------------------------------------------
@@ -670,6 +673,7 @@ const KIND_TONE = {
     put('parts', cfg.parts);
     put('tours', cfg.tours);
     put('scenarios', cfg.scenarios);
+    if (framed.frames.length) put('frames', framed.frames);
 
     /* 零件 id 的校验。
        ------------------------------------------------------------
@@ -696,10 +700,22 @@ const KIND_TONE = {
       );
     }
 
-    const hasUI = cfg.tours || cfg.parts;
+    const hasUI = cfg.tours || cfg.parts || framed.frames.length;
+    const frameUI = framed.frames.length
+      ? `<div class="arch-boundary-ui">
+          <div class="arch-boundary-toolbar"><span class="arch-boundary-label">边界</span>
+            <button type="button" data-boundary-mode="nested" aria-pressed="true">多层归属框</button>
+            <button type="button" data-boundary-mode="flat" aria-pressed="false">只留一层分区</button>
+            <button type="button" data-arch-reset>恢复全图</button>
+          </div>
+          <div class="arch-address-box" aria-live="polite"><div data-arch-address>点一个零件，看完整归属路径；点一个区域标题，看这一层的含义。</div>
+            <div data-arch-frame-detail>最外框表示逻辑资源域，不表示所有对象在一块内存里。每层边界的标题说明分组依据。</div></div>
+        </div>`
+      : '';
     /* 提示要说清这张图多能干。能力是作者声明的（bodies / scenarios / facts），
        所以提示也能跟着长 —— 没声明的图一个字都不多。 */
     const extra = [];
+    if (framed.frames.length) extra.push('点区域标题看分组含义，点零件看完整归属路径');
     if (svg.includes('data-nb-spot')) extra.push('框里的每一行 / 每个格子都能点，跳到它指向的零件');
     if (cfg.scenarios && cfg.scenarios.length) extra.push('用「场景」切换同一张图的两种状态');
     if (Object.values(cfg.parts || {}).some((p) => p && p.facts)) extra.push('用「对比两个零件」出一张对照表');
@@ -709,8 +725,9 @@ const KIND_TONE = {
       : `<span class="idle">点头上的任意一个框，只看它和它连出去的关系</span>`
         + `<span class="focused">再点一次空白处取消</span>`;
 
-    return `<figure class="archfig" data-arch${hasUI ? ' data-pano' : ''}${attrs.length ? ' ' + attrs.join(' ') : ''}>
-      ${svg}
+    return `<figure class="archfig" data-arch style="--arch-max-width:${width}px"${framed.frames.length ? ' data-boundaries="nested"' : ''}${hasUI ? ' data-pano' : ''}${attrs.length ? ' ' + attrs.join(' ') : ''}>
+      ${frameUI}
+      <div class="arch-canvas">${svg}</div>
       ${cfg.caption ? `<figcaption>${inline(cfg.caption)}</figcaption>` : ''}
       ${hasUI ? '<div class="pano-ui"></div>' : ''}
       <p class="arch-hint">${hint}</p>

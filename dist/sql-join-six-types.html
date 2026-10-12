@@ -1674,9 +1674,10 @@ mark.mk-green { background: var(--green-soft); color: var(--green); }
 
 /* ============================================================
    积木 16 · arch —— 内联 archify 生成的图
-   SVG 自带 viewBox，所以 max-width:100% 就能响应式缩放
+   SVG 按 viewBox 尺度封顶，只缩小不自动放大；正文宽屏布局不受影响。
    ============================================================ */
 .archfig { margin: 0 0 20px; }
+.arch-canvas { width: 100%; max-width: var(--arch-max-width, 100%); margin-inline: auto; }
 .archfig svg {
   display: block; width: 100%; height: auto; max-width: 100%;
   border-radius: 12px; background: var(--surface-2);
@@ -1685,6 +1686,37 @@ mark.mk-green { background: var(--green-soft); color: var(--green); }
 .archfig figcaption {
   margin-top: 10px; font-size: 12.5px; color: var(--muted);
   text-align: center; line-height: 1.6;
+}
+
+/* 多层框沿用获批原型的层次、虚线和留白，不改变节点与连线布局。 */
+.arch-boundary-ui { max-width: var(--arch-max-width); margin: 0 auto 20px; }
+.arch-boundary-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 8px 0 14px; }
+.arch-boundary-label { font-size: 12px; color: var(--muted); margin-right: 4px; }
+.arch-boundary-toolbar button {
+  border: 1px solid var(--border); background: var(--surface); color: var(--text-2);
+  border-radius: 999px; padding: 8px 14px; cursor: pointer; font: 13px/1.4 var(--sans);
+}
+.arch-boundary-toolbar button[aria-pressed="true"] {
+  border-color: var(--blue); color: var(--blue);
+  background: color-mix(in srgb, var(--blue) 8%, var(--surface));
+}
+.arch-address-box { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 12px 16px; font-size: 12px; }
+[data-arch-address] { color: var(--text); font-weight: 600; line-height: 1.7; }
+[data-arch-frame-detail] { color: var(--muted); margin-top: 5px; line-height: 1.6; }
+.archfig svg .arch-frame { cursor: pointer; }
+.arch-frame .c-region { fill: color-mix(in srgb, var(--af-cloud-stroke) 2%, transparent); stroke: var(--af-cloud-stroke); stroke-dasharray: 8 5; }
+.arch-frame[data-depth="1"] .c-region { stroke-width: 1.5; }
+.arch-frame[data-depth="2"] .c-region { stroke: color-mix(in srgb, var(--af-cloud-stroke) 76%, var(--muted)); stroke-dasharray: 7 5; }
+.arch-frame:not([data-depth="1"]):not([data-depth="2"]) .c-region { stroke: color-mix(in srgb, var(--af-cloud-stroke) 82%, var(--muted)); stroke-dasharray: 4 4; fill: transparent; }
+.arch-frame text { fill: var(--af-cloud-stroke); }
+.arch-frame:hover .c-region, .arch-frame.is-current .c-region { stroke-width: 2; }
+.arch-frame:focus-visible { outline: none; }
+.arch-frame:focus-visible .c-region { stroke: var(--blue); stroke-width: 2; }
+.archfig[data-boundaries="flat"] .arch-frame[data-frame-flat="false"] { display: none; }
+.archfig[data-focus] svg .arch-frame { opacity: 1; }
+@media (max-width: 700px) {
+  .archfig[data-frames] .arch-canvas { overflow-x: auto; }
+  .archfig[data-frames] .arch-canvas > svg { min-width: min(1080px, var(--arch-max-width)); }
 }
 
 /* arch 积木的「聚焦」—— 点一个节点，只留它、它的邻居和相连的边。
@@ -7809,6 +7841,63 @@ LEFT JOIN employees AS m
          语义层可能因为没配 data-pano 提前 return。 */
       var compareOn = false;
       var picked = [];
+      var frames = [];
+      try { frames = JSON.parse(fig.getAttribute('data-frames') || '[]'); }
+      catch (e) { frames = []; }
+      var frameNodes = Array.prototype.slice.call(svg.querySelectorAll('[data-frame]'));
+      var address = fig.querySelector('[data-arch-address]');
+      var frameDetail = fig.querySelector('[data-arch-frame-detail]');
+      var frameDefault = frameDetail && frameDetail.textContent;
+
+      function frameContext(ids, text, detail) {
+        if (!address) return;
+        frameNodes.forEach(function (node) {
+          var f = frames.filter(function (f) { return f.id === node.getAttribute('data-frame'); })[0];
+          var hit = !!f && f.members.some(function (id) { return ids.indexOf(id) >= 0; });
+          node.classList.toggle('is-current', hit);
+          node.setAttribute('aria-pressed', hit ? 'true' : 'false');
+        });
+        address.textContent = text || '点一个零件，看完整归属路径；点一个区域标题，看这一层的含义。';
+        frameDetail.textContent = detail || frameDefault;
+      }
+
+      function nodeAddress(id) {
+        var chain = frames.filter(function (f) { return f.members.indexOf(id) >= 0; })
+          .sort(function (a, b) { return a.depth - b.depth; }).map(function (f) { return f.label; });
+        var node = nodes.filter(function (n) { return n.getAttribute('data-node-id') === id; })[0];
+        chain.push(node ? node.getAttribute('data-node-label') : id);
+        frameContext([id], chain.join(' / '), '选中一个零件后，它的祖先边界仍然保留。点击区域标题，可以看这一层为什么这样分组。');
+      }
+
+      function resetMap() {
+        compareOn = false; picked = [];
+        nodes.forEach(function (n) { n.classList.remove('is-picked'); });
+        uiClear(); clear();
+        if (typeof drawTabs === 'function' && mount) { drawTabs(); drawModes(); drawCompare(); showHint(); }
+      }
+
+      function focusFrame(id) {
+        var f = frames.filter(function (f) { return f.id === id; })[0];
+        if (!f) return;
+        resetMap();
+        focusMany(f.members);
+        fig.setAttribute('data-focus', 'region');
+        frameContext(f.members, f.label, f.detail);
+      }
+
+      var boundaryUI = fig.querySelector('.arch-boundary-ui');
+      if (boundaryUI) {
+        boundaryUI.addEventListener('click', function (ev) {
+          var mode = ev.target.closest('[data-boundary-mode]');
+          if (mode) {
+            fig.setAttribute('data-boundaries', mode.getAttribute('data-boundary-mode'));
+            Array.prototype.forEach.call(boundaryUI.querySelectorAll('[data-boundary-mode]'), function (b) {
+              b.setAttribute('aria-pressed', b === mode ? 'true' : 'false');
+            });
+          }
+          if (ev.target.closest('[data-arch-reset]')) resetMap();
+        });
+      }
 
       function clear() {
         fig.removeAttribute('data-focus');
@@ -7818,6 +7907,7 @@ LEFT JOIN employees AS m
         });
         edges.forEach(function (e) { e.classList.remove('is-hot'); });
         if (typeof markSpot === 'function') markSpot(null);
+        frameContext([]);
       }
 
       /* 场景与对比入口的初始化放在最后 —— 它们会用到 showPart / focus，
@@ -7850,6 +7940,7 @@ LEFT JOIN employees AS m
 
         // 一个节点都没连出去也要能聚焦（否则点了像没反应）
         fig.setAttribute('data-focus', id);
+        nodeAddress(id);
       }
 
       /* ---------- 节点内部的「格子」也能点 ----------
@@ -7916,6 +8007,8 @@ LEFT JOIN employees AS m
       }
 
       svg.addEventListener('click', function (ev) {
+        var frame = ev.target.closest && ev.target.closest('[data-frame]');
+        if (frame) { focusFrame(frame.getAttribute('data-frame')); return; }
         /* 对比模式：点节点是「选中它」，不是聚焦 */
         if (compareOn) {
           var gp = ev.target.closest && ev.target.closest('[data-node-id]');
@@ -7938,6 +8031,8 @@ LEFT JOIN employees AS m
       // 键盘可达 —— archify 的节点本来就带 tabindex 和 role="button"
       svg.addEventListener('keydown', function (ev) {
         if (ev.key !== 'Enter' && ev.key !== ' ') return;
+        var frame = ev.target.closest && ev.target.closest('[data-frame]');
+        if (frame) { ev.preventDefault(); focusFrame(frame.getAttribute('data-frame')); return; }
         var spot = ev.target.closest && ev.target.closest('[data-nb-spot]');
         if (spot) { ev.preventDefault(); uiClear(); hitSpot(spot); return; }
         var g = ev.target.closest && ev.target.closest('[data-node-id]');
@@ -8141,6 +8236,7 @@ LEFT JOIN employees AS m
           e.classList.toggle('is-hot', on);
         });
         fig.setAttribute('data-focus', 'tour');
+        frameContext(ids, '导览：当前对象的祖先边界仍然可见');
       }
 
       function uiClear() { tourIdx = -1; stepIdx = 0; }

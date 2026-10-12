@@ -1390,10 +1390,77 @@ caption: packages/core 的组成与数据流
 |---|---|
 | `svg` | **必填**。对应 `assets/arch/<名字>.svg`，由 `tools/archify.mjs` 生成 |
 | `caption` | 图注（走行内 Markdown） |
+| `maxScale` | 可选正数，默认 1。SVG 画布最大宽度 = viewBox 宽 × maxScale；空间不足时缩小，不随宽屏自动放大。获批原型可保留自己的倍率（pt-map 为 0.87） |
+| `frames` | 可选区域语义数组，见下面「多层区域」。让区域可点、显示祖先路径，并支持一层 / 多层切换 |
 | `parts` | 可选。每个零件的说明。`{ <零件id>: { label, sub, detail, code } }`，键要**和 spec 里的组件 id 一致**；`code` 可选，是一段纯文本代码（`pre` 渲染，不走行内标记），放在面板说明之后、关系列表之前 |
 | `tours` | 可选。导览。`[{ id, label, steps: [{ at: [零件id...], text, code }] }]`；`code` 可选，导览步可带一段对应代码，渲染在说明文字下面（同 `parts` 的 `code`） |
 
-后两个是给**整体图**用的（原则 ②）。不写就和原来完全一样 —— 已经有的 40 多张 `arch` 图不受影响。
+`parts` / `tours` / `frames` 是整体图的可选语义层，不声明 `frames` 不增加区域控件。
+`maxScale` 默认 1 是所有 arch 图的画布放大上限：保留当前宽屏正文，只限制 SVG 的等比放大。
+
+#### 多层区域：节点外部也能逐层展开
+
+spec 的 `boundaries` 负责几何；note 的 `frames` 负责区域含义和父子关系。
+`wraps` 仍然只写**节点 id**，父框列全体后代节点，不把区域 id 塞进 wraps。
+
+```json
+"boundaries": [
+  { "kind": "region", "label": "进程资源域", "wraps": ["heap", "task"], "pad": 78 },
+  { "kind": "region", "label": "用户态", "wraps": ["heap"], "pad": 40 }
+]
+```
+
+```yaml
+svg: pt-map
+maxScale: 0.87
+frames:
+  - id: process
+    boundary: 0
+    kind: logical
+    label: 进程 A · 逻辑资源域
+    detail: 用户态映射和关联内核对象共同组成资源域，不是一块连续内存。
+  - id: user
+    boundary: 1
+    parent: process
+    kind: classification
+    flat: true
+    label: 用户态 · 同一块虚拟地址空间
+    detail: 代码、堆和用户栈属于同一地址空间；mm_struct 在内核。
+```
+
+上面是字段片段；可运行的完整八区域示例是 `notes/process-thread-relation/note.md` 的 §01。
+
+| frames 项 | 含义 |
+|---|---|
+| `id` | 图内唯一的区域 id，与节点 id 不混用 |
+| `boundary` | spec.boundaries 的 **0 起始下标**；改数组顺序时一起核对 |
+| `parent` | 可选，父区域 id；省略表示根区域 |
+| `kind` | 必填：`contains`（组成）、`classification`（分类）、`shared`（共享区）、`logical`（逻辑域）；与 spec.boundaries.kind 不是同一个字段 |
+| `label` | 可选，覆盖图上区域标题；省略用生成 SVG 的标题 |
+| `detail` | 必填，点区域时说明这一层为何分组。逻辑域、共享区必须标清限定条件 |
+| `flat` | 可选布尔值，默认 false；切到「只留一层分区」时保留哪些区域 |
+
+父区域可以包含子区域和直接归属节点，不要求每个节点的深度相同。
+一个共享资源只画一份，用连线说明引用，不能复制进多个使用者的框。
+
+**生成与检查链**：
+
+1. `node tools/archify.mjs archify/<名字>.json <名字>` 先通过 archify showcase 校验。
+2. 提取 SVG 时恢复成员包围盒 + pad，保存 `data-frame-members`；如 bottom 超出画布，只扩高，不挪节点。
+3. `arch` 构建阶段用 `frames.parent` 检查父子环、成员、完整包含、同级不相交、父子标题至少间隔 24 画布单位。
+4. 最终页面仍需 `visual-check`、截图和 `node tools/probe-arch.mjs process-thread-relation`。
+   基图校验不覆盖后处理、实际字号或点击状态，不能代替这一步。
+
+沿用获批首图的三层 pad：40 / 78 / 122。它们是本图实测值，不是通用模板；
+画布边缘先留余量，父子标题各有独立带，底边不能贴合。内框 pad 太小会让标题藏在节点后面。
+
+**交互**：
+
+- 点区域标题：解释分组依据，点亮成员；键盘 Enter / Space 同样可用。
+- 点零件 / 格子：保留祖先框，并在画布上方显示完整归属路径。
+- 一层 / 多层切换只改变边界显示；节点、内容与连线位置保持不变。
+- 导览、取消聚焦、恢复全图共用同一张地图，不另画近似版。
+- 默认同一种虚线语言；标题、留白、轻底色和虚线节奏分层，不每层铺一种鲜艳色。
 
 #### 两个可选字段：给整体图加语义层
 
@@ -1401,7 +1468,7 @@ caption: packages/core 的组成与数据流
 tone: violet
 icon: 🧭
 text: |
-  图还是 archify 出的（几何、校验、渲染都不归我们），加上的只有**语义**。
+  图还是 archify 出的（基图几何与路由由 archify 负责；区域包围盒与最终页面另有检查），加上的只有**语义**。
   为什么整体图需要这两样：==它零件多，读者需要一个「入口」，而不是从头看起。==
 
   这两样 archify 的 viewer **不做** —— 它做的是聚焦和 Semantic Passport。
@@ -1454,7 +1521,7 @@ tours:
 **`bodies` 字段（2026-10-11 加）：往节点矩形里装内容。**
 
 > 构建期提醒：`arch` 图的零件数 ≥ 12、又没写 `bodies` / `scenarios` 时，`npm run check` 会打一条 `·` 提醒（不阻塞）。
-> 它只是说「这张图现在是目录风格」，画不画由作者决定。示例：`notes/process-thread-relation` 的 §02 地图。
+> 它只是说「这张图现在是目录风格」，画不画由作者决定。示例：`notes/process-thread-relation` 的 §01 地图。
 
 ==archify 的节点只认三行居中文字（label / sublabel / tag）。== 于是一张整体图不管多少零件，
 画出来都是「一堆小矩形 + 一行字 + 一些线」—— 读者拿到的是一张**目录**，不是地图。

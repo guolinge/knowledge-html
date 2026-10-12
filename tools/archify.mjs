@@ -20,6 +20,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { restoreBoundaryBoxes } from './lib/arch-frames.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const ARCHIFY = process.env.ARCHIFY_DIR || path.join(os.homedir(), '.agents/skills/archify');
@@ -106,7 +107,14 @@ const ns = (t) => t.replace(/(?<![\w-])--([a-z][a-z0-9-]*)/g, '--af-$1');
 
 const archDir = path.join(ROOT, 'assets/arch');
 fs.mkdirSync(archDir, { recursive: true });
-fs.writeFileSync(path.join(archDir, `${name}.svg`), ns(svg));
+let correctedSvg;
+try {
+  correctedSvg = restoreBoundaryBoxes(svg, JSON.parse(fs.readFileSync(spec, 'utf8')));
+} catch (error) {
+  console.error(`  ✗ 区域包围盒校正失败：${error.message}`);
+  process.exit(1);
+}
+fs.writeFileSync(path.join(archDir, `${name}.svg`), ns(correctedSvg));
 
 /* archify-embed.css 是「全站共用」的，所以不能只按刚生成的这一张图筛 class ——
    那样跑第二张图时，会把第一张图需要的 class 从共用 CSS 里删掉，
