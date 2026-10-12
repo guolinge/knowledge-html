@@ -139,6 +139,20 @@ function lintNote(meta, src, warnings) {
   return issues;
 }
 
+/* ---------- anchors 弃用提醒 ----------
+   「我熟悉」入口行已于 2026-10-12 从 app.js 下线（和自由探索重复）。
+   旧笔记的 arch 块里可能还写着 anchors: —— 不再渲染、不阻塞，但提醒作者删掉。 */
+function lintAnchors(src) {
+  const issues = [];
+  const lines = src.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    if (/^anchors:$/.test(lines[i].trim()) && lines.slice(0, i).reverse().findIndex((l) => /^```arch/.test(l)) >= 0) {
+      issues.push(`第 ${i + 1} 行：arch 块里的 anchors:（「我熟悉」入口）已下线，请删掉这一段 —— 入口现在是自由探索 + 导览`);
+    }
+  }
+  return issues;
+}
+
 /* ---------- 跨笔记链接的两种产物形态 ----------
    note.md 里跨篇链接统一写 ../<slug>/（和「前置」区块同一个方言）：
    · notes/<slug>/index.html：../<slug>/ 指向兄弟笔记目录，本来就对
@@ -192,6 +206,7 @@ function main() {
   const now = new Date().toISOString().slice(0, 10);
   let errors = 0;
   let warnings = 0;
+  let notices = 0;
 
   for (const slug of slugs) {
     const dir = path.join(NOTES, slug);
@@ -214,6 +229,11 @@ function main() {
     const issues = [...lintNote(meta, src, env.warnings), ...lintFences(anchored, src), ...lintLinkifyStars(anchored, src), ...lintRawHtml(anchored, src)];
     for (const it of issues) console.warn(`  ⚠ ${slug}: ${it}`);
     warnings += issues.length;
+
+    /* 弃用提醒单独走 notices：打印、不计数、不影响退出码。
+       否则 16 篇旧笔记会把每次 check / pre-push 全部拦下。 */
+    for (const it of lintAnchors(src)) console.warn(`  · ${slug}: ${it}`);
+    notices += lintAnchors(src).length;
 
     if (CHECK) continue;
 
@@ -281,6 +301,7 @@ function main() {
   if (CHECK) {
     console.log(
       `\n  ${slugs.length} 篇：${errors} 个错误，${warnings} 个提醒` +
+        (notices ? `，另有 ${notices} 条弃用提醒（不阻塞）` : '') +
         (errors + warnings === 0 ? '  —— 没问题' : ''),
     );
     if (errors + warnings > 0) process.exitCode = 1;

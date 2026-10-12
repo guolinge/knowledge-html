@@ -653,11 +653,12 @@ const KIND_TONE = {
     /* 可选的交互数据。
        ------------------------------------------------------------
        图还是 archify 出的（几何、校验、渲染都不归我们），这里加的只是
-       **语义层**：每个零件的说明、几个「我熟悉 ___」的入口、几条导览。
+       **语义层**：每个零件的说明、几条导览。
 
        为什么要加：原则 ②「整体图」说得很清楚 —— 整体图零件多，
        读者需要一个**入口**（从他本来就懂的那个零件进去），而不是从头看起。
-       而这件事 archify 的 viewer 不做（它做的是聚焦和 Semantic Passport）。
+       入口的形态是「点任何零件亮起邻域」+ 导览；「我熟悉」按钮行已于
+       2026-10-12 下线 —— 它和自由探索是同一个动作（app.js 同步删）。
 
        写成 data-* 属性而不是内联 <script>：属性会被 escapeXml 处理，
        不用在 markdown 管道里再想办法防止闭合标签被破坏。 */
@@ -667,21 +668,19 @@ const KIND_TONE = {
       attrs.push(`data-${k}='${JSON.stringify(v).replace(/'/g, '&#39;')}'`);
     };
     put('parts', cfg.parts);
-    put('anchors', cfg.anchors);
     put('tours', cfg.tours);
     put('scenarios', cfg.scenarios);
 
     /* 零件 id 的校验。
        ------------------------------------------------------------
-       `parts` / `anchors` / `tours` 里的 id 必须和 Archify spec 里的组件 id 一致，
+       `parts` / `tours` 里的 id 必须和 Archify spec 里的组件 id 一致，
        但那是**两个文件**。改图时改了 spec、忘了同步 note —— 不会报错，
-       只是那个「我熟悉 ___」的按钮点了没反应，或者面板里显示成 id。
+       只是那个零件的面板点了没反应，或者面板里显示成 id。
        这种错只有人点上去才发现，所以在构建期就拦下来。 */
     const nodeIds = new Set();
     for (const m of svg.matchAll(/data-node-id="([^"]+)"/g)) nodeIds.add(m[1]);
     const refs = [];
     Object.keys(cfg.parts || {}).forEach((k) => refs.push([k, `parts.${k}`]));
-    (cfg.anchors || []).forEach((a, i) => refs.push([a.part, `anchors[${i}]`]));
     (cfg.tours || []).forEach((t, i) => {
       (t.steps || []).forEach((st, j) => {
         (st.at || []).forEach((id) => refs.push([id, `tours[${i}].steps[${j}].at`]));
@@ -697,7 +696,7 @@ const KIND_TONE = {
       );
     }
 
-    const hasUI = cfg.anchors || cfg.tours || cfg.parts;
+    const hasUI = cfg.tours || cfg.parts;
     /* 提示要说清这张图多能干。能力是作者声明的（bodies / scenarios / facts），
        所以提示也能跟着长 —— 没声明的图一个字都不多。 */
     const extra = [];
@@ -705,7 +704,7 @@ const KIND_TONE = {
     if (cfg.scenarios && cfg.scenarios.length) extra.push('用「场景」切换同一张图的两种状态');
     if (Object.values(cfg.parts || {}).some((p) => p && p.facts)) extra.push('用「对比两个零件」出一张对照表');
     const hint = hasUI
-      ? `<span class="idle">点头上的任意一个框看它的关系；${extra.length ? extra.join('；') + '；' : ''}或者从下面的「我熟悉」进去</span>`
+      ? `<span class="idle">点头上的任意一个框看它的关系${extra.length ? '，' + extra.join('；') : ''}</span>`
         + `<span class="focused">再点一次空白处取消</span>`
       : `<span class="idle">点头上的任意一个框，只看它和它连出去的关系</span>`
         + `<span class="focused">再点一次空白处取消</span>`;

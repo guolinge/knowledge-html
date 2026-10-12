@@ -155,10 +155,6 @@ parts:
     detail: |
       每条命令占一个标签页（会话名 `site:udp:<uuid>`），跑完就被关掉。
       ==实测这一次它停在 `about:blank`==，命令从头到尾没让浏览器打开任何一个页面。
-anchors:
-  - { part: adapter, label: "你要维护的那个文件" }
-  - { part: udp, label: "数据从哪来" }
-  - { part: daemon, label: "本机那个 :19825" }
 scenarios:
   - { id: list, label: "第一次业务请求 · /list", note: "读一遍 Cookie，拉一次列表", dim: [] }
   - { id: detail, label: "接着每条补详情 · /detail", note: "同一套流程再来 N 次，Cookie 也重新读", dim: [term, main, registry, userdir] }
