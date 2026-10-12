@@ -94,52 +94,97 @@ rows:
 
 ```arch
 svg: candidate-paths
+caption: 外层三层归属（浏览器 / 服务端 / 数据），里层两个包。点区域标题看这一层为什么这么分、包含谁；点零件看它的内容和相邻关系。两条链路的差异用上面的「场景」切。
+frames:
+  - id: browser
+    flat: true
+    boundary: 0
+    kind: logical
+    label: 浏览器 · 一次取值的发起侧
+    detail: 组件包和宿主应用同在一侧：组件决定用哪个 key，宿主决定缓存还是发 HTTP。左边那份 metadata 是服务端下发的字典，不归这一侧。
+  - id: combination
+    boundary: 1
+    parent: browser
+    kind: contains
+    label: 圈选组件包 @insight/combination
+    detail: 只依赖 @insight/dsl。它不认识 HTTP，也不持有候选值 —— 只把 setKey / resolverKey 交给注入进来的函数。
+  - id: hostapp
+    boundary: 2
+    parent: browser
+    kind: contains
+    label: 宿主应用 apps/client
+    detail: 三个注入函数在这里落地；缓存、失效、结果列预热，以及最后那次请求，都在这一层。
+  - id: server
+    flat: true
+    boundary: 3
+    kind: contains
+    label: 服务端 Node BFF
+    detail: 两个 GET 各查一份数据 —— 一个查 5 秒内存快照里的元数据，一个查代码里的常量表。
+  - id: store
+    flat: true
+    boundary: 4
+    kind: classification
+    label: 数据 · 两条链路各自的终点
+    detail: 值集合是 MySQL 里的一行 enum_content（配置），动态候选是代码里的 21 条常量表（实现）—— 一个改数据，一个要发版。
+scenarios:
+  - id: valueset
+    label: 链路 A · 值集合
+    note: 换字段拉一次，之后一路用缓存。动态候选那条支路不参与。
+    dim: [routeB, stocks]
+  - id: dynamic
+    label: 链路 B · 动态候选
+    note: 每次输入都重新问一遍。值集合那条支路不参与。
+    dim: [routeA, mysql]
 bodies:
   meta:
     badge: 只有引用键
     rows:
-      - { k: portraits, v: 41 个（1 个停用） }
-      - { k: relations, v: "3 条" }
+      - { k: portraits, v: 41 个（1 个停用）, link: ui, tip: 界面上能选的特征都从这来 }
+      - { k: relations, v: "3 条", link: ui }
       - { k: domains, v: "7 个（1 个停用）" }
     code: "value_set → setKey: city"
-    note: 没有候选值，也没有表名列名
+    note: 候选值一条都不在这里
   ui:
     rows:
-      - { k: PortraitRow, v: useStoredItems, link: inj, tip: 换字段才拉；改操作符、改值都不拉 }
-      - { k: RelationRow, v: propSetItems }
-      - { k: ValueControl, v: remote-method }
+      - { k: PortraitRow, v: useStoredItems, when: valueset, link: inj, tip: 换字段才拉；改操作符、改值都不拉 }
+      - { k: RelationRow, v: propSetItems, when: valueset }
+      - { k: ValueControl, v: onSearch(keyword), when: dynamic, link: inj, tip: 每次输入都是一次真实请求 }
+      - { k: RelationRow, v: 客体 remote-method, when: dynamic }
     note: grep 'fetch(' 零命中
   inj:
     badge: 组件与宿主的全部契约
     rows:
-      - { k: loadValueSet, v: 值集合, link: host, tip: 宿主侧负责缓存与 HTTP }
-      - { k: searchValues, v: 搜索, link: host }
-      - { k: lookupValues, v: 回显, link: host }
+      - { k: loadValueSet, v: 值集合, when: valueset, link: host, tip: 宿主侧负责缓存与 HTTP }
+      - { k: searchValues, v: 搜索, when: dynamic, link: host }
+      - { k: lookupValues, v: 回显, when: dynamic, link: host }
     code: "inject(key, async () => [])"
     note: 没给就是空实现，不报错
   host:
     badge: 唯一发 HTTP 的地方
     rows:
-      - { k: cache, v: 按 setKey 缓存 }
-      - { k: inflight, v: 同 key 复用 }
-      - { k: 失效, v: staffId / revision }
+      - { k: cache, v: 按 setKey 缓存, when: valueset }
+      - { k: inflight, v: 同 key 复用, when: valueset }
+      - { k: 失效, v: staffId / revision, when: valueset }
+      - { k: search, v: 每次输入都发, when: dynamic }
+      - { k: lookup, v: 已选值用 values= 反查, when: dynamic }
+      - { k: cache, v: 不缓存，也不合并请求, when: dynamic }
     note: 预热结果列的 setKey
   adp:
     pairs:
-      - { from: "\"440300\"", to: "440300", note: JSON 标量 }
+      - { from: "\"440300\"", to: "440300", note: JSON 标量, link: routeA, tip: 值集合响应里 value 是 JSON 字符串 }
       - { from: zhCn, to: "zh-CN" }
       - { from: "status: 0", to: DISABLED }
     note: 只做形状转换，不做业务判断
   routeA:
-    badge: 5 秒投影
+    badge: 5 秒快照
     rows:
       - { k: 入参, v: setKey 必填 }
-      - { k: 出参, v: "items[] 含停用" }
+      - { k: 出参, v: "items[] 含停用", link: adp, tip: 交给适配层翻译 }
       - { k: 错误, v: 400 / 404 }
   routeB:
     rows:
       - { k: keyword, v: 子串匹配 }
-      - { k: values, v: 按 value 反查 }
+      - { k: values, v: 按 value 反查, link: adp }
       - { k: limit, v: 默认 20 / 最大 50 }
     note: values 优先，忽略 keyword
   mysql:
@@ -147,19 +192,19 @@ bodies:
     rows:
       - { k: value, v: "\"440300\"" }
       - { k: label, v: 深圳 / Shenzhen }
-      - { k: status, v: "0（停用）" }
+      - { k: status, v: "0（停用）", link: routeA, tip: 停用项照常返回，只为回显历史条件 }
     code: "// 停用改 status，不删行"
   stocks:
     cells:
-      - { label: SEMI, sub: 板块 }
+      - { label: SEMI, sub: 板块, link: routeB, tip: 21 条里的一条，搜索和反查用的是同一份 }
       - { label: "00700.HK" }
       - { label: "09988.HK" }
     note: 共 21 条，没有停用态
-caption: 一次取值穿过五层，值集合和动态候选到服务端才分开。点任意零件看它这一层管什么，或者按下面两条导览各走一遍。
 parts:
   meta:
     label: metadata 字典
     sub: 41 个画像 / 3 条关系 / 7 个业务域
+    facts: { 数据在哪: Data Admin 投影, 形态: 字段字典, 停用态: 每条带 status, 缓存: 5 秒内存快照, 变一次: 改 MySQL 后 ≤5 秒 }
     detail: |
       字段字典。每个字段带 `fieldType`（类型 + 枚举来源），来源写在 `setKey` 或 `resolverKey` 里。
       ==候选值一条都不在这里==：所以它只有几 KB，而值集合可以有上万条。
@@ -178,6 +223,7 @@ parts:
   host:
     label: 宿主 App
     sub: useValueSets 缓存 + loadSearch / loadLookup
+    facts: { 数据在哪: 浏览器内存, 形态: "ValueItem[]", 停用态: 转成 disabled, 缓存: 按 setKey 缓存, 变一次: staffId / revision 变化即清 }
     detail: |
       决定「缓存还是请求」：按 `setKey` 缓存，inflight 复用；`staffId` 或 metadata `revision` 变化就清空。
       `prefetchColumns` 还会在预览返回后预热结果列涉及的 setKey。
@@ -190,23 +236,27 @@ parts:
   routeA:
     label: GET /api/crowd/value-sets
     sub: setKey 必填
+    facts: { 入参: setKey 必填, 判据: 直接取全集, 出参: 整集合（含停用）, 错误: 400 / 404 }
     detail: |
       从**内存快照**（`MetadataRows`，5 秒 TTL）里找集合，`JSON.stringify(item.value)` 之后返回 pb 形状。
       集合停用、条目停用都照样返回，只为回显历史条件。什么是这份快照，见 05 节。
   routeB:
     label: GET /api/crowd/resolver-options
     sub: keyword 搜索 / values 反查
+    facts: { 入参: keyword 或 values, 判据: 子串匹配 / 按值反查, 出参: 命中的一小批, 错误: 400 / 404 }
     detail: |
       `values` 非空时忽略 `keyword` 和 `limit`；`keyword` 为空返回空列表。
       当前解析器 `stock_search` 用一份 21 条的常量表同时实现搜索和反查。
   mysql:
     label: crm_dc_value_set
     sub: enum_content JSON
+    facts: { 数据在哪: MySQL crm_dc_value_set, 形态: enum_content JSON, 停用态: 有（status 0，不删行）, 缓存: 同一份 5 秒快照, 变一次: 改一行 MySQL }
     detail: |
       值的原型。每项带 `value` / `label` / `status` / `sortOrder`；停用是改 `status`，不是删行。
   stocks:
     label: resolvers.ts · STOCKS
     sub: 21 条常量
+    facts: { 数据在哪: 代码里的常量表, 形态: 21 条数组, 停用态: 没有, 缓存: 不缓存, 变一次: 改代码发版 }
     detail: |
       动态候选没有元数据表。真实实现是一次检索服务，demo 里是写死的数组；没有停用态，也不缓存。
 tours:
@@ -222,11 +272,10 @@ tours:
     label: 链路 B · 动态候选
     steps:
       - { at: [ui, inj], text: "用户敲「腾讯」，值控件先取 `searchToken` 票据，再调 search(stock_search, 腾讯)。" }
-      - { at: [inj, host, adp], text: "一路转发。动态候选不打缓存：每次都重新问。" }
+      - { at: [inj, host, adp], text: "一路转发。动态候选不走缓存：每次都重新问。" }
       - { at: [routeB, stocks], text: "`GET resolver-options?keyword=腾讯` 在 21 条常量里做子串匹配。" }
       - { at: [ui], text: "回来时票据不相等就整包丢弃 —— 旧响应永远盖不掉新结果。" }
-      - { at: [inj, host], text: "回显是另一条路：草稿里已存的取值用 `values=` 反查名字。" }
-      - { at: [adp, routeB], text: "同一个接口，`values` 非空时忽略 keyword 和 limit。" }
+      - { at: [host, adp, routeB], text: "回显是另一条路：草稿里已存的取值用 `values=` 反查名字，同一个接口、忽略 keyword 和 limit。" }
 ```
 
 上面是**地图**（谁在哪、归谁、两条链路在哪分叉）；下面这张是**分层流程** —— 同一批零件，换成从上到下的顺序，每一层挂着哪几个零件一眼扫完。

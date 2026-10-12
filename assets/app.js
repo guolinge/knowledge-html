@@ -818,13 +818,16 @@
         if (spot) ly += spot * 15;
 
         const cls = ['fedge', e.dashed && 'dashed', e.anim && 'anim'].filter(Boolean).join(' ');
+        /* 这张图自己的箭头 id —— 同页有多张 flow 图时不能写死 url(#fa)，那样会引用第一张的 */
+        const marker = svg.querySelector('marker');
+        const markerUrl = `url(#${marker ? marker.getAttribute('id') : 'fa'})`;
         /* data-edge-from / to 不只是给「聚焦」用的 ——
            visual-check 靠它判断一条边连的是谁，才能查出「边穿过了无关节点」。
            属性名跟 archify 的 SVG 保持一致（那边也是这两个名字）。 */
         parts.push(
           `<path class="${cls}" data-edge-from="${escapeXml(e.from)}" data-edge-to="${escapeXml(e.to)}" ` +
             `d="${d}"${e.tone ? ` style="color:var(--${e.tone})"` : ''}${
-              e.both ? ' marker-start="url(#fa)"' : ''
+              e.both ? ` marker-start="${markerUrl}"` : ''
             }/>`,
         );
         const edgeText = e.on || e.label;

@@ -1083,7 +1083,7 @@ mark.mk-green { background: var(--green-soft); color: var(--green); }
 }
 .flowd-svg path.fedge {
   fill: none; stroke: currentColor; stroke-width: 1.8;
-  marker-end: url(#fa);
+  marker-end: var(--flow-marker, url(#fa));
 }
 .flowd-svg path.fedge.dashed { stroke-dasharray: 5 4; }
 .flowd-svg text.felabel {
@@ -1224,12 +1224,12 @@ mark.mk-green { background: var(--green-soft); color: var(--green); }
   stroke: var(--border-strong); stroke-width: 1.2; stroke-dasharray: 4 4;
 }
 .seqd-svg .msg { fill: none; stroke: currentColor; stroke-width: 1.6; }
-.seqd-svg .msg.sync  { marker-end: url(#s-fill); }
-.seqd-svg .msg.async { marker-end: url(#s-open); }
+.seqd-svg .msg.sync  { marker-end: var(--seq-fill, url(#s-fill)); }
+.seqd-svg .msg.async { marker-end: var(--seq-open, url(#s-open)); }
 .seqd-svg .msg.reply {
-  stroke-dasharray: 5 4; marker-end: url(#s-open);
+  stroke-dasharray: 5 4; marker-end: var(--seq-open, url(#s-open));
 }
-.seqd-svg .msg.self  { marker-end: url(#s-fill); }
+.seqd-svg .msg.self  { marker-end: var(--seq-fill, url(#s-fill)); }
 .seqd-svg .msg.hot   { color: var(--blue); stroke-width: 2.2; }
 .seqd-svg .note {
   font-family: var(--mono); font-size: 10px; fill: var(--muted);
@@ -6268,30 +6268,30 @@ svg[data-preset="blueprint"] .c-security-group,
 
 <figure class="archfig" data-arch style="--arch-max-width:1316px" data-pano data-parts='{"usrin":{"label":"整份名单","sub":"select 是位图，poll 是数组","detail":"你关心的 fd 全在里面。==它不是登记在内核里的，是每次调用现场传进去的参数==\n—— 这一句是整篇的根，05 节会回来收它。\n两代名单的形状不同，语义相同：**把「我关心谁」整份交代一遍**。\n","code":"/* select：名单是一张位图，写死 FD_SETSIZE = 1024 格 */\nfd_set rset;\nFD_ZERO(&rset);\nFD_SET(conn_fd, &rset);        // 一个 fd 占一格\n\n/* poll：名单是一个数组，没有 1024 的上限 */\nstruct pollfd fds[N];\nfds[0] = (struct pollfd){ conn_fd, POLLIN, 0 };\n"},"usrsel":{"label":"你自己再扫返回集","sub":"返回的是标记，不是就绪者","detail":"两个调用返回的都是「改过标记的名单」：select 改写位图，poll 往每个元素里填 `revents`。\n==谁就绪还得你自己挨个查== —— 这一步的成本跟名单长度成正比，一个都省不掉。\n","code":"/* select 返回后：O(maxfd) 挨个查 */\nfor (int fd = 0; fd <= maxfd; fd++)\n    if (FD_ISSET(fd, &ready)) handle(fd);\n\n/* poll 返回后：O(nfds) 挨个看 */\nfor (int i = 0; i < nfds; i++)\n    if (fds[i].revents & POLLIN) handle(fds[i].fd);\n"},"kcopy":{"label":"拷入内核","sub":"整份 copy_from_user","detail":"每次调用的第一件事：把整份名单从用户态拷进内核。\nselect 拷的是三套位图（读 / 写 / 异常），poll 拷的是整个数组。\n==名单多长，这一下就多贵==。\n","code":"/* select：三套位图整份拷入（fs/select.c · core_sys_select） */\nget_fd_set(n, inp, fds.in);\nget_fd_set(n, outp, fds.out);\nget_fd_set(n, exp,  fds.ex);\n\n/* poll：整个 pollfd 数组拷入（fs/select.c · do_sys_poll；\n   名单大时分块拷，语义等价于整份 copy_from_user） */\ncopy_from_user(walk->entries, ufds, ...);\n"},"kpass1":{"label":"第一遍全扫描","sub":"挨个调 fd 自己的 poll 方法","detail":"内核替你问，但问的姿势和上一篇你写的循环一样：==名单上每个都问一遍==。\n「问」不是空话 —— 它调每个 fd 自己的 poll 方法，驱动里真有一段代码回答「好了吗」。\n","code":"/* fs/select.c · do_select 的核心循环（简化） */\nfor (;;) {\n    for (i = 0; i < n; i++) {                 // 名单上每个 fd\n        mask = select_poll_one(i, wait, ...); // ← 里面调它自己的 poll\n        if ((mask & POLLIN_SET) && (in & bit)) { res_in |= bit; retval++; }\n    }\n    if (retval || timed_out) break;           // 有一个就绪 → 不睡了\n    poll_schedule_timeout(&table, TASK_INTERRUPTIBLE, to, slack);\n}\n"},"kwq":{"label":"每个 fd 的等待队列","sub":"问的时候顺手挂上 pollwake","detail":"==这一格是 select/poll 能「睡」的全部机关==，也是它和上一篇那个\n永不停的圈的真正区别。「问每个 fd」的动作会顺手办一件事：\n把一个叫 `pollwake` 的挂载挂到**这个 fd 自己的等待队列**上。\n挂载走的是 `poll_wait` 这扇门 —— ==内核里所有驱动的 poll 方法都从这扇门\n交出自己的等待队列==，下一篇 epoll 挂回调走的也是同一扇门。\n","code":"/* include/linux/poll.h：所有驱动的 poll 方法都调它，交出自己的等待队列 */\nstatic inline void poll_wait(struct file *filp,\n                  wait_queue_head_t *wait_address, poll_table *p)\n{\n    if (p && p->_qproc)\n        p->_qproc(filp, wait_address, p);   // ← 挂载动作\n}\n\n/* fs/select.c · __pollwait：select/poll 挂上去的东西 */\ninit_waitqueue_func_entry(&entry->wait, pollwake); // 「只会敲门的」\nadd_wait_queue(wait_address, &entry->wait);        // 挂到这个 fd 的队列\n"},"ksleep":{"label":"线程睡了","sub":"睡在这些队列上，不再烧 CPU","detail":"全都没好，线程才走到这一步：睡。==这是三条需求里第 ③ 条第一次被满足==\n—— 等待不再占用执行资源。上一篇那个圈是「永不停也永不睡」，\n这里的线程是真的睡着了，CPU 转去跑别人。\n","code":"/* fs/select.c · poll_schedule_timeout */\nset_current_state(TASK_INTERRUPTIBLE);   // 标记成可被唤醒的睡眠\nschedule_hrtimeout_range(expires, slack, HRTIMER_MODE_ABS);\n// 醒来的两种方式：被某个 pollwake 敲醒，或者超时\n"},"nic":{"label":"网卡 · 数据到","sub":"中断 → 协议栈 → wake_up","detail":"数据落在某条连接的接收缓冲区里，内核沿着中断一路走到这条 socket，\n然后敲它自己的等待队列。==挂在上面的那些 pollwake 逐个被调用==\n—— 敲门声就是这么传到睡着的人耳朵里的。\n","code":"/* net/core/sock.c · 数据到达的那一刻 */\nvoid sock_def_readable(struct sock *sk)\n{\n    wq = rcu_dereference(sk->sk_wq);\n    if (skwq_has_sleeper(wq))\n        wake_up_interruptible_sync_poll(&wq->wait, EPOLLIN | ...);\n        // ↑ 敲这条 socket 的等待队列，挂着的 pollwake 被调用\n}\n"},"kpass2":{"label":"第二遍全扫描","sub":"醒了重新挨个查：找出是谁醒了","detail":"pollwake 是「只会敲门的」：它的全部工作就是把睡着的线程叫醒，\n==不带任何「是谁把我叫醒」的记录==。所以醒来之后，\n内核只能把名单从头再扫一遍，用第二遍扫描把就绪的那几个找出来。\n","code":"/* fs/select.c · pollwake 的全部工作 */\nstatic int pollwake(wait_queue_entry_t *wait, ...)\n{\n    entry = container_of(wait, struct poll_table_entry, wait);\n    if (key && !(key_to_poll(key) & entry->key)) return 0;\n    return __pollwake(wait, mode, sync, key);   // → 只叫醒，不记账\n}\n// 所以醒来后 for(;;) 从头再来：挨个 f_op->poll 重问一遍\n"},"kfree":{"label":"全部拆掉 · poll_freewait","sub":"挂载拆除 —— 返回后内核立刻忘光","detail":"找完就绪者，返回之前把这一轮挂在所有等待队列上的 pollwake 全部拆掉。\n名单本来就是调用者传进来的临时拷贝。==这一格就是「内核失忆」的现场==\n—— 下一轮调用从「整份拷入」重新开始。\n","code":"/* fs/select.c · do_select 返回前 */\npoll_freewait(&table);\n// 这一轮挂的所有 pollwake 全部拆除；\n// 名单是调用者传进来的临时拷贝，返回即作废。\n"},"kcopyout":{"label":"结果整份拷出","sub":"select 改位图，poll 填 revents","detail":"内核把「谁就绪」写回名单的标记位，整份拷回用户态。\n==你关心的是 2 个，发回来的是整份== —— select 发整张位图，poll 发整个数组。\n","code":"/* select：结果位图整份拷回用户态（fs/select.c · core_sys_select） */\nset_fd_set(n, inp, fds.res_in);\nset_fd_set(n, outp, fds.res_out);\n\n/* poll：内核填好每个元素的 revents，整份拷回 */\n"}}' data-tours='[{"id":"lifecycle","label":"一次调用的完整生命周期","steps":[{"at":["usrin","kcopy"],"text":"起点是你手里的名单。==它不在内核里，是每次调用现场传的参数== —— 整份拷入，这是这一次调用的第一笔开销。","code":"/* 名单不在内核里，是每次调用的参数 */\nint n = select(maxfd + 1, &ready, NULL, NULL, NULL);"},{"at":["kpass1"],"text":"内核替你问：名单上每个 fd 都调一遍它自己的 poll 方法。==「问」的姿势和上一篇你自己写的循环一样==，一个都跳不掉。","code":"mask = select_poll_one(i, wait, ...);   // 里面调 fd 自己的 poll 方法"},{"at":["kwq"],"text":"问的同时顺手挂载：每个被问的 fd，它的等待队列上都多了一个 `pollwake`。==能睡，靠的就是这一步== —— 这些队列成了醒来的门铃。","code":"init_waitqueue_func_entry(&entry->wait, pollwake);\nadd_wait_queue(wait_address, &entry->wait);"},{"at":["ksleep"],"text":"全都没好，才走到这一步：睡。==三条需求里的第 ③ 条在这里第一次被满足==，等待终于不再占用执行资源。","code":"set_current_state(TASK_INTERRUPTIBLE);\nschedule_hrtimeout_range(expires, slack, HRTIMER_MODE_ABS);"},{"at":["nic"],"text":"数据到：中断沿着协议栈走到那条 socket，敲它自己的等待队列，==挂着的 pollwake 被调用==。","code":"/* 中断 → 协议栈 → 找到 socket → 敲它的等待队列 */\nwake_up_interruptible_sync_poll(&wq->wait, EPOLLIN | ...);"},{"at":["ksleep","kpass2"],"text":"pollwake 只会敲门，==不带「是谁敲的」的记录==。所以醒来之后内核把名单重扫一遍，用第二遍全扫描找出就绪者。","code":"/* pollwake：叫醒线程，仅此而已 */\nreturn __pollwake(wait, mode, sync, key);"},{"at":["kfree"],"text":"找到就绪者，返回之前先拆干净：这一轮挂的所有 pollwake 全部拆除。==「内核失忆」就发生在这一格==","code":"poll_freewait(&table);   // 这一轮挂的 pollwake 全部拆除"},{"at":["kcopyout","usrsel"],"text":"整份发回来。你拿着改过标记的名单，==自己挨个查谁就绪== —— 你关心 2 个，查的是 maxfd 个。","code":"set_fd_set(n, inp, fds.res_in);   // 结果整份拷回\nif (FD_ISSET(fd, &ready)) ...     // 你再挨个查谁就绪"},{"at":["usrin","kcopy"],"text":"处理完，下一轮调用：名单重新拷入、重新全扫、重新挂、重新拆。==每一轮都是完整的一生，内核两轮之间什么都不记得==。"}]},{"id":"three-needs","label":"三条需求对一遍：治了哪条","steps":[{"at":["ksleep"],"text":"==③ 治了==。线程真的睡了：睡在挂满 pollwake 的等待队列上，事件之间 CPU 跑别人。上一篇「永不停也永不睡」的圈到这一篇退役。"},{"at":["usrin","kcopy"],"text":"==① 没治==。名单是你每次现场交的参数，整份拷入整份拷出 —— 内核不记得你上一次交代过什么。"},{"at":["kpass1","kpass2","usrsel"],"text":"==② 没治==。内核还是得把名单整个扫一遍（睡了就再扫一遍），返回的还是标记位；==你关心的那几个和名单长度无关，付的钱和名单长度成正比==。"},{"at":["kfree"],"text":"病根就是这一格：返回时全拆干净。==要治它，得让内核那头记着== —— 记名单、记就绪、把挂载变成常驻。这是下一篇 epoll 的全部题目。"}]}]'>
       
-      <div class="arch-canvas"><svg viewBox="0 0 1316 414" role="img" aria-labelledby="archify-diagram-title archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
-        <title id="archify-diagram-title">select / poll：一次调用里，名单和线程都走过了哪里</title>
-        <desc id="archify-diagram-description">把「问」搬进内核 —— 线程终于能睡了；但每次调用名单整份进、整份出，醒来还得再全扫一遍</desc>
+      <div class="arch-canvas"><svg viewBox="0 0 1316 414" role="img" aria-labelledby="sp-journey-archify-diagram-title sp-journey-archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
+        <title id="sp-journey-archify-diagram-title">select / poll：一次调用里，名单和线程都走过了哪里</title>
+        <desc id="sp-journey-archify-diagram-description">把「问」搬进内核 —— 线程终于能睡了；但每次调用名单整份进、整份出，醒来还得再全扫一遍</desc>
         <!-- Definitions -->
         <defs>
-          <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+          <marker id="sp-journey-arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
             <polygon points="0 0, 10 3.5, 0 7" class="m-default" />
           </marker>
-          <marker id="arrowhead-emphasis" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+          <marker id="sp-journey-arrowhead-emphasis" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
             <polygon points="0 0, 10 3.5, 0 7" class="m-emphasis" />
           </marker>
-          <marker id="arrowhead-security" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+          <marker id="sp-journey-arrowhead-security" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
             <polygon points="0 0, 10 3.5, 0 7" class="m-security" />
           </marker>
-          <marker id="arrowhead-dashed" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+          <marker id="sp-journey-arrowhead-dashed" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
             <polygon points="0 0, 10 3.5, 0 7" class="m-dashed" />
           </marker>
-          <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+          <pattern id="sp-journey-grid" width="40" height="40" patternUnits="userSpaceOnUse">
             <path d="M 40 0 L 0 0 0 40" class="c-grid" stroke-width="0.5"/>
           </pattern>
         </defs>
 
         <!-- Background Grid -->
-        <rect width="100%" height="100%" fill="url(#grid)" />
+        <rect width="100%" height="100%" fill="url(#sp-journey-grid)" />
 
         <!-- Boundaries (behind everything) -->
         <rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="0" x="24" y="44" width="252" height="302" rx="12" class="c-region" stroke-width="1"/>
@@ -6307,19 +6307,19 @@ svg[data-preset="blueprint"] .c-security-group,
         <text x="1042" y="252" class="t-cloud" font-size="9" font-weight="600">硬件</text>
 
         <!-- Connection paths (before components for correct z-order) -->
-        <path data-edge-from="usrin" data-edge-to="kcopy" data-edge-label="整份交进去" data-edge-key="0" data-edge-id="e1" data-composition-points="250,103;330,103" d="M 250 103 L 330 103" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
-        <path data-edge-from="kcopy" data-edge-to="kpass1" data-edge-label="挨个问" data-edge-key="1" data-edge-id="e2" data-composition-points="510,103;570,103" d="M 510 103 L 570 103" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
-        <path data-edge-from="kpass1" data-edge-to="kwq" data-edge-label="问一个挂一个" data-edge-key="2" data-edge-id="e3" data-composition-points="760,103;820,103" d="M 760 103 L 820 103" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
-        <path data-edge-from="kwq" data-edge-to="ksleep" data-edge-label="全都没好 → 睡" data-edge-key="3" data-edge-id="e4" data-composition-points="1020,103;1070,103" d="M 1020 103 L 1070 103" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
-        <path data-edge-from="kpass2" data-edge-to="kfree" data-edge-label="谁就绪记下来" data-edge-key="4" data-edge-id="e5" data-composition-points="790,293;750,293" d="M 790 293 L 750 293" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
-        <path data-edge-from="kfree" data-edge-to="kcopyout" data-edge-label="返回前先拆干净" data-edge-key="5" data-edge-id="e6" data-composition-points="550,293;520,293" d="M 550 293 L 520 293" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
-        <path data-edge-from="kcopyout" data-edge-to="usrsel" data-edge-label="整份发回来" data-edge-key="6" data-edge-id="e7" data-composition-points="320,293;250,293" d="M 320 293 L 250 293" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
-        <path data-edge-from="nic" data-edge-to="ksleep" data-edge-label="中断 → pollwake 敲醒线程" data-edge-key="7" data-edge-id="e8" data-composition-points="1155,260;1155,236;1176,236;1176,160;1160,160;1160,136" d="M 1155 260 L 1155 244 Q 1155 236 1163 236 L 1168 236 Q 1176 236 1176 228 L 1176 168 Q 1176 160 1168 160 L 1168 160 Q 1160 160 1160 152 L 1160 136" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
-        <path data-edge-from="ksleep" data-edge-to="kpass2" data-edge-label="醒了 → 重查" data-edge-key="8" data-edge-id="e9" data-composition-points="1070,103;1046,103;1046,236;890,236;890,260" d="M 1070 103 L 1054 103 Q 1046 103 1046 111 L 1046 228 Q 1046 236 1038 236 L 898 236 Q 890 236 890 244 L 890 260" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
-        <path data-edge-from="usrsel" data-edge-to="usrin" data-edge-label="下一轮再来一遍" data-edge-key="9" data-edge-id="e10" data-composition-points="150,260;150,136" d="M 150 260 L 150 136" class="a-dashed" stroke-width="1.5" marker-end="url(#arrowhead-dashed)"/>
+        <path data-edge-from="usrin" data-edge-to="kcopy" data-edge-label="整份交进去" data-edge-key="0" data-edge-id="e1" data-composition-points="250,103;330,103" d="M 250 103 L 330 103" class="a-default" stroke-width="1.5" marker-end="url(#sp-journey-arrowhead)"/>
+        <path data-edge-from="kcopy" data-edge-to="kpass1" data-edge-label="挨个问" data-edge-key="1" data-edge-id="e2" data-composition-points="510,103;570,103" d="M 510 103 L 570 103" class="a-default" stroke-width="1.5" marker-end="url(#sp-journey-arrowhead)"/>
+        <path data-edge-from="kpass1" data-edge-to="kwq" data-edge-label="问一个挂一个" data-edge-key="2" data-edge-id="e3" data-composition-points="760,103;820,103" d="M 760 103 L 820 103" class="a-default" stroke-width="1.5" marker-end="url(#sp-journey-arrowhead)"/>
+        <path data-edge-from="kwq" data-edge-to="ksleep" data-edge-label="全都没好 → 睡" data-edge-key="3" data-edge-id="e4" data-composition-points="1020,103;1070,103" d="M 1020 103 L 1070 103" class="a-default" stroke-width="1.5" marker-end="url(#sp-journey-arrowhead)"/>
+        <path data-edge-from="kpass2" data-edge-to="kfree" data-edge-label="谁就绪记下来" data-edge-key="4" data-edge-id="e5" data-composition-points="790,293;750,293" d="M 790 293 L 750 293" class="a-default" stroke-width="1.5" marker-end="url(#sp-journey-arrowhead)"/>
+        <path data-edge-from="kfree" data-edge-to="kcopyout" data-edge-label="返回前先拆干净" data-edge-key="5" data-edge-id="e6" data-composition-points="550,293;520,293" d="M 550 293 L 520 293" class="a-default" stroke-width="1.5" marker-end="url(#sp-journey-arrowhead)"/>
+        <path data-edge-from="kcopyout" data-edge-to="usrsel" data-edge-label="整份发回来" data-edge-key="6" data-edge-id="e7" data-composition-points="320,293;250,293" d="M 320 293 L 250 293" class="a-default" stroke-width="1.5" marker-end="url(#sp-journey-arrowhead)"/>
+        <path data-edge-from="nic" data-edge-to="ksleep" data-edge-label="中断 → pollwake 敲醒线程" data-edge-key="7" data-edge-id="e8" data-composition-points="1155,260;1155,236;1176,236;1176,160;1160,160;1160,136" d="M 1155 260 L 1155 244 Q 1155 236 1163 236 L 1168 236 Q 1176 236 1176 228 L 1176 168 Q 1176 160 1168 160 L 1168 160 Q 1160 160 1160 152 L 1160 136" class="a-default" stroke-width="1.5" marker-end="url(#sp-journey-arrowhead)"/>
+        <path data-edge-from="ksleep" data-edge-to="kpass2" data-edge-label="醒了 → 重查" data-edge-key="8" data-edge-id="e9" data-composition-points="1070,103;1046,103;1046,236;890,236;890,260" d="M 1070 103 L 1054 103 Q 1046 103 1046 111 L 1046 228 Q 1046 236 1038 236 L 898 236 Q 890 236 890 244 L 890 260" class="a-default" stroke-width="1.5" marker-end="url(#sp-journey-arrowhead)"/>
+        <path data-edge-from="usrsel" data-edge-to="usrin" data-edge-label="下一轮再来一遍" data-edge-key="9" data-edge-id="e10" data-composition-points="150,260;150,136" d="M 150 260 L 150 136" class="a-dashed" stroke-width="1.5" marker-end="url(#sp-journey-arrowhead-dashed)"/>
 
         <!-- Components -->
-        <g id="node-usrin" data-node-id="usrin" data-node-label="整份名单" tabindex="0" role="button" aria-label="Focus 整份名单, select：fd_set 位图 ≤1024 · poll：pollfd 数组, 你的进程" aria-pressed="false" data-node-kind="database" data-node-sublabel="select：fd_set 位图 ≤1024 · poll：pollfd 数组" data-node-context="你的进程">
+        <g id="sp-journey-node-usrin" data-node-id="usrin" data-node-label="整份名单" tabindex="0" role="button" aria-label="Focus 整份名单, select：fd_set 位图 ≤1024 · poll：pollfd 数组, 你的进程" aria-pressed="false" data-node-kind="database" data-node-sublabel="select：fd_set 位图 ≤1024 · poll：pollfd 数组" data-node-context="你的进程">
           <title>整份名单 · select：fd_set 位图 ≤1024 · poll：pollfd 数组 · 你的进程</title>
           <rect x="50" y="70" width="200" height="66" rx="6" class="c-mask"/>
           <rect x="50" y="70" width="200" height="66" rx="6" class="c-database" stroke-width="1.5"/>
@@ -6331,7 +6331,7 @@ svg[data-preset="blueprint"] .c-security-group,
         <text data-detail="context" x="150" y="117" class="t-muted" font-size="7.1" text-anchor="middle">select：fd_set 位图 ≤1024 · poll：pollfd 数组</text>
         </g>
 
-        <g id="node-usrsel" data-node-id="usrsel" data-node-label="你自己再扫返回集" tabindex="0" role="button" aria-label="Focus 你自己再扫返回集, select：FD_ISSET 挨个查 · poll：revents 挨个看, 你的进程" aria-pressed="false" data-node-kind="database" data-node-sublabel="select：FD_ISSET 挨个查 · poll：revents 挨个看" data-node-context="你的进程">
+        <g id="sp-journey-node-usrsel" data-node-id="usrsel" data-node-label="你自己再扫返回集" tabindex="0" role="button" aria-label="Focus 你自己再扫返回集, select：FD_ISSET 挨个查 · poll：revents 挨个看, 你的进程" aria-pressed="false" data-node-kind="database" data-node-sublabel="select：FD_ISSET 挨个查 · poll：revents 挨个看" data-node-context="你的进程">
           <title>你自己再扫返回集 · select：FD_ISSET 挨个查 · poll：revents 挨个看 · 你的进程</title>
           <rect x="50" y="260" width="200" height="66" rx="6" class="c-mask"/>
           <rect x="50" y="260" width="200" height="66" rx="6" class="c-database" stroke-width="1.5"/>
@@ -6343,7 +6343,7 @@ svg[data-preset="blueprint"] .c-security-group,
         <text data-detail="context" x="150" y="307" class="t-muted" font-size="6.9" text-anchor="middle">select：FD_ISSET 挨个查 · poll：revents 挨个看</text>
         </g>
 
-        <g id="node-kcopy" data-node-id="kcopy" data-node-label="拷入内核" tabindex="0" role="button" aria-label="Focus 拷入内核, 整份 copy_from_user, 内核 · 前半程：问一遍，没结果就睡" aria-pressed="false" data-node-kind="external" data-node-sublabel="整份 copy_from_user" data-node-context="内核 · 前半程：问一遍，没结果就睡">
+        <g id="sp-journey-node-kcopy" data-node-id="kcopy" data-node-label="拷入内核" tabindex="0" role="button" aria-label="Focus 拷入内核, 整份 copy_from_user, 内核 · 前半程：问一遍，没结果就睡" aria-pressed="false" data-node-kind="external" data-node-sublabel="整份 copy_from_user" data-node-context="内核 · 前半程：问一遍，没结果就睡">
           <title>拷入内核 · 整份 copy_from_user · 内核 · 前半程：问一遍，没结果就睡</title>
           <rect x="330" y="70" width="180" height="66" rx="6" class="c-mask"/>
           <rect x="330" y="70" width="180" height="66" rx="6" class="c-external" stroke-width="1.5"/>
@@ -6355,7 +6355,7 @@ svg[data-preset="blueprint"] .c-security-group,
         <text data-detail="context" x="420" y="117" class="t-muted" font-size="9" text-anchor="middle">整份 copy_from_user</text>
         </g>
 
-        <g id="node-kpass1" data-node-id="kpass1" data-node-label="第一遍全扫描" tabindex="0" role="button" aria-label="Focus 第一遍全扫描, 挨个调 fd 自己的 poll 方法, 内核 · 前半程：问一遍，没结果就睡" aria-pressed="false" data-node-kind="external" data-node-sublabel="挨个调 fd 自己的 poll 方法" data-node-context="内核 · 前半程：问一遍，没结果就睡">
+        <g id="sp-journey-node-kpass1" data-node-id="kpass1" data-node-label="第一遍全扫描" tabindex="0" role="button" aria-label="Focus 第一遍全扫描, 挨个调 fd 自己的 poll 方法, 内核 · 前半程：问一遍，没结果就睡" aria-pressed="false" data-node-kind="external" data-node-sublabel="挨个调 fd 自己的 poll 方法" data-node-context="内核 · 前半程：问一遍，没结果就睡">
           <title>第一遍全扫描 · 挨个调 fd 自己的 poll 方法 · 内核 · 前半程：问一遍，没结果就睡</title>
           <rect x="570" y="70" width="190" height="66" rx="6" class="c-mask"/>
           <rect x="570" y="70" width="190" height="66" rx="6" class="c-external" stroke-width="1.5"/>
@@ -6367,7 +6367,7 @@ svg[data-preset="blueprint"] .c-security-group,
         <text data-detail="context" x="665" y="117" class="t-muted" font-size="9" text-anchor="middle">挨个调 fd 自己的 poll 方法</text>
         </g>
 
-        <g id="node-kwq" data-node-id="kwq" data-node-label="每个 fd 的等待队列" tabindex="0" role="button" aria-label="Focus 每个 fd 的等待队列, 问的时候顺手挂上 pollwake, 内核 · 前半程：问一遍，没结果就睡" aria-pressed="false" data-node-kind="security" data-node-sublabel="问的时候顺手挂上 pollwake" data-node-context="内核 · 前半程：问一遍，没结果就睡">
+        <g id="sp-journey-node-kwq" data-node-id="kwq" data-node-label="每个 fd 的等待队列" tabindex="0" role="button" aria-label="Focus 每个 fd 的等待队列, 问的时候顺手挂上 pollwake, 内核 · 前半程：问一遍，没结果就睡" aria-pressed="false" data-node-kind="security" data-node-sublabel="问的时候顺手挂上 pollwake" data-node-context="内核 · 前半程：问一遍，没结果就睡">
           <title>每个 fd 的等待队列 · 问的时候顺手挂上 pollwake · 内核 · 前半程：问一遍，没结果就睡</title>
           <rect x="820" y="70" width="200" height="66" rx="6" class="c-mask"/>
           <rect x="820" y="70" width="200" height="66" rx="6" class="c-security" stroke-width="1.5"/>
@@ -6379,7 +6379,7 @@ svg[data-preset="blueprint"] .c-security-group,
         <text data-detail="context" x="920" y="117" class="t-muted" font-size="9" text-anchor="middle">问的时候顺手挂上 pollwake</text>
         </g>
 
-        <g id="node-ksleep" data-node-id="ksleep" data-node-label="线程睡了" tabindex="0" role="button" aria-label="Focus 线程睡了, 睡在这些队列上，不再烧 CPU, 内核 · 前半程：问一遍，没结果就睡" aria-pressed="false" data-node-kind="backend" data-node-sublabel="睡在这些队列上，不再烧 CPU" data-node-context="内核 · 前半程：问一遍，没结果就睡">
+        <g id="sp-journey-node-ksleep" data-node-id="ksleep" data-node-label="线程睡了" tabindex="0" role="button" aria-label="Focus 线程睡了, 睡在这些队列上，不再烧 CPU, 内核 · 前半程：问一遍，没结果就睡" aria-pressed="false" data-node-kind="backend" data-node-sublabel="睡在这些队列上，不再烧 CPU" data-node-context="内核 · 前半程：问一遍，没结果就睡">
           <title>线程睡了 · 睡在这些队列上，不再烧 CPU · 内核 · 前半程：问一遍，没结果就睡</title>
           <rect x="1070" y="70" width="180" height="66" rx="6" class="c-mask"/>
           <rect x="1070" y="70" width="180" height="66" rx="6" class="c-backend" stroke-width="1.5"/>
@@ -6390,7 +6390,7 @@ svg[data-preset="blueprint"] .c-security-group,
         <text data-detail="context" x="1160" y="117" class="t-muted" font-size="9" text-anchor="middle">睡在这些队列上，不再烧 CPU</text>
         </g>
 
-        <g id="node-kpass2" data-node-id="kpass2" data-node-label="第二遍全扫描" tabindex="0" role="button" aria-label="Focus 第二遍全扫描, 醒了重新挨个查：找出是谁醒了, 内核 · 后半程：重查一遍，拆干净再返回" aria-pressed="false" data-node-kind="external" data-node-sublabel="醒了重新挨个查：找出是谁醒了" data-node-context="内核 · 后半程：重查一遍，拆干净再返回">
+        <g id="sp-journey-node-kpass2" data-node-id="kpass2" data-node-label="第二遍全扫描" tabindex="0" role="button" aria-label="Focus 第二遍全扫描, 醒了重新挨个查：找出是谁醒了, 内核 · 后半程：重查一遍，拆干净再返回" aria-pressed="false" data-node-kind="external" data-node-sublabel="醒了重新挨个查：找出是谁醒了" data-node-context="内核 · 后半程：重查一遍，拆干净再返回">
           <title>第二遍全扫描 · 醒了重新挨个查：找出是谁醒了 · 内核 · 后半程：重查一遍，拆干净再返回</title>
           <rect x="790" y="260" width="200" height="66" rx="6" class="c-mask"/>
           <rect x="790" y="260" width="200" height="66" rx="6" class="c-external" stroke-width="1.5"/>
@@ -6402,7 +6402,7 @@ svg[data-preset="blueprint"] .c-security-group,
         <text data-detail="context" x="890" y="307" class="t-muted" font-size="9" text-anchor="middle">醒了重新挨个查：找出是谁醒了</text>
         </g>
 
-        <g id="node-kfree" data-node-id="kfree" data-node-label="全部拆掉 · poll_freewait" tabindex="0" role="button" aria-label="Focus 全部拆掉 · poll_freewait, 挂载拆除 —— 返回后内核立刻忘光, 内核 · 后半程：重查一遍，拆干净再返回" aria-pressed="false" data-node-kind="security" data-node-sublabel="挂载拆除 —— 返回后内核立刻忘光" data-node-context="内核 · 后半程：重查一遍，拆干净再返回">
+        <g id="sp-journey-node-kfree" data-node-id="kfree" data-node-label="全部拆掉 · poll_freewait" tabindex="0" role="button" aria-label="Focus 全部拆掉 · poll_freewait, 挂载拆除 —— 返回后内核立刻忘光, 内核 · 后半程：重查一遍，拆干净再返回" aria-pressed="false" data-node-kind="security" data-node-sublabel="挂载拆除 —— 返回后内核立刻忘光" data-node-context="内核 · 后半程：重查一遍，拆干净再返回">
           <title>全部拆掉 · poll_freewait · 挂载拆除 —— 返回后内核立刻忘光 · 内核 · 后半程：重查一遍，拆干净再返回</title>
           <rect x="550" y="260" width="200" height="66" rx="6" class="c-mask"/>
           <rect x="550" y="260" width="200" height="66" rx="6" class="c-security" stroke-width="1.5"/>
@@ -6414,7 +6414,7 @@ svg[data-preset="blueprint"] .c-security-group,
         <text data-detail="context" x="650" y="307" class="t-muted" font-size="9" text-anchor="middle">挂载拆除 —— 返回后内核立刻忘光</text>
         </g>
 
-        <g id="node-kcopyout" data-node-id="kcopyout" data-node-label="结果整份拷出" tabindex="0" role="button" aria-label="Focus 结果整份拷出, select：改位图标记 · poll：填 revents, 内核 · 后半程：重查一遍，拆干净再返回" aria-pressed="false" data-node-kind="external" data-node-sublabel="select：改位图标记 · poll：填 revents" data-node-context="内核 · 后半程：重查一遍，拆干净再返回">
+        <g id="sp-journey-node-kcopyout" data-node-id="kcopyout" data-node-label="结果整份拷出" tabindex="0" role="button" aria-label="Focus 结果整份拷出, select：改位图标记 · poll：填 revents, 内核 · 后半程：重查一遍，拆干净再返回" aria-pressed="false" data-node-kind="external" data-node-sublabel="select：改位图标记 · poll：填 revents" data-node-context="内核 · 后半程：重查一遍，拆干净再返回">
           <title>结果整份拷出 · select：改位图标记 · poll：填 revents · 内核 · 后半程：重查一遍，拆干净再返回</title>
           <rect x="320" y="260" width="200" height="66" rx="6" class="c-mask"/>
           <rect x="320" y="260" width="200" height="66" rx="6" class="c-external" stroke-width="1.5"/>
@@ -6426,7 +6426,7 @@ svg[data-preset="blueprint"] .c-security-group,
         <text data-detail="context" x="420" y="307" class="t-muted" font-size="8.6" text-anchor="middle">select：改位图标记 · poll：填 revents</text>
         </g>
 
-        <g id="node-nic" data-node-id="nic" data-node-label="网卡 · 数据到" tabindex="0" role="button" aria-label="Focus 网卡 · 数据到, 中断 → 协议栈 → wake_up, 硬件" aria-pressed="false" data-node-kind="cloud" data-node-sublabel="中断 → 协议栈 → wake_up" data-node-context="硬件">
+        <g id="sp-journey-node-nic" data-node-id="nic" data-node-label="网卡 · 数据到" tabindex="0" role="button" aria-label="Focus 网卡 · 数据到, 中断 → 协议栈 → wake_up, 硬件" aria-pressed="false" data-node-kind="cloud" data-node-sublabel="中断 → 协议栈 → wake_up" data-node-context="硬件">
           <title>网卡 · 数据到 · 中断 → 协议栈 → wake_up · 硬件</title>
           <rect x="1060" y="260" width="190" height="66" rx="6" class="c-mask"/>
           <rect x="1060" y="260" width="190" height="66" rx="6" class="c-cloud" stroke-width="1.5"/>
@@ -7433,13 +7433,16 @@ pollwake 把线程叫醒。上一篇的圈是用户态代码，挂不上任何�
         if (spot) ly += spot * 15;
 
         const cls = ['fedge', e.dashed && 'dashed', e.anim && 'anim'].filter(Boolean).join(' ');
+        /* 这张图自己的箭头 id —— 同页有多张 flow 图时不能写死 url(#fa)，那样会引用第一张的 */
+        const marker = svg.querySelector('marker');
+        const markerUrl = `url(#${marker ? marker.getAttribute('id') : 'fa'})`;
         /* data-edge-from / to 不只是给「聚焦」用的 ——
            visual-check 靠它判断一条边连的是谁，才能查出「边穿过了无关节点」。
            属性名跟 archify 的 SVG 保持一致（那边也是这两个名字）。 */
         parts.push(
           `<path class="${cls}" data-edge-from="${escapeXml(e.from)}" data-edge-to="${escapeXml(e.to)}" ` +
             `d="${d}"${e.tone ? ` style="color:var(--${e.tone})"` : ''}${
-              e.both ? ' marker-start="url(#fa)"' : ''
+              e.both ? ` marker-start="${markerUrl}"` : ''
             }/>`,
         );
         const edgeText = e.on || e.label;

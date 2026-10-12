@@ -1380,6 +1380,19 @@ archify 是一套完整的图渲染系统。它的能力**超出**我们自己�
   标签长了要么裁文案，要么给它加 `size`。
 - **边有几何下限**：微段短于 8px、两条边挤在同一条走廊里，都会判失败。
 - 产出是**静态 SVG**，不跟着容器宽度重排（靠 viewBox 缩放）。
+- **同一页可以有好几张 arch 图，而每张图自带的 id 是固定的**（`arrowhead` / `grid` /
+  `archify-diagram-title` / `node-*`）。HTML 要求 id 全页唯一 —— 不加前缀时，
+  后面几张图的 `url(#arrowhead)` 和 `aria-labelledby` 都会落到**第一张图**上。
+  今天各图定义一样所以看不出来，但读屏会把它们的图名念成第一张的；哪天某张图换了箭头，
+  它改了也不生效。
+
+  ++解法在构建期，不在图源：++ `arch` 内联时给全部 id 加图名前缀（定义、`url(#…)`、
+  `href="#…"`、`aria-labelledby` 里的每个 token 一起改），同一张图在同一页出现两次时自动加序号。
+  `assets/arch/*.svg` 本身不用重生成。同理 `flow` / `seq` 的箭头改成按图唯一的 id + 
+  CSS 变量（`--flow-marker` / `--seq-fill` / `--seq-open`）。
+
+  ==`npm run check` 会扫全页重复 id，直接报出来== —— 新增积木时若在模板里写死了 `id="xxx"`，
+  这一步会拦下。
 
 ```arch
 svg: core-package
@@ -1449,6 +1462,7 @@ frames:
 2. 提取 SVG 时恢复成员包围盒 + pad，保存 `data-frame-members`；如 bottom 超出画布，只扩高，不挪节点。
 3. `arch` 构建阶段用 `frames.parent` 检查父子环、成员、完整包含、同级不相交、父子标题至少间隔 24 画布单位。
 4. 最终页面仍需 `visual-check`、截图和 `node tools/probe-arch.mjs process-thread-relation`。
+   改了内联 id 策略后，再抽查一篇同时有 flow / seq / arch 的笔记（例：`mysql-sql-execution-flow`）。
    基图校验不覆盖后处理、实际字号或点击状态，不能代替这一步。
 
 沿用获批首图的三层 pad：40 / 78 / 122。它们是本图实测值，不是通用模板；

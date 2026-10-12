@@ -1083,7 +1083,7 @@ mark.mk-green { background: var(--green-soft); color: var(--green); }
 }
 .flowd-svg path.fedge {
   fill: none; stroke: currentColor; stroke-width: 1.8;
-  marker-end: url(#fa);
+  marker-end: var(--flow-marker, url(#fa));
 }
 .flowd-svg path.fedge.dashed { stroke-dasharray: 5 4; }
 .flowd-svg text.felabel {
@@ -1224,12 +1224,12 @@ mark.mk-green { background: var(--green-soft); color: var(--green); }
   stroke: var(--border-strong); stroke-width: 1.2; stroke-dasharray: 4 4;
 }
 .seqd-svg .msg { fill: none; stroke: currentColor; stroke-width: 1.6; }
-.seqd-svg .msg.sync  { marker-end: url(#s-fill); }
-.seqd-svg .msg.async { marker-end: url(#s-open); }
+.seqd-svg .msg.sync  { marker-end: var(--seq-fill, url(#s-fill)); }
+.seqd-svg .msg.async { marker-end: var(--seq-open, url(#s-open)); }
 .seqd-svg .msg.reply {
-  stroke-dasharray: 5 4; marker-end: url(#s-open);
+  stroke-dasharray: 5 4; marker-end: var(--seq-open, url(#s-open));
 }
-.seqd-svg .msg.self  { marker-end: url(#s-fill); }
+.seqd-svg .msg.self  { marker-end: var(--seq-fill, url(#s-fill)); }
 .seqd-svg .msg.hot   { color: var(--blue); stroke-width: 2.2; }
 .seqd-svg .note {
   font-family: var(--mono); font-size: 10px; fill: var(--muted);
@@ -6321,30 +6321,30 @@ svg[data-preset="blueprint"] .c-security-group,
 <p>一张图装下全部主线：实线是 select 的读路径；虚线里 ①→⑤ 标出 update 的时序——<mark class="mk-blue">先改页、再记 redo、写 binlog、redo 才 commit、从库重放</mark>；另一条虚线是查询缓存的命中短路。Server 层五道关卡各管一段，跨过 handler 接口才碰到数据和存储。</p>
 <figure class="archfig" data-arch style="--arch-max-width:1556px" data-pano data-parts='{"client":{"label":"客户端","sub":"发出 SQL","detail":"一条 `select * from user where id=1` 从这里发出，走 TCP（或 Unix socket）进 MySQL。==结果集最后也沿这条连接原路返回。=="},"conn":{"label":"① 连接器","sub":"认证 · 全局权限固化 · 一连接一线程","detail":"TCP 三次握手只负责把水管接上，连接器管==你是谁==：校验用户名密码（8.0 起默认 `caching_sha2_password`），然后读权限表——==全局权限和密码固化进这条连接==，表 / 列级每次请求查全局缓存（§03 讲三档生效时点）。它是一连接一线程模型，「连接很贵」的第一层原因在这里。"},"qcache":{"label":"② 查询缓存","sub":"key 是 SQL 全文 · 8.0 已移除","detail":"按==逐字节==匹配 SQL 文本，命中直接返回结果集、短路后面所有站。大小写、多一个空格、换个参数值都算 miss。==8.0 里它已经被整体删除==，画出来是为了对齐老资料，§04 讲它怎么死的。"},"parser":{"label":"③ 分析器","sub":"词法/语法 → 解析树 · ERROR 1064","detail":"把字符串切成 token、按 SQL 文法组装成解析树。==著名的 `ERROR 1064` 在这一站抛出==，语句根本没进引擎，是「翻译」阶段就被拦下了。收尾还要确认表和列真实存在、把 `select *` 展开成全部列。"},"optimizer":{"label":"④ 优化器","sub":"代价估算 · 选执行计划","detail":"同一条 SQL 往往有多条等价路径：==用哪个索引、join 谁做驱动表==。优化器按统计信息估算每条路径的代价、挑最便宜的，==`EXPLAIN` 看到的就是它的决定==。统计信息过期，它就会自信地选错。"},"executor":{"label":"⑤ 执行器","sub":"precheck 权限 · 迭代器逐行取数","detail":"先做 ==precheck==（表、列级权限的第二次校验，连接时还查不到「这张表的这些列」），然后按计划调引擎接口==一行一行==取数、做 where 过滤、组装结果集。循环转多少圈，就是这条 SQL 的代价。"},"handler":{"label":"handler 接口","sub":"两层的契约","detail":"引擎以插件形式实现这套接口。执行器懂 SQL 不懂存储，引擎懂存储不懂 SQL，==两者只靠「给我下一行」这一个动词对话==。InnoDB 能从 5.5 起当默认引擎而 Server 层一行不改，靠的就是它。"},"binlog":{"label":"binlog","sub":"Server 层逻辑日志 · 追加写","detail":"记录「哪条语句或哪行数据怎么变」，所有引擎共用。用途是==主从复制和数据恢复==：从库重放 binlog 得到和主库一样的数据。"},"bp":{"label":"⑥ Buffer Pool","sub":"16KB 数据页 · 命中内存/读盘","detail":"InnoDB 把数据页（每页 ==16KB==）缓在内存里：命中直接返回，未命中才读磁盘。update 改的是内存页（图上 ①，先改页），改完的页叫==脏页==，由后台线程择机刷回磁盘。"},"redo":{"label":"redo log","sub":"InnoDB 物理日志 · 循环写","detail":"InnoDB 特有。把「哪个页做了什么修改」==顺序追加==进日志（WAL），随机写变顺序写；崩溃后重放它找回没刷盘的数据，这就是 ==crash-safe==。文件固定大小、写满回头覆盖，能覆盖的前提是被覆盖位置的脏页已刷盘（checkpoint）。"},"disk":{"label":"磁盘 .ibd","sub":"数据真正躺的地方","detail":"脏页迟早刷回这里。整条链路上大量的设计（WAL、Buffer Pool）都是为了==少碰它==。"},"replica":{"label":"从库","sub":"另一台机器","detail":"拉取主库的 binlog 重放。==binlog 写完整的事务从库一定有；没写完整的主库自己会回滚==，主从就这样对齐（§07 的恢复规则）。"}}' data-tours='[{"id":"select","label":"select 的旅程","steps":[{"at":["client","conn"],"text":"客户端发出 SQL，经 TCP 进入 MySQL。==TCP 三次握手只是把水管接上==，之后全是连接器的事。"},{"at":["conn"],"text":"==认证==（8.0 起默认 `caching_sha2_password`），然后把全局权限和密码固化进连接；表 / 列级每次请求查全局缓存，§03 讲三档生效时点。"},{"at":["qcache"],"text":"==查询缓存==按 SQL 全文逐字节找结果集，命中就地返回。今天画它是为了对齐老资料，==8.0 已整体移除==。"},{"at":["parser"],"text":"==分析器==把字符串切成 token、组装成解析树。SQL 拼错在这里就报 `ERROR 1064`，==根本没碰到数据==。"},{"at":["optimizer"],"text":"==优化器==从等价方案里挑最便宜的：用哪个索引、join 谁驱动。它按==统计信息==估算代价，`EXPLAIN` 看到的就是它的决定。"},{"at":["executor"],"text":"==执行器==先补一次表/列级权限校验（precheck），再按计划==一行一行==向引擎要数据、做 where 过滤。"},{"at":["handler","bp"],"text":"对话走 ==handler 接口==：引擎从 ==Buffer Pool== 的 16KB 数据页里找行，命中内存、未命中才读磁盘。"},{"at":["disk"],"text":"数据最终躺在磁盘的 `.ibd` 文件里。==前面所有站都在想办法少碰它==，这也是 WAL 和 Buffer Pool 的动机。"}]},{"id":"update","label":"update 多出来的剧情","steps":[{"at":["executor","bp"],"text":"update 走完同样的前五站，==先改 Buffer Pool 里的页==（①）——改完的页叫脏页。"},{"at":["bp","redo"],"text":"紧接着把这次的修改==顺序追加进 redo log、标记 prepare==（②）：随机写变顺序写，崩溃后靠重放找回数据。"},{"at":["executor","binlog"],"text":"然后 Server 层==写 binlog==（③），完整事件、以 XID 收尾。"},{"at":["binlog","redo"],"text":"binlog 落盘，redo 才标记 ==commit==（④）。两份日志的「生效」绑成一个原子动作——==两阶段提交==，§07 展开三个崩溃点。"},{"at":["binlog","replica"],"text":"从库拉取 binlog 重放（⑤）。==binlog 写完整的事务从库一定有；没写完整的主库自己会回滚==。"}]},{"id":"slow","label":"一条 SQL 为什么时快时慢","steps":[{"at":["conn"],"text":"先排除连接层：连接数打满会被直接拒绝；空闲超过 `wait_timeout`（默认 8 小时）被掐掉；==全局权限改了要重连才生效==。"},{"at":["optimizer"],"text":"==统计信息过期==时，优化器会自信地选错索引，毫秒变分钟。`EXPLAIN` 的 type / rows / key 是第一眼。"},{"at":["executor"],"text":"执行器的循环圈数==就是这条 SQL 的代价==：索引退化、区分度崩了，圈数暴涨。"},{"at":["bp","disk"],"text":"Buffer Pool 装不下热数据时，==每次读都要碰磁盘==，内存不够是慢的另一种形态。"},{"at":["qcache"],"text":"别再指望查询缓存兜底，==8.0 里它已经不存在了==。慢查询请按前四步排查。"}]},{"id":"auth","label":"权限在哪两道闸被拦","steps":[{"at":["conn"],"text":"第一道在==连接器==：认证，并把全局权限固化进连接。它管「你能不能连」，粒度粗。"},{"at":["executor"],"text":"第二道在==执行器开工前==（precheck）：分析器解析出表名、列名之后，才查得了「这张表的这些列你碰不碰」。"},{"at":["qcache"],"text":"边角：查询缓存命中会==跳过分析器==，没解析出表名列名，所以命中路径在返回结果前要==单独做一次权限校验==。"}]}]'>
       
-      <div class="arch-canvas"><svg viewBox="0 0 1556 944" role="img" aria-labelledby="archify-diagram-title archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
-        <title id="archify-diagram-title">一条 SQL 的旅程：从客户端到数据，经过谁的手</title>
-        <desc id="archify-diagram-description">实线是 select 的读路径；虚线 ①→⑤ 标出 update 的时序；另一条虚线是命中短路</desc>
+      <div class="arch-canvas"><svg viewBox="0 0 1556 944" role="img" aria-labelledby="mysql-journey-archify-diagram-title mysql-journey-archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
+        <title id="mysql-journey-archify-diagram-title">一条 SQL 的旅程：从客户端到数据，经过谁的手</title>
+        <desc id="mysql-journey-archify-diagram-description">实线是 select 的读路径；虚线 ①→⑤ 标出 update 的时序；另一条虚线是命中短路</desc>
         <!-- Definitions -->
         <defs>
-          <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+          <marker id="mysql-journey-arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
             <polygon points="0 0, 10 3.5, 0 7" class="m-default" />
           </marker>
-          <marker id="arrowhead-emphasis" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+          <marker id="mysql-journey-arrowhead-emphasis" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
             <polygon points="0 0, 10 3.5, 0 7" class="m-emphasis" />
           </marker>
-          <marker id="arrowhead-security" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+          <marker id="mysql-journey-arrowhead-security" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
             <polygon points="0 0, 10 3.5, 0 7" class="m-security" />
           </marker>
-          <marker id="arrowhead-dashed" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+          <marker id="mysql-journey-arrowhead-dashed" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
             <polygon points="0 0, 10 3.5, 0 7" class="m-dashed" />
           </marker>
-          <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+          <pattern id="mysql-journey-grid" width="40" height="40" patternUnits="userSpaceOnUse">
             <path d="M 40 0 L 0 0 0 40" class="c-grid" stroke-width="0.5"/>
           </pattern>
         </defs>
 
         <!-- Background Grid -->
-        <rect width="100%" height="100%" fill="url(#grid)" />
+        <rect width="100%" height="100%" fill="url(#mysql-journey-grid)" />
 
         <!-- Boundaries (behind everything) -->
         <rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="0" x="30" y="210" width="1486" height="126" rx="12" class="c-region" stroke-width="1"/>
@@ -6360,23 +6360,23 @@ svg[data-preset="blueprint"] .c-security-group,
         <text x="1276" y="776" class="t-cloud" font-size="9" font-weight="600">从库 · 另一台机器</text>
 
         <!-- Connection paths (before components for correct z-order) -->
-        <path data-edge-from="client" data-edge-to="conn" data-edge-label="TCP 握手 + 用户名密码" data-edge-key="0" data-composition-points="620,102;620,150;20,150;20,278;60,278" d="M 620 102 L 620 142 Q 620 150 612 150 L 28 150 Q 20 150 20 158 L 20 270 Q 20 278 28 278 L 60 278" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
-        <path data-edge-from="conn" data-edge-to="qcache" data-edge-label="放行" data-edge-key="1" data-composition-points="256,278;306,278" d="M 256 278 L 306 278" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
-        <path data-edge-from="qcache" data-edge-to="parser" data-edge-label="未命中" data-edge-key="2" data-composition-points="502,278;552,278" d="M 502 278 L 552 278" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
-        <path data-edge-from="qcache" data-edge-to="client" data-edge-label="命中：直接返回" data-edge-key="3" data-composition-points="404,240;404,216;476,216;476,71;500,71" d="M 404 240 L 404 224 Q 404 216 412 216 L 468 216 Q 476 216 476 208 L 476 79 Q 476 71 484 71 L 500 71" class="a-dashed" stroke-width="1.5" marker-end="url(#arrowhead-dashed)"/>
-        <path data-edge-from="parser" data-edge-to="optimizer" data-edge-label="解析树" data-edge-key="4" data-composition-points="748,278;798,278" d="M 748 278 L 798 278" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
-        <path data-edge-from="optimizer" data-edge-to="executor" data-edge-label="执行计划" data-edge-key="5" data-composition-points="994,278;1044,278" d="M 994 278 L 1044 278" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
-        <path data-edge-from="executor" data-edge-to="bp" data-edge-label="① 先改内存页（脏页）" data-edge-key="6" data-composition-points="1142,316;1142,560;858,560;858,600" d="M 1142 316 L 1142 552 Q 1142 560 1134 560 L 866 560 Q 858 560 858 568 L 858 600" class="a-dashed" stroke-width="1.5" marker-end="url(#arrowhead-dashed)"/>
-        <path data-edge-from="executor" data-edge-to="handler" data-edge-label="「给我下一行」" data-edge-key="7" data-composition-points="1142,316;1142,368;858,368;858,420" d="M 1142 316 L 1142 360 Q 1142 368 1134 368 L 866 368 Q 858 368 858 376 L 858 420" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
-        <path data-edge-from="handler" data-edge-to="bp" data-edge-label="读页" data-edge-key="8" data-composition-points="858,480;858,600" d="M 858 480 L 858 600" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
-        <path data-edge-from="bp" data-edge-to="disk" data-edge-label="未命中读盘 · 脏页刷回" data-edge-key="9" data-composition-points="858,676;858,780" d="M 858 676 L 858 780" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
-        <path data-edge-from="bp" data-edge-to="redo" data-edge-label="② 记 redo（prepare）" data-edge-key="10" data-composition-points="956,638;1290,638" d="M 956 638 L 1290 638" class="a-dashed" stroke-width="1.5" marker-end="url(#arrowhead-dashed)"/>
-        <path data-edge-from="executor" data-edge-to="binlog" data-edge-label="③ 再写 binlog" data-edge-key="11" data-composition-points="1240,278;1290,278" d="M 1240 278 L 1290 278" class="a-dashed" stroke-width="1.5" marker-end="url(#arrowhead-dashed)"/>
-        <path data-edge-from="binlog" data-edge-to="redo" data-edge-label="④ binlog 完整 → redo 才 commit" data-edge-key="12" data-composition-points="1388,316;1388,600" d="M 1388 316 L 1388 600" class="a-dashed" stroke-width="1.5" marker-end="url(#arrowhead-dashed)"/>
-        <path data-edge-from="binlog" data-edge-to="replica" data-edge-label="⑤ 从库重放" data-edge-key="13" data-composition-points="1486,278;1540,278;1540,818;1486,818" d="M 1486 278 L 1532 278 Q 1540 278 1540 286 L 1540 810 Q 1540 818 1532 818 L 1486 818" class="a-dashed" stroke-width="1.5" marker-end="url(#arrowhead-dashed)"/>
+        <path data-edge-from="client" data-edge-to="conn" data-edge-label="TCP 握手 + 用户名密码" data-edge-key="0" data-composition-points="620,102;620,150;20,150;20,278;60,278" d="M 620 102 L 620 142 Q 620 150 612 150 L 28 150 Q 20 150 20 158 L 20 270 Q 20 278 28 278 L 60 278" class="a-emphasis" stroke-width="1.8" marker-end="url(#mysql-journey-arrowhead-emphasis)"/>
+        <path data-edge-from="conn" data-edge-to="qcache" data-edge-label="放行" data-edge-key="1" data-composition-points="256,278;306,278" d="M 256 278 L 306 278" class="a-emphasis" stroke-width="1.8" marker-end="url(#mysql-journey-arrowhead-emphasis)"/>
+        <path data-edge-from="qcache" data-edge-to="parser" data-edge-label="未命中" data-edge-key="2" data-composition-points="502,278;552,278" d="M 502 278 L 552 278" class="a-emphasis" stroke-width="1.8" marker-end="url(#mysql-journey-arrowhead-emphasis)"/>
+        <path data-edge-from="qcache" data-edge-to="client" data-edge-label="命中：直接返回" data-edge-key="3" data-composition-points="404,240;404,216;476,216;476,71;500,71" d="M 404 240 L 404 224 Q 404 216 412 216 L 468 216 Q 476 216 476 208 L 476 79 Q 476 71 484 71 L 500 71" class="a-dashed" stroke-width="1.5" marker-end="url(#mysql-journey-arrowhead-dashed)"/>
+        <path data-edge-from="parser" data-edge-to="optimizer" data-edge-label="解析树" data-edge-key="4" data-composition-points="748,278;798,278" d="M 748 278 L 798 278" class="a-emphasis" stroke-width="1.8" marker-end="url(#mysql-journey-arrowhead-emphasis)"/>
+        <path data-edge-from="optimizer" data-edge-to="executor" data-edge-label="执行计划" data-edge-key="5" data-composition-points="994,278;1044,278" d="M 994 278 L 1044 278" class="a-emphasis" stroke-width="1.8" marker-end="url(#mysql-journey-arrowhead-emphasis)"/>
+        <path data-edge-from="executor" data-edge-to="bp" data-edge-label="① 先改内存页（脏页）" data-edge-key="6" data-composition-points="1142,316;1142,560;858,560;858,600" d="M 1142 316 L 1142 552 Q 1142 560 1134 560 L 866 560 Q 858 560 858 568 L 858 600" class="a-dashed" stroke-width="1.5" marker-end="url(#mysql-journey-arrowhead-dashed)"/>
+        <path data-edge-from="executor" data-edge-to="handler" data-edge-label="「给我下一行」" data-edge-key="7" data-composition-points="1142,316;1142,368;858,368;858,420" d="M 1142 316 L 1142 360 Q 1142 368 1134 368 L 866 368 Q 858 368 858 376 L 858 420" class="a-emphasis" stroke-width="1.8" marker-end="url(#mysql-journey-arrowhead-emphasis)"/>
+        <path data-edge-from="handler" data-edge-to="bp" data-edge-label="读页" data-edge-key="8" data-composition-points="858,480;858,600" d="M 858 480 L 858 600" class="a-emphasis" stroke-width="1.8" marker-end="url(#mysql-journey-arrowhead-emphasis)"/>
+        <path data-edge-from="bp" data-edge-to="disk" data-edge-label="未命中读盘 · 脏页刷回" data-edge-key="9" data-composition-points="858,676;858,780" d="M 858 676 L 858 780" class="a-emphasis" stroke-width="1.8" marker-end="url(#mysql-journey-arrowhead-emphasis)"/>
+        <path data-edge-from="bp" data-edge-to="redo" data-edge-label="② 记 redo（prepare）" data-edge-key="10" data-composition-points="956,638;1290,638" d="M 956 638 L 1290 638" class="a-dashed" stroke-width="1.5" marker-end="url(#mysql-journey-arrowhead-dashed)"/>
+        <path data-edge-from="executor" data-edge-to="binlog" data-edge-label="③ 再写 binlog" data-edge-key="11" data-composition-points="1240,278;1290,278" d="M 1240 278 L 1290 278" class="a-dashed" stroke-width="1.5" marker-end="url(#mysql-journey-arrowhead-dashed)"/>
+        <path data-edge-from="binlog" data-edge-to="redo" data-edge-label="④ binlog 完整 → redo 才 commit" data-edge-key="12" data-composition-points="1388,316;1388,600" d="M 1388 316 L 1388 600" class="a-dashed" stroke-width="1.5" marker-end="url(#mysql-journey-arrowhead-dashed)"/>
+        <path data-edge-from="binlog" data-edge-to="replica" data-edge-label="⑤ 从库重放" data-edge-key="13" data-composition-points="1486,278;1540,278;1540,818;1486,818" d="M 1486 278 L 1532 278 Q 1540 278 1540 286 L 1540 810 Q 1540 818 1532 818 L 1486 818" class="a-dashed" stroke-width="1.5" marker-end="url(#mysql-journey-arrowhead-dashed)"/>
 
         <!-- Components -->
-        <g id="node-client" data-node-id="client" data-node-label="客户端" tabindex="0" role="button" aria-label="Focus 客户端, select * from user where id=1, Architecture component" aria-pressed="false" data-node-kind="external" data-node-sublabel="select * from user where id=1" data-node-context="Architecture component">
+        <g id="mysql-journey-node-client" data-node-id="client" data-node-label="客户端" tabindex="0" role="button" aria-label="Focus 客户端, select * from user where id=1, Architecture component" aria-pressed="false" data-node-kind="external" data-node-sublabel="select * from user where id=1" data-node-context="Architecture component">
           <title>客户端 · select * from user where id=1 · Architecture component</title>
           <rect x="500" y="40" width="240" height="62" rx="6" class="c-mask"/>
           <rect x="500" y="40" width="240" height="62" rx="6" class="c-external" stroke-width="1.5"/>
@@ -6388,7 +6388,7 @@ svg[data-preset="blueprint"] .c-security-group,
         <text data-detail="context" x="620" y="85" class="t-muted" font-size="9" text-anchor="middle">select * from user where id=1</text>
         </g>
 
-        <g id="node-conn" data-node-id="conn" data-node-label="① 连接器" tabindex="0" role="button" aria-label="Focus ① 连接器, 认证 · 全局权限固化 · 一连接一线程, Server 层 · 管语义与决策（SQL 文本 → 执行计划）" aria-pressed="false" data-node-kind="security" data-node-sublabel="认证 · 全局权限固化 · 一连接一线程" data-node-context="Server 层 · 管语义与决策（SQL 文本 → 执行计划）">
+        <g id="mysql-journey-node-conn" data-node-id="conn" data-node-label="① 连接器" tabindex="0" role="button" aria-label="Focus ① 连接器, 认证 · 全局权限固化 · 一连接一线程, Server 层 · 管语义与决策（SQL 文本 → 执行计划）" aria-pressed="false" data-node-kind="security" data-node-sublabel="认证 · 全局权限固化 · 一连接一线程" data-node-context="Server 层 · 管语义与决策（SQL 文本 → 执行计划）">
           <title>① 连接器 · 认证 · 全局权限固化 · 一连接一线程 · Server 层 · 管语义与决策（SQL 文本 → 执行计划）</title>
           <rect x="60" y="240" width="196" height="76" rx="6" class="c-mask"/>
           <rect x="60" y="240" width="196" height="76" rx="6" class="c-security" stroke-width="1.5"/>
@@ -6400,7 +6400,7 @@ svg[data-preset="blueprint"] .c-security-group,
         <text data-detail="context" x="158" y="292" class="t-muted" font-size="9" text-anchor="middle">认证 · 全局权限固化 · 一连接一线程</text>
         </g>
 
-        <g id="node-qcache" data-node-id="qcache" data-node-label="② 查询缓存" tabindex="0" role="button" aria-label="Focus ② 查询缓存, 全文逐字节匹配 · 8.0 已移除, Server 层 · 管语义与决策（SQL 文本 → 执行计划）" aria-pressed="false" data-node-kind="backend" data-node-sublabel="全文逐字节匹配 · 8.0 已移除" data-node-context="Server 层 · 管语义与决策（SQL 文本 → 执行计划）">
+        <g id="mysql-journey-node-qcache" data-node-id="qcache" data-node-label="② 查询缓存" tabindex="0" role="button" aria-label="Focus ② 查询缓存, 全文逐字节匹配 · 8.0 已移除, Server 层 · 管语义与决策（SQL 文本 → 执行计划）" aria-pressed="false" data-node-kind="backend" data-node-sublabel="全文逐字节匹配 · 8.0 已移除" data-node-context="Server 层 · 管语义与决策（SQL 文本 → 执行计划）">
           <title>② 查询缓存 · 全文逐字节匹配 · 8.0 已移除 · Server 层 · 管语义与决策（SQL 文本 → 执行计划）</title>
           <rect x="306" y="240" width="196" height="76" rx="6" class="c-mask"/>
           <rect x="306" y="240" width="196" height="76" rx="6" class="c-backend" stroke-width="1.5"/>
@@ -6411,7 +6411,7 @@ svg[data-preset="blueprint"] .c-security-group,
         <text data-detail="context" x="404" y="292" class="t-muted" font-size="9" text-anchor="middle">全文逐字节匹配 · 8.0 已移除</text>
         </g>
 
-        <g id="node-parser" data-node-id="parser" data-node-label="③ 分析器" tabindex="0" role="button" aria-label="Focus ③ 分析器, 词法/语法 → 解析树 · 1064, Server 层 · 管语义与决策（SQL 文本 → 执行计划）" aria-pressed="false" data-node-kind="backend" data-node-sublabel="词法/语法 → 解析树 · 1064" data-node-context="Server 层 · 管语义与决策（SQL 文本 → 执行计划）">
+        <g id="mysql-journey-node-parser" data-node-id="parser" data-node-label="③ 分析器" tabindex="0" role="button" aria-label="Focus ③ 分析器, 词法/语法 → 解析树 · 1064, Server 层 · 管语义与决策（SQL 文本 → 执行计划）" aria-pressed="false" data-node-kind="backend" data-node-sublabel="词法/语法 → 解析树 · 1064" data-node-context="Server 层 · 管语义与决策（SQL 文本 → 执行计划）">
           <title>③ 分析器 · 词法/语法 → 解析树 · 1064 · Server 层 · 管语义与决策（SQL 文本 → 执行计划）</title>
           <rect x="552" y="240" width="196" height="76" rx="6" class="c-mask"/>
           <rect x="552" y="240" width="196" height="76" rx="6" class="c-backend" stroke-width="1.5"/>
@@ -6422,7 +6422,7 @@ svg[data-preset="blueprint"] .c-security-group,
         <text data-detail="context" x="650" y="292" class="t-muted" font-size="9" text-anchor="middle">词法/语法 → 解析树 · 1064</text>
         </g>
 
-        <g id="node-optimizer" data-node-id="optimizer" data-node-label="④ 优化器" tabindex="0" role="button" aria-label="Focus ④ 优化器, 代价估算选计划 · EXPLAIN 可看, Server 层 · 管语义与决策（SQL 文本 → 执行计划）" aria-pressed="false" data-node-kind="backend" data-node-sublabel="代价估算选计划 · EXPLAIN 可看" data-node-context="Server 层 · 管语义与决策（SQL 文本 → 执行计划）">
+        <g id="mysql-journey-node-optimizer" data-node-id="optimizer" data-node-label="④ 优化器" tabindex="0" role="button" aria-label="Focus ④ 优化器, 代价估算选计划 · EXPLAIN 可看, Server 层 · 管语义与决策（SQL 文本 → 执行计划）" aria-pressed="false" data-node-kind="backend" data-node-sublabel="代价估算选计划 · EXPLAIN 可看" data-node-context="Server 层 · 管语义与决策（SQL 文本 → 执行计划）">
           <title>④ 优化器 · 代价估算选计划 · EXPLAIN 可看 · Server 层 · 管语义与决策（SQL 文本 → 执行计划）</title>
           <rect x="798" y="240" width="196" height="76" rx="6" class="c-mask"/>
           <rect x="798" y="240" width="196" height="76" rx="6" class="c-backend" stroke-width="1.5"/>
@@ -6433,7 +6433,7 @@ svg[data-preset="blueprint"] .c-security-group,
         <text data-detail="context" x="896" y="292" class="t-muted" font-size="9" text-anchor="middle">代价估算选计划 · EXPLAIN 可看</text>
         </g>
 
-        <g id="node-executor" data-node-id="executor" data-node-label="⑤ 执行器" tabindex="0" role="button" aria-label="Focus ⑤ 执行器, precheck 权限 · 迭代器逐行取数, Server 层 · 管语义与决策（SQL 文本 → 执行计划）" aria-pressed="false" data-node-kind="backend" data-node-sublabel="precheck 权限 · 迭代器逐行取数" data-node-context="Server 层 · 管语义与决策（SQL 文本 → 执行计划）">
+        <g id="mysql-journey-node-executor" data-node-id="executor" data-node-label="⑤ 执行器" tabindex="0" role="button" aria-label="Focus ⑤ 执行器, precheck 权限 · 迭代器逐行取数, Server 层 · 管语义与决策（SQL 文本 → 执行计划）" aria-pressed="false" data-node-kind="backend" data-node-sublabel="precheck 权限 · 迭代器逐行取数" data-node-context="Server 层 · 管语义与决策（SQL 文本 → 执行计划）">
           <title>⑤ 执行器 · precheck 权限 · 迭代器逐行取数 · Server 层 · 管语义与决策（SQL 文本 → 执行计划）</title>
           <rect x="1044" y="240" width="196" height="76" rx="6" class="c-mask"/>
           <rect x="1044" y="240" width="196" height="76" rx="6" class="c-backend" stroke-width="1.5"/>
@@ -6444,7 +6444,7 @@ svg[data-preset="blueprint"] .c-security-group,
         <text data-detail="context" x="1142" y="292" class="t-muted" font-size="9" text-anchor="middle">precheck 权限 · 迭代器逐行取数</text>
         </g>
 
-        <g id="node-binlog" data-node-id="binlog" data-node-label="binlog · Server 层日志" tabindex="0" role="button" aria-label="Focus binlog · Server 层日志, 逻辑日志 · 追加写 · 主从复制, Server 层 · 管语义与决策（SQL 文本 → 执行计划）" aria-pressed="false" data-node-kind="database" data-node-sublabel="逻辑日志 · 追加写 · 主从复制" data-node-context="Server 层 · 管语义与决策（SQL 文本 → 执行计划）">
+        <g id="mysql-journey-node-binlog" data-node-id="binlog" data-node-label="binlog · Server 层日志" tabindex="0" role="button" aria-label="Focus binlog · Server 层日志, 逻辑日志 · 追加写 · 主从复制, Server 层 · 管语义与决策（SQL 文本 → 执行计划）" aria-pressed="false" data-node-kind="database" data-node-sublabel="逻辑日志 · 追加写 · 主从复制" data-node-context="Server 层 · 管语义与决策（SQL 文本 → 执行计划）">
           <title>binlog · Server 层日志 · 逻辑日志 · 追加写 · 主从复制 · Server 层 · 管语义与决策（SQL 文本 → 执行计划）</title>
           <rect x="1290" y="240" width="196" height="76" rx="6" class="c-mask"/>
           <rect x="1290" y="240" width="196" height="76" rx="6" class="c-database" stroke-width="1.5"/>
@@ -6456,7 +6456,7 @@ svg[data-preset="blueprint"] .c-security-group,
         <text data-detail="context" x="1388" y="292" class="t-muted" font-size="9" text-anchor="middle">逻辑日志 · 追加写 · 主从复制</text>
         </g>
 
-        <g id="node-handler" data-node-id="handler" data-node-label="handler 接口" tabindex="0" role="button" aria-label="Focus handler 接口, 两层契约：「给我下一行」, Architecture component" aria-pressed="false" data-node-kind="external" data-node-sublabel="两层契约：「给我下一行」" data-node-context="Architecture component">
+        <g id="mysql-journey-node-handler" data-node-id="handler" data-node-label="handler 接口" tabindex="0" role="button" aria-label="Focus handler 接口, 两层契约：「给我下一行」, Architecture component" aria-pressed="false" data-node-kind="external" data-node-sublabel="两层契约：「给我下一行」" data-node-context="Architecture component">
           <title>handler 接口 · 两层契约：「给我下一行」 · Architecture component</title>
           <rect x="760" y="420" width="196" height="60" rx="6" class="c-mask"/>
           <rect x="760" y="420" width="196" height="60" rx="6" class="c-external" stroke-width="1.5"/>
@@ -6468,7 +6468,7 @@ svg[data-preset="blueprint"] .c-security-group,
         <text data-detail="context" x="858" y="464" class="t-muted" font-size="9" text-anchor="middle">两层契约：「给我下一行」</text>
         </g>
 
-        <g id="node-bp" data-node-id="bp" data-node-label="⑥ Buffer Pool" tabindex="0" role="button" aria-label="Focus ⑥ Buffer Pool, 16KB 数据页 · 命中内存/读盘, 存储引擎层 · InnoDB（管数据与存储，可插拔）" aria-pressed="false" data-node-kind="database" data-node-sublabel="16KB 数据页 · 命中内存/读盘" data-node-context="存储引擎层 · InnoDB（管数据与存储，可插拔）">
+        <g id="mysql-journey-node-bp" data-node-id="bp" data-node-label="⑥ Buffer Pool" tabindex="0" role="button" aria-label="Focus ⑥ Buffer Pool, 16KB 数据页 · 命中内存/读盘, 存储引擎层 · InnoDB（管数据与存储，可插拔）" aria-pressed="false" data-node-kind="database" data-node-sublabel="16KB 数据页 · 命中内存/读盘" data-node-context="存储引擎层 · InnoDB（管数据与存储，可插拔）">
           <title>⑥ Buffer Pool · 16KB 数据页 · 命中内存/读盘 · 存储引擎层 · InnoDB（管数据与存储，可插拔）</title>
           <rect x="760" y="600" width="196" height="76" rx="6" class="c-mask"/>
           <rect x="760" y="600" width="196" height="76" rx="6" class="c-database" stroke-width="1.5"/>
@@ -6480,7 +6480,7 @@ svg[data-preset="blueprint"] .c-security-group,
         <text data-detail="context" x="858" y="652" class="t-muted" font-size="9" text-anchor="middle">16KB 数据页 · 命中内存/读盘</text>
         </g>
 
-        <g id="node-redo" data-node-id="redo" data-node-label="redo log · InnoDB 日志" tabindex="0" role="button" aria-label="Focus redo log · InnoDB 日志, 物理日志 · 循环写 · crash-safe, 存储引擎层 · InnoDB（管数据与存储，可插拔）" aria-pressed="false" data-node-kind="database" data-node-sublabel="物理日志 · 循环写 · crash-safe" data-node-context="存储引擎层 · InnoDB（管数据与存储，可插拔）">
+        <g id="mysql-journey-node-redo" data-node-id="redo" data-node-label="redo log · InnoDB 日志" tabindex="0" role="button" aria-label="Focus redo log · InnoDB 日志, 物理日志 · 循环写 · crash-safe, 存储引擎层 · InnoDB（管数据与存储，可插拔）" aria-pressed="false" data-node-kind="database" data-node-sublabel="物理日志 · 循环写 · crash-safe" data-node-context="存储引擎层 · InnoDB（管数据与存储，可插拔）">
           <title>redo log · InnoDB 日志 · 物理日志 · 循环写 · crash-safe · 存储引擎层 · InnoDB（管数据与存储，可插拔）</title>
           <rect x="1290" y="600" width="196" height="76" rx="6" class="c-mask"/>
           <rect x="1290" y="600" width="196" height="76" rx="6" class="c-database" stroke-width="1.5"/>
@@ -6492,7 +6492,7 @@ svg[data-preset="blueprint"] .c-security-group,
         <text data-detail="context" x="1388" y="652" class="t-muted" font-size="9" text-anchor="middle">物理日志 · 循环写 · crash-safe</text>
         </g>
 
-        <g id="node-disk" data-node-id="disk" data-node-label="磁盘 .ibd" tabindex="0" role="button" aria-label="Focus 磁盘 .ibd, 数据真正躺的地方, 磁盘" aria-pressed="false" data-node-kind="cloud" data-node-sublabel="数据真正躺的地方" data-node-context="磁盘">
+        <g id="mysql-journey-node-disk" data-node-id="disk" data-node-label="磁盘 .ibd" tabindex="0" role="button" aria-label="Focus 磁盘 .ibd, 数据真正躺的地方, 磁盘" aria-pressed="false" data-node-kind="cloud" data-node-sublabel="数据真正躺的地方" data-node-context="磁盘">
           <title>磁盘 .ibd · 数据真正躺的地方 · 磁盘</title>
           <rect x="760" y="780" width="196" height="62" rx="6" class="c-mask"/>
           <rect x="760" y="780" width="196" height="62" rx="6" class="c-cloud" stroke-width="1.5"/>
@@ -6503,7 +6503,7 @@ svg[data-preset="blueprint"] .c-security-group,
         <text data-detail="context" x="858" y="825" class="t-muted" font-size="9" text-anchor="middle">数据真正躺的地方</text>
         </g>
 
-        <g id="node-replica" data-node-id="replica" data-node-label="从库" tabindex="0" role="button" aria-label="Focus 从库, 重放 binlog · 与主库对账, 从库 · 另一台机器" aria-pressed="false" data-node-kind="database" data-node-sublabel="重放 binlog · 与主库对账" data-node-context="从库 · 另一台机器">
+        <g id="mysql-journey-node-replica" data-node-id="replica" data-node-label="从库" tabindex="0" role="button" aria-label="Focus 从库, 重放 binlog · 与主库对账, 从库 · 另一台机器" aria-pressed="false" data-node-kind="database" data-node-sublabel="重放 binlog · 与主库对账" data-node-context="从库 · 另一台机器">
           <title>从库 · 重放 binlog · 与主库对账 · 从库 · 另一台机器</title>
           <rect x="1290" y="780" width="196" height="76" rx="6" class="c-mask"/>
           <rect x="1290" y="780" width="196" height="76" rx="6" class="c-database" stroke-width="1.5"/>
@@ -6605,14 +6605,15 @@ svg[data-preset="blueprint"] .c-security-group,
 <div class="compare-wrap"><table class="compare"><thead><tr><th>位置</th><th>HTTP 请求链</th><th>MySQL 链</th></tr></thead><tbody><tr><th>鉴权放行</th><td data-label="HTTP 请求链">网关</td><td data-label="MySQL 链">连接器：认证 + 权限快照</td></tr><tr><th>前置拦截</th><td data-label="HTTP 请求链">CDN / 页面缓存</td><td data-label="MySQL 链">查询缓存（8.0 已删）</td></tr><tr><th>理解并改写请求</th><td data-label="HTTP 请求链">路由 + 中间件链</td><td data-label="MySQL 链">分析器 + 优化器</td></tr><tr><th>干活</th><td data-label="HTTP 请求链">handler</td><td data-label="MySQL 链">执行器</td></tr><tr><th>碰数据</th><td data-label="HTTP 请求链">DAO / ORM</td><td data-label="MySQL 链">存储引擎（InnoDB）</td></tr></tbody></table></div><p>唯一的差别：HTTP 链的每一层都是你自己写的代码，MySQL 这条链是数据库替你搭好的，一层都改不了，只能理解它。</p>
 <p>再看那条 Server 层与引擎层的边界线。前四站流通的「货币」是同一样东西：SQL 文本及其衍生结构（解析树、执行计划），直到执行器才第一次碰到行数据。<mark class="mk-blue">线上是语义与决策，线下是数据与存储</mark>。MySQL 为什么能换引擎、日志为什么分两层（binlog 在上、redo 在下），都从这条线来。</p>
 <h2 id="连接器进门与权限快照"><span class="num">03</span>连接器：进门与权限快照</h2>
-<div class="seqd" data-seq data-n="3">
+<div class="seqd" data-seq data-n="3"
+      style="--seq-fill:url(#s-fill-1);--seq-open:url(#s-fill-1-open)">
       <svg class="seqd-svg" aria-hidden="true">
         <defs>
-          <marker id="s-fill" viewBox="0 0 10 10" refX="9" refY="5"
+          <marker id="s-fill-1" viewBox="0 0 10 10" refX="9" refY="5"
                   markerWidth="7" markerHeight="7" orient="auto-start-reverse">
             <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
           </marker>
-          <marker id="s-open" viewBox="0 0 10 10" refX="9" refY="5"
+          <marker id="s-fill-1-open" viewBox="0 0 10 10" refX="9" refY="5"
                   markerWidth="8" markerHeight="8" orient="auto-start-reverse">
             <path d="M 0 0 L 10 5 L 0 10" fill="none" stroke="currentColor" stroke-width="1.4"/>
           </marker>
@@ -6634,10 +6635,10 @@ svg[data-preset="blueprint"] .c-security-group,
 <div class="compare-wrap"><table class="compare"><thead><tr><th></th><th>短连接</th><th>长连接</th></tr></thead><tbody><tr><th>建连开销</th><td data-label="短连接"><span class="tag tone-red">每条请求都付：TCP + 认证 + 线程分配</span></td><td data-label="长连接">只付一次</td></tr><tr><th>内存风险</th><td data-label="短连接">低，断开即释放</td><td data-label="长连接"><span class="tag tone-amber">临时内存挂在连接上，越积越多</span></td></tr><tr><th>适用</th><td data-label="短连接">低频访问</td><td data-label="长连接">高频常驻（连接池）</td></tr></tbody></table></div><p>长连接的坑很具体：执行过程中的临时内存，排序缓冲、临时表、结果集，都挂在连接对象上。一次用了 64MB 排序缓冲的查询结束后，这 64MB <mark class="mk-blue">不还给操作系统</mark>，等连接断开才一次性结清。长连接跑得越久涨得越多，MySQL 内存只涨不跌，直到被系统 OOM kill。「MySQL 内存越用越高」一半的答案在这里。</p>
 <p><mark class="mk-green">两个解法：定期主动断开；5.7+ 用 <code>mysql_reset_connection</code> 重置连接，不重建连接但释放临时内存。</mark> 连接池配置里的 <code>maxLifetime</code> 就是「定期断开」的自动化。另有 <code>max_connections</code> 管连接数上限（打满拒绝新连接）、<code>wait_timeout</code> 管空闲超时（默认 28800 秒 = 8 小时）。</p>
 <h2 id="查询缓存一个被删掉的功能"><span class="num">04</span>查询缓存：一个被删掉的功能</h2>
-<div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;sql&quot;,&quot;to&quot;:&quot;qc&quot;},{&quot;from&quot;:&quot;qc&quot;,&quot;to&quot;:&quot;hit&quot;,&quot;label&quot;:&quot;命中&quot;,&quot;tone&quot;:&quot;green&quot;},{&quot;from&quot;:&quot;qc&quot;,&quot;to&quot;:&quot;chain&quot;,&quot;label&quot;:&quot;未命中&quot;}]">
+<div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;sql&quot;,&quot;to&quot;:&quot;qc&quot;},{&quot;from&quot;:&quot;qc&quot;,&quot;to&quot;:&quot;hit&quot;,&quot;label&quot;:&quot;命中&quot;,&quot;tone&quot;:&quot;green&quot;},{&quot;from&quot;:&quot;qc&quot;,&quot;to&quot;:&quot;chain&quot;,&quot;label&quot;:&quot;未命中&quot;}]" style="--flow-marker:url(#fa-1)">
       <svg class="flowd-svg" aria-hidden="true">
         <defs>
-          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+          <marker id="fa-1" viewBox="0 0 10 10" refX="9" refY="5"
                   markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
             <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
           </marker>
@@ -6685,10 +6686,10 @@ svg[data-preset="blueprint"] .c-security-group,
           <p>替代方案是 Server-side Query Rewrite 或 ProxySQL 中间层缓存，失效粒度交使用方自己定</p>
         </div></div><p><mark class="mk-amber">删掉的是 Server 层的「结果集」缓存。</mark> InnoDB 的 Buffer Pool 是「数据页」缓存，活得好好的，别拿老文章里的查询缓存当现状教人。</p>
 <h2 id="分析器与优化器从字符串到执行计划"><span class="num">05</span>分析器与优化器：从字符串到执行计划</h2>
-<div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;in&quot;,&quot;to&quot;:&quot;lex&quot;},{&quot;from&quot;:&quot;lex&quot;,&quot;to&quot;:&quot;syn&quot;,&quot;label&quot;:&quot;每个 token 带类型&quot;},{&quot;from&quot;:&quot;syn&quot;,&quot;to&quot;:&quot;err&quot;,&quot;label&quot;:&quot;from 写成 form&quot;,&quot;tone&quot;:&quot;red&quot;},{&quot;from&quot;:&quot;syn&quot;,&quot;to&quot;:&quot;pre&quot;,&quot;label&quot;:&quot;语法合法&quot;},{&quot;from&quot;:&quot;pre&quot;,&quot;to&quot;:&quot;opt&quot;},{&quot;from&quot;:&quot;opt&quot;,&quot;to&quot;:&quot;plan&quot;}]">
+<div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;in&quot;,&quot;to&quot;:&quot;lex&quot;},{&quot;from&quot;:&quot;lex&quot;,&quot;to&quot;:&quot;syn&quot;,&quot;label&quot;:&quot;每个 token 带类型&quot;},{&quot;from&quot;:&quot;syn&quot;,&quot;to&quot;:&quot;err&quot;,&quot;label&quot;:&quot;from 写成 form&quot;,&quot;tone&quot;:&quot;red&quot;},{&quot;from&quot;:&quot;syn&quot;,&quot;to&quot;:&quot;pre&quot;,&quot;label&quot;:&quot;语法合法&quot;},{&quot;from&quot;:&quot;pre&quot;,&quot;to&quot;:&quot;opt&quot;},{&quot;from&quot;:&quot;opt&quot;,&quot;to&quot;:&quot;plan&quot;}]" style="--flow-marker:url(#fa-2)">
       <svg class="flowd-svg" aria-hidden="true">
         <defs>
-          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+          <marker id="fa-2" viewBox="0 0 10 10" refX="9" refY="5"
                   markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
             <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
           </marker>
@@ -6737,14 +6738,15 @@ svg[data-preset="blueprint"] .c-security-group,
 <div class="compare-wrap"><table class="compare"><thead><tr><th>计划</th><th>执行方式</th><th>代价</th></tr></thead><tbody><tr><th>计划 1 · 大表驱动</th><td data-label="执行方式">全表扫 A（100 万行），逐行去 B 找匹配</td><td data-label="代价"><span class="tag tone-red">100 万次随机访问 · 毫秒变分钟</span></td></tr><tr><th>计划 2 · 小表驱动</th><td data-label="执行方式">全表扫 B（1000 行），用索引逐行查 A</td><td data-label="代价"><span class="tag tone-green">1000 次索引查询 · 低几个数量级</span></td></tr></tbody></table></div><p>A 表 100 万行、B 表 1000 行，谁做驱动表，代价差几个数量级。毫秒和分钟，只差一个「谁驱动谁」的决定。</p>
 <p><mark class="mk-amber">「优化器选最优」是「按它的估算选最优」。</mark> 代价模型的输入是统计信息：总行数、索引基数（一列有多少个不同值）、数据分布，由后台采样更新。表数据大变之后、统计更新之前存在一个失准窗口，它选出的「最优」计划可能比全表扫还慢。<code>EXPLAIN</code> 的 type、rows、key 是排障第一眼：先看它选了哪个索引、预估扫多少行，再和实际数据量对照。</p>
 <h2 id="执行器真正干活的人"><span class="num">06</span>执行器：真正干活的人</h2>
-<div class="seqd" data-seq data-n="2">
+<div class="seqd" data-seq data-n="2"
+      style="--seq-fill:url(#s-fill-2);--seq-open:url(#s-fill-2-open)">
       <svg class="seqd-svg" aria-hidden="true">
         <defs>
-          <marker id="s-fill" viewBox="0 0 10 10" refX="9" refY="5"
+          <marker id="s-fill-2" viewBox="0 0 10 10" refX="9" refY="5"
                   markerWidth="7" markerHeight="7" orient="auto-start-reverse">
             <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
           </marker>
-          <marker id="s-open" viewBox="0 0 10 10" refX="9" refY="5"
+          <marker id="s-fill-2-open" viewBox="0 0 10 10" refX="9" refY="5"
                   markerWidth="8" markerHeight="8" orient="auto-start-reverse">
             <path d="M 0 0 L 10 5 L 0 10" fill="none" stroke="currentColor" stroke-width="1.4"/>
           </marker>
@@ -6759,10 +6761,10 @@ svg[data-preset="blueprint"] .c-security-group,
     </div><p>这就是迭代器协议：执行器是不停调 <code>next()</code> 的消费者，引擎是惰性产出行的 iterator，像 generator 的 yield，<mark class="mk-blue">要一行才产一行</mark>。逐行拉取的理由很实际：结果集可能上百万行，一次全取直接撑爆内存；流式处理，内存里只装当前行加结果集。</p>
 <p>循环圈数就是这条 SQL 的代价。走不走索引、索引区分度高不高、要不要回表，全折算成圈数。优化器在 05 节费尽心思选的「最便宜的路」，便宜在<mark class="mk-blue">让这个循环转得最少</mark>。贵的操作（取数）放引擎用索引控制次数，便宜的操作（where 过滤）放 Server 层纯内存随便做。</p>
 <p>权限在这里有第二道闸：</p>
-<div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;conn&quot;,&quot;to&quot;:&quot;parse&quot;,&quot;label&quot;:&quot;进得了门 ≠ 碰得了表&quot;},{&quot;from&quot;:&quot;parse&quot;,&quot;to&quot;:&quot;pre&quot;},{&quot;from&quot;:&quot;pre&quot;,&quot;to&quot;:&quot;run&quot;}]">
+<div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;conn&quot;,&quot;to&quot;:&quot;parse&quot;,&quot;label&quot;:&quot;进得了门 ≠ 碰得了表&quot;},{&quot;from&quot;:&quot;parse&quot;,&quot;to&quot;:&quot;pre&quot;},{&quot;from&quot;:&quot;pre&quot;,&quot;to&quot;:&quot;run&quot;}]" style="--flow-marker:url(#fa-3)">
       <svg class="flowd-svg" aria-hidden="true">
         <defs>
-          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+          <marker id="fa-3" viewBox="0 0 10 10" refX="9" refY="5"
                   markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
             <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
           </marker>
@@ -6797,14 +6799,15 @@ svg[data-preset="blueprint"] .c-security-group,
 <div class="compare-wrap"><table class="compare"><thead><tr><th></th><th>redo log · InnoDB</th><th>binlog · Server 层</th></tr></thead><tbody><tr><th>记录内容</th><td data-label="redo log · InnoDB">物理：哪个数据页做了什么修改</td><td data-label="binlog · Server 层">逻辑：哪条语句 / 哪行怎么变</td></tr><tr><th>写入方式</th><td data-label="redo log · InnoDB"><span class="tag tone-amber">循环写，写满回头覆盖</span></td><td data-label="binlog · Server 层"><span class="tag tone-green">追加写，完整留档</span></td></tr><tr><th>属于谁</th><td data-label="redo log · InnoDB">InnoDB 特有，别的引擎没有</td><td data-label="binlog · Server 层">所有引擎共用</td></tr><tr><th>用途</th><td data-label="redo log · InnoDB">crash-safe 崩溃恢复</td><td data-label="binlog · Server 层">主从复制、数据恢复</td></tr></tbody></table></div><p>为什么不直接刷盘、要先写 redo？看两种写法的差别：</p>
 <div class="compare-wrap"><table class="compare"><thead><tr><th></th><th>直接刷脏页</th><th>WAL（先写 redo）</th></tr></thead><tbody><tr><th>写什么</th><td data-label="直接刷脏页">每次更新写回整个 16KB 页</td><td data-label="WAL（先写 redo）">只追加一条小记录</td></tr><tr><th>IO 形态</th><td data-label="直接刷脏页"><span class="tag tone-red">随机写，磁头来回寻道</span></td><td data-label="WAL（先写 redo）"><span class="tag tone-green">顺序写，只动磁头一次</span></td></tr><tr><th>时机</th><td data-label="直接刷脏页">同步，更新就得等盘</td><td data-label="WAL（先写 redo）">异步，后台择机刷脏页</td></tr><tr><th>崩溃时</th><td data-label="直接刷脏页">丢掉没刷盘的修改</td><td data-label="WAL（先写 redo）"><span class="tag tone-green">重放 redo 找回已提交的修改</span></td></tr></tbody></table></div><p>顺序写和随机写的差距是磁盘物理特性决定的。 redo 的形态差异也来自用途：循环写是因为<mark class="mk-blue">只管崩溃恢复</mark>，最近一段就够，能覆盖的前提是被覆盖位置的脏页已刷盘（checkpoint）；binlog 追加写是因为从库要回放<mark class="mk-blue">完整历史流水</mark>，覆盖掉就断了。落盘时机各有旋钮：<code>innodb_flush_log_at_trx_commit=1</code> 是每次提交都刷（最安全最慢），binlog 对应 <code>sync_binlog</code>。binlog 另有 statement / row / mixed 三种记录格式，主从复制里各有各的坑，是往外挖的钩子。</p>
 <p>update 的提交时序：</p>
-<div class="seqd" data-seq data-n="3">
+<div class="seqd" data-seq data-n="3"
+      style="--seq-fill:url(#s-fill-3);--seq-open:url(#s-fill-3-open)">
       <svg class="seqd-svg" aria-hidden="true">
         <defs>
-          <marker id="s-fill" viewBox="0 0 10 10" refX="9" refY="5"
+          <marker id="s-fill-3" viewBox="0 0 10 10" refX="9" refY="5"
                   markerWidth="7" markerHeight="7" orient="auto-start-reverse">
             <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
           </marker>
-          <marker id="s-open" viewBox="0 0 10 10" refX="9" refY="5"
+          <marker id="s-fill-3-open" viewBox="0 0 10 10" refX="9" refY="5"
                   markerWidth="8" markerHeight="8" orient="auto-start-reverse">
             <path d="M 0 0 L 10 5 L 0 10" fill="none" stroke="currentColor" stroke-width="1.4"/>
           </marker>
@@ -6849,10 +6852,10 @@ svg[data-preset="blueprint"] .c-security-group,
   <div class="pane-foot" data-p2c-foot></div>
 </div></div>
     </div><p>模拟器里的判定就是这条恢复规则：</p>
-<div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;scan&quot;,&quot;to&quot;:&quot;commit&quot;},{&quot;from&quot;:&quot;commit&quot;,&quot;to&quot;:&quot;live&quot;,&quot;label&quot;:&quot;是&quot;},{&quot;from&quot;:&quot;commit&quot;,&quot;to&quot;:&quot;chk&quot;,&quot;label&quot;:&quot;否（prepare）&quot;},{&quot;from&quot;:&quot;chk&quot;,&quot;to&quot;:&quot;do&quot;,&quot;label&quot;:&quot;完整&quot;,&quot;tone&quot;:&quot;green&quot;},{&quot;from&quot;:&quot;chk&quot;,&quot;to&quot;:&quot;undo&quot;,&quot;label&quot;:&quot;缺失&quot;,&quot;tone&quot;:&quot;red&quot;}]">
+<div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;scan&quot;,&quot;to&quot;:&quot;commit&quot;},{&quot;from&quot;:&quot;commit&quot;,&quot;to&quot;:&quot;live&quot;,&quot;label&quot;:&quot;是&quot;},{&quot;from&quot;:&quot;commit&quot;,&quot;to&quot;:&quot;chk&quot;,&quot;label&quot;:&quot;否（prepare）&quot;},{&quot;from&quot;:&quot;chk&quot;,&quot;to&quot;:&quot;do&quot;,&quot;label&quot;:&quot;完整&quot;,&quot;tone&quot;:&quot;green&quot;},{&quot;from&quot;:&quot;chk&quot;,&quot;to&quot;:&quot;undo&quot;,&quot;label&quot;:&quot;缺失&quot;,&quot;tone&quot;:&quot;red&quot;}]" style="--flow-marker:url(#fa-4)">
       <svg class="flowd-svg" aria-hidden="true">
         <defs>
-          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+          <marker id="fa-4" viewBox="0 0 10 10" refX="9" refY="5"
                   markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
             <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
           </marker>
@@ -7777,13 +7780,16 @@ REVOKE 执行的那一刻这份缓存就被重建了。「要重连才生效」�
         if (spot) ly += spot * 15;
 
         const cls = ['fedge', e.dashed && 'dashed', e.anim && 'anim'].filter(Boolean).join(' ');
+        /* 这张图自己的箭头 id —— 同页有多张 flow 图时不能写死 url(#fa)，那样会引用第一张的 */
+        const marker = svg.querySelector('marker');
+        const markerUrl = `url(#${marker ? marker.getAttribute('id') : 'fa'})`;
         /* data-edge-from / to 不只是给「聚焦」用的 ——
            visual-check 靠它判断一条边连的是谁，才能查出「边穿过了无关节点」。
            属性名跟 archify 的 SVG 保持一致（那边也是这两个名字）。 */
         parts.push(
           `<path class="${cls}" data-edge-from="${escapeXml(e.from)}" data-edge-to="${escapeXml(e.to)}" ` +
             `d="${d}"${e.tone ? ` style="color:var(--${e.tone})"` : ''}${
-              e.both ? ' marker-start="url(#fa)"' : ''
+              e.both ? ` marker-start="${markerUrl}"` : ''
             }/>`,
         );
         const edgeText = e.on || e.label;
