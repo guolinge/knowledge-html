@@ -80,10 +80,12 @@ parts:
   term:
     label: 你的终端
     sub: 一次性
+    facts: { 归属: 你的 shell（本机）, 生命周期: 一次命令一次, 需要什么权限: 无, 谁在用它: 你自己 }
     detail: 命令从这里进，结果也从这里出。整个 Node 进程跑完就退出，不留驻。
   main:
     label: main.js
     sub: 入口
+    facts: { 归属: 本机 Node 进程, 生命周期: 命令跑完就退, 需要什么权限: 读磁盘（发现 adapter）, 谁在用它: node 运行时（进程入口） }
     detail: |
       进来先做四件事：补 `PATH`（GUI 启动的终端常常找不到 `gh` / `docker`）、
       处理 `--version` 这类不需要发现的快速路径、**发现所有 adapter**、把参数交给 commander。
@@ -92,6 +94,7 @@ parts:
   registry:
     label: 注册表
     sub: 内存里的 Map
+    facts: { 归属: 本机 Node 进程的内存, 生命周期: 只活在这一次命令里, 需要什么权限: 无, 谁在用它: executeCommand() 按 site/name 查 }
     detail: |
       键是 `site/name`（这里是 `udp/portrait`），值是命令定义。
       每个 adapter 文件被 `import` 时执行的那次 `cli({...})`，就是往这里写一条。
@@ -99,6 +102,7 @@ parts:
   execution:
     label: executeCommand()
     sub: 收口
+    facts: { 归属: 本机 Node 进程, 生命周期: 命令跑完就退, 需要什么权限: 无（要不要借浏览器由它判断）, 谁在用它: main.js 分派进来 }
     detail: |
       它做四件事：按 `args` 声明校验并补默认值、判断这条命令要不要浏览器、调 `func`、结束之后关掉标签页。
       它只认类型、必填和默认值；==`limit ≤ 1000` 这种业务上限是 adapter 自己的事==（portrait.js 第 29 行）。
@@ -152,6 +156,7 @@ parts:
   tab:
     label: 自动化标签页
     sub: 会话锚点
+    facts: { 归属: Chrome 里（每条命令一个）, 生命周期: 命令结束就关掉, 需要什么权限: chrome.tabs, 谁在用它: 扩展（这一趟停在 about:blank，只占位） }
     detail: |
       每条命令占一个标签页（会话名 `site:udp:<uuid>`），跑完就被关掉。
       ==实测这一次它停在 `about:blank`==，命令从头到尾没让浏览器打开任何一个页面。
