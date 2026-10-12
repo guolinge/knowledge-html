@@ -94,6 +94,67 @@ rows:
 
 ```arch
 svg: candidate-paths
+bodies:
+  meta:
+    badge: 只有引用键
+    rows:
+      - { k: portraits, v: 41 个（1 个停用） }
+      - { k: relations, v: "3 条" }
+      - { k: domains, v: "7 个（1 个停用）" }
+    code: "value_set → setKey: city"
+    note: 没有候选值，也没有表名列名
+  ui:
+    rows:
+      - { k: PortraitRow, v: useStoredItems, link: inj, tip: 换字段才拉；改操作符、改值都不拉 }
+      - { k: RelationRow, v: propSetItems }
+      - { k: ValueControl, v: remote-method }
+    note: grep 'fetch(' 零命中
+  inj:
+    badge: 组件与宿主的全部契约
+    cells:
+      - { label: loadValueSet, sub: 值集合 }
+      - { label: searchValues, sub: 搜索 }
+      - { label: lookupValues, sub: 回显 }
+    code: "inject(key, async () => [])"
+    note: 没给就是空实现，不报错
+  host:
+    badge: 唯一发 HTTP 的地方
+    rows:
+      - { k: cache, v: 按 setKey 缓存 }
+      - { k: inflight, v: 同 key 复用 }
+      - { k: 失效, v: staffId / revision }
+    note: 预热结果列的 setKey
+  adp:
+    pairs:
+      - { from: "\"440300\"", to: "440300", note: JSON 标量 }
+      - { from: zhCn, to: "zh-CN" }
+      - { from: "status: 0", to: DISABLED }
+    note: 只做形状转换，不做业务判断
+  routeA:
+    badge: 5 秒投影
+    rows:
+      - { k: 入参, v: setKey 必填 }
+      - { k: 出参, v: "items[] 含停用" }
+      - { k: 错误, v: 400 / 404 }
+  routeB:
+    rows:
+      - { k: keyword, v: 子串匹配 }
+      - { k: values, v: 按 value 反查 }
+      - { k: limit, v: 默认 20 / 最大 50 }
+    note: values 优先，忽略 keyword
+  mysql:
+    badge: 值的原型
+    rows:
+      - { k: value, v: "\"440300\"" }
+      - { k: label, v: 深圳 / Shenzhen }
+      - { k: status, v: "0（停用）" }
+    code: "// 停用改 status，不删行"
+  stocks:
+    cells:
+      - { label: SEMI, sub: 板块 }
+      - { label: "00700.HK" }
+      - { label: "09988.HK" }
+    note: 共 21 条，没有停用态
 caption: 一次取值穿过五层，值集合和动态候选到服务端才分开。点任意零件看它这一层管什么，或者按下面两条导览各走一遍。
 parts:
   meta:

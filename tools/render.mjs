@@ -153,6 +153,35 @@ function lintAnchors(src) {
   return issues;
 }
 
+/* ---------- arch 整体图的 bodies 提醒 ----------
+   背景（2026-10-12 数过）：仓库里 48 张 arch 图，只有 6 张用了 bodies ——
+   绝大多数图是「一堆小矩形 + 一行字」。而 bodies 的能力（键值行 / 格子 /
+   条带 / 高低段 / 映射 / 计量 / 代码行）就摆在 blocks.md 里，只是没人先去看它。
+
+   这条只对**零件够多的图**开口（≥ 12 个），且只提醒、不阻塞：
+   零件少的图本来就装不下东西，硬加 bodies 反而是过度设计。
+   反例与正例：notes/process-thread-relation 的 §02 地图（bodies + scenarios + facts）。
+------------------------------------------------ */
+const ARCH_BODY_HINT_MIN_NODES = 12;
+function lintArchBodies(src) {
+  const issues = [];
+  for (const m of src.matchAll(/```arch\n([\s\S]*?)```/g)) {
+    const body = m[1];
+    const svg = (body.match(/^svg:\s*(\S+)/m) || [])[1];
+    if (!svg) continue;
+    if (/^bodies:/m.test(body) || /^scenarios:/m.test(body)) continue;
+    const file = path.join(ROOT, 'assets/arch', `${svg}.svg`);
+    if (!fs.existsSync(file)) continue;
+    const nodes = (read(file).match(/data-node-id="/g) || []).length;
+    if (nodes < ARCH_BODY_HINT_MIN_NODES) continue;
+    issues.push(
+      `arch 图 ${svg}.svg 有 ${nodes} 个零件，但没有 bodies —— 节点只有一行字，是目录不是地图。` +
+        `做法见 references/blocks.md 的 bodies 一节，示例 notes/process-thread-relation（本次检查不阻塞）`,
+    );
+  }
+  return issues;
+}
+
 /* ---------- 跨笔记链接的两种产物形态 ----------
    note.md 里跨篇链接统一写 ../<slug>/（和「前置」区块同一个方言）：
    · notes/<slug>/index.html：../<slug>/ 指向兄弟笔记目录，本来就对
@@ -238,6 +267,9 @@ function main() {
        否则 16 篇旧笔记会把每次 check / pre-push 全部拦下。 */
     for (const it of lintAnchors(src)) console.warn(`  · ${slug}: ${it}`);
     notices += lintAnchors(src).length;
+    // 整体图 bodies 提醒：只提醒不阻塞，理由见 lintArchBodies 的注释
+    for (const it of lintArchBodies(src)) console.warn(`  · ${slug}: ${it}`);
+    notices += lintArchBodies(src).length;
 
     if (CHECK) continue;
 
@@ -305,7 +337,7 @@ function main() {
   if (CHECK) {
     console.log(
       `\n  ${slugs.length} 篇：${errors} 个错误，${warnings} 个提醒` +
-        (notices ? `，另有 ${notices} 条弃用提醒（不阻塞）` : '') +
+        (notices ? `，另有 ${notices} 条提示（不阻塞）` : '') +
         (errors + warnings === 0 ? '  —— 没问题' : ''),
     );
     if (errors + warnings > 0) process.exitCode = 1;

@@ -383,8 +383,11 @@ text: |
 每条围绕一个问题，每一步只突出解释所需的对象和关系，不把全图缩成一串目录。
 节点的详细解释放在关系面板，关键对象名称和主要关系在全图上仍然可辨。
 
-做法对应 `arch` 的 `parts` / `tours`；实际示例见
-[server-code 首图](notes/server-code/note.md)。
+做法对应 `arch` 的 `parts` / `tours`；**节点里装什么**用同一个积木的 `bodies`（八种内容 + `badge` / `note`）。
+
+==最完整的一张示例是 [process-thread-relation 的 §02 地图](notes/process-thread-relation/note.md)==（`pt-map`：`bodies` + `scenarios` + `facts` + 两条导览都齐）。
+[server-code 首图](notes/server-code/note.md) 是只有 `parts` / `tours` 的简化版 ——
+只看它学不到「矩形里装什么」，而那才是整体图最容易塌掉的一半。
 
 这和原则 ③ 里「画到读者已经认识的锚点」是同一件事的两种用法。
 那一条讲画布上的位置：这条链最后那个东西，读者是不是已经认识。
@@ -415,6 +418,10 @@ text: |
   ==只写名字的节点，和只写名字的图，是同一种失败。==
 
   做法：`arch` 的 `bodies` 字段（八种内容 + `badge` / `note`），见 `blocks.md`。
+  示例看 [process-thread-relation 的地图](notes/process-thread-relation/note.md)：每个矩形里是键值行 / 小格子 / 高低段 / 映射，不是一行名字。
+
+  ++构建时会对「零件 ≥ 12 个、又没写 `bodies` / `scenarios`」的 `arch` 图给一条提醒（`·`，不阻塞）——
+  提醒只说这张图是目录风格，画不画由作者决定。++
 ```
 
 ### 两个高一层的能力：可点的格子、一张图两种状态
