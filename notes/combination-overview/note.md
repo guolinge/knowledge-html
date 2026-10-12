@@ -25,44 +25,123 @@ text: |
 
 ## 01 · 它在哪条链路上
 
-一次圈选预览要穿过四层。组件包住在第二层，上面吃 Metadata，下面把草稿交给宿主。
+一次圈选要穿过五块归属：浏览器里的组件包、两侧共用的协议层、服务端的编译与执行、两份存储，以及写元数据的 Data Admin。下面这张整体图把**归属**和**链路**画在一起 —— 点区域标题看这一层为什么这么分，点零件看它属于谁、和谁相连；`多层归属框 / 只留一层分区` 可以切换组织方式（只切边界，不挪零件）。
 
-```lane-stack
-- badge: LAYER 01
-  title: 元数据层
-  desc: 字段、关系、操作符的定义与物理映射，只有 Data Admin 能写
-  tone: muted
-  nodes:
-    - { title: "Data Admin（MySQL）", sub: "crm_dc_portrait / crm_dc_relation / ...", tag: 写 }
-    - { title: CrowdMetadata, sub: "GET /api/audience/metadata 的 pb 投影", tag: 读 }
-    - { title: ResolvedCrowdMetadata, sub: "壳里 resolve 出来的内部模型", tag: 解析 }
-  next: "宿主拉一次 Metadata 传给壳；壳先 resolve 再喂给子树 :: :: 组件自己不发请求"
-
-- badge: LAYER 02
-  title: 组件层 —— 这个包在这里
-  desc: 把 Metadata 渲染成界面，把操作变成草稿
-  tone: blue
-  nodes:
-    - { title: InsightCombiner, sub: "壳：props 进、草稿事件出", tag: "12 个 .vue" }
-    - { title: DraftQuery, sub: "允许半填的编辑中间态（协议在 dsl）", tag: "9 个 .ts" }
-  next: "宿主在提交前调 buildQuery :: :: 组件只抛变更，不提交"
-
-- badge: LAYER 03
-  title: 提交与校验
-  desc: 草稿收窄成 DSL，服务端再查一遍
-  tone: violet
-  nodes:
-    - { title: buildQuery(draft), sub: "结构完整性检查，实现也在 dsl", tag: "@insight/dsl" }
-    - { title: 服务端校验+编译, sub: "validateStructure + Semantics → compile", tag: "@insight/sql-builder" }
-  next: "SQL 交给 DAL :: :: 组件对这一层不可见"
-
-- badge: LAYER 04
-  title: 执行层
-  desc: 活查预览、异步快照
-  tone: green
-  nodes:
-    - { title: countSql / listSql / uidsSql, sub: "同一段 WHERE，四种外层", tag: compile 产物 }
-    - { title: "DAL → Doris", sub: "预览同步，快照异步", tag: 执行 }
+```arch
+svg: insight-chain
+caption: 六个归属框：用户侧 ⊃ 组件包（两层）；服务端、共享协议层、数据、外部系统各一层。虚线是回程（结果与草稿）与相对独立的引用。
+frames:
+  - id: admin
+    boundary: 0
+    label: 外部系统 · Data Admin
+    kind: classification
+    flat: true
+    detail: 分类依据是「谁拥有它」——Data Admin 是独立系统，不随洞察应用发布；它只做一件事：往元数据表里写字段、关系和默认值。
+  - id: data
+    boundary: 1
+    label: 数据 · 两份存储，角色不同
+    kind: logical
+    flat: true
+    detail: 逻辑归在一起，但不是一份存储：MySQL 存元数据与任务状态，Doris 存宽表、关系表和快照名单。它们的生命周期和负责人都不一样。
+  - id: serv
+    boundary: 2
+    label: 服务端 · 网络另一侧
+    kind: classification
+    flat: true
+    detail: 分类依据是「跑在哪」——Node BFF、编译器（一个 npm 包，只在服务端跑）和 DAL 都在网络另一侧。组件包拿不到它们，只能通过 HTTP 说话。
+  - id: dsl
+    boundary: 3
+    label: 共享协议层 · 浏览器与 Node 各引一份
+    kind: shared
+    flat: true
+    detail: 一个 npm 包、一份定义，两边各引一份构建产物。组件用它把形状翻译成操作符和控件，BFF 用它校验和编译——同一份协议，避免两边各自漂移。
+  - id: user
+    boundary: 4
+    label: 用户侧 · 浏览器
+    kind: classification
+    flat: true
+    detail: 分类依据是「跑在谁的机器上」：组件包和宿主应用都在用户浏览器里。宿主持有草稿、发请求；组件包只负责渲染和抛变更。
+  - id: pkg
+    boundary: 5
+    parent: user
+    label: 圈选组件包 @insight/combination
+    kind: contains
+    detail: 组成关系：壳、条件区、值控件共同构成这一个发布包。宿主把它当依赖引入，界面嵌在宿主页面里。
+bodies:
+  host:
+    rows:
+      - { k: 草稿, v: DraftQuery（允许半填） }
+      - { k: 请求, v: /api/preview · /api/snapshots }
+      - { k: 收到, v: 人数 · 一页名单 · snapshotId }
+    note: 草稿的真相在宿主；组件只抛变更，不替它提交
+  shell:
+    badge: 12 个 .vue 的入口
+    rows:
+      - { k: props, v: metadata · modelValue · 三个加载函数 }
+      - { k: 事件, v: update:modelValue }
+      - { k: 壳内, v: resolveCrowdMetadata() 一次 }
+    code: v-model="query" :metadata="crowd"
+    note: 只渲染 include；exclude 原样保留
+  rows:
+    rows:
+      - { k: Section, v: 组间逻辑 + 组增删 }
+      - { k: Group, v: 行级逻辑 · 幽灵行 }
+      - { k: 三种行, v: 特征 / 关系 / UID }
+    note: 界面嵌套和草稿树同构
+  ctrl:
+    rows:
+      - { k: ValueControl, v: 形态由 controlFor 定 }
+      - { k: TemporalOps, v: 时间口径 + 比较符 }
+      - { k: LogicToggle, v: AND / OR 胶囊 }
+    note: 候选值靠注入的函数现取，组件不认 HTTP
+  dsl:
+    badge: 两侧共用一份
+    rows:
+      - { k: 协议, v: DraftQuery · buildQuery }
+      - { k: 读模型, v: CrowdMetadata · resolveCrowdMetadata }
+      - { k: 决策, v: applicableOps · controlFor }
+    note: 浏览器安全、零运行时依赖
+  bff:
+    rows:
+      - { k: 取投影, v: 读元数据表组装（5 秒 TTL） }
+      - { k: 校验, v: validateStructure + Semantics }
+      - { k: 编译, v: compile → 四条 SQL }
+      - { k: 执行, v: 调 DAL，结果回宿主 }
+    code: compile(query, catalog)
+  sb:
+    rows:
+      - { k: 先校验, v: 形状 → 语义（要 Catalog） }
+      - { k: 再编译, v: 四语句共用同一段 WHERE }
+    note: 只产 SQL 文本，不连数据库
+  dal:
+    badge: 唯一数据面
+    rows:
+      - { k: 预览, v: 同步活查人数与名单 }
+      - { k: 快照, v: CREATE JOB 冻名单 }
+    note: 组件和 BFF 都拿不到 Doris 的表名与 SQL 细节
+  admin:
+    rows:
+      - { k: 字段, v: field_key · 类型四元组 }
+      - { k: 关系, v: object + properties（含主键属性） }
+      - { k: 默认值, v: defaultValue + explain }
+  mysql:
+    rows:
+      - { k: crm_dc_, v: portrait / relation / attr }
+      - { k: 值集合, v: value_set（停用条目也留） }
+      - { k: 任务, v: snapshot_job（状态机） }
+  doris:
+    rows:
+      - { k: 宽表, v: user_portraits_wide（含管户列） }
+      - { k: 关系长表, v: rel_holding / rel_product }
+      - { k: 名单, v: audience_snapshot（日分区） }
+tours:
+  - id: life
+    label: 一次圈选的一生
+    steps:
+      - { at: [admin, mysql], text: "Data Admin 往 == 元数据表== 里写一行：字段、类型、默认值。BFF 每 5 秒读一次，组装成投影。" }
+      - { at: [bff, host, dsl, shell], text: "宿主拿到 ==CrowdMetadata==；壳 resolve 一次转成内部模型；组件用 dsl 的形状规则渲染出操作符和控件；草稿留在宿主。" }
+      - { at: [host, bff, sb, dal], text: "点了查询：宿主把草稿连同身份发给 BFF。==草稿先收窄成 DSL==，服务端再校验、编译成 SQL，交给 DAL。" }
+      - { at: [dal, doris], text: "预览是活查，当场回人数和一页名单；创建事项才异步冻名单 —— ==INSERT SELECT== 写进 Doris 的日分区，客户端只拿到 snapshotId。" }
 ```
 
 技术方案给这个包画了很清楚的边界：**不绑定具体 HTTP 接口，不生成 SQL，也不连接数据库**。三件事都推给了别人：
