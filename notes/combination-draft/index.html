@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>draft.ts：DraftQuery 协议逐字段解剖</title>
-<meta name="description" content="packages/combination/src/draft.ts 全文 273 行：7 个类型、3 个守卫、2 个工厂、1 道闸。这篇把协议的每个字段拆开讲 —— 谁写它、什么时候缺省、值有哪几种形状、buildQuery 按 op 分派检查什么。全部机制 2026-10-10 tsx 实跑验证。" />
+<title>draft 协议：DraftQuery 逐字段解剖</title>
+<meta name="description" content="DraftQuery 全家和 buildQuery 现在住在 @insight/dsl/src/draft.ts（276 行），组合器和 BFF 重导出同一份协议。这篇逐字段解剖：判别字段、value 六种形状、detail vs times、谁写哪个字段、buildQuery 按 op 分派检查什么。2026-10-12 按 crm-dsl-stru @ 7f2ec46 全部实跑复核。" />
 <link rel="stylesheet" href="../../assets/theme.css?v=e6a9ffd3d6" />
   <link rel="stylesheet" href="../../assets/blocks.css?v=2cdcd8509f" />
   <link rel="stylesheet" href="../../assets/archify-embed.css?v=68fec0b81b" />
@@ -27,6 +27,7 @@
   <aside class="toc" id="toc">
       <p class="toc-title">目录</p>
       <a href="../../index.html" class="sub">← 全部笔记</a>
+      <a href="#协议现在住在哪">协议现在住在哪</a>
       <a href="#类型全家的形状">类型全家的形状</a>
       <a href="#判别字段switch-的依据">判别字段：switch 的依据</a>
       <a href="#draftquery根上的四个字段">DraftQuery：根上的四个字段</a>
@@ -36,33 +37,99 @@
       <a href="#uidleaf指定-uid3-个字段没有可选的" class="sub">UidLeaf：指定 UID（3 个字段，没有可选的）</a>
       <a href="#谁写哪个字段">谁写哪个字段</a>
       <a href="#buildquery草稿的守门员">buildQuery：草稿的守门员</a>
-      <a href="#两个工厂与省键的细节">两个工厂与省键的细节</a>
+      <a href="#三个工厂与省键的细节">三个工厂与省键的细节</a>
       <a href="#错误码清单">错误码清单</a>
   </aside>
 
   <main>
     <div class="hero">
       <span class="eyebrow">● 从零理解 · 协议</span>
-      <h1>draft.ts：DraftQuery 协议逐字段解剖</h1>
-      <p class="lede">packages/combination/src/draft.ts 全文 273 行：7 个类型、3 个守卫、2 个工厂、1 道闸。这篇把协议的每个字段拆开讲 —— 谁写它、什么时候缺省、值有哪几种形状、buildQuery 按 op 分派检查什么。全部机制 2026-10-10 tsx 实跑验证。</p>
+      <h1>draft 协议：DraftQuery 逐字段解剖</h1>
+      <p class="lede">DraftQuery 全家和 buildQuery 现在住在 @insight/dsl/src/draft.ts（276 行），组合器和 BFF 重导出同一份协议。这篇逐字段解剖：判别字段、value 六种形状、detail vs times、谁写哪个字段、buildQuery 按 op 分派检查什么。2026-10-12 按 crm-dsl-stru @ 7f2ec46 全部实跑复核。</p>
     </div>
 
 <aside class="needs">
       <p class="needs-title">读这篇之前，你需要先知道</p>
       <a class="need" href="../combination-overview/">← <b>4. 组件层</b><span>受控的圈选组件包：Metadata 驱动渲染，草稿收窄成 DSL</span></a>
     </aside>
-    <div class="provenance"><span><b>来源</b> 本仓库 crm-dsl-stru packages/combination/src/draft.ts 全文 273 行 @ e7fdf40（逐行读过） · packages/combination/src/index.ts（导出面）、packages/dsl/src/schema.ts（portraitLeaf 等构造器）、validate.ts（EMPTY_GROUP / detail requires objects） · npx tsx 实跑（2026-10-10）：空组 / detail 空 objects / times 空 objects 三例在 buildQuery 与 validateStructure 的真实输出；portraitDraft 省键行为；类型守卫对 group 的返回值</span><span><b>生成</b> 2026-10-10</span><span><b>模型</b> pi (openai-codex)</span></div>
+    <div class="provenance"><span><b>来源</b> 本仓库 crm-dsl-stru packages/dsl/src/draft.ts 全文 276 行 @ 7f2ec46（逐行读过，与旧版 combination/draft.ts diff 过：仅新增 eq_default/neqDefault 分支） · packages/dsl/src/audience.ts（CrowdMetadata 全家）、operators.ts（OPERATOR_DISPLAY）、fieldType.ts（hasDefaultValueOp）、clock.ts（秒级换算） · packages/combination/src/draft.ts（3 行转发）、relationDraft.ts（主键属性生成 props）、components/TemporalOps.vue · packages/sql-builder/src/validate.ts（validateStructure / EMPTY_GROUP 第二层防线） · npx tsx 实跑（2026-10-12）：11 个输入在 buildQuery 与 validateStructure 的真实输出；portraitDraft 省键行为</span><span><b>生成</b> 2026-10-10</span><span><b>模型</b> pi (openai-codex)</span></div>
     <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">TypeScript</span> <span class="tag tone-muted">协议设计</span> <span class="tag tone-muted">判别联合</span> <span class="tag tone-muted">圈选</span> <span class="tag tone-muted">校验</span></span></div>
 
-<p><a href="../combination-components/">组件图鉴</a>讲了 11 个组件长什么样，<a href="../combination-mechanics/">机制篇</a>讲了行为。这一篇只解剖一个文件：<code>src/draft.ts</code>，全文 273 行 —— <strong>组件和编译器之间的协议本体</strong>。</p>
-<p>界面上每一样东西（范围下拉、条件组、三种行、值输入框）在这份协议里都有一个字段与它对应；界面允许的每种「没填完」，协议里都表现为「字段缺席」。读完这篇，你拿到任意一份 DraftQuery JSON 应该能直接说出它对应界面的什么状态。</p>
+<p><a href="../combination-components/">组件图鉴</a>讲了 11 个组件长什么样，<a href="../combination-mechanics/">机制篇</a>讲了行为。这一篇解剖<strong>协议本体</strong>：DraftQuery 全家、每个字段的写入者和缺省边界，以及 <code>buildQuery</code> 这道闸。</p>
+<p>2026-10-12 按最新代码（@ 7f2ec46）全文重写。上一次写这篇时协议住在 <code>packages/combination/src/draft.ts</code>；现在它搬进了 <code>@insight/dsl/src/draft.ts</code>（276 行），组合器和 BFF 从同一份协议重导出 —— 这是「包拆成 dsl 协议 + sql-builder 编译器」重构的一部分。</p>
 <div class="callout tone-blue">
       <span class="ic">🧭</span>
-      <div><p><strong>这篇的解剖顺序</strong>：先看类型全家的形状（01），再看判别字段怎么分派（02），
-然后逐字段过 DraftQuery 和三种叶子（03/04），最后是 buildQuery 这道闸
-（06）和两个工厂（07）。所有「谁写它」「缺省时是什么」都经过 tsx 实跑验证。</p>
+      <div><p><strong>本篇结构</strong>：协议现在住哪（00）→ 类型全家（01）→ 判别字段（02）→
+逐字段解剖（03/04）→ 谁写哪个字段（05）→ buildQuery 的闸（06）→
+工厂与省键（07）→ 错误码清单（08）。
+全部「谁写它」「缺省时是什么」「填错会说什么」都经过 tsx 实跑验证。</p>
 </div>
-    </div><h2 id="类型全家的形状"><span class="num">01</span>类型全家的形状</h2>
+    </div><h2 id="协议现在住在哪"><span class="num">00</span>协议现在住在哪</h2>
+<p>拆包之后的依赖关系是一条直线：</p>
+<div class="pipe"><div class="lane tone-blue">
+        <div class="lane-meta">
+          <span class="ln">LAYER 01</span>
+          <b>@insight/dsl —— 协议包</b>
+          <small>只描述「条件长什么样」，不编译、不执行</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>src/draft.ts</b>
+        <small>276 行：Draft* 类型 + buildQuery + 工厂</small>
+        <span class="tag tone-blue">本篇主角</span>
+      </div><div class="pnode">
+        <b>src/audience.ts</b>
+        <small>CrowdMetadata 全家、ValueSource</small>
+        <span class="tag tone-blue">界面协议</span>
+      </div><div class="pnode">
+        <b>src/operators.ts</b>
+        <small>OPERATOR_DISPLAY：操作符三语名与模板</small>
+        <span class="tag tone-blue">字典</span>
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">组件和 BFF 各自 import<span class="note">同一份类型，没有两套</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-violet">
+        <div class="lane-meta">
+          <span class="ln">LAYER 02</span>
+          <b>@insight/combination —— 组件包</b>
+          <small>渲染界面，把人的操作变成草稿</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>src/draft.ts</b>
+        <small>3 行：从 @insight/dsl 重导出</small>
+        <span class="tag tone-violet">转发</span>
+      </div><div class="pnode">
+        <b>relationDraft.ts</b>
+        <small>用关系主键属性生成出生草稿</small>
+        <span class="tag tone-violet">新增</span>
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">草稿经宿主提交</span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-green">
+        <div class="lane-meta">
+          <span class="ln">LAYER 03</span>
+          <b>@insight/sql-builder —— 编译器包</b>
+          <small>结构校验、语义校验、编译 SQL</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>src/validate.ts</b>
+        <small>validateStructure / validateSemantics</small>
+        <span class="tag tone-green">第二层防线</span>
+      </div><div class="pnode">
+        <b>src/compile.ts</b>
+        <small>Validate → Resolve → Compile → Assemble</small>
+        <span class="tag tone-green">编译</span>
+      </div></div>
+      </div></div><p><code>packages/combination/src/draft.ts</code> 现在的全部内容：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-ts">// DraftQuery 与 buildQuery 的实现放在 @insight/dsl，组件和 BFF 共用同一份协议。
+export { buildQuery, blankDetail, isDraftPortrait, isDraftRelation, isDraftUid, portraitDraft } from '@insight/dsl';
+export type { DraftNode, DraftPortrait, DraftProp, DraftProps, DraftQuery, DraftRelation, DraftTree } from '@insight/dsl';
+</code></pre></div>
+<p>搬家的同时协议加了一族新操作符（<code>eq_default</code> / <code>neq_default</code>，03 节），其余逐行未变 —— 旧版与新版的 diff 只有两处 import 路径和两个 eqDefault 分支。</p>
+<h2 id="类型全家的形状"><span class="num">01</span>类型全家的形状</h2>
 <p>draft.ts 导出 7 个类型、3 个守卫、2 个工厂和 1 道闸（<code>buildQuery</code>），另有 12 个私有函数。类型结构是一棵和界面同构的树：</p>
 <div class="tree" data-tree><ul class="tlist"><li class="has-kids">
             <div class="tnode tone-violet" data-tree-node>
@@ -136,19 +203,13 @@
             </div>
             
           </li></ul>
-          </li></ul></div><p><code>?</code> 是这篇的主角。<strong>草稿和 DSL 用的是同一棵树，区别全部落在可选性上</strong>：草稿允许 <code>field: ''</code>、允许 <code>value</code> 缺席、允许 <code>objects</code> 空 —— 这些在 DSL（<code>InsightQuery</code>）里全部不合法。两者的大小关系是刻意维护的，测试里有一行类型断言：</p>
+          </li></ul></div><p><code>?</code> 是这篇的主角。<strong>草稿和 DSL 用的是同一棵树，区别全部落在可选性上</strong>：草稿允许 <code>field: ''</code>、允许 <code>value</code> 缺席、允许 <code>objects</code> 空 —— 这些在 DSL（<code>InsightQuery</code>）里全部不合法。两者的大小关系是刻意维护的，测试里有一行类型断言（搬包后仍在，<code>combination/test/build.spec.ts</code>）：</p>
 <div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-ts">type _legalQueryIsDraft = Expect&lt;InsightQuery extends DraftQuery ? true : false&gt;;
 </code></pre></div>
 <p>合法的 DSL 一定能当草稿用。所以「打开历史 DSL 回显」不需要任何转换，直接塞回组件；反方向（草稿 → DSL）才需要 <code>buildQuery</code> 收窄。</p>
 <h2 id="判别字段switch-的依据"><span class="num">02</span>判别字段：switch 的依据</h2>
 <p>七个类型里除了 <code>DraftQuery</code> 和 <code>DraftProps</code>，都带一个字面量 <code>type</code> 字段。这不是装饰 —— 它是**判别联合（discriminated union）**的判别符，TypeScript 靠它收窄类型，运行时靠它分派渲染：</p>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>type 的取值</th><th>渲染成什么</th><th>由谁消费</th></tr></thead><tbody><tr><th>'group'</th><td data-label="渲染成什么">ConditionGroup（递归）</td><td data-label="由谁消费">buildTree</td></tr><tr><th>'portrait'</th><td data-label="渲染成什么">PortraitRow</td><td data-label="由谁消费">buildPortrait</td></tr><tr><th>'relation'</th><td data-label="渲染成什么">RelationRow</td><td data-label="由谁消费">buildRelation</td></tr><tr><th>'uid'</th><td data-label="渲染成什么">UidRow</td><td data-label="由谁消费">buildUid</td></tr></tbody></table></div><p>三个守卫就是围绕判别字段的标准缩窄：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-ts">export function isDraftPortrait(node: DraftNode): node is DraftPortrait {
-  return node.type === 'portrait';
-}
-// isDraftRelation / isDraftUid 同型
-</code></pre></div>
-<p>ConditionGroup 的模板里 <code>v-if=&quot;isDraftPortrait(entry.child)&quot;</code> 三连选行组件，靠的就是它们；实跑验证过，group 节点对三个守卫都返回 false —— 它们只认叶子。</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>type 的取值</th><th>渲染成什么</th><th>由谁消费</th></tr></thead><tbody><tr><th>'group'</th><td data-label="渲染成什么">ConditionGroup（递归）</td><td data-label="由谁消费">buildTree</td></tr><tr><th>'portrait'</th><td data-label="渲染成什么">PortraitRow</td><td data-label="由谁消费">buildPortrait</td></tr><tr><th>'relation'</th><td data-label="渲染成什么">RelationRow</td><td data-label="由谁消费">buildRelation</td></tr><tr><th>'uid'</th><td data-label="渲染成什么">UidRow</td><td data-label="由谁消费">buildUid</td></tr></tbody></table></div><p>三个守卫（<code>isDraftPortrait</code> / <code>isDraftRelation</code> / <code>isDraftUid</code>）是围绕判别字段的标准缩窄，ConditionGroup 模板里 <code>v-if</code> 三连选行组件靠的就是它们。实跑验证过，group 节点对三个守卫都返回 false —— 它们只认叶子。</p>
 <p><code>DraftRelation</code> 里还藏着<strong>第二个判别字段</strong>：<code>formula: 'detail' | 'times'</code>。同一个关系叶子，公式不同，<code>op</code> 的合法集、<code>objects</code> 和 <code>value</code> 的语义全都不一样（04 节展开）。</p>
 <h2 id="draftquery根上的四个字段"><span class="num">03</span>DraftQuery：根上的四个字段</h2>
 <table>
@@ -211,13 +272,13 @@
 <td><code>field</code></td>
 <td><code>string</code></td>
 <td>ConditionNameSelect</td>
-<td>必须是 <code>crm_dc_portrait.field_key</code>；草稿里允许 <code>''</code>（还没选）</td>
+<td>必须是元数据 <code>field_key</code>；草稿里允许 <code>''</code>（还没选）</td>
 </tr>
 <tr>
 <td><code>op</code></td>
 <td><code>Op</code></td>
-<td>PortraitRow 操作符下拉</td>
-<td>必须落在 <code>applicableOps(shape)</code> 里 —— 形状四元组决定的，机制篇 03 节</td>
+<td>PortraitRow / TemporalOps</td>
+<td>必须落在 <code>applicableOps(shape)</code> 里</td>
 </tr>
 <tr>
 <td><code>value</code></td>
@@ -227,8 +288,9 @@
 </tr>
 </tbody>
 </table>
-<p><strong>value 是整个协议里唯一「一个字段、五种形状」的地方</strong>，也是草稿半填状态的载体：</p>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>op 族</th><th>value 形状</th><th>实例</th><th>填错时 buildQuery 说</th></tr></thead><tbody><tr><th><code>is_null</code> / <code>is_not_null</code></th><td data-label="value 形状"><span class="tag tone-red">不许有 —— 键都不该出现</span></td><td data-label="实例"><code>{ &quot;op&quot;: &quot;is_null&quot; }</code></td><td data-label="填错时 buildQuery 说"><code>VALUE_TYPE</code>：does not take a value</td></tr><tr><th><code>in</code> / <code>not_in</code></th><td data-label="value 形状"><code>ScalarValue[]</code> 数组</td><td data-label="实例"><code>{ &quot;op&quot;: &quot;in&quot;, &quot;value&quot;: [&quot;HK&quot;, &quot;US&quot;] }</code></td><td data-label="填错时 buildQuery 说"><code>INCOMPLETE_LEAF</code>：requires an array</td></tr><tr><th><code>between</code></th><td data-label="value 形状">二元组 <code>[min, max]</code></td><td data-label="实例"><code>{ &quot;op&quot;: &quot;between&quot;, &quot;value&quot;: [100, 500] }</code></td><td data-label="填错时 buildQuery 说"><code>INCOMPLETE_LEAF</code>：requires [min, max]</td></tr><tr><th><code>last_n_days</code> 等四种相对时间</th><td data-label="value 形状">正整数 number（填 N 本身，单位在操作符上）</td><td data-label="实例"><code>{ &quot;op&quot;: &quot;last_n_days&quot;, &quot;value&quot;: 30 }</code></td><td data-label="填错时 buildQuery 说"><code>VALUE_TYPE</code>：requires a positive integer</td></tr><tr><th><code>eq</code> / <code>neq</code> / <code>lt</code> / <code>lte</code> / <code>gt</code> / <code>gte</code></th><td data-label="value 形状">标量：string | number | boolean</td><td data-label="实例"><code>{ &quot;op&quot;: &quot;gte&quot;, &quot;value&quot;: 1000000 }</code></td><td data-label="填错时 buildQuery 说">缺了 <code>INCOMPLETE_LEAF</code>：requires a value</td></tr></tbody></table></div><p><code>ScalarValue</code> 是 <code>string | number | boolean</code> 三者之一 —— 没有 <code>null</code>，没有对象。日期和时间字段的值是 Unix 毫秒数（number），界面上的日期串只是 <code>ValueControl</code> 的显示层。</p>
+<p><strong>value 是整个协议里「一个字段、六种形状」的地方</strong>，也是草稿半填状态的载体：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>op 族</th><th>value 形状</th><th>实例</th><th>填错时 buildQuery 说</th></tr></thead><tbody><tr><th><code>is_null</code> / <code>is_not_null</code></th><td data-label="value 形状"><span class="tag tone-red">不许有 —— 键都不该出现</span></td><td data-label="实例"><code>{ &quot;op&quot;: &quot;is_null&quot; }</code></td><td data-label="填错时 buildQuery 说"><code>VALUE_TYPE</code>：does not take a value</td></tr><tr><th><code>eq_default</code> / <code>neq_default</code></th><td data-label="value 形状"><span class="tag tone-red">同样不许有 —— <mark class="mk-blue">和源数据默认值比较</mark></span></td><td data-label="实例"><code>{ &quot;op&quot;: &quot;eq_default&quot; }</code></td><td data-label="填错时 buildQuery 说"><code>VALUE_TYPE</code>：does not take a value</td></tr><tr><th><code>in</code> / <code>not_in</code></th><td data-label="value 形状"><code>ScalarValue[]</code> 数组</td><td data-label="实例"><code>{ &quot;op&quot;: &quot;in&quot;, &quot;value&quot;: [&quot;HK&quot;, &quot;US&quot;] }</code></td><td data-label="填错时 buildQuery 说"><code>INCOMPLETE_LEAF</code>：requires an array</td></tr><tr><th><code>between</code></th><td data-label="value 形状">二元组 <code>[min, max]</code></td><td data-label="实例"><code>{ &quot;op&quot;: &quot;between&quot;, &quot;value&quot;: [100, 500] }</code></td><td data-label="填错时 buildQuery 说"><code>INCOMPLETE_LEAF</code>：requires [min, max]</td></tr><tr><th><code>last_n_days</code> 等四种相对时间</th><td data-label="value 形状">正整数 number（填 N 本身，单位在操作符上）</td><td data-label="实例"><code>{ &quot;op&quot;: &quot;last_n_days&quot;, &quot;value&quot;: 30 }</code></td><td data-label="填错时 buildQuery 说"><code>VALUE_TYPE</code>：requires a positive integer</td></tr><tr><th><code>eq</code> / <code>neq</code> / <code>lt</code> / <code>lte</code> / <code>gt</code> / <code>gte</code></th><td data-label="value 形状">标量：string | number | boolean</td><td data-label="实例"><code>{ &quot;op&quot;: &quot;gte&quot;, &quot;value&quot;: 1000000 }</code></td><td data-label="填错时 buildQuery 说">缺了 <code>INCOMPLETE_LEAF</code>：requires a value</td></tr></tbody></table></div><p><code>ScalarValue</code> 是 <code>string | number | boolean</code> 三者之一 —— 没有 <code>null</code>，没有对象。日期和时间字段的值是<strong>秒级 Unix 时间戳</strong>（number；拆包重构把毫秒统一成了秒，<code>dsl/clock.ts</code> 出口就是秒）。</p>
+<p><code>eq_default</code> / <code>neq_default</code> 是拆包期间新增的一族：<strong>连续型和时间型</strong>字段如果配了默认值（<code>defaultValue</code> + <code>defaultExplain</code>），用户可以用「等于默认值 / 不等于默认值」圈人，值就是元数据里的那个默认值，草稿里不携带。<code>applicableOps</code> 只给带默认值的字段追加这两个 op（<code>fieldType.ts</code> 的 <code>hasDefaultValueOp</code>）。界面上它们显示成 <code>= 未发生交易</code> 这样的提示（默认值解释），TemporalOps 组件负责渲染。</p>
 <h3 id="draftrelation关系行7-个字段">DraftRelation：关系行（7 个字段）</h3>
 <table>
 <thead>
@@ -249,7 +311,7 @@
 <tr>
 <td><code>relation</code></td>
 <td><code>string</code></td>
-<td>必填，= <code>crm_dc_relation.relation_key</code>；草稿允许 <code>''</code></td>
+<td>必填，= 元数据 <code>relation_key</code>；草稿允许 <code>''</code></td>
 <td>同左</td>
 </tr>
 <tr>
@@ -313,21 +375,21 @@
               <span class="tdot" aria-hidden="true"></span>
               <b>DraftProp</b>
               <code>field / op / value?</code>
-              <span class="tnote">field = crm_dc_relation_attr.field_key，op/value 的形状约束与 portrait 完全同套</span>
+              <span class="tnote">field = 关系属性 field_key，op/value 的形状约束与 portrait 同套 —— <mark class="mk-blue">但 eq_default/neq_default 在这里被明确禁止</mark></span>
             </div>
             
           </li></ul>
           </li></ul>
-          </li></ul></div><p><code>qty ≥ 100</code> 编译出来是这一行的 <code>qty &gt;= 100</code>，不是 <code>SUM(qty) &gt;= 100</code> —— 协议层面就不存在聚合语义，属性只描述单条记录。</p>
+          </li></ul></div><p>关系属性上禁用默认值比较是 2026-10-12 实跑确认的新行为：往 props 里塞 <code>{ field: 'qty', op: 'eq_default' }</code> 会抛 <code>OP_NOT_ALLOWED: relation prop does not allow eq_default</code>。数量这类属性的默认值语义没有定义，协议干脆不收。<code>qty ≥ 100</code> 编译出来是这一行的 <code>qty &gt;= 100</code>，不是 <code>SUM(qty) &gt;= 100</code> —— 协议层面不存在聚合语义。</p>
 <h3 id="uidleaf指定-uid3-个字段没有可选的">UidLeaf：指定 UID（3 个字段，没有可选的）</h3>
 <div class="compare-wrap"><table class="compare"><thead><tr><th>字段</th><th>约束</th><th>填错时</th></tr></thead><tbody><tr><th><code>op</code></th><td data-label="约束">只有 in / not_in —— UID 叶子没有大小比较</td><td data-label="填错时">写了别的 op：<code>OP_NOT_ALLOWED</code></td></tr><tr><th><code>uids</code></th><td data-label="约束"><code>string[]</code>，<mark class="mk-blue">必填非空</mark>，每项必须是字符串</td><td data-label="填错时">空/缺：<code>INCOMPLETE_LEAF</code>：uid leaf requires uids</td></tr></tbody></table></div><p>UID 保字符串是协议级的决定：<code>9007199254740993</code> 超出 JS 安全整数，转 number 就错。解析、去重、500 截断发生在 UidRow 的输入层，协议只收干净的数组。</p>
 <h2 id="谁写哪个字段"><span class="num">05</span>谁写哪个字段</h2>
 <p>协议的每个字段都有唯一的写入者，双向对得上：</p>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>协议字段</th><th>写入的组件</th><th>什么时候写</th></tr></thead><tbody><tr><th><code>scope.kind</code> / <code>scope.groupIds</code></th><td data-label="写入的组件">ScopeBar</td><td data-label="什么时候写">用户切范围；身份加载后 clampScope 可能替用户改写</td></tr><tr><th><code>include</code> 顶层（logic、组数）</th><td data-label="写入的组件">ConditionSection</td><td data-label="什么时候写">加组 / 删组 / 切组间逻辑</td></tr><tr><th><code>group.logic</code> / <code>children</code></th><td data-label="写入的组件">ConditionGroup</td><td data-label="什么时候写">切行级逻辑；行的增删替换都在这层落地</td></tr><tr><th><code>portrait.field</code> / <code>relation</code></th><td data-label="写入的组件">ConditionNameSelect</td><td data-label="什么时候写">级联下拉选中，带 field:/relation: 前缀</td></tr><tr><th><code>portrait.op</code></th><td data-label="写入的组件">PortraitRow / RelationRow 的操作符下拉</td><td data-label="什么时候写">可选项来自 metadata.operators ∩ applicableOps</td></tr><tr><th><code>value</code></th><td data-label="写入的组件">ValueControl</td><td data-label="什么时候写">defineModel 赋值，行组件包成新叶子上抛</td></tr><tr><th><code>relation.formula</code> / <code>objects</code> / <code>props.*</code></th><td data-label="写入的组件">RelationRow</td><td data-label="什么时候写">公式切换、客体多选、属性过滤增删</td></tr><tr><th><code>uid.op</code> / <code>uids</code></th><td data-label="写入的组件">UidRow</td><td data-label="什么时候写">粘贴文本 parseUids 后写入</td></tr></tbody></table></div><p>反方向也成立：从一份 DraftQuery JSON 反推界面 —— <code>children</code> 里有多少个 group 就渲染几个灰色圆角块，一行 <code>type</code> 决定行组件，<code>props.items.length &gt; 0</code> 决定关系行的属性区展不展开。协议即界面。</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>协议字段</th><th>写入的组件</th><th>什么时候写</th></tr></thead><tbody><tr><th><code>scope.kind</code> / <code>scope.groupIds</code></th><td data-label="写入的组件">ScopeBar</td><td data-label="什么时候写">用户切范围；身份加载后 clampScope 可能替用户改写</td></tr><tr><th><code>include</code> 顶层（logic、组数）</th><td data-label="写入的组件">ConditionSection</td><td data-label="什么时候写">加组 / 删组 / 切组间逻辑</td></tr><tr><th><code>group.logic</code> / <code>children</code></th><td data-label="写入的组件">ConditionGroup</td><td data-label="什么时候写">切行级逻辑；行的增删替换都在这层落地</td></tr><tr><th><code>portrait.field</code> / <code>relation</code></th><td data-label="写入的组件">ConditionNameSelect</td><td data-label="什么时候写">级联下拉选中，带 field:/relation: 前缀</td></tr><tr><th>时间/日期字段的 <code>op</code></th><td data-label="写入的组件">TemporalOps</td><td data-label="什么时候写">模式选择：固定时间（&gt; &gt;= &lt; &lt;= = != + 默认值）或最近X天/X天之前</td></tr><tr><th>其余 <code>op</code></th><td data-label="写入的组件">PortraitRow / RelationRow 的操作符下拉</td><td data-label="什么时候写">可选项来自 metadata 操作符 ∩ applicableOps</td></tr><tr><th><code>value</code></th><td data-label="写入的组件">ValueControl</td><td data-label="什么时候写">defineModel 赋值，行组件包成新叶子上抛</td></tr><tr><th><code>relation.formula</code> / <code>objects</code> / <code>props.*</code></th><td data-label="写入的组件">RelationRow</td><td data-label="什么时候写">公式切换、客体多选、属性过滤增删</td></tr><tr><th><code>uid.op</code> / <code>uids</code></th><td data-label="写入的组件">UidRow</td><td data-label="什么时候写">粘贴文本 parseUids 后写入</td></tr></tbody></table></div><p>反方向也成立：从一份 DraftQuery JSON 反推界面 —— <code>children</code> 里有多少个 group 就渲染几个灰色圆角块，一行 <code>type</code> 决定行组件，<code>props.items.length &gt; 0</code> 决定关系行的属性区展不展开。协议即界面。</p>
 <h2 id="buildquery草稿的守门员"><span class="num">06</span>buildQuery：草稿的守门员</h2>
-<p><code>buildQuery(draft): InsightQuery</code> 是这份文件的主函数，273 行里它占了约 200 行。它做且只做<strong>结构完整性检查</strong> —— 不看 Metadata，不查字段存不存在、值类型对不对（那是服务端 <code>validateSemantics</code> 的事）。</p>
-<p>按节点类型分派，每个 op 族一条检查路。下面交互里的错误码和报错文案全部是 tsx 实跑的真实输出：</p>
-<div class="demo" data-widget="combination-build-lab" data-config="{&quot;groups&quot;:[{&quot;name&quot;:&quot;根与组&quot;,&quot;cases&quot;:[{&quot;name&quot;:&quot;version 写成 2&quot;,&quot;verdict&quot;:&quot;err&quot;,&quot;code&quot;:&quot;UNSUPPORTED_VERSION&quot;,&quot;message&quot;:&quot;only version 1 is supported&quot;,&quot;draft&quot;:&quot;{ \&quot;version\&quot;: 2, \&quot;scope\&quot;: { \&quot;type\&quot;: \&quot;scope\&quot;, \&quot;kind\&quot;: \&quot;self\&quot; },\n  \&quot;include\&quot;: null, \&quot;exclude\&quot;: null }\n&quot;},{&quot;name&quot;:&quot;组缺 logic&quot;,&quot;verdict&quot;:&quot;err&quot;,&quot;code&quot;:&quot;INCOMPLETE_LEAF&quot;,&quot;message&quot;:&quot;group requires AND or OR&quot;,&quot;draft&quot;:&quot;{ \&quot;version\&quot;: 1, \&quot;scope\&quot;: { \&quot;type\&quot;: \&quot;scope\&quot;, \&quot;kind\&quot;: \&quot;self\&quot; },\n  \&quot;include\&quot;: { \&quot;type\&quot;: \&quot;group\&quot;, \&quot;children\&quot;: [] }, \&quot;exclude\&quot;: null }\n&quot;},{&quot;name&quot;:&quot;空组&quot;,&quot;verdict&quot;:&quot;ok&quot;,&quot;draft&quot;:&quot;{ \&quot;version\&quot;: 1, \&quot;scope\&quot;: { \&quot;type\&quot;: \&quot;scope\&quot;, \&quot;kind\&quot;: \&quot;self\&quot; },\n  \&quot;include\&quot;: { \&quot;type\&quot;: \&quot;group\&quot;, \&quot;logic\&quot;: \&quot;OR\&quot;,\n    \&quot;children\&quot;: [{ \&quot;type\&quot;: \&quot;group\&quot;, \&quot;logic\&quot;: \&quot;AND\&quot;, \&quot;children\&quot;: [] }] },\n  \&quot;exclude\&quot;: null }\n&quot;,&quot;out&quot;:&quot;include 结构原样通过 —— children: [] 不检查\n&quot;,&quot;server&quot;:&quot;buildQuery 放行，服务端 `validateStructure` 抛 `EMPTY_GROUP: group requires at least one child`（实跑确认）。 ==空组是第二道两层防线的例子==。&quot;}]},{&quot;name&quot;:&quot;特征行 value 形状&quot;,&quot;cases&quot;:[{&quot;name&quot;:&quot;值没填&quot;,&quot;verdict&quot;:&quot;err&quot;,&quot;code&quot;:&quot;INCOMPLETE_LEAF&quot;,&quot;message&quot;:&quot;portrait age requires a value&quot;,&quot;draft&quot;:&quot;{ \&quot;type\&quot;: \&quot;portrait\&quot;, \&quot;field\&quot;: \&quot;age\&quot;, \&quot;op\&quot;: \&quot;gte\&quot; }\n&quot;},{&quot;name&quot;:&quot;is_null 带了值&quot;,&quot;verdict&quot;:&quot;err&quot;,&quot;code&quot;:&quot;VALUE_TYPE&quot;,&quot;message&quot;:&quot;portrait age is_null does not take a value&quot;,&quot;draft&quot;:&quot;{ \&quot;type\&quot;: \&quot;portrait\&quot;, \&quot;field\&quot;: \&quot;age\&quot;, \&quot;op\&quot;: \&quot;is_null\&quot;, \&quot;value\&quot;: 1 }\n&quot;},{&quot;name&quot;:&quot;in 的值不是数组&quot;,&quot;verdict&quot;:&quot;err&quot;,&quot;code&quot;:&quot;INCOMPLETE_LEAF&quot;,&quot;message&quot;:&quot;portrait city in requires an array&quot;,&quot;draft&quot;:&quot;{ \&quot;type\&quot;: \&quot;portrait\&quot;, \&quot;field\&quot;: \&quot;city\&quot;, \&quot;op\&quot;: \&quot;in\&quot;, \&quot;value\&quot;: \&quot;深圳\&quot; }\n&quot;},{&quot;name&quot;:&quot;相对时间填了 0&quot;,&quot;verdict&quot;:&quot;err&quot;,&quot;code&quot;:&quot;VALUE_TYPE&quot;,&quot;message&quot;:&quot;portrait x last_n_days requires a positive integer&quot;,&quot;draft&quot;:&quot;{ \&quot;type\&quot;: \&quot;portrait\&quot;, \&quot;field\&quot;: \&quot;x\&quot;, \&quot;op\&quot;: \&quot;last_n_days\&quot;, \&quot;value\&quot;: 0 }\n&quot;}]},{&quot;name&quot;:&quot;关系行两种公式&quot;,&quot;cases&quot;:[{&quot;name&quot;:&quot;detail 带 value&quot;,&quot;verdict&quot;:&quot;err&quot;,&quot;code&quot;:&quot;INCOMPLETE_LEAF&quot;,&quot;message&quot;:&quot;detail does not take a value&quot;,&quot;draft&quot;:&quot;{ \&quot;type\&quot;: \&quot;relation\&quot;, \&quot;relation\&quot;: \&quot;holding\&quot;, \&quot;formula\&quot;: \&quot;detail\&quot;,\n  \&quot;op\&quot;: \&quot;in\&quot;, \&quot;objects\&quot;: [\&quot;00700.HK\&quot;], \&quot;value\&quot;: 3 }\n&quot;},{&quot;name&quot;:&quot;detail 用了 times 的 op&quot;,&quot;verdict&quot;:&quot;err&quot;,&quot;code&quot;:&quot;OP_NOT_ALLOWED&quot;,&quot;message&quot;:&quot;detail only allows in/not_in, got gte&quot;,&quot;draft&quot;:&quot;{ \&quot;type\&quot;: \&quot;relation\&quot;, \&quot;relation\&quot;: \&quot;holding\&quot;, \&quot;formula\&quot;: \&quot;detail\&quot;,\n  \&quot;op\&quot;: \&quot;gte\&quot;, \&quot;objects\&quot;: [\&quot;00700.HK\&quot;] }\n&quot;},{&quot;name&quot;:&quot;times 填负数&quot;,&quot;verdict&quot;:&quot;err&quot;,&quot;code&quot;:&quot;INCOMPLETE_LEAF&quot;,&quot;message&quot;:&quot;times requires a non-negative integer&quot;,&quot;draft&quot;:&quot;{ \&quot;type\&quot;: \&quot;relation\&quot;, \&quot;relation\&quot;: \&quot;trade\&quot;, \&quot;formula\&quot;: \&quot;times\&quot;,\n  \&quot;op\&quot;: \&quot;gte\&quot;, \&quot;value\&quot;: -1 }\n&quot;},{&quot;name&quot;:&quot;times between 写反&quot;,&quot;verdict&quot;:&quot;err&quot;,&quot;code&quot;:&quot;VALUE_TYPE&quot;,&quot;message&quot;:&quot;times between requires min &lt;= max&quot;,&quot;draft&quot;:&quot;{ \&quot;type\&quot;: \&quot;relation\&quot;, \&quot;relation\&quot;: \&quot;trade\&quot;, \&quot;formula\&quot;: \&quot;times\&quot;,\n  \&quot;op\&quot;: \&quot;between\&quot;, \&quot;value\&quot;: [3, 1] }\n&quot;},{&quot;name&quot;:&quot;props 的 items 空&quot;,&quot;verdict&quot;:&quot;err&quot;,&quot;code&quot;:&quot;INCOMPLETE_LEAF&quot;,&quot;message&quot;:&quot;relation props require items&quot;,&quot;draft&quot;:&quot;{ \&quot;type\&quot;: \&quot;relation\&quot;, \&quot;relation\&quot;: \&quot;holding\&quot;, \&quot;formula\&quot;: \&quot;detail\&quot;,\n  \&quot;op\&quot;: \&quot;in\&quot;, \&quot;objects\&quot;: [\&quot;00700.HK\&quot;],\n  \&quot;props\&quot;: { \&quot;logic\&quot;: \&quot;AND\&quot;, \&quot;items\&quot;: [] } }\n&quot;}]},{&quot;name&quot;:&quot;UID&quot;,&quot;cases&quot;:[{&quot;name&quot;:&quot;uid 列表为空&quot;,&quot;verdict&quot;:&quot;err&quot;,&quot;code&quot;:&quot;INCOMPLETE_LEAF&quot;,&quot;message&quot;:&quot;uid leaf requires uids&quot;,&quot;draft&quot;:&quot;{ \&quot;type\&quot;: \&quot;uid\&quot;, \&quot;op\&quot;: \&quot;in\&quot;, \&quot;uids\&quot;: [] }\n&quot;}]}]}">
+<p><code>buildQuery(draft): InsightQuery</code> 是 draft.ts 的主函数，276 行里它占了约 200 行。它做且只做<strong>结构完整性检查</strong> —— 不看 Metadata，不查字段存不存在、值类型对不对（那是服务端 <code>validateSemantics</code> 的事）。</p>
+<p>按节点类型分派，每个 op 族一条检查路。下面交互里的错误码和报错文案全部是 tsx 实跑的真实输出（2026-10-12，对 <code>@insight/dsl</code> + <code>@insight/sql-builder</code>）：</p>
+<div class="demo" data-widget="combination-build-lab" data-config="{&quot;groups&quot;:[{&quot;name&quot;:&quot;根与组&quot;,&quot;cases&quot;:[{&quot;name&quot;:&quot;version 写成 2&quot;,&quot;verdict&quot;:&quot;err&quot;,&quot;code&quot;:&quot;UNSUPPORTED_VERSION&quot;,&quot;message&quot;:&quot;only version 1 is supported&quot;,&quot;draft&quot;:&quot;{ \&quot;version\&quot;: 2, \&quot;scope\&quot;: { \&quot;type\&quot;: \&quot;scope\&quot;, \&quot;kind\&quot;: \&quot;self\&quot; },\n  \&quot;include\&quot;: null, \&quot;exclude\&quot;: null }\n&quot;},{&quot;name&quot;:&quot;组缺 logic&quot;,&quot;verdict&quot;:&quot;err&quot;,&quot;code&quot;:&quot;INCOMPLETE_LEAF&quot;,&quot;message&quot;:&quot;group requires AND or OR&quot;,&quot;draft&quot;:&quot;{ \&quot;version\&quot;: 1, \&quot;scope\&quot;: { \&quot;type\&quot;: \&quot;scope\&quot;, \&quot;kind\&quot;: \&quot;self\&quot; },\n  \&quot;include\&quot;: { \&quot;type\&quot;: \&quot;group\&quot;, \&quot;children\&quot;: [] }, \&quot;exclude\&quot;: null }\n&quot;},{&quot;name&quot;:&quot;空组&quot;,&quot;verdict&quot;:&quot;ok&quot;,&quot;draft&quot;:&quot;{ \&quot;version\&quot;: 1, \&quot;scope\&quot;: { \&quot;type\&quot;: \&quot;scope\&quot;, \&quot;kind\&quot;: \&quot;self\&quot; },\n  \&quot;include\&quot;: { \&quot;type\&quot;: \&quot;group\&quot;, \&quot;logic\&quot;: \&quot;OR\&quot;,\n    \&quot;children\&quot;: [{ \&quot;type\&quot;: \&quot;group\&quot;, \&quot;logic\&quot;: \&quot;AND\&quot;, \&quot;children\&quot;: [] }] },\n  \&quot;exclude\&quot;: null }\n&quot;,&quot;out&quot;:&quot;include 结构原样通过 —— children: [] 不检查\n&quot;,&quot;server&quot;:&quot;buildQuery 放行，服务端 `validateStructure`（现住 @insight/sql-builder）抛 `EMPTY_GROUP: group requires at least one child`（实跑确认）。==空组是第二道两层防线的例子==。&quot;}]},{&quot;name&quot;:&quot;特征行 value 形状&quot;,&quot;cases&quot;:[{&quot;name&quot;:&quot;值没填&quot;,&quot;verdict&quot;:&quot;err&quot;,&quot;code&quot;:&quot;INCOMPLETE_LEAF&quot;,&quot;message&quot;:&quot;portrait age requires a value&quot;,&quot;draft&quot;:&quot;{ \&quot;type\&quot;: \&quot;portrait\&quot;, \&quot;field\&quot;: \&quot;age\&quot;, \&quot;op\&quot;: \&quot;gte\&quot; }\n&quot;},{&quot;name&quot;:&quot;eq_default 带了值&quot;,&quot;verdict&quot;:&quot;err&quot;,&quot;code&quot;:&quot;VALUE_TYPE&quot;,&quot;message&quot;:&quot;portrait aum eq_default does not take a value&quot;,&quot;draft&quot;:&quot;{ \&quot;type\&quot;: \&quot;portrait\&quot;, \&quot;field\&quot;: \&quot;aum\&quot;, \&quot;op\&quot;: \&quot;eq_default\&quot;, \&quot;value\&quot;: 1 }\n&quot;},{&quot;name&quot;:&quot;is_null 带了值&quot;,&quot;verdict&quot;:&quot;err&quot;,&quot;code&quot;:&quot;VALUE_TYPE&quot;,&quot;message&quot;:&quot;portrait age is_null does not take a value&quot;,&quot;draft&quot;:&quot;{ \&quot;type\&quot;: \&quot;portrait\&quot;, \&quot;field\&quot;: \&quot;age\&quot;, \&quot;op\&quot;: \&quot;is_null\&quot;, \&quot;value\&quot;: 1 }\n&quot;},{&quot;name&quot;:&quot;in 的值不是数组&quot;,&quot;verdict&quot;:&quot;err&quot;,&quot;code&quot;:&quot;INCOMPLETE_LEAF&quot;,&quot;message&quot;:&quot;portrait city in requires an array&quot;,&quot;draft&quot;:&quot;{ \&quot;type\&quot;: \&quot;portrait\&quot;, \&quot;field\&quot;: \&quot;city\&quot;, \&quot;op\&quot;: \&quot;in\&quot;, \&quot;value\&quot;: \&quot;深圳\&quot; }\n&quot;}]},{&quot;name&quot;:&quot;关系行两种公式&quot;,&quot;cases&quot;:[{&quot;name&quot;:&quot;detail 的 objects 空&quot;,&quot;verdict&quot;:&quot;ok&quot;,&quot;draft&quot;:&quot;{ \&quot;type\&quot;: \&quot;relation\&quot;, \&quot;relation\&quot;: \&quot;holding\&quot;, \&quot;formula\&quot;: \&quot;detail\&quot;,\n  \&quot;op\&quot;: \&quot;in\&quot;, \&quot;objects\&quot;: [] }\n&quot;,&quot;out&quot;:&quot;{ \&quot;type\&quot;: \&quot;relation\&quot;, \&quot;relation\&quot;: \&quot;holding\&quot;, \&quot;formula\&quot;: \&quot;detail\&quot;,\n  \&quot;op\&quot;: \&quot;in\&quot;, \&quot;objects\&quot;: [] }\n&quot;,&quot;server&quot;:&quot;**buildQuery 放过了它** —— `[]` 是真值，`if (!objects)` 拦不到。 服务端 `validateStructure` 抛 `INCOMPLETE_LEAF: detail requires objects`。==两层防线里组件这层漏的一个，被服务端这层接住了==。&quot;},{&quot;name&quot;:&quot;detail 带了 value&quot;,&quot;verdict&quot;:&quot;err&quot;,&quot;code&quot;:&quot;INCOMPLETE_LEAF&quot;,&quot;message&quot;:&quot;detail does not take a value&quot;,&quot;draft&quot;:&quot;{ \&quot;type\&quot;: \&quot;relation\&quot;, \&quot;relation\&quot;: \&quot;holding\&quot;, \&quot;formula\&quot;: \&quot;detail\&quot;,\n  \&quot;op\&quot;: \&quot;in\&quot;, \&quot;objects\&quot;: [\&quot;00700.HK\&quot;], \&quot;value\&quot;: 3 }\n&quot;},{&quot;name&quot;:&quot;detail 用了 times 的 op&quot;,&quot;verdict&quot;:&quot;err&quot;,&quot;code&quot;:&quot;OP_NOT_ALLOWED&quot;,&quot;message&quot;:&quot;detail only allows in/not_in, got gte&quot;,&quot;draft&quot;:&quot;{ \&quot;type\&quot;: \&quot;relation\&quot;, \&quot;relation\&quot;: \&quot;holding\&quot;, \&quot;formula\&quot;: \&quot;detail\&quot;,\n  \&quot;op\&quot;: \&quot;gte\&quot;, \&quot;objects\&quot;: [\&quot;00700.HK\&quot;] }\n&quot;},{&quot;name&quot;:&quot;属性用 eq_default&quot;,&quot;verdict&quot;:&quot;err&quot;,&quot;code&quot;:&quot;OP_NOT_ALLOWED&quot;,&quot;message&quot;:&quot;relation prop does not allow eq_default&quot;,&quot;draft&quot;:&quot;{ \&quot;type\&quot;: \&quot;relation\&quot;, \&quot;relation\&quot;: \&quot;holding\&quot;, \&quot;formula\&quot;: \&quot;detail\&quot;,\n  \&quot;op\&quot;: \&quot;in\&quot;, \&quot;objects\&quot;: [\&quot;00700.HK\&quot;],\n  \&quot;props\&quot;: { \&quot;logic\&quot;: \&quot;AND\&quot;, \&quot;items\&quot;: [{ \&quot;field\&quot;: \&quot;qty\&quot;, \&quot;op\&quot;: \&quot;eq_default\&quot; }] } }\n&quot;},{&quot;name&quot;:&quot;times 填负数&quot;,&quot;verdict&quot;:&quot;err&quot;,&quot;code&quot;:&quot;INCOMPLETE_LEAF&quot;,&quot;message&quot;:&quot;times requires a non-negative integer&quot;,&quot;draft&quot;:&quot;{ \&quot;type\&quot;: \&quot;relation\&quot;, \&quot;relation\&quot;: \&quot;trade\&quot;, \&quot;formula\&quot;: \&quot;times\&quot;,\n  \&quot;op\&quot;: \&quot;gte\&quot;, \&quot;value\&quot;: -1 }\n&quot;}]},{&quot;name&quot;:&quot;UID&quot;,&quot;cases&quot;:[{&quot;name&quot;:&quot;uid 列表为空&quot;,&quot;verdict&quot;:&quot;err&quot;,&quot;code&quot;:&quot;INCOMPLETE_LEAF&quot;,&quot;message&quot;:&quot;uid leaf requires uids&quot;,&quot;draft&quot;:&quot;{ \&quot;type\&quot;: \&quot;uid\&quot;, \&quot;op\&quot;: \&quot;in\&quot;, \&quot;uids\&quot;: [] }\n&quot;}]}]}">
       <div class="demo-head">
         <span class="title">喂 14 份草稿，看哪份活下来（协议视角复看）</span>
         <span class="status" data-status></span>
@@ -337,9 +399,10 @@
       <div class="demo-body custom" data-mount></div>
     </div><p><code>buildQuery</code> 放过、服务端接住的情况（tsx 实跑）：</p>
 <div class="compare-wrap"><table class="compare"><thead><tr><th>输入</th><th>buildQuery</th><th>validateStructure（服务端）</th></tr></thead><tbody><tr><th>空组（children: []）</th><td data-label="buildQuery"><span class="tag tone-amber">放行 —— 只查了 logic</span></td><td data-label="validateStructure（服务端）"><span class="tag tone-red">EMPTY_GROUP：group requires at least one child</span></td></tr><tr><th>detail 的 objects: []</th><td data-label="buildQuery"><span class="tag tone-amber">放行 —— [] 是真值，if (!objects) 拦不到</span></td><td data-label="validateStructure（服务端）"><span class="tag tone-red">INCOMPLETE_LEAF：detail requires objects</span></td></tr><tr><th>times 的 objects: []</th><td data-label="buildQuery"><span class="tag tone-green">放行</span></td><td data-label="validateStructure（服务端）"><span class="tag tone-green">也放行 —— 与省略同义：不限标的</span></td></tr></tbody></table></div><p>前两行是组件层守门员的两个漏点，第三行是刻意的宽容。调用方在提交前跑 <code>buildQuery</code> 拦住最明显的没填完，服务端在编译前把 <code>validateStructure</code> + <code>validateSemantics</code> 全部重跑 —— <strong>信任的只有那条链，不是前端</strong>。</p>
-<h2 id="两个工厂与省键的细节"><span class="num">07</span>两个工厂与省键的细节</h2>
-<p>draft.ts 还导出两个工厂，它们决定了草稿「刚出生时的样子」：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-ts">export function portraitDraft(field: string, op: Op, value?: unknown): DraftPortrait {
+<h2 id="三个工厂与省键的细节"><span class="num">07</span>三个工厂与省键的细节</h2>
+<p>draft.ts 导出两个工厂，组合包另有一个（<code>relationDraft</code>），它们决定了草稿「刚出生时的样子」：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-ts">// @insight/dsl/src/draft.ts
+export function portraitDraft(field: string, op: Op, value?: unknown): DraftPortrait {
   if (value === undefined) return { type: 'portrait', field, op };
   return { type: 'portrait', field, op, value };
 }
@@ -347,12 +410,25 @@
 export function blankDetail(relation: string): DraftRelation {
   return { type: 'relation', relation, formula: 'detail', op: 'in', objects: [] };
 }
+
+// @insight/combination/src/relationDraft.ts —— 新增
+export function relationDraft(metadata: ResolvedCrowdMetadata, name: string): DraftRelation {
+  const relation = metadata.relations.find((item) =&gt; item.key === name);
+  const items: DraftProp[] = (relation?.properties ?? [])
+    .filter((prop) =&gt; prop.isPrimaryKey === 1 &amp;&amp; !SUBJECT_FIELDS.has(prop.key))
+    .map((prop) =&gt; {
+      const op = applicableOps(prop)[0];
+      return { field: prop.key, op: isOp(op) ? op : 'eq' };
+    });
+  const leaf = blankDetail(name);
+  return items.length === 0 ? leaf : { ...leaf, props: { logic: 'AND', items: items } };
+}
 </code></pre></div>
-<p><code>portraitDraft</code> 的三元分支看着多余，其实是在维护「<strong>值缺席 = 键不存在</strong>」这条协议约定。实跑验证：</p>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>调用</th><th>产物 JSON</th><th>'value' in 对象</th></tr></thead><tbody><tr><th><code>portraitDraft('age', 'gte')</code></th><td data-label="产物 JSON"><code>{&quot;type&quot;:&quot;portrait&quot;,&quot;field&quot;:&quot;age&quot;,&quot;op&quot;:&quot;gte&quot;}</code></td><td data-label="'value' in 对象">——</td></tr><tr><th><code>portraitDraft('age', 'gte', undefined)</code></th><td data-label="产物 JSON">同上，<mark class="mk-blue">没有 value 键</mark></td><td data-label="'value' in 对象"><span class="tag tone-green">false</span></td></tr><tr><th><code>portraitDraft('age', 'gte', 18)</code></th><td data-label="产物 JSON"><code>{...,&quot;value&quot;:18}</code></td><td data-label="'value' in 对象">true</td></tr></tbody></table></div><p>如果工厂写成无条件带 <code>value: undefined</code>，草稿 JSON 会出现「有键但没值」的状态 —— 界面回显和 diff 时都要多解释一层。<code>blankDetail</code> 则定义了关系行的出生形态：detail 公式 + 存在 + 空客体数组（空数组在草稿里合法，代表「还没选标的」）。</p>
-<p>三个守卫（<code>isDraftPortrait</code> / <code>isDraftRelation</code> / <code>isDraftUid</code>）只认叶子：对 group 节点全部返回 false（实跑确认）。它们是 ConditionGroup 模板里 <code>v-if</code> 三连的依据。</p>
+<p><code>portraitDraft</code> 的三元分支在维护「<strong>值缺席 = 键不存在</strong>」这条协议约定。实跑验证：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>调用</th><th>产物 JSON</th><th>'value' in 对象</th></tr></thead><tbody><tr><th><code>portraitDraft('age', 'gte')</code></th><td data-label="产物 JSON"><code>{&quot;type&quot;:&quot;portrait&quot;,&quot;field&quot;:&quot;age&quot;,&quot;op&quot;:&quot;gte&quot;}</code></td><td data-label="'value' in 对象">——</td></tr><tr><th><code>portraitDraft('age', 'gte', undefined)</code></th><td data-label="产物 JSON">同上，<mark class="mk-blue">没有 value 键</mark></td><td data-label="'value' in 对象"><span class="tag tone-green">false</span></td></tr><tr><th><code>portraitDraft('age', 'gte', 18)</code></th><td data-label="产物 JSON"><code>{...,&quot;value&quot;:18}</code></td><td data-label="'value' in 对象">true</td></tr></tbody></table></div><p>如果工厂写成无条件带 <code>value: undefined</code>，草稿 JSON 会出现「有键但没值」的状态 —— 界面回显和 diff 时都要多解释一层。</p>
+<p><code>relationDraft</code> 是拆包期间新增的：<strong>出生即带主键属性过滤</strong>。关系的元数据里标了 <code>isPrimaryKey</code> 的属性（排除 uid / object_id 这两个主体字段），自动生成一排待填的 props —— 「持有序号」这类主键属性就是关系记录的身份证，圈人几乎总要按它过滤。PortraitRow 把特征名换成关系名、RelationRow 换关系名，都用它生成出生草稿；<code>blankDetail</code> 退为它的无属性基底。</p>
 <h2 id="错误码清单"><span class="num">08</span>错误码清单</h2>
-<p><code>buildQuery</code> 抛的全部错误码（与 SQL Builder 共用同一套 <code>CompileError</code>）：</p>
+<p><code>buildQuery</code> 抛的全部错误码（与编译器共用同一套 <code>CompileError</code>，定义在 <code>@insight/dsl/errors.ts</code>）：</p>
 <table>
 <thead>
 <tr>
@@ -374,13 +450,13 @@ export function blankDetail(relation: string): DraftRelation {
 </tr>
 <tr>
 <td><code>VALUE_TYPE</code></td>
-<td>值不是标量、相对时间非正整数、is_null 带值、between 写反</td>
-<td>times between requires min &lt;= max</td>
+<td>值不是标量、相对时间非正整数、is_null/eq_default 带值、between 写反</td>
+<td>portrait aum eq_default does not take a value</td>
 </tr>
 <tr>
 <td><code>OP_NOT_ALLOWED</code></td>
-<td>op 不属于该公式/叶子的合法集</td>
-<td>detail only allows in/not_in, got gte</td>
+<td>op 不属于该公式/叶子的合法集；属性上用默认值比较</td>
+<td>relation prop does not allow eq_default</td>
 </tr>
 <tr>
 <td><code>UNKNOWN_NODE</code></td>
@@ -389,7 +465,7 @@ export function blankDetail(relation: string): DraftRelation {
 </tr>
 </tbody>
 </table>
-<p>每个错误都带一句话文案，指向具体字段 —— 组件图鉴 06 节的交互可以逐个触发它们。</p>
+<p>服务端 <code>validateStructure</code> 另有一套同码异文的检查（比如版本错报 <code>DSL version must be 1</code>，空组报 <code>EMPTY_GROUP</code>）—— 码相同、文案各自措辞，调用方按码分派即可。</p>
 <div class="quiz"><details>
         <summary>草稿里 value 缺席，JSON 里应该是没有这个键，还是写 &quot;value&quot;: null？</summary>
         <div class="a"><p>没有键。portraitDraft 工厂在 value === undefined 时不写这个键
@@ -405,17 +481,24 @@ value（禁止 vs 次数）。buildRelation 先查 formula 再分派检查，
 界面上 RelationRow 切公式时 op 和 value 全部重置。</p>
 </div>
       </details><details>
+        <summary>eq_default 和 is_null 都是无值操作符，它们的区别是什么？关系属性上为什么禁止 eq_default？</summary>
+        <div class="a"><p>is_null 判断「这一列是不是 SQL NULL」；eq_default 判断「这一列的值是否等于
+元数据配置的默认值」—— 值来自元数据的 defaultValue，草稿里不携带，
+所以它也是无值操作符。关系属性上没有「默认值」的语义（数量、市场这类
+属性不存在约定的缺失值），协议直接禁止：OP_NOT_ALLOWED。</p>
+</div>
+      </details><details>
         <summary>空组（children 为空数组）能通过 buildQuery，这说明协议允许空组吗？</summary>
         <div class="a"><p>不允许。buildQuery 只检查了 group 的 logic，没查 children 非空 ——
 这是组件层守门员的漏点之一（实跑：放行）。服务端 validateStructure
-会抛 EMPTY_GROUP: group requires at least one child。空组、
-detail 空 objects 都是这个模式：组件层漏的，服务端那层接住。</p>
+（现住 @insight/sql-builder）会抛 EMPTY_GROUP: group requires at least
+one child。空组、detail 空 objects 都是这个模式：组件层漏的，服务端那层接住。</p>
 </div>
       </details></div>
 
     <footer>
-      <span>draft.ts：DraftQuery 协议逐字段解剖</span>
-      <span>最后更新 2026-10-10 · 单文件可离线打开</span>
+      <span>draft 协议：DraftQuery 逐字段解剖</span>
+      <span>最后更新 2026-10-12 · 单文件可离线打开</span>
     </footer>
   </main>
 </div>

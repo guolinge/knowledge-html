@@ -3,6 +3,17 @@
 这个包 22 个文件、2891 行。它的活可以一句话说完：**把 Metadata 渲染成圈选界面，把人的操作变成一份叫 DraftQuery 的草稿**。至于草稿怎么变成 SQL，它不管。
 
 ```callout
+tone: amber
+icon: 🕒
+text: |
+  **时效提示（2026-10-12）**：本篇基于 crm-dsl-stru @ e7fdf40，此后代码有四类变化影响本篇的数字与说法：
+  ①协议与 buildQuery 迁至 `@insight/dsl/src/draft.ts`（combination 只剩转发），类型改名 `Crowd*`；
+  ②`ops.ts` 与 `audience.ts` 并入 dsl；③API 从 `/api/audience/*` 改为 `/api/crowd/*`；
+  ④新增 TemporalOps.vue（12 个 .vue），文件行数与 import 计数已变。
+  设计与机制未变；协议细节以[草稿协议篇](../combination-draft/)为准。
+```
+
+```callout
 tone: blue
 icon: 🎯
 text: |
