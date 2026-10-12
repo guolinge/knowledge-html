@@ -15150,6 +15150,140 @@ WIDGETS['mysql-2pc-crash'] = (root) => {
     render();
   };
 
+  /* —— 控件：候选值两条管道 ——
+     四幕按真实顺序跑（对应 note 的 02 / 03 两节）：
+       链路 A 值集合：换字段 → loadValueSet → 宿主缓存 miss → GET value-sets
+       链路 B 动态搜索：输入 → searchToken 取票 → GET resolver-options → 票据相等才写入
+       竞态：旧请求晚回，token 不等 → 整包丢弃
+       回显：values= 按 value 反查名字 → rememberedObjects → shownItems 拼装
+     左栏是事件流，右栏是组件里那几个 ref 的状态快照。
+  ------------------------------------------------ */
+  WIDGETS['cand-pipe-lab'] = (root) => {
+    var mainLog = root.querySelector('[data-log="main"]');
+    var stateLog = root.querySelector('[data-log="state"]');
+    var statusEl = root.querySelector('[data-status]');
+    var runBtn = root.querySelector('[data-run]');
+    var resetBtn = root.querySelector('[data-reset]');
+    var timers = [];
+    var stateOrder = [];
+    var stateVal = {};
+    var stateTone = {};
+
+    function addLine(box, badge, tone, time, text, warn) {
+      var el = document.createElement('div');
+      el.className = 'line' + (warn ? ' warn' : '');
+      var b = document.createElement('span');
+      b.className = 'badge tone-' + tone;
+      b.textContent = badge;
+      var tm = document.createElement('span');
+      tm.className = 'time';
+      tm.textContent = time;
+      var tx = document.createElement('span');
+      tx.className = 'txt';
+      tx.textContent = text;
+      el.append(b, tm, tx);
+      box.appendChild(el);
+      box.scrollTop = box.scrollHeight;
+    }
+
+    function addDivider(box, text) {
+      var el = document.createElement('div');
+      el.className = 'line divider';
+      var tx = document.createElement('span');
+      tx.className = 'txt';
+      tx.textContent = text;
+      el.appendChild(tx);
+      box.appendChild(el);
+      box.scrollTop = box.scrollHeight;
+    }
+
+    function renderState() {
+      while (stateLog.firstChild) stateLog.removeChild(stateLog.firstChild);
+      stateOrder.forEach(function (k) {
+        addLine(stateLog, k, stateTone[k] || 'muted', '', String(stateVal[k]), false);
+      });
+      stateLog.scrollTop = 0;
+    }
+
+    function setState(patch, tones) {
+      Object.keys(patch).forEach(function (k) {
+        if (!(k in stateVal)) stateOrder.push(k);
+        stateVal[k] = patch[k];
+        if (tones && tones[k]) stateTone[k] = tones[k];
+      });
+      renderState();
+    }
+
+    /* 每条 = 一个真实动作。state 是这一步之后组件里那个值的快照。 */
+    var STEPS = [
+      { t: 0,     badge: '用户',   tone: 'muted',  text: '选中字段「常驻城市」' },
+      { t: 300,   badge: '组件',   tone: 'blue',   text: "valueSource = { type: 'VALUE_SET', setKey: 'city' }", state: { setKey: "'city'" } },
+      { t: 620,   badge: '注入层', tone: 'violet', text: "loadValueSet('city') → props.loadValueSet('city')" },
+      { t: 940,   badge: '宿主',   tone: 'green',  text: '缓存 miss、同 key 也没有 inflight → 走 getValueSet', state: { 缓存: 'miss' } },
+      { t: 1260,  badge: 'HTTP',   tone: 'amber',  text: 'GET /api/crowd/value-sets?setKey=city', state: { 请求: '1 次（值集合）' } },
+      { t: 1860,  badge: '服务端', tone: 'red',    text: '5 秒 TTL 投影里找到 set=city → toValueSet → items 6 条' },
+      { t: 2180,  badge: '宿主',   tone: 'green',  text: '适配：parsePbScalar 反序列化、status 0 → DISABLED；写入 cache', state: { items: '6 条（1 条 DISABLED）' } },
+      { t: 2500,  badge: '组件',   tone: 'blue',   text: 'el-option 出现 6 项，「深圳」是灰的', state: { shownItems: '6' } },
+      { t: 3000,  divider: '链路 B · 动态候选：每次输入都是一次请求' },
+      { t: 3200,  badge: '用户',   tone: 'muted',  text: '在值输入框里敲「腾讯」' },
+      { t: 3500,  badge: '组件',   tone: 'blue',   text: 'searchToken = 1（先取票据，再发请求）', state: { searchToken: '1' } },
+      { t: 3800,  badge: '注入层', tone: 'violet', text: "search('stock_search', '腾讯') → props.searchValues(...)" },
+      { t: 4120,  badge: 'HTTP',   tone: 'amber',  text: 'GET /api/crowd/resolver-options?resolverKey=stock_search&keyword=腾讯&limit=20', state: { 请求: '2 次' } },
+      { t: 4720,  badge: '服务端', tone: 'red',    text: '21 条常量里子串匹配 value + 三语 label → 命中 1 条' },
+      { t: 5040,  badge: '组件',   tone: 'blue',   text: '票据相等（1 = 1）→ 写 remoteItems', state: { remoteItems: '「腾讯 00700.HK」' } },
+      { t: 5360,  badge: '组件',   tone: 'blue',   text: '下拉里出现「腾讯 00700.HK」' },
+      { t: 5900,  divider: '竞态：先发的请求后回来' },
+      { t: 6100,  badge: '用户',   tone: 'muted',  text: '又改成「阿里」—— 第 2 个请求发出', state: { searchToken: '2' } },
+      { t: 6420,  badge: 'HTTP',   tone: 'amber',  text: 'GET ...&keyword=阿里（第 2 个请求）… 还没回来' },
+      { t: 7000,  badge: '竞态',   tone: 'amber',  text: '第 1 个请求（腾讯）这时才回来：token 1 ≠ 2 → 整包丢弃，不写 remoteItems', warn: true },
+      { t: 7400,  badge: 'HTTP',   tone: 'amber',  text: '第 2 个请求返回「阿里巴巴 09988.HK」' },
+      { t: 7720,  badge: '组件',   tone: 'blue',   text: '票据相等（2 = 2）→ 写 remoteItems', state: { remoteItems: '「阿里巴巴 09988.HK」' } },
+      { t: 8040,  badge: '组件',   tone: 'blue',   text: '下拉里是阿里 —— 腾讯那条没有回来（虽然它先发）' },
+      { t: 8700,  divider: '回显：用 values= 把已保存的取值换回名字' },
+      { t: 8900,  badge: '草稿',   tone: 'muted',  text: "已经存着 ['00700.HK', '09988.HK'] —— 但搜索结果里没有它们" },
+      { t: 9220,  badge: '组件',   tone: 'blue',   text: 'resolve(values) → lookupValues(resolverKey, values)' },
+      { t: 9540,  badge: 'HTTP',   tone: 'amber',  text: 'GET ...?resolverKey=stock_search&values=00700.HK&values=09988.HK（忽略 keyword 和 limit）', state: { 请求: '4 次' } },
+      { t: 10140, badge: '服务端', tone: 'red',    text: 'values 分支：按 value 精确反查 → 两条都命中' },
+      { t: 10460, badge: '组件',   tone: 'blue',   text: '写进 rememberedObjects', state: { remembered: '2 条' } },
+      { t: 10780, badge: '组件',   tone: 'blue',   text: 'shownItems = 候选 + 选中但缺失的（换到名字用名字，换不到用原值）', state: { shownItems: '2（回显）' } },
+      { t: 11300, badge: '完成',   tone: 'green',  text: '4 次请求：值集合 1、搜索 2（1 次丢弃）、回显 1', eof: true },
+    ];
+
+    function clearTimers() { timers.forEach(clearTimeout); timers = []; }
+
+    function reset() {
+      clearTimers();
+      while (mainLog.firstChild) mainLog.removeChild(mainLog.firstChild);
+      while (stateLog.firstChild) stateLog.removeChild(stateLog.firstChild);
+      stateOrder = []; stateVal = {}; stateTone = {};
+      statusEl.textContent = '未开始';
+      runBtn.disabled = false;
+      runBtn.textContent = '▶ 开始模拟';
+    }
+
+    function run() {
+      reset();
+      runBtn.disabled = true;
+      runBtn.textContent = '模拟中…';
+      STEPS.forEach(function (s) {
+        timers.push(setTimeout(function () {
+          if (s.divider) { addDivider(mainLog, s.divider); statusEl.textContent = s.divider; return; }
+          addLine(mainLog, s.badge, s.tone, 't=' + (s.t / 1000).toFixed(1) + 's', s.text, !!s.warn);
+          if (s.state) setState(s.state, { setKey: 'violet', 缓存: 'amber', 请求: 'amber', items: 'blue', shownItems: 'blue', searchToken: 'red', remoteItems: 'blue', remembered: 'green' });
+          statusEl.textContent = 't=' + (s.t / 1000).toFixed(1) + 's · ' + s.text;
+          if (s.eof) {
+            runBtn.disabled = false;
+            runBtn.textContent = '▶ 再跑一次';
+            statusEl.textContent = '跑完：4 次请求，1 次被 token 丢弃';
+          }
+        }, s.t + 40));
+      });
+    }
+
+    runBtn.addEventListener('click', run);
+    resetBtn.addEventListener('click', reset);
+  };
+
   /* ---------- 挂载 ---------- */
   document.querySelectorAll('[data-widget]').forEach((root) => {
     var name = root.getAttribute('data-widget');

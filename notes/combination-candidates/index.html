@@ -1,0 +1,683 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-has-toc="1">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>@insight/combination 候选值两条管道：从下拉框到数据源再回来</title>
+<meta name="description" content="组件手里只有一个 metadata —— 那只是字段字典，里面只有 setKey / resolverKey 两个引用键，没有候选值。候选值是点开下拉那一刻现取的：一条走共享值集合接口，一条走动态候选接口。这篇把两条链路从鼠标点击追到 MySQL 的那一行、再追回 el-option，含每一层的形状变化、注入契约和四处竞态票据。" />
+<link rel="stylesheet" href="../../assets/theme.css?v=e6a9ffd3d6" />
+  <link rel="stylesheet" href="../../assets/blocks.css?v=2cdcd8509f" />
+  <link rel="stylesheet" href="../../assets/archify-embed.css?v=68fec0b81b" />
+</head>
+<body>
+<div id="progress"></div>
+<div id="tocScrim"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
+    <a class="brand" href="../../index.html"><span class="dot"></span>知识笔记</a>
+    
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="toc" id="toc">
+      <p class="toc-title">目录</p>
+      <a href="../../index.html" class="sub">← 全部笔记</a>
+      <a href="#先看全图一次取值穿过五层">先看全图：一次取值穿过五层</a>
+      <a href="#链路-a-值集合点一下字段十一行时序回来">链路 A · 值集合：点一下字段，十一行时序回来</a>
+      <a href="#21-触发点是换字段不是换操作符" class="sub">2.1 触发点是「换字段」，不是「换操作符」</a>
+      <a href="#22-十一步时序" class="sub">2.2 十一步时序</a>
+      <a href="#23-值的一路变形" class="sub">2.3 值的一路变形</a>
+      <a href="#24-关系属性走的是另一条路批量预取" class="sub">2.4 关系属性走的是另一条路：批量预取</a>
+      <a href="#链路-b-动态候选每次输入都是一次请求">链路 B · 动态候选：每次输入都是一次请求</a>
+      <a href="#31-搜索打开下拉或敲字都会发" class="sub">3.1 搜索：打开下拉或敲字都会发</a>
+      <a href="#32-第二处注入函数用-values-把已保存的取值换回中文名" class="sub">3.2 第二处注入函数：用 values= 把已保存的取值换回中文名</a>
+      <a href="#函数是怎么注入进去的">函数是怎么「注入」进去的</a>
+      <a href="#服务端这两个接口">服务端这两个接口</a>
+      <a href="#边界六处不那么直觉的地方">边界：六处不那么直觉的地方</a>
+      <a href="#跑一遍两条链路" class="sub">跑一遍两条链路</a>
+      <a href="#速查">速查</a>
+      <a href="#一句话" class="sub">一句话</a>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow">● 从零理解 · 链路</span>
+      <h1>@insight/combination 候选值两条管道：从下拉框到数据源再回来</h1>
+      <p class="lede">组件手里只有一个 metadata —— 那只是字段字典，里面只有 setKey / resolverKey 两个引用键，没有候选值。候选值是点开下拉那一刻现取的：一条走共享值集合接口，一条走动态候选接口。这篇把两条链路从鼠标点击追到 MySQL 的那一行、再追回 el-option，含每一层的形状变化、注入契约和四处竞态票据。</p>
+    </div>
+
+<aside class="needs">
+      <p class="needs-title">读这篇之前，你需要先知道</p>
+      <a class="need" href="../combination-mechanics/">← <b>6. 组件机制</b><span>受控数据流、幽灵行与 convert、控件决策、候选值管道、buildQuery 检查清单</span></a>
+    </aside>
+    <div class="provenance"><span><b>来源</b> crm-dsl-stru @ 7f2ec46（本机跑起来的实例，行号按这个提交） · packages/combination/src/values.ts（69 行）、components/ValueControl.vue（253 行）、components/PortraitRow.vue（172 行）、components/RelationRow.vue（580 行）、InsightCombiner.vue（154 行）、context.ts（7 行）—— wc -l 实测 · apps/client/src/useValueSets.ts（55 行）、api.ts（267 行） · apps/server/src/audienceRoutes.ts（61 行）、metadata/resolvers.ts（58 行，STOCKS 21 条）、metadata/audience.ts（202 行）、metadata/source.ts（CACHE_TTL_MS = 5000） · packages/dsl/src/audience.ts（308 行，resolveCrowdMetadata 把 pb 读模型转成组件内部模型） · apps/server/test/metadata.project.spec.ts（pb 投影与 value JSON 标量字符串的断言）</span><span><b>生成</b> 2026-10-12</span><span><b>模型</b> pi (anthropic/claude-opus-4-6)</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">Vue</span> <span class="tag tone-muted">圈选</span> <span class="tag tone-muted">候选值</span> <span class="tag tone-muted">HTTP 链路</span> <span class="tag tone-muted">pb 读模型</span></span></div>
+
+<p>组件篇讲了受控数据流和控件决策，配置层讲了 metadata 从哪来。这一篇只回答一个问题：<strong>点开下拉框的那一下，候选值是从哪来的。</strong></p>
+<p>先给结论：<code>metadata</code> 里<strong>没有候选值</strong>，只有两个引用键，<code>fieldType.setKey</code> 和 <code>fieldType.resolverKey</code>。真正的取值是那一刻现取的，走两条不同的管道，各自穿过五层。两条管道的形状也不同：值集合是「字段被选中时自动拉一次，之后一直用」，动态候选是「每次输入关键词都发一次请求」。</p>
+<div class="callout tone-blue">
+      <span class="ic">🧭</span>
+      <div><p><strong>读这篇之前</strong>：需要知道组件是受控的、<code>metadata</code> 是 Data Admin 的 pb 读模型、<code>valueSource</code> 有四态（<code>NONE</code> / <code>VALUE_SET</code> / <code>DYNAMIC</code> / <code>CUSTOM</code>）——
+这些在<a href="../combination-mechanics/">组件机制篇</a>的 02、04 两节。</p>
+<p>本仓库 <code>crm-dsl-stru</code> 停在 <code>7f2ec46</code>，行号按这个提交。凡是「实测」字样，都是 <code>wc -l</code> / <code>grep</code> 跑出来的，不是估的。</p>
+</div>
+    </div><h2 id="先看全图一次取值穿过五层"><span class="num">01</span>先看全图：一次取值穿过五层</h2>
+<p>每一层只做一件事：组件决定「用哪个 key」，注入层转发函数，宿主决定「缓存还是发 HTTP」，适配层把 pb 变形，服务端查表或查常量表。</p>
+<div class="pipe"><div class="lane tone-blue">
+        <div class="lane-meta">
+          <span class="ln">LAYER 01</span>
+          <b>组件子树</b>
+          <small>只认 metadata 和三个注入进来的函数</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>PortraitRow</b>
+        <small>useStoredItems(() =&gt; feature.valueSource)</small>
+        <span class="tag tone-blue">画像行</span>
+      </div><div class="pnode tone-violet">
+        <b>RelationRow</b>
+        <small>propSetItems 批量 + 客体 remote select</small>
+        <span class="tag tone-violet">关系行</span>
+      </div><div class="pnode tone-violet">
+        <b>ValueControl</b>
+        <small>remote-method → onSearch(keyword)</small>
+        <span class="tag tone-violet">值控件</span>
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">loadValueSet(setKey)<span class="note">组件自己不发请求</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-violet">
+        <div class="lane-meta">
+          <span class="ln">LAYER 02</span>
+          <b>注入层</b>
+          <small>InsightCombiner 把调用方给的函数 provide 下去</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>loadValueSetKey</b>
+        <small>props.loadValueSet?.(setKey)</small>
+        <span class="tag tone-violet">值集合</span>
+      </div><div class="pnode">
+        <b>searchValuesKey</b>
+        <small>props.searchValues?.(resolverKey, kw)</small>
+        <span class="tag tone-violet">搜索</span>
+      </div><div class="pnode">
+        <b>lookupValuesKey</b>
+        <small>props.lookupValues?.(resolverKey, values)</small>
+        <span class="tag tone-violet">回显</span>
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">宿主 App<span class="note">函数体在这里，组件看不见</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-green">
+        <div class="lane-meta">
+          <span class="ln">LAYER 03</span>
+          <b>宿主 App</b>
+          <small>决定缓存、决定打哪个接口</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>useValueSets</b>
+        <small>按 setKey 缓存 + inflight 复用</small>
+        <span class="tag tone-green">缓存</span>
+      </div><div class="pnode">
+        <b>loadSearch / loadLookup</b>
+        <small>薄薄一层，透传 api.ts</small>
+        <span class="tag tone-green">透传</span>
+      </div><div class="pnode">
+        <b>prefetchColumns</b>
+        <small>预览结果回来后预热结果列的 setKey</small>
+        <span class="tag tone-green">预热</span>
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">api 适配层<span class="note">pb → 组件内部形状</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-amber">
+        <div class="lane-meta">
+          <span class="ln">LAYER 04</span>
+          <b>api 适配层</b>
+          <small>value 是 JSON 字符串、I18n 是 zhCn/zhHk、status 是数字 —— 全在这里转</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>getValueSet</b>
+        <small>toValueItems → parsePbScalar</small>
+        <span class="tag tone-amber">value-sets</span>
+      </div><div class="pnode">
+        <b>searchValues / lookupValues</b>
+        <small>toResolverItems → toI18nText</small>
+        <span class="tag tone-amber">resolver-options</span>
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">服务端<span class="note">两个 GET，无 body</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-red">
+        <div class="lane-meta">
+          <span class="ln">LAYER 05</span>
+          <b>服务端</b>
+          <small>一个查投影，一个查内存常量表</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>GET /api/crowd/value-sets</b>
+        <small>5 秒 TTL 投影里找 set → toValueSet</small>
+        <span class="tag tone-red">setKey 必填</span>
+      </div><div class="pnode">
+        <b>GET /api/crowd/resolver-options</b>
+        <small>values 优先，否则 keyword 子串匹配</small>
+        <span class="tag tone-red">resolverKey 必填</span>
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">数据<span class="note">一份在 MySQL，一份在代码里</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-muted">
+        <div class="lane-meta">
+          <span class="ln">LAYER 06</span>
+          <b>数据</b>
+          <small>两条链路的终点完全不同</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>crm_dc_value_set</b>
+        <small>enum_content JSON，原生标量</small>
+        <span class="tag tone-muted">MySQL</span>
+      </div><div class="pnode tone-amber">
+        <b>resolvers.ts · STOCKS</b>
+        <small>21 条写死的股票，value + 三语 label</small>
+        <span class="tag tone-amber">常量表</span>
+      </div></div>
+      </div></div><p>三个最容易以为错的地方，先摆出来：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>直觉</th><th>代码里实际是什么</th><th>结果</th></tr></thead><tbody><tr><th>metadata 接口里带着候选值</th><td data-label="代码里实际是什么">只带 <code>setKey</code> / <code>resolverKey</code> 两个引用键；<code>CUSTOM</code> 才会把 items 一起带 —— 而 pb 投影已经不产出 <code>CUSTOM</code> 了</td><td data-label="结果">字典和值是两次请求</td></tr><tr><th>组件自己发 HTTP</th><td data-label="代码里实际是什么">组合器源码里 <code>grep -rn 'fetch(\|axios'</code> <mark class="mk-blue">零命中</mark>；注入函数没给时默认 <code>async () =&gt; []</code></td><td data-label="结果">组件可以脱离宿主单跑，下拉只是空的</td></tr><tr><th>值集合是静态的、全局缓存</th><td data-label="代码里实际是什么">服务端 5 秒 TTL 全量刷新（<code>CACHE_TTL_MS = 5000</code>）；宿主按 <code>setKey</code> 缓存，<code>staffId</code> 或 metadata <code>revision</code> 变了就清空</td><td data-label="结果">停用值仍会回来，只是渲染成灰色不可选</td></tr></tbody></table></div><h2 id="链路-a-值集合点一下字段十一行时序回来"><span class="num">02</span>链路 A · 值集合：点一下字段，十一行时序回来</h2>
+<h3 id="21-触发点是换字段不是换操作符">2.1 触发点是「换字段」，不是「换操作符」</h3>
+<p><code>PortraitRow</code> 把 <code>feature.valueSource</code> 交给 <code>useStoredItems</code>，<code>values.ts</code> 里 watch 的就是这个 source：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">// packages/combination/src/values.ts —— 值集合分支
+watch(source, async (next) =&gt; {
+  const current = ++ticket;
+  if (!next || next.type === 'NONE' || next.type === 'DYNAMIC') { items.value = []; return; }
+  if (next.type === 'CUSTOM') { items.value = next.items; return; }
+  items.value = [];
+  const loaded = await loadValueSet(next.setKey).catch(() =&gt; []);   // ← 只有 VALUE_SET 走到这
+  if (current === ticket) items.value = loaded;
+}, { immediate: true });
+</code></pre></div>
+<p>所以：<strong>同一个字段上改操作符、改值，都不会再拉一次；换成另一个字段（或另一个 setKey）才会拉。</strong> <code>ticket</code> 是防串道的票据：快速连换两次字段时，先发的响应回来晚了会被丢掉。</p>
+<h3 id="22-十一步时序">2.2 十一步时序</h3>
+<div class="seqd has-grid" data-seq data-n="5">
+      <svg class="seqd-svg" aria-hidden="true">
+        <defs>
+          <marker id="s-fill" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+          <marker id="s-open" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10" fill="none" stroke="currentColor" stroke-width="1.4"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="seqd-head"><div class="scell"><div class="spart tone-muted" data-id="u">
+          <b>用户</b>
+        </div></div><div class="scell"><div class="spart tone-blue" data-id="vc">
+          <b>PortraitRow + ValueControl</b>
+        </div></div><div class="scell"><div class="spart tone-violet" data-id="inj">
+          <b>注入层</b>
+        </div></div><div class="scell"><div class="spart tone-green" data-id="host">
+          <b>宿主 App</b>
+        </div></div><div class="scell"><div class="spart tone-red" data-id="srv">
+          <b>服务端</b>
+        </div></div></div>
+      <div class="seqd-body"><div class="smsg" data-from="u" data-to="vc" data-kind="sync" data-i="1"><span class="slabel">选中字段「常驻城市」</span></div><div class="smsg is-self" data-from="vc" data-to="vc" data-kind="self" data-i="2"><span class="slabel">valueSource = { VALUE_SET, setKey: 'city' }</span></div><div class="smsg" data-from="vc" data-to="inj" data-kind="sync" data-i="3" data-note="1"><span class="snote">1</span><span class="slabel">loadValueSet('city')</span></div><div class="smsg" data-from="inj" data-to="host" data-kind="sync" data-i="4" data-note="2"><span class="snote">2</span><span class="slabel">props.loadValueSet('city')</span></div><div class="smsg is-self" data-from="host" data-to="host" data-kind="self" data-i="5"><span class="slabel">查 cache / inflight</span></div><div class="smsg" data-from="host" data-to="srv" data-kind="sync" data-i="6" data-note="3"><span class="snote">3</span><span class="slabel">GET /api/crowd/value-sets?setKey=city</span></div><div class="smsg is-self" data-from="srv" data-to="srv" data-kind="self" data-i="7"><span class="slabel">查投影</span></div><div class="smsg" data-from="srv" data-to="host" data-kind="reply" data-i="8" data-note="4"><span class="snote">4</span><span class="slabel">items[] · value 是 JSON 标量字符串</span></div><div class="smsg is-self" data-from="host" data-to="host" data-kind="self" data-i="9"><span class="slabel">适配 + 写缓存</span></div><div class="smsg" data-from="host" data-to="inj" data-kind="reply" data-i="10"><span class="slabel">ValueItem[]</span></div><div class="smsg" data-from="inj" data-to="vc" data-kind="reply" data-i="11" data-note="5"><span class="snote">5</span><span class="slabel">ResolvedOption[] · DISABLED → disabled</span></div><div class="smsg" data-from="vc" data-to="u" data-kind="reply" data-i="12"><span class="slabel">下拉出现候选（深圳是灰的）</span></div><div class="smsg" data-from="u" data-to="vc" data-kind="sync" data-i="13"><span class="slabel">选中「深圳」</span></div><div class="smsg is-self" data-from="vc" data-to="vc" data-kind="self" data-i="14"><span class="slabel">emit('update:modelValue')</span></div><div class="smsg" data-from="vc" data-to="u" data-kind="reply" data-i="15"><span class="slabel">{ field: 'city', op: 'eq', value: '440300' }</span></div></div>
+    </div><p>三处对应代码：</p>
+<div class="spec tone-blue">
+      <div class="spec-head"><b>这条链上的三个关键点</b><span>组件 → 注入层 → 宿主</span></div>
+      <div class="spec-body"><div class="srow">
+          <div class="sk">1 · 组件不认 HTTP</div>
+          <div class="sv"><div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>// packages/combination/src/values.ts:8
+const loadValueSet = inject(loadValueSetKey, async () =&gt; []);
+// 组件包里 grep 'fetch(' / 'axios' —— 零命中
+</pre></div></div>
+        </div><div class="srow">
+          <div class="sk">2 · 注入层只转发</div>
+          <div class="sv"><div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>// packages/combination/src/InsightCombiner.vue:59
+provide(loadValueSetKey, (setKey) =&gt; props.loadValueSet?.(setKey) ?? Promise.resolve([]));
+</pre></div></div>
+        </div><div class="srow">
+          <div class="sk">3 · 宿主决定缓存还是请求</div>
+          <div class="sv"><div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>// apps/client/src/useValueSets.ts —— 三级：cache → inflight → getValueSet
+const cached = cache.value[setKey];
+if (cached) return cached;
+const pending = inflight.get(setKey);
+if (pending) return pending;
+const promise = getValueSet(requestedStaff, setKey).then((body) =&gt; {
+  if (staffId.value === requestedStaff &amp;&amp; run === generation) cache.value = { ...cache.value, [setKey]: body.items };
+  return body.items;
+})
+</pre></div></div>
+        </div></div>
+    </div><h3 id="23-值的一路变形">2.3 值的一路变形</h3>
+<p>同一条数据在这条链上换了四次形状。看仔细：<strong>MySQL 里是原生标量，HTTP 上是 JSON 字符串，组件内部又变回原生标量。</strong></p>
+<div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-muted">① MySQL 行</span>
+            <span class="name">crm_dc_value_set</span>
+            <span class="spacer"></span>
+            <span class="tag tone-ok">原生标量</span>
+          </div>
+          
+          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>set_key = 'city'
+enum_content = [
+  { &quot;value&quot;: &quot;440300&quot;, &quot;label&quot;: { &quot;zh-CN&quot;: &quot;深圳&quot;, &quot;zh-HK&quot;: &quot;深圳&quot;, &quot;en&quot;: &quot;Shenzhen&quot; },
+    &quot;status&quot;: 0, &quot;sortOrder&quot;: 100 }
+]
+</pre></div>
+          <p class="jnote">status 0 = 停用。它仍在数组里 —— 停用是改状态，不是删行。</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">toValueSet<span class="note">value 变成 JSON 标量字符串</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-red">② HTTP 响应</span>
+            <span class="name">pb 形状</span>
+            <span class="spacer"></span>
+            <span class="tag tone-red">value 是字符串</span>
+          </div>
+          <div class="rec"><div class="">
+            <b>key</b><span>city</span></div><div class="warn">
+            <b>items[0].value</b><span>&quot;440300&quot;</span><em>带引号的 JSON 标量</em></div><div class="warn">
+            <b>items[0].label</b><span>{ zhCn, zhHk, en }</span><em>键名也换了</em></div><div class="warn">
+            <b>items[0].status</b><span>0</span><em>数字不是布尔</em></div></div>
+          
+          <p class="jnote bad">服务端 <code>toValueSet</code> 里一句 <code>JSON.stringify(item.value)</code>，把标量变成可逆的字符串。</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">api.ts 适配<span class="note">parsePbScalar + toI18nText</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-green">③ 宿主拿到</span>
+            <span class="name">ValueItem[]</span>
+            <span class="spacer"></span>
+            <span class="tag tone-ok">恢复成标量</span>
+          </div>
+          
+          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>{ value: '440300', label: { 'zh-CN': '深圳', 'zh-HK': '深圳', en: 'Shenzhen' },
+  sortOrder: 100, status: 'DISABLED' }
+</pre></div>
+          <p class="jnote">parsePbScalar 做一次 JSON.parse；status 0 → 'DISABLED'；I18n 键转会 zh-CN / zh-HK。</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">useResolvedItems<span class="note">只给渲染要用的三样</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-violet">④ 喂给 el-option</span>
+            <span class="name">ResolvedOption</span>
+            <span class="spacer"></span>
+            <span class="tag tone-violet">给控件用</span>
+          </div>
+          
+          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>{ value: '440300', label: '深圳', disabled: true }
+</pre></div>
+          <p class="jnote"><code>disabled</code> 由 status 推出。新条件里它选不了；回显历史条件时它照样显示。停用值回来就是为了这个。</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">选中之后<span class="note">又变回原生标量</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-amber">⑤ 草稿</span>
+            <span class="name">DraftPortrait</span>
+            <span class="spacer"></span>
+            <span class="tag tone-amber">落进 DSL</span>
+          </div>
+          
+          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>{ type: 'portrait', field: 'city', op: 'eq', value: '440300' }
+</pre></div>
+          <p class="jnote">写进草稿的永远是原生标量，不是字符串 —— DSL 和 pb 的那层区别在这里被抹平了。</p>
+        </div><h3 id="24-关系属性走的是另一条路批量预取">2.4 关系属性走的是另一条路：批量预取</h3>
+<p><code>RelationRow</code> 不用 <code>useStoredItems</code>。一条关系可能挂好几个枚举属性，它索性在一个 watch 里把<strong>所有</strong> <code>VALUE_SET</code> 属性一起拉回来，结果存在 <code>propSetItems</code>：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">// packages/combination/src/components/RelationRow.vue —— 换关系时一次性拉齐
+watch(relationDef, async (relation) =&gt; {
+  const next: Record&lt;string, ResolvedOption[]&gt; = {};
+  const ticket = ++propLoadToken;
+  for (const prop of relation?.properties ?? []) {
+    if (prop.valueSource.type !== 'VALUE_SET') continue;
+    const items = await loadValueSet(prop.valueSource.setKey).catch(() =&gt; []);
+    next[prop.key] = items.map((item) =&gt; ({ value: item.value, label: label(item.label), disabled: item.status === 'DISABLED' }));
+  }
+  if (ticket === propLoadToken) propSetItems.value = next;
+}, { immediate: true });
+</code></pre></div>
+<p>对象（客体）的候选又是第三条路：<code>DYNAMIC</code> 走远程搜索，<code>CUSTOM</code> 用 metadata 自带 items，<code>NONE</code> 直接空数组，分支落在 <code>propItemsFor()</code> 里。</p>
+<h2 id="链路-b-动态候选每次输入都是一次请求"><span class="num">03</span>链路 B · 动态候选：每次输入都是一次请求</h2>
+<h3 id="31-搜索打开下拉或敲字都会发">3.1 搜索：打开下拉或敲字都会发</h3>
+<div class="seqd has-grid" data-seq data-n="5">
+      <svg class="seqd-svg" aria-hidden="true">
+        <defs>
+          <marker id="s-fill" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+          <marker id="s-open" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10" fill="none" stroke="currentColor" stroke-width="1.4"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="seqd-head"><div class="scell"><div class="spart tone-muted" data-id="u">
+          <b>用户</b>
+        </div></div><div class="scell"><div class="spart tone-blue" data-id="vc">
+          <b>值控件</b>
+        </div></div><div class="scell"><div class="spart tone-violet" data-id="inj">
+          <b>注入层</b>
+        </div></div><div class="scell"><div class="spart tone-green" data-id="host">
+          <b>宿主 App</b>
+        </div></div><div class="scell"><div class="spart tone-red" data-id="srv">
+          <b>服务端</b>
+        </div></div></div>
+      <div class="seqd-body"><div class="smsg" data-from="u" data-to="vc" data-kind="sync" data-i="1"><span class="slabel">输入「腾讯」</span></div><div class="smsg is-self" data-from="vc" data-to="vc" data-kind="self" data-i="2"><span class="slabel">searchToken++ 取票据</span></div><div class="smsg" data-from="vc" data-to="inj" data-kind="sync" data-i="3" data-note="1"><span class="snote">1</span><span class="slabel">search('stock_search', '腾讯')</span></div><div class="smsg" data-from="inj" data-to="host" data-kind="sync" data-i="4"><span class="slabel">props.searchValues(resolverKey, keyword)</span></div><div class="smsg" data-from="host" data-to="srv" data-kind="sync" data-i="5" data-note="2"><span class="snote">2</span><span class="slabel">GET /resolver-options?…&amp;keyword=腾讯</span></div><div class="smsg is-self" data-from="srv" data-to="srv" data-kind="self" data-i="6"><span class="slabel">子串匹配</span></div><div class="smsg" data-from="srv" data-to="host" data-kind="reply" data-i="7" data-note="3"><span class="snote">3</span><span class="slabel">items[] · label 是 zhCn / zhHk / en</span></div><div class="smsg" data-from="host" data-to="inj" data-kind="reply" data-i="8"><span class="slabel">键转 zh-CN / zh-HK / en</span></div><div class="smsg" data-from="inj" data-to="vc" data-kind="reply" data-i="9"><span class="slabel">ResolvedOption[]</span></div><div class="smsg is-self" data-from="vc" data-to="vc" data-kind="self" data-i="10" data-note="4"><span class="snote">4</span><span class="slabel">票据相等才写 remoteItems</span></div><div class="smsg" data-from="vc" data-to="u" data-kind="reply" data-i="11"><span class="slabel">下拉里出现「腾讯 <code>00700.HK</code>」</span></div></div>
+    </div><p>四个细节，图上标了号：</p>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>细节</th>
+<th>代码</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td><code>&lt;ValueControl :search=&quot;valueSearchFn&quot;&gt;</code> 只在 <code>valueSource.type === 'DYNAMIC'</code> 且控件不是 <code>NONE</code> 时给出；<code>valueResolve</code> 同理</td>
+<td><code>PortraitRow.vue</code> 的两个 computed</td>
+</tr>
+<tr>
+<td>2</td>
+<td>打开下拉也会搜一次（空关键词）；敲字时 el-select 的 <code>remote-method</code> 每次输入都调</td>
+<td><code>ValueControl.onOpen(open)</code> → <code>onSearch('')</code></td>
+</tr>
+<tr>
+<td>3</td>
+<td>服务端返回的 label 是 pb 键名；<code>api.ts</code> 的 <code>toResolverItems</code> 转成组件内部形状</td>
+<td><code>api.ts</code></td>
+</tr>
+<tr>
+<td>4</td>
+<td><code>searchToken</code> 是一个自增整数：<strong>发出前取号，回来时比对</strong>，不相等就整包丢弃</td>
+<td><code>ValueControl.onSearch</code></td>
+</tr>
+</tbody>
+</table>
+<p><mark class="mk-amber">这个包<strong>没有防抖</strong>。技术方案里写着「输入关键词后防抖调用 searchValues」，但 <code>packages/combination/src/</code> 里 <code>grep debounce</code> 零命中、也没有 <code>setTimeout</code>。每次输入（以及每次打开下拉）都是一次真实请求。</mark></p>
+<h3 id="32-第二处注入函数用-values-把已保存的取值换回中文名">3.2 第二处注入函数：用 <code>values=</code> 把已保存的取值换回中文名</h3>
+<p>搜索结果里不会总是有草稿里那个值（换个关键词、或者对方已下架）。这时用第二处注入函数按 value 精确反查：</p>
+<div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;remote&quot;,&quot;to&quot;:&quot;shown&quot;,&quot;label&quot;:&quot;候选&quot;},{&quot;from&quot;:&quot;stored&quot;,&quot;to&quot;:&quot;shown&quot;,&quot;label&quot;:&quot;候选&quot;},{&quot;from&quot;:&quot;remembered&quot;,&quot;to&quot;:&quot;shown&quot;,&quot;label&quot;:&quot;换名字&quot;,&quot;dashed&quot;:true},{&quot;from&quot;:&quot;shown&quot;,&quot;to&quot;:&quot;option&quot;,&quot;label&quot;:&quot;渲染&quot;}]">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-blue" data-id="remote">
+              
+              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="3" width="11" height="8.5" rx="1.5"/><path d="M2.5 6h11"/></svg>
+              <b>搜索命中</b>
+              <small>remoteItems</small>
+            </div><div class="fnode tone-muted" data-id="stored">
+              
+              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="3" width="11" height="8.5" rx="1.5"/><path d="M2.5 6h11"/></svg>
+              <b>值集合候选</b>
+              <small>stored.resolved()</small>
+            </div><div class="fnode tone-amber" data-id="remembered">
+              
+              
+              <b>回显缓存</b>
+              <small>rememberedObjects</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="shown">
+              
+              
+              <b>shownItems</b>
+              <small>候选 + 选中但缺失的</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="option">
+              
+              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="3" width="11" height="8.5" rx="1.5"/><path d="M2.5 6h11"/></svg>
+              <b>el-option</b>
+              <small>disabled 来自 status</small>
+            </div></div></div>
+      
+    </div><p>图里的「选中但缺失的」是这样补上的：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">// packages/combination/src/components/ValueControl.vue —— shownItems
+const selected = Array.isArray(modelValue.value) ? modelValue.value : modelValue.value == null ? [] : [modelValue.value];
+return [...items,
+  ...selected.filter(v =&gt; !items.some(i =&gt; i.value === v))
+             .map(v =&gt; selectedLabels.get(String(v)) ?? { value: v, label: String(v) })];   // ← 兜底：原值显示原值
+</code></pre></div>
+<p><code>selectedLabels</code> 有两个来源：当前 items，以及 <code>resolveSelected</code>（也就是注入的 <code>lookupValues</code>）对已选值反查回来的条目：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">// 同一文件的 watch —— 已选值不在候选里时，向解析器换名字
+watch(() =&gt; [modelValue.value, props.resolveSelected] as const, async () =&gt; {
+  const values = selected.filter(isScalar);
+  if (values.length === 0) return;
+  const items = await resolve(values).catch(() =&gt; []);
+  for (const item of items) remember(item);
+}, { immediate: true });
+</code></pre></div>
+<p>服务端对应分支只有三行：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">// apps/server/src/metadata/resolvers.ts —— values 非空时忽略 keyword 和 limit
+if (values.length &gt; 0) {
+  const byValue = new Map(STOCKS.map((item) =&gt; [item.value, item]));
+  return { items: values.flatMap((value) =&gt; { const item = byValue.get(value); return item ? [item] : []; }), nextCursor: null };
+}
+</code></pre></div>
+<p><code>RelationRow</code> 的客体（如持仓标的）走的是同一对函数，只是调用点换成 <code>onObjectSearch</code> / <code>objectOptions</code>。它还多修了一个 Element Plus 的坑：远程搜索后组件会自己清一次查询并再次触发 <code>remote-method</code>，如果不判断输入框里还有没有关键词，刚拿到的结果会被一次空搜索覆盖掉。</p>
+<h2 id="函数是怎么注入进去的"><span class="num">04</span>函数是怎么「注入」进去的</h2>
+<p>组件和宿主之间是一份四行的契约：三个函数 prop + 三个 injection key。组件不 import 宿主，宿主也不 import 组件。</p>
+<div class="spec tone-violet">
+      <div class="spec-head"><b>注入契约</b><span>InsightCombiner.vue（154 行）里的三行 provide</span></div>
+      <div class="spec-body"><div class="srow">
+          <div class="sk">组件侧消费</div>
+          <div class="sv"><div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>// values.ts
+const loadValueSet  = inject(loadValueSetKey,  async () =&gt; []);   // 没给 → 空数组
+const searchValues  = inject(searchValuesKey,  async () =&gt; []);
+const lookupValues  = inject(lookupValuesKey,  async () =&gt; []);
+</pre></div></div>
+        </div><div class="srow">
+          <div class="sk">壳侧转发</div>
+          <div class="sv"><div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>// InsightCombiner.vue:59-61
+provide(loadValueSetKey, (setKey) =&gt; props.loadValueSet?.(setKey) ?? Promise.resolve([]));
+provide(searchValuesKey, (resolverKey, keyword) =&gt; props.searchValues?.(resolverKey, keyword) ?? Promise.resolve([]));
+provide(lookupValuesKey, (resolverKey, values) =&gt; props.lookupValues?.(resolverKey, values) ?? Promise.resolve([]));
+</pre></div></div>
+        </div><div class="srow">
+          <div class="sk">宿主侧实现</div>
+          <div class="sv"><div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>// apps/client/src/App.vue:392 —— 三个 prop 传进去
+&lt;InsightCombiner v-model=&quot;query&quot; :metadata=&quot;metadata&quot;
+  :load-value-set=&quot;loadValueSet&quot; :search-values=&quot;loadSearch&quot; :lookup-values=&quot;loadLookup&quot; ... /&gt;
+</pre></div></div>
+        </div><div class="srow">
+          <div class="sk">为什么这么设计</div>
+          <div class="sv"><p>组件包不绑定具体 HTTP 接口：它要的只是「给我 setKey 的候选值」，至于你从哪儿取、要不要缓存、什么时候清，都是宿主的事。
+代价是多一层转发；好处是同一个组件包换一个宿主（另一个页面、另一种鉴权、甚至 mock 数据）不用改代码。</p>
+</div>
+        </div></div>
+    </div><p>三个 prop 的来源接口不一样，第一个和第三个尤其容易混：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>prop</th><th>谁给的</th><th>打哪个接口</th></tr></thead><tbody><tr><th>metadata</th><td data-label="谁给的">GET /api/crowd/metadata</td><td data-label="打哪个接口">字段字典。里面只有 <code>setKey</code> / <code>resolverKey</code></td></tr><tr><th>loadValueSet</th><td data-label="谁给的">宿主 useValueSets → getValueSet</td><td data-label="打哪个接口">GET /api/crowd/value-sets?setKey=</td></tr><tr><th>searchValues</th><td data-label="谁给的">宿主 loadSearch → api.searchValues</td><td data-label="打哪个接口">GET /api/crowd/resolver-options?resolverKey=&amp;keyword=&amp;limit=</td></tr><tr><th>lookupValues</th><td data-label="谁给的">宿主 loadLookup → api.lookupValues</td><td data-label="打哪个接口">GET /api/crowd/resolver-options?resolverKey=&amp;values=（可重复）</td></tr></tbody></table></div><h2 id="服务端这两个接口"><span class="num">05</span>服务端这两个接口</h2>
+<p>两个 GET，都没有 body。区别在参数语义和数据的住处。</p>
+<div class="spec tone-green">
+      <div class="spec-head"><b>GET /api/crowd/value-sets</b><span>一份共享候选值集合 · 数据在 MySQL</span></div>
+      <div class="spec-body"><div class="srow">
+          <div class="sk">输入</div>
+          <div class="sv"><p><code>setKey</code> 必填。</p>
+</div>
+        </div><div class="srow">
+          <div class="sk">处理</div>
+          <div class="sv"><div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>const setKey = queryString(request.query, 'setKey');
+if (!setKey) return reply.status(400).send({ code: 'MISSING_SET_KEY', message: 'setKey is required' });
+const set = (await getMetadataRows()).valueSets.find((item) =&gt; item.setKey === setKey);
+if (!set) return reply.status(404).send({ code: 'UNKNOWN_VALUE_SET', message: `Unknown value set: ${setKey}` });
+return toValueSet(set);
+</pre></div></div>
+        </div><div class="srow">
+          <div class="sk">输出</div>
+          <div class="sv"><p>pb 形状：<code>{ key, name, dataType, status, items[] }</code>。
+<code>items[].value</code> 是 <strong>JSON 标量字符串</strong>（服务端 <code>JSON.stringify</code>），<code>label</code> 是 <code>zhCn / zhHk / en</code>，<code>status</code> 是数字。</p>
+</div>
+        </div><div class="srow">
+          <div class="sk">两个「照样返回」</div>
+          <div class="sv"><p>集合已停用照样返回；集合里某一条已停用也照样返回（带 <code>status: 0</code>）。两者都是为了回显历史条件。</p>
+</div>
+        </div></div>
+    </div><div class="spec tone-amber">
+      <div class="spec-head"><b>GET /api/crowd/resolver-options</b><span>动态候选 · 数据在内存常量表（demo 是 21 只股票）</span></div>
+      <div class="spec-body"><div class="srow">
+          <div class="sk">输入</div>
+          <div class="sv"><p><code>resolverKey</code> 必填。<code>keyword</code> 搜索；<code>values</code> 按已保存取值回显名称（可重复传多值）。</p>
+</div>
+        </div><div class="srow">
+          <div class="sk">优先级</div>
+          <div class="sv"><p><mark class="mk-blue"><code>values</code> 非空时，<code>keyword</code> 和 <code>limit</code> 都不看</mark>；两者都空时返回空列表，所以「打开下拉但不输入」在 demo 里就是空的。</p>
+</div>
+        </div><div class="srow">
+          <div class="sk">搜索规则</div>
+          <div class="sv"><div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>const matched = STOCKS.filter((item) =&gt; {
+  if (item.value.toLowerCase().includes(needle)) return true;
+  return Object.values(item.label).some((label) =&gt; label.toLowerCase().includes(needle));
+}).slice(0, limit);
+</pre></div></div>
+        </div><div class="srow">
+          <div class="sk">limit</div>
+          <div class="sv"><p>默认 20，最大 50（<code>queryLimit</code>），<strong>只限制搜索</strong>，不影响 <code>values</code> 回显。</p>
+</div>
+        </div><div class="srow">
+          <div class="sk">错误码</div>
+          <div class="sv"><p>缺参 400 <code>MISSING_RESOLVER_KEY</code>；未知解析器 404 <code>UNKNOWN_RESOLVER</code>。</p>
+</div>
+        </div></div>
+    </div><p>服务端这份投影有 5 秒 TTL（<code>metadata/source.ts</code> 的 <code>CACHE_TTL_MS = 5_000</code>）：改一行 MySQL，最多 5 秒后这两个接口就跟着变。宿主那边则是在页面重新获得焦点时刷新字典，<code>revision</code> 没变就不重建对象、也不清缓存。</p>
+<h2 id="边界六处不那么直觉的地方"><span class="num">06</span>边界：六处不那么直觉的地方</h2>
+<div class="cards" data-cols="2"><div class="ccard tone-amber">
+          
+          <h4>停用值要回来</h4>
+          <p>停用是改 status，不是删行</p>
+          <div class="cbody"><p><code>enum_content</code> 里的条目 <code>status: 0</code> 之后仍然出现在响应里，宿主把它映射成 <code>disabled: true</code>。
+这样历史条件回显时下拉里还找得到「深圳」，只是新条件选不了它。
+<mark class="mk-blue">如果服务端过滤掉停用值，历史条件会显示成一个裸的 <code>440300</code>。</mark></p>
+</div>
+          
+        </div><div class="ccard tone-blue">
+          
+          <h4>空关键词 = 空列表</h4>
+          <p>demo 的解析器不返回「默认一批」</p>
+          <div class="cbody"><p><code>if (!needle) return { items: [], nextCursor: null }</code>。打开下拉会发一次空搜索，但结果是空的。
+真实解析器可能返回热门项 —— 那是 <code>searchResolver</code> 的实现自由，不是协议的约定。</p>
+</div>
+          
+        </div><div class="ccard tone-red">
+          
+          <h4>没有防抖</h4>
+          <p>方案里写了，代码里没有</p>
+          <div class="cbody"><p><code>packages/combination/src/</code> 里没有 <code>debounce</code>、没有 <code>setTimeout</code>。每次输入都发一次请求，
+靠的是 token 丢弃旧响应，而不是合并请求。<mark class="mk-blue">请求量按流量算，不按意图算。</mark></p>
+</div>
+          
+        </div><div class="ccard tone-amber">
+          
+          <h4>Element Plus 会自清查询</h4>
+          <p>远程搜索后的那次回调是坑</p>
+          <div class="cbody"><p>远程搜索结束后，el-select 会把查询清空并再触发一次 <code>remote-method</code>，回调参数是空串。
+不判断的话，刚写进 <code>remoteItems</code> 的结果会被这次空搜索覆盖成空列表。
+<code>RelationRow</code> 用 <code>currentObjectQuery()</code> 读真实输入框来挡。</p>
+</div>
+          
+        </div><div class="ccard tone-green">
+          
+          <h4>缓存的两级失效</h4>
+          <p>一级在宿主，一级在页面</p>
+          <div class="cbody"><p>宿主：<code>staffId</code> 变化或 metadata <code>revision</code> 变化 → <code>reset()</code> 清 <code>cache</code> 与 <code>inflight</code>。
+页面：重新获得焦点 → <code>loadMeta()</code>；<code>revision</code> 相同则复用原 metadata 对象，不触发下游 watch。</p>
+</div>
+          
+        </div><div class="ccard tone-violet">
+          
+          <h4>兜底显示原值</h4>
+          <p>换不到名字也要能看</p>
+          <div class="cbody"><p>解析器里查不到那个 value 时，<code>shownItems</code> 用 <code>{ value, label: String(value) }</code> 兜底 ——
+标签位上显示原始的 <code>00700.HK</code>。<mark class="mk-blue">宁可难看，不可留空。</mark></p>
+</div>
+          
+        </div></div><h3 id="跑一遍两条链路">跑一遍两条链路</h3>
+<p>下面这个模拟按真实顺序放四幕：值集合（一次请求）、动态搜索（两次，其中一次被丢弃）、回显（一次）。左边是事件流，右边是组件里那几个 <code>ref</code> 的值。</p>
+<div class="demo" data-widget="cand-pipe-lab">
+      <div class="demo-head">
+        <span class="title">四幕：值集合 → 搜索 → 竞态 → 回显</span>
+        <span class="status" data-status>点「开始模拟」</span>
+        <span class="spacer"></span>
+        <button class="btn" data-run>▶ 开始模拟</button><button class="btn ghost" data-reset>重置</button>
+      </div>
+      <div class="demo-body"><div class="pane">
+        <div class="pane-head">
+          <span class="tag tone-blue">事件流</span>
+          组件 → 注入层 → 宿主 → 服务端
+          <span class="sub">每一条都是链路上真实发生的动作</span>
+        </div>
+        <div class="log" data-log="main"></div>
+        <div class="pane-foot"><span class="tag tone-blue">4 次请求</span><span class="tag tone-blue">1 次被 token 丢弃</span></div>
+      </div><div class="pane">
+        <div class="pane-head">
+          <span class="tag tone-violet">状态快照</span>
+          组件里的 ref
+          <span class="sub">每一步之后这些值是什么</span>
+        </div>
+        <div class="log" data-log="state"></div>
+        <div class="pane-foot"><span class="tag tone-violet">setKey</span><span class="tag tone-violet">remoteItems</span><span class="tag tone-violet">shownItems</span></div>
+      </div></div>
+    </div><h2 id="速查"><span class="num">07</span>速查</h2>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>维度</th><th>值集合 VALUE_SET</th><th>动态候选 DYNAMIC</th></tr></thead><tbody><tr><th>触发时机</th><td data-label="值集合 VALUE_SET">选中字段时自动拉一次（watch valueSource）</td><td data-label="动态候选 DYNAMIC">打开下拉 / 每次输入关键词</td></tr><tr><th>请求参数</th><td data-label="值集合 VALUE_SET"><code>setKey</code></td><td data-label="动态候选 DYNAMIC"><code>resolverKey</code> + <code>keyword</code>，回显时用重复的 <code>values</code></td></tr><tr><th>接口</th><td data-label="值集合 VALUE_SET"><code>GET /api/crowd/value-sets</code></td><td data-label="动态候选 DYNAMIC"><code>GET /api/crowd/resolver-options</code></td></tr><tr><th>数据在哪</th><td data-label="值集合 VALUE_SET">MySQL <code>crm_dc_value_set.enum_content</code>，经 5 秒 TTL 投影</td><td data-label="动态候选 DYNAMIC">代码里的常量表（demo 21 条）</td></tr><tr><th>返回值</th><td data-label="值集合 VALUE_SET">整集合（含停用项），宿主缓存</td><td data-label="动态候选 DYNAMIC">命中的一小批，不缓存，每次覆盖 remoteItems</td></tr><tr><th>停用态</th><td data-label="值集合 VALUE_SET">有：<code>status: 0</code> → <code>disabled: true</code></td><td data-label="动态候选 DYNAMIC">没有：动态候选不带停用</td></tr><tr><th>覆盖风险</th><td data-label="值集合 VALUE_SET">快速换字段：<code>ticket</code> 丢弃旧响应</td><td data-label="动态候选 DYNAMIC">快速改关键词：<code>searchToken</code> 丢弃旧响应</td></tr><tr><th>缺失时怎么办</th><td data-label="值集合 VALUE_SET">整集都在，不会缺</td><td data-label="动态候选 DYNAMIC"><code>values=</code> 反查换名字，查不到就用原值显示</td></tr></tbody></table></div><ul class="check warn"><li>以为 metadata 里带着候选值（它只有 setKey / resolverKey）</li><li>以为「打开下拉没数据」是 bug（空关键词本来就返回空）</li><li>给动态候选加了缓存（它是每次覆盖的实时结果）</li><li>在组件包里找 HTTP 请求（没有，全在宿主）</li></ul><ul class="check"><li>组件只消费 metadata + 三个注入函数，不碰 HTTP</li><li>value 集合按 setKey 缓存，inflight 复用，staffId / revision 变化即清</li><li>停用项照常返回、渲染成 disabled，保证历史条件可回显</li><li>每条异步链路都有票据（ticket / searchToken / objectSearchToken / propLoadToken）</li><li>换不到名字时用原值兜底，不留空</li></ul><div class="quiz"><details>
+        <summary>为什么 metadata 接口里看不到候选值？</summary>
+        <div class="a"><p>设计和消费解耦：metadata 只是字段字典，回答「这个字段有没有候选值来源、去哪取」（<code>enumType</code> + <code>setKey</code> / <code>resolverKey</code>）。
+候选值可能很大、可能是实时的（股票搜索），塞进字典会让每次刷新字典都带上几万条数据。所以值是另一条按需的请求。</p>
+</div>
+      </details><details>
+        <summary>值集合字段，改一下操作符会再发一次请求吗？</summary>
+        <div class="a"><p>不会。<code>useStoredItems</code> watch 的是 <code>valueSource</code>，只有换字段（换 setKey）才重新拉。
+改 op、改值都只是草稿变化，不触发取值。</p>
+</div>
+      </details><details>
+        <summary>动态候选下拉打开后是空的，怎么排查？</summary>
+        <div class="a"><p>先看服务端：<code>searchResolver</code> 对空关键词直接返回空列表，这是当前实现的选择（打开时的空搜索拿不到候选）。
+再看请求有没有带上关键词；如果关键词有值仍然是空的，看 <code>values</code>/<code>keyword</code> 是否传混（<code>values</code> 非空会忽略 <code>keyword</code>）。
+最后看 <code>remoteItems</code> 是否被 Element Plus 的二次空搜索覆盖。</p>
+</div>
+      </details><details>
+        <summary>两个注入函数都返回 <code>undefined</code> 会怎样？</summary>
+        <div class="a"><p>组件不会抛错：<code>inject(key, async () =&gt; [])</code> 给了默认空实现，壳里又用 <code>?? Promise.resolve([])</code> 兜了一层。
+表现是下拉永远为空、搜索无结果 —— 组件可以脱离宿主独立渲染，只是没有候选值。</p>
+</div>
+      </details><details>
+        <summary>草稿里有一个搜索不到的历史取值，下拉里会显示成什么？</summary>
+        <div class="a"><p><code>watch(modelValue, resolveSelected)</code> 会用 <code>values=</code> 向解析器反查一次名字；查到就用中文名，查不到用 <code>String(value)</code> 兜底。
+两种情况都能在列表里看到它，不会因为不在候选里就消失。</p>
+</div>
+      </details></div><div class="summary">
+      <h3 id="一句话">一句话</h3>
+      <p><code>metadata</code> 是<strong>字典</strong>（只有 <code>setKey</code> / <code>resolverKey</code>）；候选值是<strong>现取的</strong>：值集合一次拉全集并按 setKey 缓存，动态候选每次输入都打一次 <code>resolver-options</code>，两条路都在「宿主 App」这一层落成 HTTP。</p>
+
+    </div>
+
+    <footer>
+      <span>@insight/combination 候选值两条管道：从下拉框到数据源再回来</span>
+      <span>最后更新 2026-10-12 · 单文件可离线打开</span>
+    </footer>
+  </main>
+</div>
+
+<script src="../../assets/app.js?v=621c5acfdb"></script>
+</body>
+</html>
