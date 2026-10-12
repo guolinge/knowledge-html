@@ -11,9 +11,6 @@ parts:
   shared:
     label: NET + IPC namespace
     detail: '==这两个是同一个 Pod 里的容器**共用**的。==所以它们共享一个 localhost、一张网卡、一组共享内存段 —— 这正是「同 Pod 的容器像一个机上邻居」的原因。'
-anchors:
-  - { part: shared, label: "哪些是两个容器共用的" }
-  - { part: pidA, label: "我从 PID 这头看" }
 tours:
   - id: two-containers
     label: "两个容器：各自的和共用的"

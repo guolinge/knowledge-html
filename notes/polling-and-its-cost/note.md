@@ -128,10 +128,6 @@ parts:
     label: CPU
     sub: 从头到尾跑的都是它
     detail: 线程 X 永远在跑：问、问、问、处理、问。==同一台机器，左边它在跑别人，右边它一直在跑你== —— 「等待不再占用执行资源」落到机器上就是这个样子。
-anchors:
-  - { part: tA, label: "线程" }
-  - { part: c1, label: "连接 socket" }
-  - { part: cpuR, label: "CPU 核" }
 tours:
   - id: two-endings
     label: "一次 read 的两种结局"
@@ -224,10 +220,6 @@ parts:
     label: 连接 3 · socket
     sub: 这一圈唯一的收获
     detail: 缓冲区里有 200 字节。read 这次把数据带回来，r>0，==handle 就地处理它==，处理完 i++ 继续问剩下的。
-anchors:
-  - { part: thread, label: "主线程" }
-  - { part: crest, label: "被问的连接" }
-  - { part: list, label: "fd 名单" }
 tours:
   - id: one-round
     label: "①② 两步走一圈"

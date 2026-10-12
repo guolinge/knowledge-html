@@ -316,10 +316,6 @@ parts:
     label: 存储节点
     sub: 另一台机器
     detail: 同一个对象的分片散在多台机器的盘上，坏一台不丢数据 —— 04.3 的 EC 就落在这里。
-anchors:
-  - { part: client, label: 我想跟着一次 GET 走一遍 }
-  - { part: idx1, label: 我想搞清「桶怎么装 key」 }
-  - { part: data1, label: 我想搞清「对象到底在哪」 }
 tours:
   - id: get-journey
     label: 一次 GET 的完整旅程
@@ -880,9 +876,6 @@ text: |
 ```arch
 svg: oss-web-hosting
 caption: 蓝色的读路径、紫色的发版路径、虚线的是控制面。对象存储当源站，CDN 当全球缓存层，业务后端只碰「签发凭证」这种轻活。
-anchors:
-  - { part: users, label: 我想搞清「用户怎么拿到资源」 }
-  - { part: ci, label: 我想搞清「代码怎么发出去」 }
 tours:
   - id: read
     label: 一次静态资源请求

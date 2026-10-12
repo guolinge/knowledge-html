@@ -20,10 +20,6 @@ parts:
   path:
     label: 一段路径字符串
     detail: 软链接的 inode 里存的不是数据，是一段路径。==所以每次打开都要多解析一次==，而且目标不在时它照样存在（变成悬空链接）。
-anchors:
-  - { part: i100, label: "硬链接和软链接差在哪" }
-  - { part: n2, label: "我从硬链接看" }
-  - { part: n3, label: "我从软链接看" }
 tours:
   - id: two-links
     label: "硬链接和软链接，差在哪一条边"

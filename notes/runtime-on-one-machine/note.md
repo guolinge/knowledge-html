@@ -27,10 +27,6 @@ parts:
     label: 镜像只读层
     sub: 磁盘上只有一份
     detail: 所有基于同一个镜像的容器，==在磁盘上共用同一份只读层==。多出来的只是各自那层可写的。
-anchors:
-  - { part: procA,  label: "我想看清「一个容器」" }
-  - { part: kernel, label: "我从内核这头看" }
-  - { part: image,  label: "我从镜像这头看" }
 tours:
   - id: what-is-container
     label: "「容器」到底是什么"

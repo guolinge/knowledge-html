@@ -274,9 +274,6 @@ parts:
   clusterNav: { label: 用主键回主树, detail: "回表是一次按主键的逻辑查找，不是用行的物理地址直接跳转。" }
   clusterLeaf: { label: 聚簇树叶子, detail: "拿到行记录和可见性相关字段；大变长列可能还需读取页外数据。" }
   result: { label: 返回结果, detail: "按 SELECT 需求输出列。页是否缺失、是否需要旧版本，决定额外物理读取。" }
-anchors:
-  - { part: secondaryLeaf, label: 我想看二级叶子 }
-  - { part: clusterLeaf, label: 我想看整行在哪 }
 ```
 
 ```journey

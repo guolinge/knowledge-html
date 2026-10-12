@@ -25,7 +25,7 @@ items:
 
 ```arch
 svg: mysql-journey
-caption: ==从客户端到磁盘，一条 SQL 的旅程。==点图上任意一个框，只看它和它的邻居；下方「我熟悉」从你已经认识的东西进去；四条导览各讲一个问题。
+caption: ==从客户端到磁盘，一条 SQL 的旅程。==点图上任意一个框，只看它和它的邻居，从你认识的那个框进去；四条导览各讲一个问题。
 parts:
   client:
     label: 客户端
@@ -75,12 +75,6 @@ parts:
     label: 从库
     sub: 另一台机器
     detail: 拉取主库的 binlog 重放。==binlog 写完整的事务从库一定有；没写完整的主库自己会回滚==，主从就这样对齐（§07 的恢复规则）。
-anchors:
-  - { part: conn, label: "HTTP 请求链（网关与鉴权）" }
-  - { part: parser, label: "编译器前端" }
-  - { part: qcache, label: "一个被删掉的缓存" }
-  - { part: binlog, label: "update 的两份日志" }
-  - { part: optimizer, label: "时快时慢的变量" }
 tours:
   - id: select
     label: "select 的旅程"

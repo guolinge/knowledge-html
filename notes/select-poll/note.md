@@ -153,10 +153,6 @@ parts:
       set_fd_set(n, outp, fds.res_out);
 
       /* poll：内核填好每个元素的 revents，整份拷回 */
-anchors:
-  - { part: usrin, label: "名单" }
-  - { part: kwq, label: "等待队列" }
-  - { part: ksleep, label: "线程睡了" }
 tours:
   - id: lifecycle
     label: "一次调用的完整生命周期"

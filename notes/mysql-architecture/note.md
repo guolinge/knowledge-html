@@ -141,12 +141,6 @@ parts:
     label: redo 文件（循环写）
     sub: 固定大小 · 写满回卷覆盖
     detail: 固定大小、循环写，写满回到开头覆盖。能覆盖的前提是对应脏页已刷盘、进度已记入 checkpoint，所以它不需要无限大，只要装下「还没刷盘的那一小段」。
-anchors:
-  - { part: connpool, label: "连接池与长连接" }
-  - { part: thread, label: "线程模型 1:1" }
-  - { part: tpool, label: "线程池 M:N" }
-  - { part: rows, label: "表数据与索引" }
-  - { part: binlog, label: "主从复制" }
 tours:
   - id: select-journey
     label: "一条 SELECT 的一生"
@@ -309,12 +303,6 @@ parts:
     detail: |
       左边那条路：几千个线程轮流上核，每次换人都把 cache 冲一遍，命中率雪崩。右边那条路：几十个 Worker 铺在 16 个核上，几乎不换人，cache 一直是热的。
       ==M:N 的收益最终落在这里：不是线程变少了，是每个核上的线程变稳定了。==
-anchors:
-  - { part: conn, label: "4096 条连接" }
-  - { part: threadA, label: "一连接一线程" }
-  - { part: tg, label: "线程池" }
-  - { part: recv, label: "epoll" }
-  - { part: cpu, label: "CPU 核与 cache" }
 tours:
   - id: burst
     label: "4096 条连接同时醒来：两条路"

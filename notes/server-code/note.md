@@ -28,10 +28,6 @@ parts:
     label: fd 表
     sub: accept 在这里开一格
     detail: ==这才是 accept 真正动过的地方。== 它不在连接 socket 上动任何手脚，只是在你的 fd 表里新建一格，指过去 —— 图上那根竖直的虚线就是它的全部效果。
-anchors:
-  - { part: conn, label: "我想搞清「一条连接」" }
-  - { part: fdtable, label: "accept 到底动了什么" }
-  - { part: lsock, label: "我从监听 socket 看" }
 tours:
   - id: establish
     label: "一条连接的一生"
@@ -69,10 +65,6 @@ parts:
   rw:
     label: read() 返回
     detail: 数据到了你的手上。
-anchors:
-  - { part: conn, label: "我想搞清「一条连接」" }
-  - { part: thread, label: "我熟悉线程" }
-  - { part: nic, label: "我从网卡这头看" }
 tours:
   - id: wakeup
     label: "数据到了，怎么唤醒你的代码"
@@ -313,11 +305,6 @@ parts:
     label: CPU 核
     sub: 只有几个
     detail: 一万个调度实体，最后要在这几个核上排队。==名单是按「执行」的规模准备的一万份，能干活的核只有几个== —— 这就是「用执行资源去买等待」的落点。
-anchors:
-  - { part: thread, label: "线程" }
-  - { part: sock, label: "内核里的 socket" }
-  - { part: fdtable, label: "accept 给的 fd" }
-  - { part: cpu, label: "CPU 核" }
 tours:
   - id: grow
     label: "一万个连接多出了什么"

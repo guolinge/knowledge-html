@@ -145,11 +145,6 @@ parts:
     label: 短主键 + 自增
     sub: 新行总插最右端 · 页分裂少
     detail: 自增主键让新行永远插在聚簇树最右端，写集中在少数热页上；随机主键（UUID）把插入点撒满全树，==页分裂频发==。
-anchors:
-  - { part: q1, label: "一条查询" }
-  - { part: sec_leaf, label: "二级索引的叶子" }
-  - { part: pk_leaf, label: "表数据本身" }
-  - { part: tax, label: "主键宽度税" }
 tours:
   - id: pk
     label: "主键查询：一跳直达"
@@ -324,10 +319,6 @@ parts:
     label: Index Merge
     sub: 各查一份再合并 · 另一条路
     detail: OR 时优化器可能转投 Index Merge：多个索引各查一份再合并，==而不是硬用这一棵树==。
-anchors:
-  - { part: sort, label: "多字段排序（你天天在用）" }
-  - { part: w1, label: "一个能用的查询" }
-  - { part: c1, label: "排序数组的一格" }
 tours:
   - id: eq
     label: "等值怎么用上这个序"
@@ -402,10 +393,6 @@ parts:
     label: b = 20
     sub: c = 1
     detail: 同一段区间。c 的任何值都可能出现在任何位置，==没有排序保证==。
-anchors:
-  - { part: q_eq, label: "三个都等值的查询" }
-  - { part: q, label: "带范围的查询" }
-  - { part: cut, label: "断掉的那一刻" }
 tours:
   - id: alleq
     label: "等值链能走满"
@@ -555,11 +542,6 @@ parts:
     label: FORCE INDEX
     sub: 对「不选」是打架 · 对「用不了」没用
     detail: 只在确认优化器判断错了时用，==根因（统计过期、索引设计错）修好后立刻摘掉==——hint 写在 SQL 里长期生效，数据一变就从解药变毒药。8.0.20 起还有 INDEX / NO_INDEX 等索引级 hint 语法可选。
-anchors:
-  - { part: ex, label: "一次 EXPLAIN" }
-  - { part: c2, label: "全表扫描更快" }
-  - { part: v1, label: "优化器可能是对的" }
-  - { part: s4, label: "隐式类型转换（最危险）" }
 tours:
   - id: diagnose
     label: "从 EXPLAIN 开始分诊"

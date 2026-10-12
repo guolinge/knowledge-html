@@ -27,10 +27,6 @@ parts:
   buf:
     label: 接收缓冲 + 发送缓冲
     detail: ==每条连接各一份。==所以「一万条连接」在内核里的开销不是一万个编号（那很便宜），是一万份等待。
-anchors:
-  - { part: chain, label: "我只想搞清这串对象" }
-  - { part: lsock, label: "我从监听这头看" }
-  - { part: csock, label: "我从连接这头看" }
 tours:
   - id: one-fd
     label: "一个 fd 牵出多少东西"

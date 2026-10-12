@@ -298,10 +298,6 @@ parts:
   jm:
     label: JobManager
     detail: 管事的那个 —— 调度、检查点、故障恢复。==它不干活==。它和 TaskManager 的区别是「管事的」和「干活的」。
-anchors:
-  - { part: task, label: "Task 到底是什么" }
-  - { part: slot, label: "Slot 和算子是几比几" }
-  - { part: jm, label: "JobManager 为什么不算「一层」" }
 tours:
   - id: five-layers
     label: "五个词，从图纸到线程"

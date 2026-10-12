@@ -126,10 +126,6 @@ parts:
       ep_start_scan(ep, &scan_batch);  // 把 rdllist 整体摘下来
       list_for_each_entry_safe(epi, tmp, &scan_batch, rdllink)
           ep_deliver_event(ep, epi, &pt, &events, &scan_batch); // 逐项拷给用户
-anchors:
-  - { part: thr, label: "我写的三个调用" }
-  - { part: wqA, label: "回调挂在哪" }
-  - { part: ewq, label: "谁通知 epoll_wait" }
 tours:
   - id: journey
     label: "一条事件的完整旅程"

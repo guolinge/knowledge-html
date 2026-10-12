@@ -46,11 +46,6 @@ parts:
     label: B+Tree（胜出）
     sub: 内部只存键 · 叶子成链
     detail: 三处改动正好是三个死因的解药：键数据分离治扇出稀释，数据下沉治深度不齐，叶子成链治范围回溯。§05 把它解剖开。
-anchors:
-  - { part: disk, label: "磁盘（最贵的部件）" }
-  - { part: bst, label: "二叉查找树" }
-  - { part: hash, label: "哈希表" }
-  - { part: bpt, label: "B+Tree（终点）" }
 tours:
   - id: liba
     label: "先立靶：为什么只数页访问"
@@ -275,10 +270,6 @@ parts:
     label: 叶子节点的 16KB
     sub: 键挨着数据 + Pnext
     detail: 数据密集但也按页组织 —— 范围扫描按「页」计 IO，不按「行」计：扫一万行只是滑过几十个叶页。
-anchors:
-  - { part: root, label: "根节点（树高从这算）" }
-  - { part: leaf2, label: "叶子（数据住这）" }
-  - { part: pageInner, label: "16KB 页的内部" }
 tours:
   - id: point
     label: "一次点查：三次页访问"
@@ -384,10 +375,6 @@ parts:
     label: SELECT email
     sub: WHERE email='x'
     detail: 索引叶子里就有 email，不回表，`EXPLAIN` 的 `Extra = Using index` 就是这个信号。覆盖索引不是免费的：==索引列越多树越大、写代价越高==，只覆盖高频查询真正要的列。
-anchors:
-  - { part: iroot, label: "二级索引" }
-  - { part: cleaf, label: "聚簇索引（表数据本体）" }
-  - { part: bp, label: "buffer pool" }
 tours:
   - id: lookup
     label: "回表的完整路径"
@@ -496,10 +483,6 @@ parts:
     label: 新行 · UUIDv4
     sub: 插入点遍布全树
     detail: 新行落点随机，热点页不固定，缓冲池命中更差。==伤害的不是查找逻辑，是 B+Tree 的物理生长方式。==
-anchors:
-  - { part: newI, label: "自增主键的插入" }
-  - { part: newU, label: "随机主键的插入" }
-  - { part: leafI3, label: "最右叶子（热页）" }
 tours:
   - id: seq
     label: "自增：往右端追加"

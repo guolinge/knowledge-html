@@ -189,12 +189,6 @@ parts:
     sub: task 轮流上
     detail: ==调度器面前没有进程，只有 task。== 三条执行流各自排队、各自上核，这是并行的来源（§04 展开）。
     facts: { 归属: 硬件, 份数: 4 个核, 跟着谁走: 不随任何东西, 隔离: task 轮流上 }
-anchors:
-  - { part: task0, label: "task（执行流的本体）" }
-  - { part: mm, label: "地址空间" }
-  - { part: files, label: "fd 表" }
-  - { part: elf, label: "程序（还没跑的）" }
-  - { part: loader, label: "execve 那三件事" }
 scenarios:
   - id: multi
     label: 3 条执行流
@@ -411,11 +405,6 @@ parts:
     label: 堆 · 全组一份
     sub: 直接读写
     detail: 共享是能力也是坑：省了 IPC 的序列化和拷贝，换来数据竞争、锁、原子操作和内存可见性问题——==共享内存连显式的消息边界都没有==。
-anchors:
-  - { part: ptA, label: "页表" }
-  - { part: frame42, label: "物理内存" }
-  - { part: t1s, label: "线程的栈" }
-  - { part: procA, label: "进程" }
 tours:
   - id: translate
     label: "同一个虚拟地址，两个世界"
@@ -517,11 +506,6 @@ parts:
     label: 磁盘 / 网卡
     sub: 数据的来源
     detail: read 的数据最终从这里来。设备就绪后发中断，==唤醒是设备干的，不是进程干的==——进程只参与最后一步：被挑中后继续跑。
-anchors:
-  - { part: cpu, label: "CPU 核" }
-  - { part: runq, label: "运行队列" }
-  - { part: waitq, label: "等待队列" }
-  - { part: timer, label: "时钟中断" }
 tours:
   - id: preempt
     label: "时间片到点：换人"
@@ -753,11 +737,6 @@ parts:
     label: 容器 · 一组进程
     sub: 反向开关 NEW*
     detail: CLONE_NEWNS / CLONE_NEWIPC / CLONE_NEWNET 方向是反的——clone 默认继承父进程的命名空间，带标志表示「另立一个」。==容器共享的是内核，隔离的是命名空间；线程共享的是进程资源域==。两种「轻」不是一回事。
-anchors:
-  - { part: clone, label: "clone()" }
-  - { part: taskBf, label: "fork" }
-  - { part: taskTp, label: "线程" }
-  - { part: container, label: "容器" }
 tours:
   - id: fork
     label: "fork 的账单"
