@@ -40,6 +40,7 @@
       <a href="#函数是怎么注入进去的">函数是怎么「注入」进去的</a>
       <a href="#41-那为什么不把-pb-直接当组件模型" class="sub">4.1 那为什么不把 pb 直接当组件模型</a>
       <a href="#服务端这两个接口">服务端这两个接口</a>
+      <a href="#51-那两个接口读的内存快照是什么" class="sub">5.1 那两个接口读的「内存快照」是什么</a>
       <a href="#边界六处不那么直觉的地方">边界：六处不那么直觉的地方</a>
       <a href="#跑一遍两条链路" class="sub">跑一遍两条链路</a>
       <a href="#速查">速查</a>
@@ -143,7 +144,7 @@
         </div></div>
     </div><h2 id="先看全图一次取值穿过五层"><span class="num">01</span>先看全图：一次取值穿过五层</h2>
 <p>每一层只做一件事：组件决定「用哪个 key」，注入层转发函数，宿主决定「缓存还是发 HTTP」，适配层把 pb 变形，服务端查表或查常量表。</p>
-<figure class="archfig" data-arch data-pano data-parts='{"meta":{"label":"metadata 字典","sub":"41 个画像 / 3 条关系 / 7 个业务域","detail":"字段字典。每个字段带 `fieldType`（类型 + 枚举来源），来源写在 `setKey` 或 `resolverKey` 里。\n==候选值一条都不在这里==：所以它只有几 KB，而值集合可以有上万条。\n"},"ui":{"label":"组件子树","sub":"PortraitRow · RelationRow · ValueControl","detail":"三个消费点：画像行 `useStoredItems(() => feature.valueSource)`；关系行的 `propSetItems` 批量预取；值控件的 remote-method。\n组件包里 `grep &#39;fetch(&#39;` 零命中 —— 它不认识 HTTP。\n"},"inj":{"label":"注入层","sub":"InsightCombiner 的三行 provide","detail":"把宿主的函数转给子组件，没给就退化成 `async () => []`。\n`loadValueSetKey` / `searchValuesKey` / `lookupValuesKey` 就是组件与宿主之间的全部契约。\n"},"host":{"label":"宿主 App","sub":"useValueSets 缓存 + loadSearch / loadLookup","detail":"决定「缓存还是请求」：按 `setKey` 缓存，inflight 复用；`staffId` 或 metadata `revision` 变化就清空。\n`prefetchColumns` 还会在预览返回后预热结果列涉及的 setKey。\n"},"adp":{"label":"适配层 api.ts","sub":"pb → 组件内部形状","detail":"1:1 转换：反序列化 `value`、`zhCn / zhHk / en` 转 `zh-CN / zh-HK / en`、`status: 0` 转 `DISABLED`。\n==只做形状转换，不做业务判断==；四步变形见 2.3。\n"},"routeA":{"label":"GET /api/crowd/value-sets","sub":"setKey 必填","detail":"从 5 秒 TTL 的投影里找集合，`JSON.stringify(item.value)` 之后返回 pb 形状。\n集合停用、条目停用都照样返回，只为回显历史条件。\n"},"routeB":{"label":"GET /api/crowd/resolver-options","sub":"keyword 搜索 / values 反查","detail":"`values` 非空时忽略 `keyword` 和 `limit`；`keyword` 为空返回空列表。\n当前解析器 `stock_search` 用一份 21 条的常量表同时实现搜索和反查。\n"},"mysql":{"label":"crm_dc_value_set","sub":"enum_content JSON","detail":"值的原型。每项带 `value` / `label` / `status` / `sortOrder`；停用是改 `status`，不是删行。\n"},"stocks":{"label":"resolvers.ts · STOCKS","sub":"21 条常量","detail":"动态候选没有元数据表。真实实现是一次检索服务，demo 里是写死的数组；没有停用态，也不缓存。\n"}}' data-tours='[{"id":"valueset","label":"链路 A · 值集合","steps":[{"at":["ui"],"text":"用户选中「常驻城市」，这个字段的 valueSource 变成 `{ VALUE_SET, setKey: city }`。"},{"at":["ui","inj"],"text":"`useStoredItems` 调注入的 `loadValueSet(city)`。==只有换字段才拉==，改操作符、改值都不拉。"},{"at":["inj","host"],"text":"宿主先查缓存：有就返回，没有才发请求。"},{"at":["host","adp","routeA","mysql"],"text":"缓存没命中才发请求：服务端从 5 秒投影里取出整个集合（含停用项）。"},{"at":["adp","ui"],"text":"回来先过适配层（反序列化 value、转 I18n 键、status 0 → DISABLED），再上屏；停用项是灰的，名字仍在。"}]},{"id":"dynamic","label":"链路 B · 动态候选","steps":[{"at":["ui","inj"],"text":"用户敲「腾讯」，值控件先取 `searchToken` 票据，再调 search(stock_search, 腾讯)。"},{"at":["inj","host","adp"],"text":"一路转发。动态候选不打缓存：每次都重新问。"},{"at":["routeB","stocks"],"text":"`GET resolver-options?keyword=腾讯` 在 21 条常量里做子串匹配。"},{"at":["ui"],"text":"回来时票据不相等就整包丢弃 —— 旧响应永远盖不掉新结果。"},{"at":["inj","host"],"text":"回显是另一条路：草稿里已存的取值用 `values=` 反查名字。"},{"at":["adp","routeB"],"text":"同一个接口，`values` 非空时忽略 keyword 和 limit。"}]}]'>
+<figure class="archfig" data-arch data-pano data-parts='{"meta":{"label":"metadata 字典","sub":"41 个画像 / 3 条关系 / 7 个业务域","detail":"字段字典。每个字段带 `fieldType`（类型 + 枚举来源），来源写在 `setKey` 或 `resolverKey` 里。\n==候选值一条都不在这里==：所以它只有几 KB，而值集合可以有上万条。\n"},"ui":{"label":"组件子树","sub":"PortraitRow · RelationRow · ValueControl","detail":"三个消费点：画像行 `useStoredItems(() => feature.valueSource)`；关系行的 `propSetItems` 批量预取；值控件的 remote-method。\n组件包里 `grep &#39;fetch(&#39;` 零命中 —— 它不认识 HTTP。\n"},"inj":{"label":"注入层","sub":"InsightCombiner 的三行 provide","detail":"把宿主的函数转给子组件，没给就退化成 `async () => []`。\n`loadValueSetKey` / `searchValuesKey` / `lookupValuesKey` 就是组件与宿主之间的全部契约。\n"},"host":{"label":"宿主 App","sub":"useValueSets 缓存 + loadSearch / loadLookup","detail":"决定「缓存还是请求」：按 `setKey` 缓存，inflight 复用；`staffId` 或 metadata `revision` 变化就清空。\n`prefetchColumns` 还会在预览返回后预热结果列涉及的 setKey。\n"},"adp":{"label":"适配层 api.ts","sub":"pb → 组件内部形状","detail":"1:1 转换：反序列化 `value`、`zhCn / zhHk / en` 转 `zh-CN / zh-HK / en`、`status: 0` 转 `DISABLED`。\n==只做形状转换，不做业务判断==；四步变形见 2.3。\n"},"routeA":{"label":"GET /api/crowd/value-sets","sub":"setKey 必填","detail":"从**内存快照**（`MetadataRows`，5 秒 TTL）里找集合，`JSON.stringify(item.value)` 之后返回 pb 形状。\n集合停用、条目停用都照样返回，只为回显历史条件。什么是这份快照，见 05 节。\n"},"routeB":{"label":"GET /api/crowd/resolver-options","sub":"keyword 搜索 / values 反查","detail":"`values` 非空时忽略 `keyword` 和 `limit`；`keyword` 为空返回空列表。\n当前解析器 `stock_search` 用一份 21 条的常量表同时实现搜索和反查。\n"},"mysql":{"label":"crm_dc_value_set","sub":"enum_content JSON","detail":"值的原型。每项带 `value` / `label` / `status` / `sortOrder`；停用是改 `status`，不是删行。\n"},"stocks":{"label":"resolvers.ts · STOCKS","sub":"21 条常量","detail":"动态候选没有元数据表。真实实现是一次检索服务，demo 里是写死的数组；没有停用态，也不缓存。\n"}}' data-tours='[{"id":"valueset","label":"链路 A · 值集合","steps":[{"at":["ui"],"text":"用户选中「常驻城市」，这个字段的 valueSource 变成 `{ VALUE_SET, setKey: city }`。"},{"at":["ui","inj"],"text":"`useStoredItems` 调注入的 `loadValueSet(city)`。==只有换字段才拉==，改操作符、改值都不拉。"},{"at":["inj","host"],"text":"宿主先查缓存：有就返回，没有才发请求。"},{"at":["host","adp","routeA","mysql"],"text":"缓存没命中才发请求：服务端从内存快照（5 秒 TTL）取出整个集合，含停用项。"},{"at":["adp","ui"],"text":"回来先过适配层（反序列化 value、转 I18n 键、status 0 → DISABLED），再上屏；停用项是灰的，名字仍在。"}]},{"id":"dynamic","label":"链路 B · 动态候选","steps":[{"at":["ui","inj"],"text":"用户敲「腾讯」，值控件先取 `searchToken` 票据，再调 search(stock_search, 腾讯)。"},{"at":["inj","host","adp"],"text":"一路转发。动态候选不打缓存：每次都重新问。"},{"at":["routeB","stocks"],"text":"`GET resolver-options?keyword=腾讯` 在 21 条常量里做子串匹配。"},{"at":["ui"],"text":"回来时票据不相等就整包丢弃 —— 旧响应永远盖不掉新结果。"},{"at":["inj","host"],"text":"回显是另一条路：草稿里已存的取值用 `values=` 反查名字。"},{"at":["adp","routeB"],"text":"同一个接口，`values` 非空时忽略 keyword 和 limit。"}]}]'>
       <svg viewBox="0 0 1296 648" role="img" aria-labelledby="archify-diagram-title archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
         <title id="archify-diagram-title">候选值两条链路：一次取值穿过五层</title>
         <desc id="archify-diagram-description">metadata 只给两个引用键；值是点开下拉那一刻现取的，两条路在服务端才分开</desc>
@@ -490,7 +491,7 @@
         </div>
         <div class="lane-body"><div class="pnode">
         <b>GET /api/crowd/value-sets</b>
-        <small>5 秒 TTL 投影里找 set → toValueSet</small>
+        <small>内存快照（5 秒 TTL）里找 set → toValueSet</small>
         <span class="tag tone-red">setKey 必填</span>
       </div><div class="pnode">
         <b>GET /api/crowd/resolver-options</b>
@@ -896,7 +897,23 @@ return toValueSet(set);
           <div class="sv"><p>缺参 400 <code>MISSING_RESOLVER_KEY</code>；未知解析器 404 <code>UNKNOWN_RESOLVER</code>。</p>
 </div>
         </div></div>
-    </div><p>服务端这份投影有 5 秒 TTL（<code>metadata/source.ts</code> 的 <code>CACHE_TTL_MS = 5_000</code>）：改一行 MySQL，最多 5 秒后这两个接口就跟着变。宿主那边则是在页面重新获得焦点时刷新字典，<code>revision</code> 没变就不重建对象、也不清缓存。</p>
+    </div><h3 id="51-那两个接口读的内存快照是什么">5.1 那两个接口读的「内存快照」是什么</h3>
+<p>上面说 <code>value-sets</code> 从「内存快照」里取集合 —— 这份快照就是<strong>六张元数据表的全量读模型</strong>（<code>MetadataRows</code>），服务端进程里只留一份，5 秒过期。它由 <code>getMetadataRows()</code> 维护：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">// apps/server/src/metadata/source.ts
+const CACHE_TTL_MS = 5_000;
+
+export async function getMetadataRows(): Promise&lt;MetadataRows&gt; {
+  if (cached &amp;&amp; Date.now() &lt; expiresAt) return cached;   // 5 秒内：直接用快照
+  if (inflight) return inflight;                          // 并发请求复用同一个查询
+  const pending = loadMetadataRows({ enabledOnly: false }) // 六张表全量读一次
+    .then(rows =&gt; { assertMetadataRows(rows); cached = rows; expiresAt = Date.now() + CACHE_TTL_MS; return rows; });
+  inflight = pending;
+  return pending;
+}
+</code></pre></div>
+<p>三个字段各管一件事：<code>cached</code> 是快照本身，<code>expiresAt</code> 是它的死期，<code>inflight</code> 让同一个 5 秒窗口内的并发请求共用一次 MySQL 查询（避免缓存击穿时打出一串重复查询）。</p>
+<p><mark class="mk-blue">这份快照不只喂 <code>value-sets</code>：<code>/api/crowd/metadata</code>、<code>/api/crowd/catalog</code>、预览（<code>/api/preview</code>）和创建快照（<code>/api/snapshots</code>）读的都是它</mark> —— 所以「改一行 MySQL，最多 5 秒后整条链路一起变」。这也是为什么 demo 里改配置能立刻在界面上看到效果。</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>位置</th><th>快照在哪</th><th>多久变一次</th></tr></thead><tbody><tr><th>服务端进程（demo）</th><td data-label="快照在哪"><code>getMetadataRows()</code> 的 <code>cached</code>，全量读本机 MySQL</td><td data-label="多久变一次">5 秒 TTL，或 <code>resetCatalogCache()</code> 立即失效</td></tr><tr><th>线上（技术方案）</th><td data-label="快照在哪">元数据归 Data Admin，BFF 通过 Metadata API 取；缓存退到 BFF 或 Data Admin 一侧</td><td data-label="多久变一次">语义不变：<mark class="mk-blue">不是每个请求都去问上游</mark></td></tr><tr><th>浏览器</th><td data-label="快照在哪">页面重新获得焦点时重新拉一份 <code>metadata</code>；<code>revision</code> 没变就复用原对象、也不清值集合缓存</td><td data-label="多久变一次">跟着服务端的 5 秒走</td></tr></tbody></table></div><p>宿主那边则是另一层：页面重新获得焦点时刷新字典，<code>revision</code> 没变就不重建对象、也不清缓存。</p>
 <h2 id="边界六处不那么直觉的地方"><span class="num">06</span>边界：六处不那么直觉的地方</h2>
 <div class="cards" data-cols="2"><div class="ccard tone-amber">
           

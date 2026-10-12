@@ -191,8 +191,8 @@ parts:
     label: GET /api/crowd/value-sets
     sub: setKey 必填
     detail: |
-      从 5 秒 TTL 的投影里找集合，`JSON.stringify(item.value)` 之后返回 pb 形状。
-      集合停用、条目停用都照样返回，只为回显历史条件。
+      从**内存快照**（`MetadataRows`，5 秒 TTL）里找集合，`JSON.stringify(item.value)` 之后返回 pb 形状。
+      集合停用、条目停用都照样返回，只为回显历史条件。什么是这份快照，见 05 节。
   routeB:
     label: GET /api/crowd/resolver-options
     sub: keyword 搜索 / values 反查
@@ -216,7 +216,7 @@ tours:
       - { at: [ui], text: "用户选中「常驻城市」，这个字段的 valueSource 变成 `{ VALUE_SET, setKey: city }`。" }
       - { at: [ui, inj], text: "`useStoredItems` 调注入的 `loadValueSet(city)`。==只有换字段才拉==，改操作符、改值都不拉。" }
       - { at: [inj, host], text: "宿主先查缓存：有就返回，没有才发请求。" }
-      - { at: [host, adp, routeA, mysql], text: "缓存没命中才发请求：服务端从 5 秒投影里取出整个集合（含停用项）。" }
+      - { at: [host, adp, routeA, mysql], text: "缓存没命中才发请求：服务端从内存快照（5 秒 TTL）取出整个集合，含停用项。" }
       - { at: [adp, ui], text: "回来先过适配层（反序列化 value、转 I18n 键、status 0 → DISABLED），再上屏；停用项是灰的，名字仍在。" }
   - id: dynamic
     label: 链路 B · 动态候选
@@ -272,7 +272,7 @@ tours:
   desc: 一个查投影，一个查内存常量表
   tone: red
   nodes:
-    - { title: GET /api/crowd/value-sets, sub: "5 秒 TTL 投影里找 set → toValueSet", tag: setKey 必填 }
+    - { title: GET /api/crowd/value-sets, sub: "内存快照（5 秒 TTL）里找 set → toValueSet", tag: setKey 必填 }
     - { title: GET /api/crowd/resolver-options, sub: "values 优先，否则 keyword 子串匹配", tag: resolverKey 必填 }
   next: "数据 :: :: 一份在 MySQL，一份在代码里"
 - badge: LAYER 06
@@ -704,7 +704,44 @@ rows:
       缺参 400 `MISSING_RESOLVER_KEY`；未知解析器 404 `UNKNOWN_RESOLVER`。
 ```
 
-服务端这份投影有 5 秒 TTL（`metadata/source.ts` 的 `CACHE_TTL_MS = 5_000`）：改一行 MySQL，最多 5 秒后这两个接口就跟着变。宿主那边则是在页面重新获得焦点时刷新字典，`revision` 没变就不重建对象、也不清缓存。
+### 5.1 那两个接口读的「内存快照」是什么
+
+上面说 `value-sets` 从「内存快照」里取集合 —— 这份快照就是**六张元数据表的全量读模型**（`MetadataRows`），服务端进程里只留一份，5 秒过期。它由 `getMetadataRows()` 维护：
+
+```text
+// apps/server/src/metadata/source.ts
+const CACHE_TTL_MS = 5_000;
+
+export async function getMetadataRows(): Promise<MetadataRows> {
+  if (cached && Date.now() < expiresAt) return cached;   // 5 秒内：直接用快照
+  if (inflight) return inflight;                          // 并发请求复用同一个查询
+  const pending = loadMetadataRows({ enabledOnly: false }) // 六张表全量读一次
+    .then(rows => { assertMetadataRows(rows); cached = rows; expiresAt = Date.now() + CACHE_TTL_MS; return rows; });
+  inflight = pending;
+  return pending;
+}
+```
+
+三个字段各管一件事：`cached` 是快照本身，`expiresAt` 是它的死期，`inflight` 让同一个 5 秒窗口内的并发请求共用一次 MySQL 查询（避免缓存击穿时打出一串重复查询）。
+
+==这份快照不只喂 `value-sets`：`/api/crowd/metadata`、`/api/crowd/catalog`、预览（`/api/preview`）和创建快照（`/api/snapshots`）读的都是它== —— 所以「改一行 MySQL，最多 5 秒后整条链路一起变」。这也是为什么 demo 里改配置能立刻在界面上看到效果。
+
+```compare
+first: 位置
+head: [快照在哪, 多久变一次]
+rows:
+  - 服务端进程（demo）:
+      - "`getMetadataRows()` 的 `cached`，全量读本机 MySQL"
+      - "5 秒 TTL，或 `resetCatalogCache()` 立即失效"
+  - 线上（技术方案）:
+      - "元数据归 Data Admin，BFF 通过 Metadata API 取；缓存退到 BFF 或 Data Admin 一侧"
+      - "语义不变：==不是每个请求都去问上游=="
+  - 浏览器:
+      - "页面重新获得焦点时重新拉一份 `metadata`；`revision` 没变就复用原对象、也不清值集合缓存"
+      - "跟着服务端的 5 秒走"
+```
+
+宿主那边则是另一层：页面重新获得焦点时刷新字典，`revision` 没变就不重建对象、也不清缓存。
 
 ## 06 · 边界：六处不那么直觉的地方
 
