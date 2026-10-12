@@ -14,11 +14,46 @@ text: |
 
 ### 先看 metadata 长什么样
 
-`GET /api/crowd/metadata` 的真实响应节选（demo 数据，41 个画像 / 3 条关系 / 7 个业务域）：
+`GET /api/crowd/metadata` 的真实响应（demo 数据：**41 个画像 / 3 条关系 / 7 个业务域**）。它整体只有四个顶层键：
 
 ```spec
-title: metadata 长什么样
-subtitle: GET /api/crowd/metadata 的真实响应节选 · revision f4badf35
+title: 整体：四个顶层键
+subtitle: 41 个画像 / 3 条关系 / 7 个业务域 · revision f4badf35
+tone: blue
+rows:
+  - k: 信封
+    code: |
+      {
+        "revision":  "f4badf35",     // 投影内容哈希：任一条状态或文案变了它就变
+        "domains":   [ /* 7 个 */ ],
+        "portraits": [ /* 41 个 */ ],
+        "relations": [ /* 3 条 */ ]
+      }
+  - k: "domains 7 个"
+    code: |
+      { "key": "futu",     "name": { "zhCn": "富途" }, "level": 1, "sortOrder": 10, "status": 1 }
+      { "key": "identity", "parentKey": "futu", "level": 2, ... }    // 子域才有 parentKey
+      { "key": "legacy",   "level": 1, "status": 0 }                 // 停用的域也在
+      // 其余 4 个：account / asset / trade / service
+  - k: "portraits 41 个"
+    code: |
+      { "key": "age",  "fieldType": { "variableType": "range", "dataType": "long", "enumType": "none" } }
+      { "key": "city", "fieldType": { "enumType": "value_set", "setKey": "city" } }
+      { "key": "open_city", "status": 0, ... }    // 停用的字段也在 —— 回显历史条件要用
+      // 其余 38 个：gender / region / aum_hkd / ...（只有一个带 defaultValue）
+  - k: "relations 3 条"
+    code: |
+      { "key": "holding",
+        "object":     { "key": "stock", "fieldType": { "enumType": "dynamic", "resolverKey": "stock_search" } },
+        "properties": [ { "key": "market" }, { "key": "qty" } ] }
+      // 其余 2 条：product / hk_main_category_position
+```
+
+三个字段各长什么样，从这 41 + 3 里各挑一个看细节：
+
+```spec
+title: 三种字段的细节
+subtitle: 枚举字段 / 关系的客体 / 连续型默认值 · revision f4badf35
 tone: blue
 rows:
   - k: ① 枚举字段
