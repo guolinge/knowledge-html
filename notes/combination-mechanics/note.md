@@ -175,7 +175,7 @@ rows:
   - "其余": [{ text: "INPUT", tone: muted }, "long / double / string"]
 ```
 
-==日期和时间的 DSL 值是 Unix 毫秒==，界面上看到的是日期选择器给的人话串，`ValueControl` 用 `@insight/dsl/clock` 在两者之间换算（`zonedToUnixMs` / `startOfDayMs`）。换算逻辑同样在 dsl 包里，组件只调用。
+==日期和时间的 DSL 值是 Unix 秒==（10-10 写作时还是毫秒，10-11 改成了秒），界面上看到的是日期选择器给的人话串，`ValueControl` 用 `@insight/dsl/clock` 在两者之间换算（`zonedToUnixMs` / `startOfDayMs`）。换算逻辑同样在 dsl 包里，组件只调用。
 
 下面的交互是真数据：左边 7 个字段全部取自 demo 种子（`apps/seed/src/demoCatalog.ts`）的真实形状，操作符和控件形态是实跑 `applicableOps` / `controlFor` 的输出。点操作符看控件怎么跟着变。
 
@@ -306,7 +306,11 @@ text: |
 |------|----------|----------|-----------|
 | `CUSTOM` | 不加载，Metadata 里自带 | 不需要 | 无处不在（就在字段上） |
 | `VALUE_SET` | 下拉打开 / 关系行挂载时 | 组件侧票据 + 宿主侧缓存 | 宿主（`useValueSets`） |
-| `DYNAMIC` | 每次关键词变化 | 组件侧票据 | 不缓存（每次都搜） |
+| `DYNAMIC` | 搜索：每次关键词变化；回显：值变化时查一次 | 组件侧票据 | 不缓存（每次现查） |
+
+> 10-11 之后 DYNAMIC 多了一条回显通道：注入函数从「一个 search」变成「search + resolve」
+> （`lookupValues`，按 value 查 label）。已保存的取值不用先打开下拉就能显示中文名。
+> 三项注入 key 和两个函数的细节见[组件内幕](../combination-internals/) 11 节。
 
 `VALUE_SET` 的宿主侧实现值得一看，它解决了两件事：同一 setKey 的并发请求只发一次（inflight 去重），身份切换时全部作废（generation 递增）：
 

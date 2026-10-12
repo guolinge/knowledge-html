@@ -30,6 +30,8 @@ items:
 
 这个页面的每张截图本身就是拆分质量的证据：**每个组件都能脱离全家桶，单独喂 props 渲染出来**。耦合在壳里的组件做不到这一点。
 
+每个组件与外层的完整接口（谁渲染它、props 怎么进、事件怎么出、内部有哪些状态）在[组件内幕](../combination-internals/)。
+
 ## 02 · 壳与范围：InsightCombiner、ScopeBar
 
 壳只做四件事：接 props、把两个候选值加载函数 `provide` 给深层、渲染 ScopeBar 和唯一的包含区、在身份变化时收窄 scope。业务逻辑一概没有 —— 那些在 ts 层（全景篇 05 节有地图）。
@@ -192,7 +194,7 @@ rows:
   - "PortraitRow": ["modelValue · metadata", "update · convert", "换字段重置 op；操作符 = metadata.operators ∩ applicableOps"]
   - "RelationRow": ["modelValue · metadata", "update · convert", "detail/times 两公式；客体三来源；props 可嵌 AND/OR"]
   - "UidRow": ["modelValue(UidLeaf)", "update:modelValue", "parseUids 解析粘贴；500 截断；保字符串"]
-  - "ValueControl": ["inputForm · valueType · items · search · prefix/suffix", "defineModel → update:modelValue", "七形态一个组件；日期 ↔ Unix 毫秒；已选值回显"]
+  - "ValueControl": ["inputForm · valueType · items · search · prefix/suffix", "defineModel → update:modelValue", "七形态一个组件；日期 ↔ Unix 秒；已选值回显（+ lookup 通道）"]
   - "LogicToggle": ["modelValue('AND'·'OR') · showConnectors · stackAlign", "update:modelValue", "三处复用的逻辑胶囊；连接线纯 CSS + ResizeObserver"]
   - "ConditionRow": ["label", "delete", "行外壳：类型标签 + 删除按钮，三种行共用"]
 ```
