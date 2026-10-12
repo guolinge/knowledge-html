@@ -32,7 +32,7 @@ first: 环节
 head: [自己开浏览器点, opencli 的一条命令]
 rows:
   - 登录: ["人工登录，登录态在浏览器里", "复用同一个登录态，但不用你操作"]
-  - 找数据: ["搜索框 → 列表 → 点进详情", { text: "一个接口调用", tone: green }]
+  - 找数据: ["搜索框 → 列表 → 点进详情", { text: "一条命令（内部 1~2 个接口）", tone: green }]
   - 拿到什么: ["屏幕上的文字", { text: "结构化 JSON / YAML / CSV", tone: green }]
   - 再加工: ["复制粘贴，或者手写脚本", "管道接给别的程序；`-f csv` 直接进表格"]
   - 谁来维护: ["你每次都要重来一遍", "规则写在文件里，坏了改那个文件"]
@@ -101,44 +101,51 @@ parts:
     sub: 收口
     detail: |
       它做四件事：按 `args` 声明校验并补默认值、判断这条命令要不要浏览器、调 `func`、结束之后关掉标签页。
-      ==`limit <= 1000` 那条检查在这里也拦一道==（adapter 里也写了一遍，两层都拦）。
+      它只认类型、必填和默认值；==`limit ≤ 1000` 这种业务上限是 adapter 自己的事==（portrait.js 第 29 行）。
   adapter:
     label: portrait.js 的 func
     sub: 44 行
+    facts: { 归属: 本机 Node 进程, 生命周期: 命令跑完就退, 需要什么权限: 无（Cookie 靠扩展借）, 谁在用它: opencli 的 executeCommand() }
     detail: |
       整个文件里只有这一段在做业务：读 Cookie、调两个接口、把字段挑出来塞进 `rows`。
       它拿到 `page` 对象（能读 Cookie、能操作浏览器），但它**取数用的是 Node 自己的 `fetch`**。
   render:
     label: output.js 的 render()
     sub: 最后一步
+    facts: { 归属: 本机 Node 进程, 生命周期: 命令跑完就退, 需要什么权限: 无, 谁在用它: cli.js }
     detail: |
       函数体只负责 `return rows`，它不知道输出格式。渲染是 opencli 本体做的：
       按 adapter 声明的 `columns` 出表格；==进了管道（非 TTY）就自动降级成 YAML==。
   userdir:
     label: 磁盘上的 adapter
     sub: 6 个文件
+    facts: { 归属: 磁盘, 生命周期: 一直在，改完即生效, 需要什么权限: 无, 谁在用它: 每个 Node 进程启动时扫一次 }
     detail: |
       公司的私有 adapter，不属于 opencli 官方包，所以放在用户目录：免编译、改完立刻生效、
       `npm 升级 opencli` 也不会被覆盖。==它和内置目录只差一个发现顺序。==
   udp:
     label: cnudp.futuoa.com
     sub: 数据在这
+    facts: { 归属: 公司内网, 生命周期: 它自己说了算, 需要什么权限: 一个有效的 Cookie, 谁在用它: adapter 的那句 fetch }
     detail: 它只认请求头里的 Cookie。命令能查到东西，是因为你的浏览器登录过。
   daemon:
     label: daemon :19825
     sub: 常驻
+    facts: { 归属: 本机常驻小服务, 生命周期: 常驻，一次拉起之后都在, 需要什么权限: 一个本机回环端口, 谁在用它: 所有需要浏览器的命令 }
     detail: |
       CLI 和扩展之间没法直接通话（扩展在浏览器沙箱里，外面连不进去），中间就放了这个本地小服务：
       CLI 用 HTTP 敲它，扩展用 WebSocket 连它。第一次用到时**自动拉起**，之后一直活着。
   ext:
     label: OpenCLI 扩展
     sub: 开发者模式装的
+    facts: { 归属: Chrome 里, 生命周期: 常驻到 Chrome 关闭, 需要什么权限: 浏览器权限（cookies / debugger / tabs）, 谁在用它: daemon }
     detail: |
       它才有权限碰浏览器：`chrome.cookies` 读登录态、`chrome.debugger` 走 CDP 执行 JS、
       `chrome.tabs` 开关标签页。==adapter 里那句 `page.getCookies()` 最终落在它身上。==
   jar:
     label: Chrome 的 Cookie 库
     sub: Chrome 自己管的
+    facts: { 归属: Chrome 自己管, 生命周期: 跟着登录态，过期就没了, 需要什么权限: 只有扩展读得到, 谁在用它: 扩展 }
     detail: |
       登录 cookie 存在这里，包含 `HttpOnly` 的那些（页面 JS 读不到，扩展能读）。
       这一趟合并去重后取出了 26 个。
@@ -160,12 +167,12 @@ bodies:
     badge: 第 0 步
     code: "opencli udp portrait <kw>"
     rows:
-      - { k: 输出, v: "表格 / YAML" }
-      - { k: 退出码, v: "0 / 2 / 66" }
+      - { k: 输出, v: "表格 / YAML", link: render }
+      - { k: 退出码, v: "0 / 2 / 66", tip: "77 要登录 · 75 超时 · 69 连不上浏览器" }
   main:
     badge: 入口
     cells:
-      - { label: "内置 clis/", sub: "官方那一批" }
+      - { label: "内置 clis/", sub: "官方那一批", tip: "随 npm 升级一起更新" }
       - { label: "用户 clis/", sub: "只有 udp", tone: violet, link: userdir }
     rows:
       - { k: 先做, v: "补 PATH、发现" }
@@ -173,15 +180,15 @@ bodies:
   registry:
     badge: 内存 Map
     rows:
-      - { k: "udp/portrait", v: "portrait.js" }
-      - { k: "udp/relation", v: "relation.js" }
-      - { k: "共 5 条", v: "还有 dc-*" }
+      - { k: "udp/portrait", v: "portrait.js", link: adapter }
+      - { k: "udp/relation", v: "relation.js", tip: "同一个网站的另一类查询" }
+      - { k: "共 5 条", v: "还有 dc-*", tip: "dc-* 是两个「原始返回」版本" }
     note: 键是 site/name
   execution:
     badge: 收口
     rows:
       - { k: 校验, v: "必填 / 类型 / 默认" }
-      - { k: 会话, v: "site:udp:<uuid>" }
+      - { k: 会话, v: "site:udp:<uuid>", tip: "跑完就释放" }
       - { k: 收尾, v: "关掉标签页" }
     note: 只读命令不占写锁
   adapter:
@@ -190,66 +197,58 @@ bodies:
       - { k: 读, v: "page.getCookies() ×（1+N）", link: daemon, tip: "一次调用读 3 个域，合并去重" }
       - { k: 调, v: "/list（一次）", when: list, link: udp }
       - { k: 调, v: "/detail?id=（每条一次）", when: detail, link: udp }
-      - { k: 挑, v: "47 个字段 → 12 个" }
+      - { k: 挑, v: "47 个字段 → 12 个", tip: "留下哪 12 个，就是 columns 那份清单" }
     code: "fetchUdpJson(page, '/api/udp/portrait/list', …)"
   render:
     badge: 输出
     rows:
-      - { k: 默认, v: "表格（终端里）" }
-      - { k: 管道里, v: "自动降级 YAML" }
-      - { k: "-f", v: "json / csv / md" }
+      - { k: 默认, v: "表格（终端里）", tip: "前提是 TTY；重定向就不算" }
+      - { k: 管道里, v: "自动降级 YAML", tip: "所以复制粘贴得来的多半是 YAML" }
+      - { k: "-f", v: "json / csv / md", tip: "显式指定就不降级" }
     note: adapter 不知道格式
   userdir:
     badge: 磁盘
     rows:
-      - { k: portrait.js, v: 特征搜索 }
-      - { k: relation.js, v: 关系表搜索 }
-      - { k: relation-fields.js, v: 字段明细 }
-      - { k: dc-portrait.js, v: 原始返回 }
-      - { k: dc-relation.js, v: 原始返回 }
-      - { k: utils.js, v: 共享工具 }
+      - { k: portrait.js, v: 特征搜索, tip: "本次解剖的主角" }
+      - { k: relation.js, v: 关系表搜索, tip: "同一网站的另一类对象" }
+      - { k: relation-fields.js, v: 字段明细, tip: "码表 JSON 能直接落库" }
+      - { k: dc-portrait.js, v: 原始返回, tip: "排查用：不加工" }
+      - { k: dc-relation.js, v: 原始返回, tip: "排查用：不加工" }
+      - { k: utils.js, v: 共享工具, tip: "请求 / 枚举 / 码表都靠它" }
     note: 免编译、改完即生效
   udp:
     badge: 只认 Cookie
     pairs:
-      - { from: "/list", to: "id + 46 个字段" }
-      - { from: "/detail?id=", to: "47 个字段" }
+      - { from: "/list", to: "id + 46 个字段", link: adapter, tip: "回到函数体被拆信封" }
+      - { from: "/detail?id=", to: "47 个字段", link: adapter, tip: "每个 id 一次" }
     note: 多的那个是 auditInfo
   daemon:
     badge: 常驻
     rows:
-      - { k: 收, v: "HTTP POST /command" }
+      - { k: 收, v: "HTTP POST /command", tip: "探针看到的第一条就是它" }
       - { k: 转, v: "WebSocket → 扩展", link: ext, tip: "扩展主动连上来并保活，daemon 只做转发" }
-      - { k: 启停, v: "第一次用到时自动拉起" }
+      - { k: 启停, v: "第一次用到时自动拉起", tip: "opencli daemon status 能看它" }
     note: CLI 和扩展没法直接通话
   ext:
     badge: MV3 service worker
     cells:
-      - { label: chrome.cookies, sub: 读登录态 }
-      - { label: chrome.debugger, sub: "CDP：执行 JS" }
-      - { label: chrome.tabs, sub: 开关标签页 }
+      - { label: chrome.cookies, sub: 读登录态, link: jar }
+      - { label: chrome.debugger, sub: "CDP：执行 JS", tip: "navigate / exec / 截图都走它" }
+      - { label: chrome.tabs, sub: 开关标签页, link: tab }
     note: 这一趟只用到读 Cookie
   jar:
     badge: 登录态
     rows:
-      - { k: cnudp.futuoa.com, v: "本次那批" }
-      - { k: futuoa.com, v: "父域兜底" }
-      - { k: passport.futuoa.com, v: 登录中心 }
+      - { k: cnudp.futuoa.com, v: "本次那批", tip: "26 个 Cookie 的主力" }
+      - { k: futuoa.com, v: "父域兜底", tip: "读不到再去父域拿" }
+      - { k: passport.futuoa.com, v: 登录中心, tip: "SSO 会话在这" }
     note: 含 HttpOnly
   tab:
     badge: 会话锚点
     rows:
-      - { k: 地址, v: "about:blank" }
+      - { k: 地址, v: "about:blank", tip: "实测没导航过任何网址" }
       - { k: 会话, v: "site:udp:<uuid>" }
     note: 命令结束就关掉
-facts:
-  userdir: { 归属: 磁盘, 生命周期: 一直在，改完即生效, 需要什么权限: 无, 谁在用它: 每个 Node 进程启动时扫一次 }
-  adapter: { 归属: 本机 Node 进程, 生命周期: 命令跑完就退, 需要什么权限: 无（Cookie 靠扩展借）, 谁在用它: opencli 的 executeCommand() }
-  render: { 归属: 本机 Node 进程, 生命周期: 命令跑完就退, 需要什么权限: 无, 谁在用它: cli.js }
-  daemon: { 归属: 本机常驻小服务, 生命周期: 常驻，一次拉起之后都在, 需要什么权限: 一个本机回环端口, 谁在用它: 所有需要浏览器的命令 }
-  ext: { 归属: Chrome 里, 生命周期: 常驻到 Chrome 关闭, 需要什么权限: 浏览器权限（cookies / debugger / tabs）, 谁在用它: daemon }
-  jar: { 归属: Chrome 自己管, 生命周期: 跟着登录态，过期就没了, 需要什么权限: 只有扩展读得到, 谁在用它: 扩展 }
-  udp: { 归属: 公司内网, 生命周期: 它自己说了算, 需要什么权限: 一个有效的 Cookie, 谁在用它: adapter 的那句 fetch }
 tours:
   - id: trip
     label: "这条命令经过了谁"
@@ -307,7 +306,7 @@ items:
       `limit` 整数、默认 10
 
       opencli 按这份声明校验类型、补默认值、生成 `--help`。
-      传 `--limit 1001` 会直接报错退出，==函数体根本不会被执行==。
+      传 `--limit 1001`：类型校验能过（它确实是整数），进了函数体、走到==第 29 行被 adapter 自己的检查==拦下，退出码 2。
   - title: 第三段 · 返回哪些列（第 20~21 行）
     tag: 输出长什么样
     tone: emerald
@@ -315,13 +314,26 @@ items:
       `columns` 列 12 个字段名，它们决定**表格输出的列和顺序**。
 
       它只影响显示：函数体返回的对象里字段比这多也不显示，
-      少一个就显示空。`extras` 这种嵌套对象在表格里会被压成一格。
+      少一个就显示空。`extras` 是嵌套对象，表格里直接渲染成字面的
+      `[object Object]` —— ==这条命令实际上只有 YAML / JSON 好用==。
   - title: 第四段 · 函数体（第 22~65 行）
     tag: 业务逻辑都在这里
     tone: amber
     body: |
       44 行，全是「取数 + 挑字段」。它不解析 HTML、不点按钮、不管输出格式，
       因为它拿到的不是网页，而是两个接口的 JSON。
+```
+
+想改它的行为，就是改那个文件：
+
+```callout
+tone: green
+icon: ✏
+text: |
+  把一份 adapter 放进 `~/.opencli/clis/<site>/` 就生效（同名覆盖内置的），改完不用编译、不用重启。
+
+  改坏了先跑 `opencli validate <site>`，它检查语法和声明；过了再真跑一次命令看输出。
+  `opencli list` 随时能看到当前这个进程里注册了哪些命令。
 ```
 
 ## 04 · 从关键词到一行表格：数据走了六步
