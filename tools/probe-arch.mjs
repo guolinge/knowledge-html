@@ -30,7 +30,7 @@ setTimeout(()=>{
  const repeated=[...new Set(figureIds.filter((id,i)=>figureIds.indexOf(id)!==i))];
  check('同页多张 arch 图的内部 id 不重复',!repeated.length,JSON.stringify(repeated));
  check('每张图的图名指向自己',[...document.querySelectorAll('[data-arch] svg')].every(s=>{
-  const labels=(s.getAttribute('aria-labelledby')||'').split(/\s+/).filter(Boolean);
+  const labels=(s.getAttribute('aria-labelledby')||'').split(/\\s+/).filter(Boolean);
   return labels.length>0&&labels.every(id=>s.querySelector('#'+CSS.escape(id)));
  }));
  const meta=JSON.parse(fig.dataset.frames), byId=id=>frames.find(f=>f.dataset.frame===id);
