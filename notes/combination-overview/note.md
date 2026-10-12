@@ -325,7 +325,7 @@ rows:
   - "`@insight/dsl/fieldType`": ["4", "==`applicableOps` 和 `controlFor`== —— 控件决策引擎，机制篇 03 节的主角"]
   - "`@insight/dsl/context`": ["3", "`DataLevel` / `Actor` 类型（scope 收窄用）"]
   - "`@insight/dsl`": ["1", "`CompileError` —— buildQuery 抛的错误码和编译器共用"]
-  - "`@insight/dsl/clock`": ["1", "时区换算：日期控件显示的字符串 ↔ Unix 毫秒"]
+  - "`@insight/dsl/clock`": ["1", "时区换算：日期控件显示的字符串 ↔ Unix 秒（时间戳单位 10-11 起是秒）"]
 ```
 
 UI 依赖是 element-plus（全套控件）和 vue-i18n（文案）。除此之外没有别的运行时依赖。
