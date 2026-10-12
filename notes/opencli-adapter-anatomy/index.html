@@ -1,0 +1,694 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-has-toc="1">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>opencli 做了什么：一条命令的解剖</title>
+<meta name="description" content="从 `opencli udp portrait &lt;关键词&gt;` 出发，把「把网站变成命令」这件事拆开：一条命令经过哪五个角色、adapter 的三段结构、数据从 API 信封到表格的五次变形，以及三个反直觉的地方（请求是 Node 发的、detail 请求白打、trace 抓不到它）。" />
+<link rel="stylesheet" href="../../assets/theme.css?v=e6a9ffd3d6" />
+  <link rel="stylesheet" href="../../assets/blocks.css?v=cfea027674" />
+  <link rel="stylesheet" href="../../assets/archify-embed.css?v=68fec0b81b" />
+</head>
+<body>
+<div id="progress"></div>
+<div id="tocScrim"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
+    <a class="brand" href="../../index.html"><span class="dot"></span>知识笔记</a>
+    
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="toc" id="toc">
+      <p class="toc-title">目录</p>
+      <a href="../../index.html" class="sub">← 全部笔记</a>
+      <a href="#opencli-到底做了什么">opencli 到底做了什么</a>
+      <a href="#一条命令经过了谁">一条命令经过了谁</a>
+      <a href="#portraitjs-是怎么被找到又是怎么被调起来的">portrait.js 是怎么被找到、又是怎么被调起来的</a>
+      <a href="#从关键词到一行表格数据走了六步">从关键词到一行表格：数据走了六步</a>
+      <a href="#三个反直觉的地方">三个反直觉的地方</a>
+      <a href="#它会怎么坏">它会怎么坏</a>
+      <a href="#自测">自测</a>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow">● 工具链 · opencli</span>
+      <h1>opencli 做了什么：一条命令的解剖</h1>
+      <p class="lede">从 `opencli udp portrait &lt;关键词&gt;` 出发，把「把网站变成命令」这件事拆开：一条命令经过哪五个角色、adapter 的三段结构、数据从 API 信封到表格的五次变形，以及三个反直觉的地方（请求是 Node 发的、detail 请求白打、trace 抓不到它）。</p>
+    </div>
+
+
+    <div class="provenance"><span><b>来源</b> 本机实测（2026-10-12，opencli v1.8.8）：`opencli udp portrait futu_hk_trade_overnight_count`，并用探针包住 globalThis.fetch 记录真实请求序列（limit=1 → 10 个请求；limit=3 → 18 个；单次 305~587ms；业务请求带 26 个 Cookie） · 源码：@jackwener/opencli v1.8.8 dist/src/ 下的 main.js · discovery.js · registry.js · execution.js · output.js · node-network.js · browser/page.js · browser/daemon.js · 私有 adapter 源码：portrait.js 与 utils.js（归档在 crm-dsl-stru 仓库 docs/opencli-udp/） · 飞书《OpenCLI 安装教程（面向 Claude Code 用户）》 https://futu.feishu.cn/docx/QqDUdcYLio4T6Rx22PAcq5GMnku</span><span><b>生成</b> 2026-10-12</span><span><b>模型</b> deepseek-v4.1-flash</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">opencli</span> <span class="tag tone-muted">adapter</span> <span class="tag tone-muted">Browser Bridge</span> <span class="tag tone-muted">CLI</span> <span class="tag tone-muted">UDP</span></span></div>
+
+<h2 id="opencli-到底做了什么"><span class="num">01</span>opencli 到底做了什么</h2>
+<p>我们要查「公司现网有哪些用户字段、口径是什么」，答案在 UDP 那个内部网站上（<code>cnudp.futuoa.com</code>）。以前的做法是开浏览器、登录、搜索框里打字、点开详情、把口径 SQL 抄下来。</p>
+<p>现在这一趟不用开浏览器：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-bash">opencli udp portrait futu_hk_trade_overnight_count
+</code></pre></div>
+<p>出来的是这个（这里只截前几个字段；终端里直接跑是一张表格，这里是进了管道之后的样子）：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-yaml">- id: 474
+  name: FutuHK累计夜盘交易次数
+  enName: futu_hk_trade_overnight_count
+  status: 4
+  dataType: long
+  variableType: range
+  defaultValue: '0'
+  defaultExplain: 没有夜盘交易过
+  relationship: |-
+    select nn_uid,count(distinct order_id) as overnight_count
+    from futu_hk.hk.ods.trade.t3.main_order.us
+    where enable_ba_trade=3 and cum_qty&gt;0 group by nn_uid
+</code></pre></div>
+<p>opencli 不生产这些数据，它做的是把<strong>一个网站</strong>变成<strong>一个命令</strong>。规则写在一个 JS 文件里，那个文件叫 adapter（适配器），<code>portrait.js</code> 就是其中一个。</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>环节</th><th>自己开浏览器点</th><th>opencli 的一条命令</th></tr></thead><tbody><tr><th>登录</th><td data-label="自己开浏览器点">人工登录，登录态在浏览器里</td><td data-label="opencli 的一条命令">复用同一个登录态，但不用你操作</td></tr><tr><th>找数据</th><td data-label="自己开浏览器点">搜索框 → 列表 → 点进详情</td><td data-label="opencli 的一条命令"><span class="tag tone-green">一个接口调用</span></td></tr><tr><th>拿到什么</th><td data-label="自己开浏览器点">屏幕上的文字</td><td data-label="opencli 的一条命令"><span class="tag tone-green">结构化 JSON / YAML / CSV</span></td></tr><tr><th>再加工</th><td data-label="自己开浏览器点">复制粘贴，或者手写脚本</td><td data-label="opencli 的一条命令">管道接给别的程序；<code>-f csv</code> 直接进表格</td></tr><tr><th>谁来维护</th><td data-label="自己开浏览器点">你每次都要重来一遍</td><td data-label="opencli 的一条命令">规则写在文件里，坏了改那个文件</td></tr></tbody></table></div><p>一次命令里同时在场的有四样东西，后面每一节都会碰到它们：</p>
+<div class="cards" data-cols="2"><div class="ccard tone-violet">
+          <span class="tag tone-violet">业务逻辑</span>
+          <h4>adapter（你写的那一个文件）</h4>
+          
+          <div class="cbody"><p><code>~/.opencli/clis/udp/portrait.js</code>。一个 <code>cli({...})</code> 调用，声明四件事：
+哪个网站、命令叫什么、要什么参数、函数体怎么取数。</p>
+</div>
+          
+        </div><div class="ccard tone-blue">
+          <span class="tag tone-blue">调度</span>
+          <h4>opencli 本体</h4>
+          
+          <div class="cbody"><p>全局装的 <code>@jackwener/opencli</code>。它负责<strong>跑</strong>你的 adapter：
+找到文件、校验参数、借浏览器、把返回值渲染成表格。</p>
+</div>
+          
+        </div><div class="ccard tone-amber">
+          <span class="tag tone-amber">借浏览器</span>
+          <h4>Browser Bridge</h4>
+          
+          <div class="cbody"><p>一个 daemon（<code>127.0.0.1:19825</code>）+ 一个 Chrome 扩展。
+作用是让命令能用上<strong>你 Chrome 里已经登录的身份</strong>。</p>
+</div>
+          
+        </div><div class="ccard tone-green">
+          <span class="tag tone-green">数据来源</span>
+          <h4>目标网站</h4>
+          
+          <div class="cbody"><p><code>cnudp.futuoa.com</code>。真正有数据的地方。它不关心请求是人发的还是命令发的，
+只认请求头里的 Cookie。</p>
+</div>
+          
+        </div></div><h2 id="一条命令经过了谁"><span class="num">02</span>一条命令经过了谁</h2>
+<p>下面这张图是一次 <code>opencli udp portrait</code> 里同时在场的所有部件。<mark class="mk-blue">矩形里的每一行都能点</mark>，点了会跳到它指向的那个零件；「入口」按钮从你熟悉的那一块进去；底下三条导览把这条链讲完。</p>
+<figure class="archfig" data-arch data-pano data-parts='{"term":{"label":"你的终端","sub":"一次性","detail":"命令从这里进，结果也从这里出。整个 Node 进程跑完就退出，不留驻。"},"main":{"label":"main.js","sub":"入口","detail":"进来先做四件事：补 `PATH`（GUI 启动的终端常常找不到 `gh` / `docker`）、\n处理 `--version` 这类不需要发现的快速路径、**发现所有 adapter**、把参数交给 commander。\n发现跑两轮：先内置的 `clis/`，再用户目录 `~/.opencli/clis/`。==后发现的同名命令覆盖先发现的==，\n这就是私有 adapter 能顶掉官方实现的原因。\n"},"registry":{"label":"注册表","sub":"内存里的 Map","detail":"键是 `site/name`（这里是 `udp/portrait`），值是命令定义。\n每个 adapter 文件被 `import` 时执行的那次 `cli({...})`，就是往这里写一条。\n`opencli list` 读的就是它。这个进程里有 5 条 `udp` 开头的命令。\n"},"execution":{"label":"executeCommand()","sub":"收口","detail":"它做四件事：按 `args` 声明校验并补默认值、判断这条命令要不要浏览器、调 `func`、结束之后关掉标签页。\n==`limit <= 1000` 那条检查在这里也拦一道==（adapter 里也写了一遍，两层都拦）。\n"},"adapter":{"label":"portrait.js 的 func","sub":"44 行","detail":"整个文件里只有这一段在做业务：读 Cookie、调两个接口、把字段挑出来塞进 `rows`。\n它拿到 `page` 对象（能读 Cookie、能操作浏览器），但它**取数用的是 Node 自己的 `fetch`**。\n"},"render":{"label":"output.js 的 render()","sub":"最后一步","detail":"函数体只负责 `return rows`，它不知道输出格式。渲染是 opencli 本体做的：\n按 adapter 声明的 `columns` 出表格；==进了管道（非 TTY）就自动降级成 YAML==。\n"},"userdir":{"label":"磁盘上的 adapter","sub":"6 个文件","detail":"公司的私有 adapter，不属于 opencli 官方包，所以放在用户目录：免编译、改完立刻生效、\n`npm 升级 opencli` 也不会被覆盖。==它和内置目录只差一个发现顺序。==\n"},"udp":{"label":"cnudp.futuoa.com","sub":"数据在这","detail":"它只认请求头里的 Cookie。命令能查到东西，是因为你的浏览器登录过。"},"daemon":{"label":"daemon :19825","sub":"常驻","detail":"CLI 和扩展之间没法直接通话（扩展在浏览器沙箱里，外面连不进去），中间就放了这个本地小服务：\nCLI 用 HTTP 敲它，扩展用 WebSocket 连它。第一次用到时**自动拉起**，之后一直活着。\n"},"ext":{"label":"OpenCLI 扩展","sub":"开发者模式装的","detail":"它才有权限碰浏览器：`chrome.cookies` 读登录态、`chrome.debugger` 走 CDP 执行 JS、\n`chrome.tabs` 开关标签页。==adapter 里那句 `page.getCookies()` 最终落在它身上。==\n"},"jar":{"label":"Chrome 的 Cookie 库","sub":"Chrome 自己管的","detail":"登录 cookie 存在这里，包含 `HttpOnly` 的那些（页面 JS 读不到，扩展能读）。\n这一趟合并去重后取出了 26 个。\n"},"tab":{"label":"自动化标签页","sub":"会话锚点","detail":"每条命令占一个标签页（会话名 `site:udp:<uuid>`），跑完就被关掉。\n==实测这一次它停在 `about:blank`==，命令从头到尾没让浏览器打开任何一个页面。\n"}}' data-anchors='[{"part":"adapter","label":"你要维护的那个文件"},{"part":"udp","label":"数据从哪来"},{"part":"daemon","label":"本机那个 :19825"}]' data-tours='[{"id":"trip","label":"这条命令经过了谁","steps":[{"at":["term","main"],"text":"终端把 `opencli udp portrait <关键词>` 交给 `main.js`，进程起来。①"},{"at":["userdir","registry"],"text":"发现阶段：扫 `~/.opencli/clis/udp/`，`import` 每个 `.js`；文件里的 `cli({...})` 把自己写进注册表。②"},{"at":["registry","execution"],"text":"按 `udp/portrait` 查到定义，交给执行器：校验参数、补默认值（`page=1`、`limit=10`）。③"},{"at":["execution","adapter"],"text":"调 `func(page, args)`。==从这一刻起，跑的都是你的代码。==④"},{"at":["adapter","daemon","ext","jar"],"text":"`page.getCookies()` 往下绕一圈：daemon 转发 → 扩展 → Chrome 的 Cookie 库，把登录态取回来。⑤"},{"at":["adapter","udp"],"text":"拿到 Cookie 串之后，==请求是 Node 进程自己发出去的==：`/api/udp/portrait/list`。⑥ 数据从这一步进来，后面全是本地加工。"},{"at":["render","term"],"text":"函数体 `return rows`，opencli 按 `columns` 渲染成表格；==它自己去管道里时换成 YAML==。⑦ 结果回到你的屏幕。"}]},{"id":"loop","label":"为什么请求数是 1+N","steps":[{"at":["adapter","udp"],"text":"列表接口一次返回 N 条，每条只给了 `id` 和 46 个字段。"},{"at":["adapter"],"text":"adapter 对每个 id 再调一次 `/detail?id=`；而 ==detail 只多一个 `auditInfo`，函数体还没有用它==。"},{"at":["adapter","daemon","ext","jar"],"text":"每转一圈，`readCookie()` 都会把 3 个域重新读一遍。==Cookie 没有缓存。=="},{"at":["term","render"],"text":"结果：`--limit 3` 实测 18 个 HTTP 请求、305ms。limit 越大，这个倍率越贵。"}]},{"id":"split","label":"浏览器和请求，各干各的","steps":[{"at":["ext","tab"],"text":"这一趟浏览器被用到的地方只有两处：读 Cookie，和准备一个标签页当会话锚点。"},{"at":["jar"],"text":"实测标签页停在 `about:blank`，没导航过任何网址。"},{"at":["adapter","udp"],"text":"取数的 HTTPS 请求由 Node 发出，==不走浏览器==。它带着从 Chrome 借来的 Cookie，所以服务端认为是同一个登录用户。"}]}]' data-scenarios='[{"id":"list","label":"第一次业务请求 · /list","note":"读一遍 Cookie，拉一次列表","dim":[]},{"id":"detail","label":"接着每条补详情 · /detail","note":"同一套流程再来 N 次，Cookie 也重新读","dim":["term","main","registry","userdir"]}]'>
+      <svg viewBox="0 0 1626 1053" role="img" aria-labelledby="archify-diagram-title archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
+        <title id="archify-diagram-title">一条 opencli 命令经过了谁</title>
+        <desc id="archify-diagram-description">opencli udp portrait &lt;关键词&gt;：从终端到公司内网，再回到你的屏幕</desc>
+        <!-- Definitions -->
+        <defs>
+          <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-default" />
+          </marker>
+          <marker id="arrowhead-emphasis" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-emphasis" />
+          </marker>
+          <marker id="arrowhead-security" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-security" />
+          </marker>
+          <marker id="arrowhead-dashed" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-dashed" />
+          </marker>
+          <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+            <path d="M 40 0 L 0 0 0 40" class="c-grid" stroke-width="0.5"/>
+          </pattern>
+        </defs>
+
+        <!-- Background Grid -->
+        <rect width="100%" height="100%" fill="url(#grid)" />
+
+        <!-- Boundaries (behind everything) -->
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="0" x="4" y="34" width="1252" height="446" rx="12" class="c-region" stroke-width="1"/>
+        <text x="12" y="52" class="t-cloud" font-size="9" font-weight="600">本机 · 一个 Node 进程（跑完就退）</text>
+
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="1" x="1294" y="34" width="292" height="156" rx="12" class="c-region" stroke-width="1"/>
+        <text x="1302" y="52" class="t-cloud" font-size="9" font-weight="600">公司内网</text>
+
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="2" x="890" y="570" width="440" height="175" rx="12" class="c-region" stroke-width="1"/>
+        <text x="898" y="588" class="t-cloud" font-size="9" font-weight="600">本机 · 常驻小服务，第一次用时自动拉起</text>
+
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="3" x="560" y="810" width="1010" height="175" rx="12" class="c-region" stroke-width="1"/>
+        <text x="568" y="828" class="t-cloud" font-size="9" font-weight="600">本机 · Chrome</text>
+
+        <!-- Connection paths (before components for correct z-order) -->
+        <path data-edge-from="term" data-edge-to="main" data-edge-label="① 敲下这一行" data-edge-key="0" data-edge-id="c1" data-composition-points="180,115;204,115;204,141;226,141;226,125;250,125" d="M 180 115 L 196 115 Q 204 115 204 123 L 204 133 Q 204 141 212 141 L 218 141 Q 226 141 226 133 L 226 133 Q 226 125 234 125 L 250 125" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="main" data-edge-to="registry" data-edge-label="② 扫目录、import 并注册" data-edge-key="1" data-edge-id="c2" data-composition-points="440,125;510,125" d="M 440 125 L 510 125" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="registry" data-edge-to="execution" data-edge-label="③ 查到 udp/portrait" data-edge-key="2" data-edge-id="c3" data-composition-points="680,125;750,125" d="M 680 125 L 750 125" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="execution" data-edge-to="adapter" data-edge-label="④ 调用 func(page, args)" data-edge-key="3" data-edge-id="c4" data-composition-points="920,125;990,125" d="M 920 125 L 990 125" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="userdir" data-edge-to="registry" data-edge-label="cli({...}) 注册" data-edge-key="4" data-edge-id="c5" data-composition-points="575,300;575,245;595,245;595,190" d="M 575 300 L 575 253 Q 575 245 583 245 L 587 245 Q 595 245 595 237 L 595 190" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="adapter" data-edge-to="daemon" data-edge-label="⑤ page.getCookies()（1+N 次）" data-edge-key="5" data-edge-id="c6" data-composition-points="1110,190;1110,600" d="M 1110 190 L 1110 600" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="daemon" data-edge-to="ext" data-edge-label="WebSocket 转发" data-edge-key="6" data-edge-id="c7" data-composition-points="1110,725;1110,840" d="M 1110 725 L 1110 840" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="ext" data-edge-to="jar" data-edge-label="chrome.cookies 读登录态" data-edge-key="7" data-edge-id="c8" data-composition-points="920,897.5;896,897.5;896,918.5;824,918.5;824,902.5;800,902.5" d="M 920 897.5 L 904 897.5 Q 896 897.5 896 905.5 L 896 910.5 Q 896 918.5 888 918.5 L 832 918.5 Q 824 918.5 824 910.5 L 824 910.5 Q 824 902.5 816 902.5 L 800 902.5" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="ext" data-edge-to="tab" data-edge-label="chrome.tabs 开标签页" data-edge-key="8" data-edge-id="c9" data-composition-points="1300,897.5;1324,897.5;1324,913.5;1306,913.5;1306,895;1330,895" d="M 1300 897.5 L 1316 897.5 Q 1324 897.5 1324 905.5 L 1324 905.5 Q 1324 913.5 1316 913.5 L 1314 913.5 Q 1306 913.5 1306 905.5 L 1306 903 Q 1306 895 1314 895 L 1330 895" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="adapter" data-edge-to="udp" data-edge-label="⑥ Node 自己发 HTTPS" data-edge-key="9" data-edge-id="c10" data-composition-points="1230,125;1254,125;1254,141;1296,141;1296,115;1320,115" d="M 1230 125 L 1246 125 Q 1254 125 1254 133 L 1254 133 Q 1254 141 1262 141 L 1288 141 Q 1296 141 1296 133 L 1296 123 Q 1296 115 1304 115 L 1320 115" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="main" data-edge-to="render" data-edge-label="⑦ rows → 渲染成输出" data-edge-key="10" data-edge-id="c11" data-composition-points="345,190;345,245;130,245;130,300" d="M 345 190 L 345 237 Q 345 245 337 245 L 138 245 Q 130 245 130 253 L 130 300" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+
+        <!-- Components -->
+        <g id="node-term" data-nb="1" data-node-id="term" data-node-label="你的终端" tabindex="0" role="button" aria-label="Focus 你的终端, 一次性, 本机 · 一个 Node 进程（跑完就退）" aria-pressed="false" data-node-kind="external" data-node-sublabel="一次性" data-node-context="本机 · 一个 Node 进程（跑完就退）">
+          <title>你的终端 · 一次性 · 本机 · 一个 Node 进程（跑完就退）</title>
+          <rect x="30" y="60" width="150" height="110" rx="6" class="c-mask"/>
+          <rect x="30" y="60" width="150" height="110" rx="6" class="c-external" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="external" class="semantic-sigil s-external" transform="translate(36 66) scale(0.6875)">
+            <rect x="2.5" y="5" width="8.5" height="8" rx="1.5"/>
+            <path d="M8 2.5h5.5V8M13.5 2.5 7.5 8.5"/>
+          </g>
+          <rect class="nb-badge" x="122.4" y="68" width="45.6" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="145.2" y="79" font-size="8" text-anchor="middle">第 0 步</text>
+          <text class="nb-title" x="64" y="81" font-size="10.5" font-weight="600">你的终端</text>
+          <line class="nb-hr" x1="38" y1="88" x2="172" y2="88"/>
+          <g data-when="list">
+          <text class="nb-k" x="42" y="115.5" font-size="9">输出</text><text class="nb-v" x="83.4" y="115.5" font-size="9">表格 / YAML</text>
+          <text class="nb-k" x="42" y="129.5" font-size="9">退出码</text><text class="nb-v" x="83.4" y="129.5" font-size="9">0 / 2 / 66</text>
+          <text class="nb-code" x="42" y="148.5" font-size="7.5">opencli udp portrait &lt;kw&gt;</text>
+          </g>
+          <g data-when="detail">
+          <text class="nb-k" x="42" y="115.5" font-size="9">输出</text><text class="nb-v" x="83.4" y="115.5" font-size="9">表格 / YAML</text>
+          <text class="nb-k" x="42" y="129.5" font-size="9">退出码</text><text class="nb-v" x="83.4" y="129.5" font-size="9">0 / 2 / 66</text>
+          <text class="nb-code" x="42" y="148.5" font-size="7.5">opencli udp portrait &lt;kw&gt;</text>
+          </g>
+        </g>
+
+        <g id="node-main" data-nb="1" data-node-id="main" data-node-label="main.js" tabindex="0" role="button" aria-label="Focus main.js, 入口 · 发现 + 分派, 本机 · 一个 Node 进程（跑完就退）" aria-pressed="false" data-node-kind="backend" data-node-sublabel="入口 · 发现 + 分派" data-node-context="本机 · 一个 Node 进程（跑完就退）">
+          <title>main.js · 入口 · 发现 + 分派 · 本机 · 一个 Node 进程（跑完就退）</title>
+          <rect x="250" y="60" width="190" height="130" rx="6" class="c-mask"/>
+          <rect x="250" y="60" width="190" height="130" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(256 66) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <rect class="nb-badge" x="396.8" y="68" width="31.2" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="412.4" y="79" font-size="8" text-anchor="middle">入口</text>
+          <text class="nb-title" x="284" y="81" font-size="10.5" font-weight="600">main.js</text>
+          <line class="nb-hr" x1="258" y1="88" x2="432" y2="88"/>
+          <g data-when="list">
+          <text class="nb-k" x="262" y="115.5" font-size="9">先做</text><text class="nb-v" x="292.6" y="115.5" font-size="9">补 PATH、发现</text>
+          <text class="nb-k" x="262" y="129.5" font-size="9">再做</text><text class="nb-v" x="292.6" y="129.5" font-size="9">交给 commander</text>
+          <rect class="nb-cell" x="262.0" y="139.5" width="80.0" height="32" rx="4"/><text class="nb-cell-t" x="302.0" y="152.5" font-size="9" text-anchor="middle">内置 clis/</text><text class="nb-cell-s" x="302.0" y="163.5" font-size="7.5" text-anchor="middle">官方那一批</text>
+          <g class="nb-spot" data-nb-spot="1" tabindex="0" role="button" data-nb-link="userdir" data-tone="violet"><rect class="nb-cell" data-tone="violet" x="348.0" y="139.5" width="80.0" height="32" rx="4"/><text class="nb-cell-t" data-tone="violet" x="388.0" y="152.5" font-size="9" text-anchor="middle">用户 clis/</text><text class="nb-cell-s" x="388.0" y="163.5" font-size="7.5" text-anchor="middle">只有 udp</text></g>
+          </g>
+          <g data-when="detail">
+          <text class="nb-k" x="262" y="115.5" font-size="9">先做</text><text class="nb-v" x="292.6" y="115.5" font-size="9">补 PATH、发现</text>
+          <text class="nb-k" x="262" y="129.5" font-size="9">再做</text><text class="nb-v" x="292.6" y="129.5" font-size="9">交给 commander</text>
+          <rect class="nb-cell" x="262.0" y="139.5" width="80.0" height="32" rx="4"/><text class="nb-cell-t" x="302.0" y="152.5" font-size="9" text-anchor="middle">内置 clis/</text><text class="nb-cell-s" x="302.0" y="163.5" font-size="7.5" text-anchor="middle">官方那一批</text>
+          <g class="nb-spot" data-nb-spot="1" tabindex="0" role="button" data-nb-link="userdir" data-tone="violet"><rect class="nb-cell" data-tone="violet" x="348.0" y="139.5" width="80.0" height="32" rx="4"/><text class="nb-cell-t" data-tone="violet" x="388.0" y="152.5" font-size="9" text-anchor="middle">用户 clis/</text><text class="nb-cell-s" x="388.0" y="163.5" font-size="7.5" text-anchor="middle">只有 udp</text></g>
+          </g>
+        </g>
+
+        <g id="node-registry" data-nb="1" data-node-id="registry" data-node-label="注册表" tabindex="0" role="button" aria-label="Focus 注册表, 内存里的 Map, 本机 · 一个 Node 进程（跑完就退）" aria-pressed="false" data-node-kind="backend" data-node-sublabel="内存里的 Map" data-node-context="本机 · 一个 Node 进程（跑完就退）">
+          <title>注册表 · 内存里的 Map · 本机 · 一个 Node 进程（跑完就退）</title>
+          <rect x="510" y="60" width="170" height="130" rx="6" class="c-mask"/>
+          <rect x="510" y="60" width="170" height="130" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(516 66) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <rect class="nb-badge" x="617.6" y="68" width="50.4" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="642.8" y="79" font-size="8" text-anchor="middle">内存 Map</text>
+          <text class="nb-title" x="544" y="81" font-size="10.5" font-weight="600">注册表</text>
+          <line class="nb-hr" x1="518" y1="88" x2="672" y2="88"/>
+          <g data-when="list">
+          <text class="nb-k" x="522" y="121" font-size="9">udp/portrait</text><text class="nb-v" x="595.8" y="121" font-size="9">portrait.js</text>
+          <text class="nb-k" x="522" y="135" font-size="9">udp/relation</text><text class="nb-v" x="595.8" y="135" font-size="9">relation.js</text>
+          <text class="nb-k" x="522" y="149" font-size="9">共 5 条</text><text class="nb-v" x="595.8" y="149" font-size="9">还有 dc-*</text>
+          <text class="nb-note" x="522" y="182" font-size="8">键是 site/name</text>
+          </g>
+          <g data-when="detail">
+          <text class="nb-k" x="522" y="121" font-size="9">udp/portrait</text><text class="nb-v" x="595.8" y="121" font-size="9">portrait.js</text>
+          <text class="nb-k" x="522" y="135" font-size="9">udp/relation</text><text class="nb-v" x="595.8" y="135" font-size="9">relation.js</text>
+          <text class="nb-k" x="522" y="149" font-size="9">共 5 条</text><text class="nb-v" x="595.8" y="149" font-size="9">还有 dc-*</text>
+          <text class="nb-note" x="522" y="182" font-size="8">键是 site/name</text>
+          </g>
+        </g>
+
+        <g id="node-execution" data-nb="1" data-node-id="execution" data-node-label="executeCommand()" tabindex="0" role="button" aria-label="Focus executeCommand(), 校验 · 开会话 · 调 func, 本机 · 一个 Node 进程（跑完就退）" aria-pressed="false" data-node-kind="backend" data-node-sublabel="校验 · 开会话 · 调 func" data-node-context="本机 · 一个 Node 进程（跑完就退）">
+          <title>executeCommand() · 校验 · 开会话 · 调 func · 本机 · 一个 Node 进程（跑完就退）</title>
+          <rect x="750" y="60" width="170" height="130" rx="6" class="c-mask"/>
+          <rect x="750" y="60" width="170" height="130" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(756 66) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <rect class="nb-badge" x="876.8" y="68" width="31.2" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="892.4" y="79" font-size="8" text-anchor="middle">收口</text>
+          <text class="nb-title" x="784" y="81" font-size="9" font-weight="600">executeCommand()</text>
+          <line class="nb-hr" x1="758" y1="88" x2="912" y2="88"/>
+          <g data-when="list">
+          <text class="nb-k" x="762" y="121" font-size="9">校验</text><text class="nb-v" x="792.6" y="121" font-size="9">必填 / 类型 / 默认</text>
+          <text class="nb-k" x="762" y="135" font-size="9">会话</text><text class="nb-v" x="792.6" y="135" font-size="9">site:udp:&lt;uuid&gt;</text>
+          <text class="nb-k" x="762" y="149" font-size="9">收尾</text><text class="nb-v" x="792.6" y="149" font-size="9">关掉标签页</text>
+          <text class="nb-note" x="762" y="182" font-size="8">只读命令不占写锁</text>
+          </g>
+          <g data-when="detail">
+          <text class="nb-k" x="762" y="121" font-size="9">校验</text><text class="nb-v" x="792.6" y="121" font-size="9">必填 / 类型 / 默认</text>
+          <text class="nb-k" x="762" y="135" font-size="9">会话</text><text class="nb-v" x="792.6" y="135" font-size="9">site:udp:&lt;uuid&gt;</text>
+          <text class="nb-k" x="762" y="149" font-size="9">收尾</text><text class="nb-v" x="792.6" y="149" font-size="9">关掉标签页</text>
+          <text class="nb-note" x="762" y="182" font-size="8">只读命令不占写锁</text>
+          </g>
+        </g>
+
+        <g id="node-adapter" data-nb="1" data-node-id="adapter" data-node-label="portrait.js 的 func" tabindex="0" role="button" aria-label="Focus portrait.js 的 func, 真正干活的那 44 行, 本机 · 一个 Node 进程（跑完就退）" aria-pressed="false" data-node-kind="backend" data-node-sublabel="真正干活的那 44 行" data-node-tag="业务逻辑" data-node-context="本机 · 一个 Node 进程（跑完就退）">
+          <title>portrait.js 的 func · 真正干活的那 44 行 · 本机 · 一个 Node 进程（跑完就退） · 业务逻辑</title>
+          <rect x="990" y="60" width="240" height="130" rx="6" class="c-mask"/>
+          <rect x="990" y="60" width="240" height="130" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(996 66) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <rect class="nb-badge" x="1167.6" y="68" width="50.4" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="1192.8" y="79" font-size="8" text-anchor="middle">业务逻辑</text>
+          <text class="nb-title" x="1024" y="81" font-size="10.5" font-weight="600">portrait.js 的 func</text>
+          <line class="nb-hr" x1="998" y1="88" x2="1222" y2="88"/>
+          <g data-when="list">
+          <g class="nb-spot" data-nb-spot="1" tabindex="0" role="button" data-nb-link="daemon" data-nb-tip="一次调用读 3 个域，合并去重"><rect class="nb-hit" x="997" y="107.5" width="226.0" height="14"/><text class="nb-k" x="1002" y="118.5" font-size="9">读</text><text class="nb-v" x="1021.8" y="118.5" font-size="9">page.getCookies() ×（1+N）</text></g>
+          <g class="nb-spot" data-nb-spot="1" tabindex="0" role="button" data-nb-link="udp" data-when="list"><rect class="nb-hit" x="997" y="121.5" width="226.0" height="14"/><text class="nb-k" x="1002" y="132.5" font-size="9">调</text><text class="nb-v" x="1021.8" y="132.5" font-size="9">/list（一次）</text></g>
+          <text class="nb-k" x="1002" y="146.5" font-size="9">挑</text><text class="nb-v" x="1021.8" y="146.5" font-size="9">47 个字段 → 12 个</text>
+          <text class="nb-code" x="1002" y="165.5" font-size="7.5">fetchUdpJson(page, '/api/udp/portrait/list', …)</text>
+          </g>
+          <g data-when="detail">
+          <g class="nb-spot" data-nb-spot="1" tabindex="0" role="button" data-nb-link="daemon" data-nb-tip="一次调用读 3 个域，合并去重"><rect class="nb-hit" x="997" y="107.5" width="226.0" height="14"/><text class="nb-k" x="1002" y="118.5" font-size="9">读</text><text class="nb-v" x="1021.8" y="118.5" font-size="9">page.getCookies() ×（1+N）</text></g>
+          <g class="nb-spot" data-nb-spot="1" tabindex="0" role="button" data-nb-link="udp" data-when="detail"><rect class="nb-hit" x="997" y="121.5" width="226.0" height="14"/><text class="nb-k" x="1002" y="132.5" font-size="9">调</text><text class="nb-v" x="1021.8" y="132.5" font-size="9">/detail?id=（每条一次）</text></g>
+          <text class="nb-k" x="1002" y="146.5" font-size="9">挑</text><text class="nb-v" x="1021.8" y="146.5" font-size="9">47 个字段 → 12 个</text>
+          <text class="nb-code" x="1002" y="165.5" font-size="7.5">fetchUdpJson(page, '/api/udp/portrait/list', …)</text>
+          </g>
+        </g>
+
+        <g id="node-userdir" data-nb="1" data-node-id="userdir" data-node-label="~/.opencli/clis/udp/" tabindex="0" role="button" aria-label="Focus ~/.opencli/clis/udp/, 磁盘上的 6 个 .js, 本机 · 一个 Node 进程（跑完就退）" aria-pressed="false" data-node-kind="database" data-node-sublabel="磁盘上的 6 个 .js" data-node-context="本机 · 一个 Node 进程（跑完就退）">
+          <title>~/.opencli/clis/udp/ · 磁盘上的 6 个 .js · 本机 · 一个 Node 进程（跑完就退）</title>
+          <rect x="475" y="300" width="200" height="160" rx="6" class="c-mask"/>
+          <rect x="475" y="300" width="200" height="160" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(481 306) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <rect class="nb-badge" x="631.8" y="308" width="31.2" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="647.4" y="319" font-size="8" text-anchor="middle">磁盘</text>
+          <text class="nb-title" x="509" y="321" font-size="9.7" font-weight="600">~/.opencli/clis/udp/</text>
+          <line class="nb-hr" x1="483" y1="328" x2="667" y2="328"/>
+          <g data-when="list">
+          <text class="nb-k" x="487" y="355" font-size="9">portrait.js</text><text class="nb-v" x="593.2" y="355" font-size="9">特征搜索</text>
+          <text class="nb-k" x="487" y="369" font-size="9">relation.js</text><text class="nb-v" x="593.2" y="369" font-size="9">关系表搜索</text>
+          <text class="nb-k" x="487" y="383" font-size="9">relation-fields.js</text><text class="nb-v" x="593.2" y="383" font-size="9">字段明细</text>
+          <text class="nb-k" x="487" y="397" font-size="9">dc-portrait.js</text><text class="nb-v" x="593.2" y="397" font-size="9">原始返回</text>
+          <text class="nb-k" x="487" y="411" font-size="9">dc-relation.js</text><text class="nb-v" x="593.2" y="411" font-size="9">原始返回</text>
+          <text class="nb-k" x="487" y="425" font-size="9">utils.js</text><text class="nb-v" x="593.2" y="425" font-size="9">共享工具</text>
+          <text class="nb-note" x="487" y="452" font-size="8">免编译、改完即生效</text>
+          </g>
+          <g data-when="detail">
+          <text class="nb-k" x="487" y="355" font-size="9">portrait.js</text><text class="nb-v" x="593.2" y="355" font-size="9">特征搜索</text>
+          <text class="nb-k" x="487" y="369" font-size="9">relation.js</text><text class="nb-v" x="593.2" y="369" font-size="9">关系表搜索</text>
+          <text class="nb-k" x="487" y="383" font-size="9">relation-fields.js</text><text class="nb-v" x="593.2" y="383" font-size="9">字段明细</text>
+          <text class="nb-k" x="487" y="397" font-size="9">dc-portrait.js</text><text class="nb-v" x="593.2" y="397" font-size="9">原始返回</text>
+          <text class="nb-k" x="487" y="411" font-size="9">dc-relation.js</text><text class="nb-v" x="593.2" y="411" font-size="9">原始返回</text>
+          <text class="nb-k" x="487" y="425" font-size="9">utils.js</text><text class="nb-v" x="593.2" y="425" font-size="9">共享工具</text>
+          <text class="nb-note" x="487" y="452" font-size="8">免编译、改完即生效</text>
+          </g>
+        </g>
+
+        <g id="node-udp" data-nb="1" data-node-id="udp" data-node-label="cnudp.futuoa.com" tabindex="0" role="button" aria-label="Focus cnudp.futuoa.com, 只认请求头里的 Cookie, 公司内网" aria-pressed="false" data-node-kind="cloud" data-node-sublabel="只认请求头里的 Cookie" data-node-context="公司内网">
+          <title>cnudp.futuoa.com · 只认请求头里的 Cookie · 公司内网</title>
+          <rect x="1320" y="60" width="240" height="110" rx="6" class="c-mask"/>
+          <rect x="1320" y="60" width="240" height="110" rx="6" class="c-cloud" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="cloud" class="semantic-sigil s-cloud" transform="translate(1326 66) scale(0.6875)">
+            <path d="M4.3 12.5h7.3a2.4 2.4 0 0 0 .2-4.8 4 4 0 0 0-7.5-1.3A3.1 3.1 0 0 0 4.3 12.5Z"/>
+          </g>
+          <rect class="nb-badge" x="1483.2" y="68" width="64.8" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="1515.6" y="79" font-size="8" text-anchor="middle">只认 Cookie</text>
+          <text class="nb-title" x="1354" y="81" font-size="10.5" font-weight="600">cnudp.futuoa.com</text>
+          <line class="nb-hr" x1="1328" y1="88" x2="1552" y2="88"/>
+          <g data-when="list">
+          <text class="nb-pair-from" x="1332" y="117" font-size="8.5">/list</text><text class="nb-pair-arrow" x="1427.0" y="117" font-size="8.5">→</text><text class="nb-pair-to" x="1444.3" y="117" font-size="8.5">id + 46 个字段</text>
+          <text class="nb-pair-from" x="1332" y="131" font-size="8.5">/detail?id=</text><text class="nb-pair-arrow" x="1427.0" y="131" font-size="8.5">→</text><text class="nb-pair-to" x="1444.3" y="131" font-size="8.5">47 个字段</text>
+          <text class="nb-note" x="1332" y="162" font-size="8">多的那个是 auditInfo</text>
+          </g>
+          <g data-when="detail">
+          <text class="nb-pair-from" x="1332" y="117" font-size="8.5">/list</text><text class="nb-pair-arrow" x="1427.0" y="117" font-size="8.5">→</text><text class="nb-pair-to" x="1444.3" y="117" font-size="8.5">id + 46 个字段</text>
+          <text class="nb-pair-from" x="1332" y="131" font-size="8.5">/detail?id=</text><text class="nb-pair-arrow" x="1427.0" y="131" font-size="8.5">→</text><text class="nb-pair-to" x="1444.3" y="131" font-size="8.5">47 个字段</text>
+          <text class="nb-note" x="1332" y="162" font-size="8">多的那个是 auditInfo</text>
+          </g>
+        </g>
+
+        <g id="node-daemon" data-nb="1" data-node-id="daemon" data-node-label="daemon :19825" tabindex="0" role="button" aria-label="Focus daemon :19825, HTTP 进来 / WebSocket 出去, 本机 · 常驻小服务，第一次用时自动拉起" aria-pressed="false" data-node-kind="messagebus" data-node-sublabel="HTTP 进来 / WebSocket 出去" data-node-context="本机 · 常驻小服务，第一次用时自动拉起">
+          <title>daemon :19825 · HTTP 进来 / WebSocket 出去 · 本机 · 常驻小服务，第一次用时自动拉起</title>
+          <rect x="920" y="600" width="380" height="125" rx="6" class="c-mask"/>
+          <rect x="920" y="600" width="380" height="125" rx="6" class="c-messagebus" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="messagebus" class="semantic-sigil s-messagebus" transform="translate(926 606) scale(0.6875)">
+            <path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h11"/>
+            <circle cx="5" cy="4.5" r="1" class="sigil-fill"/>
+            <circle cx="10.5" cy="8" r="1" class="sigil-fill"/>
+            <circle cx="7" cy="11.5" r="1" class="sigil-fill"/>
+          </g>
+          <rect class="nb-badge" x="1256.8" y="608" width="31.2" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="1272.4" y="619" font-size="8" text-anchor="middle">常驻</text>
+          <text class="nb-title" x="954" y="621" font-size="10.5" font-weight="600">daemon :19825</text>
+          <line class="nb-hr" x1="928" y1="628" x2="1292" y2="628"/>
+          <g data-when="list">
+          <text class="nb-k" x="932" y="658.5" font-size="9">收</text><text class="nb-v" x="962.6" y="658.5" font-size="9">HTTP POST /command</text>
+          <g class="nb-spot" data-nb-spot="1" tabindex="0" role="button" data-nb-link="ext" data-nb-tip="扩展主动连上来并保活，daemon 只做转发"><rect class="nb-hit" x="927" y="661.5" width="366.0" height="14"/><text class="nb-k" x="932" y="672.5" font-size="9">转</text><text class="nb-v" x="962.6" y="672.5" font-size="9">WebSocket → 扩展</text></g>
+          <text class="nb-k" x="932" y="686.5" font-size="9">启停</text><text class="nb-v" x="962.6" y="686.5" font-size="9">第一次用到时自动拉起</text>
+          <text class="nb-note" x="932" y="717" font-size="8">CLI 和扩展没法直接通话</text>
+          </g>
+          <g data-when="detail">
+          <text class="nb-k" x="932" y="658.5" font-size="9">收</text><text class="nb-v" x="962.6" y="658.5" font-size="9">HTTP POST /command</text>
+          <g class="nb-spot" data-nb-spot="1" tabindex="0" role="button" data-nb-link="ext" data-nb-tip="扩展主动连上来并保活，daemon 只做转发"><rect class="nb-hit" x="927" y="661.5" width="366.0" height="14"/><text class="nb-k" x="932" y="672.5" font-size="9">转</text><text class="nb-v" x="962.6" y="672.5" font-size="9">WebSocket → 扩展</text></g>
+          <text class="nb-k" x="932" y="686.5" font-size="9">启停</text><text class="nb-v" x="962.6" y="686.5" font-size="9">第一次用到时自动拉起</text>
+          <text class="nb-note" x="932" y="717" font-size="8">CLI 和扩展没法直接通话</text>
+          </g>
+        </g>
+
+        <g id="node-ext" data-nb="1" data-node-id="ext" data-node-label="OpenCLI 扩展（MV3）" tabindex="0" role="button" aria-label="Focus OpenCLI 扩展（MV3）, 唯一有浏览器权限的一环, 本机 · Chrome" aria-pressed="false" data-node-kind="frontend" data-node-sublabel="唯一有浏览器权限的一环" data-node-context="本机 · Chrome">
+          <title>OpenCLI 扩展（MV3） · 唯一有浏览器权限的一环 · 本机 · Chrome</title>
+          <rect x="920" y="840" width="380" height="115" rx="6" class="c-mask"/>
+          <rect x="920" y="840" width="380" height="115" rx="6" class="c-frontend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="frontend" class="semantic-sigil s-frontend" transform="translate(926 846) scale(0.6875)">
+            <rect x="2" y="3" width="12" height="10" rx="2"/>
+            <path d="M2 6.5h12"/>
+            <circle cx="4.1" cy="4.8" r=".7" class="sigil-fill"/>
+            <circle cx="6.3" cy="4.8" r=".7" class="sigil-fill"/>
+          </g>
+          <rect class="nb-badge" x="1189.6" y="848" width="98.4" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="1238.8" y="859" font-size="8" text-anchor="middle">MV3 service worker</text>
+          <text class="nb-title" x="954" y="861" font-size="10.5" font-weight="600">OpenCLI 扩展（MV3）</text>
+          <line class="nb-hr" x1="928" y1="868" x2="1292" y2="868"/>
+          <g data-when="list">
+          <rect class="nb-cell" x="932.0" y="887.5" width="104.0" height="32" rx="4"/><text class="nb-cell-t" x="984.0" y="900.5" font-size="9" text-anchor="middle">chrome.cookies</text><text class="nb-cell-s" x="984.0" y="911.5" font-size="7.5" text-anchor="middle">读登录态</text>
+          <rect class="nb-cell" x="1042.0" y="887.5" width="104.0" height="32" rx="4"/><text class="nb-cell-t" x="1094.0" y="900.5" font-size="9" text-anchor="middle">chrome.debugger</text><text class="nb-cell-s" x="1094.0" y="911.5" font-size="7.5" text-anchor="middle">CDP：执行 JS</text>
+          <rect class="nb-cell" x="1152.0" y="887.5" width="104.0" height="32" rx="4"/><text class="nb-cell-t" x="1204.0" y="900.5" font-size="9" text-anchor="middle">chrome.tabs</text><text class="nb-cell-s" x="1204.0" y="911.5" font-size="7.5" text-anchor="middle">开关标签页</text>
+          <text class="nb-note" x="932" y="947" font-size="8">这一趟只用到读 Cookie</text>
+          </g>
+          <g data-when="detail">
+          <rect class="nb-cell" x="932.0" y="887.5" width="104.0" height="32" rx="4"/><text class="nb-cell-t" x="984.0" y="900.5" font-size="9" text-anchor="middle">chrome.cookies</text><text class="nb-cell-s" x="984.0" y="911.5" font-size="7.5" text-anchor="middle">读登录态</text>
+          <rect class="nb-cell" x="1042.0" y="887.5" width="104.0" height="32" rx="4"/><text class="nb-cell-t" x="1094.0" y="900.5" font-size="9" text-anchor="middle">chrome.debugger</text><text class="nb-cell-s" x="1094.0" y="911.5" font-size="7.5" text-anchor="middle">CDP：执行 JS</text>
+          <rect class="nb-cell" x="1152.0" y="887.5" width="104.0" height="32" rx="4"/><text class="nb-cell-t" x="1204.0" y="900.5" font-size="9" text-anchor="middle">chrome.tabs</text><text class="nb-cell-s" x="1204.0" y="911.5" font-size="7.5" text-anchor="middle">开关标签页</text>
+          <text class="nb-note" x="932" y="947" font-size="8">这一趟只用到读 Cookie</text>
+          </g>
+        </g>
+
+        <g id="node-jar" data-nb="1" data-node-id="jar" data-node-label="Chrome 的 Cookie 库" tabindex="0" role="button" aria-label="Focus Chrome 的 Cookie 库, 登录态就在这, 本机 · Chrome" aria-pressed="false" data-node-kind="database" data-node-sublabel="登录态就在这" data-node-context="本机 · Chrome">
+          <title>Chrome 的 Cookie 库 · 登录态就在这 · 本机 · Chrome</title>
+          <rect x="590" y="840" width="210" height="125" rx="6" class="c-mask"/>
+          <rect x="590" y="840" width="210" height="125" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(596 846) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <rect class="nb-badge" x="747.2" y="848" width="40.8" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="767.6" y="859" font-size="8" text-anchor="middle">登录态</text>
+          <text class="nb-title" x="624" y="861" font-size="10.2" font-weight="600">Chrome 的 Cookie 库</text>
+          <line class="nb-hr" x1="598" y1="868" x2="792" y2="868"/>
+          <g data-when="list">
+          <text class="nb-k" x="602" y="898.5" font-size="9">cnudp.futuoa.com</text><text class="nb-v" x="713.6" y="898.5" font-size="9">本次那批</text>
+          <text class="nb-k" x="602" y="912.5" font-size="9">futuoa.com</text><text class="nb-v" x="713.6" y="912.5" font-size="9">父域兜底</text>
+          <text class="nb-k" x="602" y="926.5" font-size="9">passport.futuoa.com</text><text class="nb-v" x="713.6" y="926.5" font-size="9">登录中心</text>
+          <text class="nb-note" x="602" y="957" font-size="8">含 HttpOnly</text>
+          </g>
+          <g data-when="detail">
+          <text class="nb-k" x="602" y="898.5" font-size="9">cnudp.futuoa.com</text><text class="nb-v" x="713.6" y="898.5" font-size="9">本次那批</text>
+          <text class="nb-k" x="602" y="912.5" font-size="9">futuoa.com</text><text class="nb-v" x="713.6" y="912.5" font-size="9">父域兜底</text>
+          <text class="nb-k" x="602" y="926.5" font-size="9">passport.futuoa.com</text><text class="nb-v" x="713.6" y="926.5" font-size="9">登录中心</text>
+          <text class="nb-note" x="602" y="957" font-size="8">含 HttpOnly</text>
+          </g>
+        </g>
+
+        <g id="node-tab" data-nb="1" data-node-id="tab" data-node-label="自动化标签页" tabindex="0" role="button" aria-label="Focus 自动化标签页, 会话的锚点, 本机 · Chrome" aria-pressed="false" data-node-kind="frontend" data-node-sublabel="会话的锚点" data-node-context="本机 · Chrome">
+          <title>自动化标签页 · 会话的锚点 · 本机 · Chrome</title>
+          <rect x="1330" y="840" width="210" height="110" rx="6" class="c-mask"/>
+          <rect x="1330" y="840" width="210" height="110" rx="6" class="c-frontend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="frontend" class="semantic-sigil s-frontend" transform="translate(1336 846) scale(0.6875)">
+            <rect x="2" y="3" width="12" height="10" rx="2"/>
+            <path d="M2 6.5h12"/>
+            <circle cx="4.1" cy="4.8" r=".7" class="sigil-fill"/>
+            <circle cx="6.3" cy="4.8" r=".7" class="sigil-fill"/>
+          </g>
+          <rect class="nb-badge" x="1477.6" y="848" width="50.4" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="1502.8" y="859" font-size="8" text-anchor="middle">会话锚点</text>
+          <text class="nb-title" x="1364" y="861" font-size="10.5" font-weight="600">自动化标签页</text>
+          <line class="nb-hr" x1="1338" y1="868" x2="1532" y2="868"/>
+          <g data-when="list">
+          <text class="nb-k" x="1342" y="898" font-size="9">地址</text><text class="nb-v" x="1372.6" y="898" font-size="9">about:blank</text>
+          <text class="nb-k" x="1342" y="912" font-size="9">会话</text><text class="nb-v" x="1372.6" y="912" font-size="9">site:udp:&lt;uuid&gt;</text>
+          <text class="nb-note" x="1342" y="942" font-size="8">命令结束就关掉</text>
+          </g>
+          <g data-when="detail">
+          <text class="nb-k" x="1342" y="898" font-size="9">地址</text><text class="nb-v" x="1372.6" y="898" font-size="9">about:blank</text>
+          <text class="nb-k" x="1342" y="912" font-size="9">会话</text><text class="nb-v" x="1372.6" y="912" font-size="9">site:udp:&lt;uuid&gt;</text>
+          <text class="nb-note" x="1342" y="942" font-size="8">命令结束就关掉</text>
+          </g>
+        </g>
+
+        <g id="node-render" data-nb="1" data-node-id="render" data-node-label="output.js 的 render()" tabindex="0" role="button" aria-label="Focus output.js 的 render(), 把 rows 变成输出, 本机 · 一个 Node 进程（跑完就退）" aria-pressed="false" data-node-kind="backend" data-node-sublabel="把 rows 变成输出" data-node-context="本机 · 一个 Node 进程（跑完就退）">
+          <title>output.js 的 render() · 把 rows 变成输出 · 本机 · 一个 Node 进程（跑完就退）</title>
+          <rect x="30" y="300" width="200" height="130" rx="6" class="c-mask"/>
+          <rect x="30" y="300" width="200" height="130" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(36 306) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <rect class="nb-badge" x="186.8" y="308" width="31.2" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="202.4" y="319" font-size="8" text-anchor="middle">输出</text>
+          <text class="nb-title" x="64" y="321" font-size="9.2" font-weight="600">output.js 的 render()</text>
+          <line class="nb-hr" x1="38" y1="328" x2="222" y2="328"/>
+          <g data-when="list">
+          <text class="nb-k" x="42" y="361" font-size="9">默认</text><text class="nb-v" x="83.4" y="361" font-size="9">表格（终端里）</text>
+          <text class="nb-k" x="42" y="375" font-size="9">管道里</text><text class="nb-v" x="83.4" y="375" font-size="9">自动降级 YAML</text>
+          <text class="nb-k" x="42" y="389" font-size="9">-f</text><text class="nb-v" x="83.4" y="389" font-size="9">json / csv / md</text>
+          <text class="nb-note" x="42" y="422" font-size="8">adapter 不知道格式</text>
+          </g>
+          <g data-when="detail">
+          <text class="nb-k" x="42" y="361" font-size="9">默认</text><text class="nb-v" x="83.4" y="361" font-size="9">表格（终端里）</text>
+          <text class="nb-k" x="42" y="375" font-size="9">管道里</text><text class="nb-v" x="83.4" y="375" font-size="9">自动降级 YAML</text>
+          <text class="nb-k" x="42" y="389" font-size="9">-f</text><text class="nb-v" x="83.4" y="389" font-size="9">json / csv / md</text>
+          <text class="nb-note" x="42" y="422" font-size="8">adapter 不知道格式</text>
+          </g>
+        </g>
+
+        <!-- Connection labels -->
+        <g data-detail="context" data-edge-from="term" data-edge-to="main" data-edge-label="① 敲下这一行" data-edge-key="0" data-edge-id="c1">
+          <rect x="181.2" y="215" width="67.6" height="14" rx="3" class="c-mask"/>
+          <text x="215" y="225" class="t-muted" font-size="8" text-anchor="middle">① 敲下这一行</text>
+        </g>
+        <g data-detail="context" data-edge-from="main" data-edge-to="registry" data-edge-label="② 扫目录、import 并注册" data-edge-key="1" data-edge-id="c2">
+          <rect x="394.8" y="215" width="120.39999999999999" height="14" rx="3" class="c-mask"/>
+          <text x="455" y="225" class="t-muted" font-size="8" text-anchor="middle">② 扫目录、import 并注册</text>
+        </g>
+        <g data-detail="context" data-edge-from="registry" data-edge-to="execution" data-edge-label="③ 查到 udp/portrait" data-edge-key="2" data-edge-id="c3">
+          <rect x="644.4" y="215" width="101.2" height="14" rx="3" class="c-mask"/>
+          <text x="695" y="225" class="t-muted" font-size="8" text-anchor="middle">③ 查到 udp/portrait</text>
+        </g>
+        <g data-detail="context" data-edge-from="execution" data-edge-to="adapter" data-edge-label="④ 调用 func(page, args)" data-edge-key="3" data-edge-id="c4">
+          <rect x="874.8" y="215" width="120.39999999999999" height="14" rx="3" class="c-mask"/>
+          <text x="935" y="225" class="t-muted" font-size="8" text-anchor="middle">④ 调用 func(page, args)</text>
+        </g>
+        <g data-detail="context" data-edge-from="userdir" data-edge-to="registry" data-edge-label="cli({...}) 注册" data-edge-key="4" data-edge-id="c5">
+          <rect x="519" y="265" width="82" height="14" rx="3" class="c-mask"/>
+          <text x="560" y="275" class="t-muted" font-size="8" text-anchor="middle">cli({...}) 注册</text>
+        </g>
+        <g data-detail="context" data-edge-from="adapter" data-edge-to="daemon" data-edge-label="⑤ page.getCookies()（1+N 次）" data-edge-key="5" data-edge-id="c6">
+          <rect x="1035.4" y="240" width="149.2" height="14" rx="3" class="c-mask"/>
+          <text x="1110" y="250" class="t-muted" font-size="8" text-anchor="middle">⑤ page.getCookies()（1+N 次）</text>
+        </g>
+        <g data-detail="context" data-edge-from="daemon" data-edge-to="ext" data-edge-label="WebSocket 转发" data-edge-key="6" data-edge-id="c7">
+          <rect x="1071.4" y="729" width="77.2" height="14" rx="3" class="c-mask"/>
+          <text x="1110" y="739" class="t-muted" font-size="8" text-anchor="middle">WebSocket 转发</text>
+        </g>
+        <g data-detail="context" data-edge-from="ext" data-edge-to="jar" data-edge-label="chrome.cookies 读登录态" data-edge-key="7" data-edge-id="c8">
+          <rect x="799.8" y="965" width="120.39999999999999" height="14" rx="3" class="c-mask"/>
+          <text x="860" y="975" class="t-muted" font-size="8" text-anchor="middle">chrome.cookies 读登录态</text>
+        </g>
+        <g data-detail="context" data-edge-from="ext" data-edge-to="tab" data-edge-label="chrome.tabs 开标签页" data-edge-key="8" data-edge-id="c9">
+          <rect x="1262" y="965" width="106" height="14" rx="3" class="c-mask"/>
+          <text x="1315" y="975" class="t-muted" font-size="8" text-anchor="middle">chrome.tabs 开标签页</text>
+        </g>
+        <g data-detail="context" data-edge-from="adapter" data-edge-to="udp" data-edge-label="⑥ Node 自己发 HTTPS" data-edge-key="9" data-edge-id="c10">
+          <rect x="1224.4" y="240" width="101.2" height="14" rx="3" class="c-mask"/>
+          <text x="1275" y="250" class="t-muted" font-size="8" text-anchor="middle">⑥ Node 自己发 HTTPS</text>
+        </g>
+        <g data-detail="context" data-edge-from="main" data-edge-to="render" data-edge-label="⑦ rows → 渲染成输出" data-edge-key="10" data-edge-id="c11">
+          <rect x="294.4" y="235" width="101.2" height="14" rx="3" class="c-mask"/>
+          <text x="345" y="245" class="t-muted" font-size="8" text-anchor="middle">⑦ rows → 渲染成输出</text>
+        </g>
+
+        <!-- Legend -->
+        <g data-legend data-legend-bridge>
+          <text x="40" y="1017" class="t-primary" font-size="12" font-weight="650">Legend</text>
+          <g data-legend-semantic-kind="frontend" data-legend-kind="frontend" data-legend-label="Frontend" data-legend-x="40" data-legend-baseline="1037" data-legend-width="83">
+            <rect x="40" y="1028" width="16" height="10" rx="2.5" class="c-frontend" stroke-width="1"/>
+            <text x="62" y="1037" class="t-muted" font-size="10" font-weight="500">Frontend</text>
+          </g>
+          <g data-legend-semantic-kind="backend" data-legend-kind="backend" data-legend-label="Backend" data-legend-x="145" data-legend-baseline="1037" data-legend-width="78">
+            <rect x="145" y="1028" width="16" height="10" rx="2.5" class="c-backend" stroke-width="1"/>
+            <text x="167" y="1037" class="t-muted" font-size="10" font-weight="500">Backend</text>
+          </g>
+          <g data-legend-semantic-kind="database" data-legend-kind="database" data-legend-label="Database" data-legend-x="245" data-legend-baseline="1037" data-legend-width="83">
+            <rect x="245" y="1028" width="16" height="10" rx="2.5" class="c-database" stroke-width="1"/>
+            <text x="267" y="1037" class="t-muted" font-size="10" font-weight="500">Database</text>
+          </g>
+          <g data-legend-semantic-kind="cloud" data-legend-kind="cloud" data-legend-label="Cloud" data-legend-x="350" data-legend-baseline="1037" data-legend-width="68">
+            <rect x="350" y="1028" width="16" height="10" rx="2.5" class="c-cloud" stroke-width="1"/>
+            <text x="372" y="1037" class="t-muted" font-size="10" font-weight="500">Cloud</text>
+          </g>
+          <g data-legend-semantic-kind="messagebus" data-legend-kind="messagebus" data-legend-label="Message bus" data-legend-x="440" data-legend-baseline="1037" data-legend-width="98">
+            <rect x="440" y="1028" width="16" height="10" rx="2.5" class="c-messagebus" stroke-width="1"/>
+            <text x="462" y="1037" class="t-muted" font-size="10" font-weight="500">Message bus</text>
+          </g>
+          <g data-legend-semantic-kind="external" data-legend-kind="external" data-legend-label="External" data-legend-x="560" data-legend-baseline="1037" data-legend-width="83">
+            <rect x="560" y="1028" width="16" height="10" rx="2.5" class="c-external" stroke-width="1"/>
+            <text x="582" y="1037" class="t-muted" font-size="10" font-weight="500">External</text>
+          </g>
+        </g>
+      </svg>
+      <figcaption><mark class="mk-blue">左边一行是 Node 进程里发生的事，右下方是浏览器里发生的事。</mark> 命令本身（① ~ ④）全在一个进程内跑完；读 Cookie 要往下绕一圈（⑤ 走到 Chrome 里再回来）；真正的取数请求是 <mark class="mk-blue">Node 进程自己发出去的</mark>（⑥），浏览器只借出了身份；函数体返回的 <code>rows</code> 最后回到进程里渲染成输出（⑦）。矩形里的每一行、每一格都能点 —— 点了跳到它指向的那个零件；用「场景」在 <mark class="mk-blue">第一次拉列表 ↔ 之后每条补详情</mark> 之间切换，看 ⑤ ⑥ 是怎么被重复的；用「对比两个零件」挑两个（比如 <strong>adapter</strong> 和 <strong>扩展</strong>）出一张对照表。</figcaption>
+      <div class="pano-ui"></div>
+      <p class="arch-hint"><span class="idle">点头上的任意一个框看它的关系；框里的每一行 / 每个格子都能点，跳到它指向的零件；用「场景」切换同一张图的两种状态；或者从下面的「我熟悉」进去</span><span class="focused">再点一次空白处取消</span></p>
+    </figure><p>一次 <code>--limit 3</code> 的时间线实测 305ms。慢的不是某一次请求，而是次数：4 次业务请求各 26~82ms，12 次读 Cookie 的 RPC 各 6~17ms，剩下的二三十毫秒是进程启动和会话开销。</p>
+<h2 id="portraitjs-是怎么被找到又是怎么被调起来的"><span class="num">03</span>portrait.js 是怎么被找到、又是怎么被调起来的</h2>
+<p><code>portrait.js</code> 全文 66 行。官方模板把它叫三段（declaration / args / func），这里按四块读它 —— 因为 <code>columns</code> 单独管着「输出长什么样」。<mark class="mk-blue">上面那张图里的 ② ④ 两步，对应的就是下面这两块。</mark></p>
+<div class="cards" data-cols="2"><div class="ccard tone-violet">
+          <span class="tag tone-violet">谁来发现我</span>
+          <h4>第一段 · 声明（第 5~14 行）</h4>
+          
+          <div class="cbody"><p>一次 <code>cli({...})</code> 调用：</p>
+<p><code>site: 'udp'</code> + <code>name: 'portrait'</code> → 命令名 <code>opencli udp portrait</code>
+<code>strategy: Strategy.COOKIE</code> → 需要登录态，所以要有浏览器
+<code>browser: true</code> → 这条命令要一个 <code>page</code> 对象
+<code>domain: 'cnudp.futuoa.com'</code> → 登录域
+<code>navigateBefore: false</code> → <mark class="mk-blue">不预先打开网站页面</mark></p>
+</div>
+          
+        </div><div class="ccard tone-blue">
+          <span class="tag tone-blue">谁来校验</span>
+          <h4>第二段 · 参数（第 15~19 行）</h4>
+          
+          <div class="cbody"><p>三个参数，声明成数据而不是写成解析代码：</p>
+<p><code>keyword</code> 必填、位置参数
+<code>page</code> 整数、默认 1
+<code>limit</code> 整数、默认 10</p>
+<p>opencli 按这份声明校验类型、补默认值、生成 <code>--help</code>。
+传 <code>--limit 1001</code> 会直接报错退出，<mark class="mk-blue">函数体根本不会被执行</mark>。</p>
+</div>
+          
+        </div><div class="ccard tone-emerald">
+          <span class="tag tone-emerald">输出长什么样</span>
+          <h4>第三段 · 返回哪些列（第 20~21 行）</h4>
+          
+          <div class="cbody"><p><code>columns</code> 列 12 个字段名，它们决定<strong>表格输出的列和顺序</strong>。</p>
+<p>它只影响显示：函数体返回的对象里字段比这多也不显示，
+少一个就显示空。<code>extras</code> 这种嵌套对象在表格里会被压成一格。</p>
+</div>
+          
+        </div><div class="ccard tone-amber">
+          <span class="tag tone-amber">业务逻辑都在这里</span>
+          <h4>第四段 · 函数体（第 22~65 行）</h4>
+          
+          <div class="cbody"><p>44 行，全是「取数 + 挑字段」。它不解析 HTML、不点按钮、不管输出格式，
+因为它拿到的不是网页，而是两个接口的 JSON。</p>
+</div>
+          
+        </div></div><h2 id="从关键词到一行表格数据走了六步"><span class="num">04</span>从关键词到一行表格：数据走了六步</h2>
+<p>这一段是整篇的重点。同一个字段数据在命令里换了六种形态，每一步都丢一点、加一点：</p>
+<div class="demo" data-widget="stepper" data-config="{&quot;steps&quot;:[{&quot;label&quot;:&quot;你给的字符串&quot;,&quot;note&quot;:&quot;起点只有一个词，谁都不知道它对应几条记录。&quot;,&quot;code&quot;:&quot;\&quot;futu_hk_trade_overnight_count\&quot;\n&quot;},{&quot;label&quot;:&quot;第一层 API 包裹&quot;,&quot;note&quot;:&quot;`GET /api/udp/portrait/list?page=1&amp;pageSize=1&amp;keyword=…` 的原始返回。\n==有两层 `data`==：外层是 API 信封（`code` / `message`），内层是分页信封（`data` / `totalCount` / `page` / `pageSize`）。\n&quot;,&quot;code&quot;:&quot;{\n  \&quot;code\&quot;: 0,                       // ← API 信封\n  \&quot;message\&quot;: \&quot;成功\&quot;,\n  \&quot;data\&quot;: {                        // ← 分页信封\n    \&quot;data\&quot;: [ {\&quot;id\&quot;: 474, \&quot;enName\&quot;: \&quot;…\&quot;, …} ],   // ← 46 个字段\n    \&quot;totalCount\&quot;: 1, \&quot;page\&quot;: 1, \&quot;pageSize\&quot;: 1\n  }\n}\n&quot;},{&quot;label&quot;:&quot;拆信封，拿到数组&quot;,&quot;note&quot;:&quot;`fetchUdpJson()` 里 `return data?.data` 剥掉第一层，\nadapter 里 `Array.isArray(payload?.data) ? payload.data : []` 剥掉第二层。\n==剥完之后这里只剩下 `id` 有用==，下一步要拿它去问详情。\n&quot;,&quot;code&quot;:&quot;[ { id: 474, name: \&quot;FutuHK累计夜盘交易次数\&quot;, … }, … ]\n&quot;},{&quot;label&quot;:&quot;按 id 补详情&quot;,&quot;note&quot;:&quot;对每个 id 再调 `GET /api/udp/portrait/detail?id=474`，返回 47 个字段。\n==实测：detail 只比 list 多一个 `auditInfo`，而函数体没有用它。==\n&quot;,&quot;code&quot;:&quot;{ \&quot;code\&quot;: 0, \&quot;data\&quot;: { \&quot;id\&quot;: 474, \&quot;caliber\&quot;: \&quot;…\&quot;, \&quot;relationship\&quot;: \&quot;…\&quot;, … } }\n&quot;},{&quot;label&quot;:&quot;挑字段 + 抹平差异&quot;,&quot;note&quot;:&quot;12 个字段被挑进 `rows`，其中三处做了加工：\n`enumContent` → `enumMapping(\&quot;0:否;1:是\&quot;)`；`developers` 可能是字符串也可能是数组，统一成 `;` 拼接；\n`extras` 把 10 个零散字段收成一个对象。==剩下的二十多个字段在这里被丢掉。==\n&quot;,&quot;code&quot;:&quot;rows.push({\n  id: d.id ?? null,\n  name: d.name ?? null,\n  enumMapping: enumMapping(d.enumContent),\n  extras: {\n    developers: Array.isArray(d.developers) ? d.developers.join(';') : str(d.developers),\n    updatedAt: d.updatedAt ?? null,\n    …\n  },\n});\n&quot;},{&quot;label&quot;:&quot;渲染&quot;,&quot;note&quot;:&quot;函数体 `return rows` 就结束了，==它完全不知道输出格式==。\n渲染是 opencli 本体做的：按 `columns` 出表格。\n管道里跑（非 TTY）时 `table` 会自动降级成 YAML，所以复制粘贴得来的多半是 YAML 的样子。\n&quot;,&quot;code&quot;:&quot;- id: 474\n  name: FutuHK累计夜盘交易次数\n  enName: futu_hk_trade_overnight_count\n  …\n&quot;}]}">
+      <div class="demo-head">
+        <span class="title">一个关键词的六次变形</span>
+        <span class="status" data-status></span>
+        <span class="spacer"></span>
+        
+      </div>
+      <div class="demo-body custom" data-mount></div>
+    </div><p><code>??</code>（空值合并）铺满整个 <code>rows.push</code>：接口字段缺了、类型不对，这里都不报错，只是变成 <code>null</code>。<mark class="mk-blue">数据变少了不会有人告诉你。</mark></p>
+<h2 id="三个反直觉的地方"><span class="num">05</span>三个反直觉的地方</h2>
+<p>第一条最反直觉：<strong>取数请求不是浏览器发的。</strong></p>
+<div class="callout tone-red">
+      <span class="ic">⚠</span>
+      <div><p>adapter 里那句 <code>fetch(url, { headers: { Cookie: cookie } })</code> 执行在 <strong>Node 进程</strong>里，
+不是浏览器。浏览器只借出了 Cookie 串。</p>
+<p>证据有两条，都是这一趟实测的：</p>
+<ul>
+<li><code>--trace on</code> 抓的 <code>network.jsonl</code> 是 <strong>0 字节</strong>：追踪只抓浏览器侧的网络，这条请求不经过浏览器</li>
+<li>标签页最后停在 <code>about:blank</code>，它压根没被用到</li>
+</ul>
+<p><mark class="mk-green">所以排查这条命令时，别去 Chrome 的开发者工具里找那个请求。</mark></p>
+</div>
+    </div><p>第二条：<strong><code>detail</code> 那次请求，这一趟是白打的。</strong></p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>接口</th><th>返回字段数</th><th>独有字段</th></tr></thead><tbody><tr><th><code>/list</code> 的每一条</th><td data-label="返回字段数">46 个</td><td data-label="独有字段">——</td></tr><tr><th><code>/detail?id=</code></th><td data-label="返回字段数">47 个</td><td data-label="独有字段">只多一个 <code>auditInfo</code>，<mark class="mk-blue">而且函数体没用它</mark></td></tr></tbody></table></div><p><code>portrait.js</code> 对每个 id 都打一次 detail，所以一次命令的请求数不是 2 次，而是 <strong>1 + N 次</strong>。这件事在 <code>--limit</code> 变大时会被放大：</p>
+<div class="demo" data-widget="tuner" data-config="{&quot;param&quot;:{&quot;label&quot;:&quot;limit（要几条记录）&quot;,&quot;values&quot;:[1,3,10,50,200]},&quot;outputs&quot;:[{&quot;label&quot;:&quot;业务请求（1 + N）&quot;,&quot;values&quot;:[2,4,11,51,201],&quot;tone&quot;:&quot;amber&quot;},{&quot;label&quot;:&quot;读 Cookie 的 RPC（3 × 上面那个数）&quot;,&quot;values&quot;:[6,12,33,153,603],&quot;tone&quot;:&quot;red&quot;},{&quot;label&quot;:&quot;HTTP 请求总数&quot;,&quot;values&quot;:[10,18,46,206,806],&quot;tone&quot;:&quot;muted&quot;}]}">
+      <div class="demo-head">
+        <span class="title">一次命令要发多少个 HTTP 请求</span>
+        <span class="status" data-status></span>
+        <span class="spacer"></span>
+        
+      </div>
+      <div class="demo-body custom" data-mount></div>
+    </div><p><code>values</code> 是把实测公式代进去算出来的数字：1 和 3 这两档真跑过（10 个、18 个），其余按同一条公式推算 —— 总数 = 1（探活）+ 3(1+N)（读 Cookie）+ (1+N)（业务）+ 1（关标签页）。公式本身来自代码：<code>readCookie()</code> 每次调用打 3 个域（<code>cnudp</code> / <code>futuoa.com</code> / <code>passport</code>），而 <code>fetchUdpJson()</code> 每次调用都重新读一遍。</p>
+<p>第三条：<code>trace</code> 抓不到业务请求，但抓到了别的东西。</p>
+<div class="callout tone-amber">
+      <span class="ic">🌀</span>
+      <div><p><code>--trace on</code> 的产物在 <code>~/.opencli/profiles/default/traces/&lt;时间戳&gt;-&lt;随机&gt;/</code>：
+<code>summary.md</code> 是能读的行动时间线，<code>network.jsonl</code> 是空的（见上一条），
+<code>state/</code> 存着最后页面状态，<code>screenshots/</code> 存着截图。</p>
+<p>这次的时间线只有两行，恰好把命令的骨架说清了：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">06:54:38.053Z command start {&quot;args&quot;:{&quot;keyword&quot;:&quot;…&quot;,&quot;page&quot;:1,&quot;limit&quot;:2}}
+06:54:38.640Z command end
+</code></pre></div>
+<p><mark class="mk-blue">两行之间 587ms，就是上面那一整趟。</mark></p>
+</div>
+    </div><h2 id="它会怎么坏"><span class="num">06</span>它会怎么坏</h2>
+<p>知道每一步谁负责，就能知道坏了该找谁。三种常见失效：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>现象</th><th>真实原因</th><th>该找谁</th></tr></thead><tbody><tr><th><code>AUTH_REQUIRED</code>：提示 session expired</th><td data-label="真实原因"><code>utils.js</code> 自己判出来的：响应跳到了 <code>/login</code>，或者返回的是 HTML 而不是 JSON</td><td data-label="该找谁"><strong>去 Chrome 里重新登录 futuoa</strong>，命令不用改</td></tr><tr><th><code>BROWSER_CONNECT</code>：extension not connected</th><td data-label="真实原因">扩展没连上 daemon：没启用、被禁用、或者 Chrome 没开</td><td data-label="该找谁">跑 <code>opencli doctor</code>；再不行就打开 chrome://extensions 确认它是启用状态</td></tr><tr><th>某几个字段突然全变 <code>null</code></th><td data-label="真实原因">接口字段改名或改类型了，<code>?? null</code> 把它静静吃掉</td><td data-label="该找谁"><span class="tag tone-red"><mark class="mk-blue">最难查的一种</mark>：去 <code>detail</code> 的原始返回里对键名</span></td></tr></tbody></table></div><p>还有两类「不是坏，但会误导你」的情况：</p>
+<div class="cards" data-cols="2"><div class="ccard tone-muted">
+          <span class="tag tone-muted">不是坏了</span>
+          <h4>输出变成了 YAML</h4>
+          
+          <div class="cbody"><p>非 TTY（管道、重定向、CI）下，<code>table</code> 会自动降级成 YAML。
+屏幕上看着是表格、<code>| head</code> 之后变成 YAML，是同一个原因。
+想固定格式就显式写 <code>-f json</code> / <code>-f csv</code>。</p>
+</div>
+          
+        </div><div class="ccard tone-muted">
+          <span class="tag tone-muted">拿来写脚本</span>
+          <h4>退出码不是 0</h4>
+          
+          <div class="cbody"><p><code>ARGUMENT</code> = 2（比如 <code>--limit 1001</code>）；
+<code>EMPTY_RESULT</code> = 66（这个关键词搜不到东西）；
+<code>AUTH_REQUIRED</code> = 77；<code>TIMEOUT</code> = 75。
+<mark class="mk-blue">脚本里判 <code>exit 66</code> 比 grep 输出文字稳。</mark></p>
+</div>
+          
+        </div></div><h2 id="自测"><span class="num">07</span>自测</h2>
+<div class="quiz"><details>
+        <summary>opencli 自己会取数据吗？这一趟里真正取数的是谁？</summary>
+        <div class="a"><p>不会。opencli 负责发现 adapter、校验参数、提供浏览器通道、渲染输出；
+取数那两行是 adapter 的函数体，用 Node 自己的 <code>fetch</code> 发的，浏览器只借出 Cookie。</p>
+</div>
+      </details><details>
+        <summary>为什么一次命令要读 1 + N 次 Cookie？</summary>
+        <div class="a"><p>因为 <code>fetchUdpJson()</code> 每次调用都重新 <code>readCookie()</code>，而它每次打 3 个域的 RPC。
+代码里没有缓存。是浪费，还是「每次都拿最新的登录态」，看你怎么判。</p>
+</div>
+      </details><details>
+        <summary><code>--limit 1</code> 和 <code>--limit 200</code> 的请求数差多少？</summary>
+        <div class="a"><p><code>limit 1</code> 实测 10 个 HTTP 请求；<code>limit 200</code> 按同一条公式是 806 个
+（业务请求 1+N，读 Cookie 的 RPC 是它的 3 倍）。
+这就是 N+1 请求在小数据上无感、在大数据上致命的原因。</p>
+</div>
+      </details><details>
+        <summary>这条命令为什么不需要预先打开网站页面（<code>navigateBefore: false</code>）？</summary>
+        <div class="a"><p>因为它只用到 Cookie，不需要页面里的任何东西。
+代价是：哪天接口要求一个只存在于页面里的 CSRF token，这条命令就会失败。</p>
+</div>
+      </details></div>
+
+    <footer>
+      <span>opencli 做了什么：一条命令的解剖</span>
+      <span>最后更新 2026-10-12 · 单文件可离线打开</span>
+    </footer>
+  </main>
+</div>
+
+<script src="../../assets/app.js?v=9080049699"></script>
+</body>
+</html>
