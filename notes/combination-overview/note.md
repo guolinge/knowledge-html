@@ -3,6 +3,14 @@
 这个包 22 个文件、2795 行。它的活可以一句话说完：**把 Metadata 渲染成圈选界面，把人的操作变成一份叫 DraftQuery 的草稿**。草稿协议本身住在 `@insight/dsl`，它只是消费方；草稿怎么变成 SQL，它也不管。
 
 ```callout
+tone: muted
+icon: ✅
+text: |
+  本篇已按 `crm-dsl-stru @ 7f2ec46`（2026-10-12）刷新：数字、协议位置与依赖计数都以这版为准，
+  截图同步重拍。协议层的逐字段解剖见[草稿协议篇](../combination-draft/)。
+```
+
+```callout
 tone: blue
 icon: 🎯
 text: |
