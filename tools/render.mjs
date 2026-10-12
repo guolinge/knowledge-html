@@ -153,6 +153,35 @@ function lintAnchors(src) {
   return issues;
 }
 
+/* ---------- arch 整体图的 bodies 提醒 ----------
+   背景（2026-10-12 数过）：仓库里 48 张 arch 图，只有 6 张用了 bodies ——
+   绝大多数图是「一堆小矩形 + 一行字」。而 bodies 的能力（键值行 / 格子 /
+   条带 / 高低段 / 映射 / 计量 / 代码行）就摆在 blocks.md 里，只是没人先去看它。
+
+   这条只对**零件够多的图**开口（≥ 12 个），且只提醒、不阻塞：
+   零件少的图本来就装不下东西，硬加 bodies 反而是过度设计。
+   反例与正例：notes/process-thread-relation 的 §02 地图（bodies + scenarios + facts）。
+------------------------------------------------ */
+const ARCH_BODY_HINT_MIN_NODES = 12;
+function lintArchBodies(src) {
+  const issues = [];
+  for (const m of src.matchAll(/```arch\n([\s\S]*?)```/g)) {
+    const body = m[1];
+    const svg = (body.match(/^svg:\s*(\S+)/m) || [])[1];
+    if (!svg) continue;
+    if (/^bodies:/m.test(body) || /^scenarios:/m.test(body)) continue;
+    const file = path.join(ROOT, 'assets/arch', `${svg}.svg`);
+    if (!fs.existsSync(file)) continue;
+    const nodes = (read(file).match(/data-node-id="/g) || []).length;
+    if (nodes < ARCH_BODY_HINT_MIN_NODES) continue;
+    issues.push(
+      `arch 图 ${svg}.svg 有 ${nodes} 个零件，但没有 bodies —— 节点只有一行字，是目录不是地图。` +
+        `做法见 references/blocks.md 的 bodies 一节，示例 notes/process-thread-relation（本次检查不阻塞）`,
+    );
+  }
+  return issues;
+}
+
 /* ---------- 跨笔记链接的两种产物形态 ----------
    note.md 里跨篇链接统一写 ../<slug>/（和「前置」区块同一个方言）：
    · notes/<slug>/index.html：../<slug>/ 指向兄弟笔记目录，本来就对
@@ -191,7 +220,11 @@ function main() {
 
   const slugs = allDirs.filter((s) => !ONLY || s === ONLY).sort();
 
-  const existingSlugs = new Set(slugs);
+  /* 「已产出的笔记」按**磁盘上真实存在的全部笔记**算，不受 --only 影响。
+     踩过：这里原来用 `new Set(slugs)`，于是 `npm run view -- <slug>`（单篇构建）
+     把这篇的所有前置都渲染成「待产出」灰块，再跑一次全量构建又变回可点链接 ——
+     同一个产物两种构建模式不一致，dist/ 里来回抖。 */
+  const existingSlugs = new Set(allDirs);
 
   if (!slugs.length) {
     console.log('notes/ 下还没有笔记。用 npm run new -- <slug> 创建第一篇。');
@@ -234,6 +267,9 @@ function main() {
        否则 16 篇旧笔记会把每次 check / pre-push 全部拦下。 */
     for (const it of lintAnchors(src)) console.warn(`  · ${slug}: ${it}`);
     notices += lintAnchors(src).length;
+    // 整体图 bodies 提醒：只提醒不阻塞，理由见 lintArchBodies 的注释
+    for (const it of lintArchBodies(src)) console.warn(`  · ${slug}: ${it}`);
+    notices += lintArchBodies(src).length;
 
     if (CHECK) continue;
 
@@ -301,7 +337,7 @@ function main() {
   if (CHECK) {
     console.log(
       `\n  ${slugs.length} 篇：${errors} 个错误，${warnings} 个提醒` +
-        (notices ? `，另有 ${notices} 条弃用提醒（不阻塞）` : '') +
+        (notices ? `，另有 ${notices} 条提示（不阻塞）` : '') +
         (errors + warnings === 0 ? '  —— 没问题' : ''),
     );
     if (errors + warnings > 0) process.exitCode = 1;
@@ -310,14 +346,24 @@ function main() {
 
   // 首页索引：从磁盘汇总全部笔记，再用刚构建的条目覆盖。
   // 这样某篇写坏时它只是不能构建，不会从首页凭空消失。
-  const byslug = new Map(collectAll().map((e) => [e.slug, e]));
-  for (const e of entries) byslug.set(e.slug, e);
-  const allEntries = [...byslug.values()].sort((a, b) => a.slug.localeCompare(b.slug));
-  write(
-    path.join(ROOT, 'index.html'),
-    versionAssets(renderHome(allEntries, { site: '知识笔记', assetPrefix: '', plans })),
-  );
-  console.log(`  ✓ index.html (${allEntries.length} 篇)`);
+  //
+  // 单篇构建（--only）不写 index.html：那时只有这一篇是渲染过的，
+  // 其余篇会退化成 collectAll() 的原始 markdown 摘要 —— 整站搜索索引
+  // 被一次「只看一篇」的构建改差。踩过：`npm run view -- <slug>` 之后
+  // index.html 里其它 81 篇的搜索正文全变了，而用户只看了一篇。
+  // 首页的正确版本由全量构建（build / build:standalone / done）负责。
+  if (ONLY) {
+    console.log('  · index.html 没动（单篇构建只看 dist/' + ONLY + '.html）');
+  } else {
+    const byslug = new Map(collectAll().map((e) => [e.slug, e]));
+    for (const e of entries) byslug.set(e.slug, e);
+    const allEntries = [...byslug.values()].sort((a, b) => a.slug.localeCompare(b.slug));
+    write(
+      path.join(ROOT, 'index.html'),
+      versionAssets(renderHome(allEntries, { site: '知识笔记', assetPrefix: '', plans })),
+    );
+    console.log(`  ✓ index.html (${allEntries.length} 篇)`);
+  }
 
   if (errors) process.exitCode = 1;
 }

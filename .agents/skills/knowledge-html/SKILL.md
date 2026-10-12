@@ -383,8 +383,10 @@ text: |
 每条围绕一个问题，每一步只突出解释所需的对象和关系，不把全图缩成一串目录。
 节点的详细解释放在关系面板，关键对象名称和主要关系在全图上仍然可辨。
 
-做法对应 `arch` 的 `parts` / `tours`；实际示例见
-[server-code 首图](notes/server-code/note.md)。
+做法对应 `arch` 的 `parts` / `tours`；**节点里装什么**用同一个积木的 `bodies`（八种内容 + `badge` / `note`）。
+
+==示例看 [process-thread-relation 的 §02 地图](notes/process-thread-relation/note.md)==（`pt-map`：`bodies` + `scenarios` + `facts` + 两条导览都齐）——
+整体图该长的样子，那里全都有。
 
 这和原则 ③ 里「画到读者已经认识的锚点」是同一件事的两种用法。
 那一条讲画布上的位置：这条链最后那个东西，读者是不是已经认识。
@@ -415,6 +417,10 @@ text: |
   ==只写名字的节点，和只写名字的图，是同一种失败。==
 
   做法：`arch` 的 `bodies` 字段（八种内容 + `badge` / `note`），见 `blocks.md`。
+  示例看 [process-thread-relation 的地图](notes/process-thread-relation/note.md)：每个矩形里是键值行 / 小格子 / 高低段 / 映射，不是一行名字。
+
+  ++构建时会对「零件 ≥ 12 个、又没写 `bodies` / `scenarios`」的 `arch` 图给一条提醒（`·`，不阻塞）——
+  提醒只说这张图是目录风格，画不画由作者决定。++
 ```
 
 ### 两个高一层的能力：可点的格子、一张图两种状态
@@ -2148,7 +2154,7 @@ text: |
 | `summary` | 小结 |
 | `raw` | 直接写 HTML |
 
-**交互控件 56 个**（在 `assets/app.js` 的 `WIDGETS` 里，供 `demo` 积木引用）：
+**交互控件 57 个**（在 `assets/app.js` 的 `WIDGETS` 里，供 `demo` 积木引用）：
 `polling-vs-cdc` `combination-count` `join-lab` `on-vs-where` `knex-chain`
 `stepper` `tuner` `diff` `stream-modes` `operator-lab` `hashring` `partition-prune`
 `dsl-lab` `null-lab` `config-to-ui` `field-lineage` `count-dedup-lab`
@@ -2159,7 +2165,7 @@ text: |
 `schema-walk`
 `tri-logic-lab` `uid-set-lab` `dist-lab` `storage-anatomy` `prune-lab` `innodb-visual-lab`
 `ls-cost-lab` `atomic-lab` `rtt-lab`
-`combination-control-lab` `combination-values-lab` `combination-build-lab`
+`combination-control-lab` `combination-values-lab` `combination-build-lab` `cand-pipe-lab`
 `s3-list-lab` `ec-lab` `mysql-2pc-crash` `join-driver-lab`
 
 **已知缺口**（按优先级）：
@@ -2485,7 +2491,8 @@ Label "请求" overlaps component "gateway"
 
 | 症状 | 改哪 |
 |---|---|
-| 屏幕利用率低 / 留白太多 | `theme.css` 的 `--shell` / `--prose` / `--gutter` |
+| 屏幕利用率低 / 留白太多 | `theme.css` 的 `--shell` / `--wide` / `--prose` / `--gutter` |
+| 宽屏上整体图还是很小、文字挤在一起 | 调大 `--wide`（图和积木的上限）；`--prose` 不动 |
 | 共享积木在窄屏被不可恢复地裁掉、关键控件不可达 | `blocks.css` 里做安全降级；优先局部滚动，不为手机重做图义 |
 | 目录 / 交互别扭 | `app.js` + `lib/page.mjs` |
 | 颜色不对 | `theme.css` 的 token |
@@ -2500,8 +2507,12 @@ Label "请求" overlaps component "gateway"
 `theme.css` 里三层控制：
 
 - `--prose`（880px）管**文字元素**（`p` / `h2` / `h3` / `ul` / `.callout` / `.quiz`）
-- `main` 的 `max-width`（1280px）管**整列上限**，防 4K 屏上积木被拉飞
+- `--wide`（1680px）管**整列上限** —— 图 / 积木 / 表格能用到这么宽，防 4K 屏上被拉飞
+- `--shell`（2000px）管外框，要装得下「目录列 + 整列」
 - **积木不受 `--prose` 限制**，自动用满整列
+
+==屏幕越宽，多出来的宽度全给图。== 所以调宽度先动 `--wide`，不要动 `--prose`：
+把 1680 调到 2200 会让 1920 屏上的整体图再宽一圈，而正文行宽一个字都不变。
 
 判断一个新积木该不该限宽：**它主要是文字还是图形？** 文字限，图形不限。
 
@@ -3637,7 +3648,7 @@ text: |
 | **`npm run probe:home`** | **首页外壳的冒烟探针** —— `check` / `visual-check` 都盖不到首页（内联 JS + 浏览器运行时状态）。改了 `tools/lib/home.mjs` 必跑，见「改了站点外壳」 |
 | **`npm run gaps -- <slug>`** | **图解缺口审计**：把该被逐段审的正文段落列出来（带行号 + 字数），并给出「段落 / 积木」比值。==写完之后必跑，见复盘 ⑦== |
 | `npm run check` | 校验积木语法 + YAML + 约定 + skill 与代码一致 + **skill 文档自己能不能渲染** |
-| `npm run view -- <slug>` | 构建单篇 + 打开（**默认就开**，它的用途就是这个；agent 验证时加 `--no-open`） |
+| `npm run view -- <slug>` | 构建单篇 + 打开（**默认就开**，它的用途就是这个；agent 验证时加 `--no-open`）。单篇构建**不动 `index.html`**：只有这一篇是渲染过的，其余篇的搜索正文会退化成原始 markdown。 |
 | **`npm run block -- <slug> <n>`** | **只看第 n 个积木**：量高 + 截图，打印截图路径。==默认不开浏览器==（人要看加 `--open`） |
 | `npm run block -- <slug> --list` | 列出这一篇的块（编号 + 行号 + 语言） |
 | `npm run build:standalone` | 重建全部产物（`dist/*.html` + 首页） |
