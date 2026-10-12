@@ -12,61 +12,148 @@ text: |
   本仓库 `crm-dsl-stru` 停在 `7f2ec46`，行号按这个提交。凡是「实测」字样，都是 `wc -l` / `grep` 跑出来的，不是估的。
 ```
 
+### 先看 metadata 长什么样
+
+`GET /api/crowd/metadata` 的真实响应节选（demo 数据，41 个画像 / 3 条关系 / 7 个业务域）：
+
+```spec
+title: metadata 长什么样
+subtitle: GET /api/crowd/metadata 的真实响应节选 · revision f4badf35
+tone: blue
+rows:
+  - k: ① 枚举字段
+    code: |
+      {
+        "key": "city",
+        "name": { "zhCn": "常驻城市", "zhHk": "常駐城市", "en": "City" },
+        "fieldType": { "variableType": "enum", "dataType": "string",
+                       "contentType": 7, "enumType": "value_set", "setKey": "city" },
+        "domainKey": "identity", "status": 1, "frequency": 2, "entity": "niuniu"
+      }
+  - k: ② 关系的客体
+    code: |
+      {
+        "key": "holding",
+        "object": { "key": "stock",
+                    "fieldType": { "variableType": "range", "dataType": "string",
+                                   "enumType": "dynamic", "resolverKey": "stock_search" } },
+        "properties": [ { "key": "market", "isPrimaryKey": 0,
+                          "fieldType": { "enumType": "value_set", "setKey": "market" } } ]
+      }
+  - k: ③ 连续型 + 默认值
+    code: |
+      {
+        "key": "trade_count_30d",
+        "fieldType": { "variableType": "range", "dataType": "long", "enumType": "none" },
+        "defaultValue": "0", "defaultValueExplain": "未发生交易"
+      }
+  - k: ④ 里面没有什么
+    v: |
+      没有候选值，没有表名 / 列名，没有操作符表。看得到的 `setKey` / `resolverKey` 是**指针**；
+      `defaultValue` 也是 JSON 字符串（`"0"`，不是数字 `0`）。候选值要靠这两个指针再去请求一次。
+```
+
 ## 01 · 先看全图：一次取值穿过五层
 
 每一层只做一件事：组件决定「用哪个 key」，注入层转发函数，宿主决定「缓存还是发 HTTP」，适配层把 pb 变形，服务端查表或查常量表。
 
-```lane-stack
-- badge: LAYER 01
-  title: 组件子树
-  desc: 只认 metadata 和三个注入进来的函数
-  tone: blue
-  nodes:
-    - { title: PortraitRow, sub: "useStoredItems(() => feature.valueSource)", tag: 画像行 }
-    - { title: RelationRow, sub: "propSetItems 批量 + 客体 remote select", tag: 关系行, tone: violet }
-    - { title: ValueControl, sub: "remote-method → onSearch(keyword)", tag: 值控件, tone: violet }
-  next: "loadValueSet(setKey) :: :: 组件自己不发请求"
-- badge: LAYER 02
-  title: 注入层
-  desc: InsightCombiner 把调用方给的函数 provide 下去
-  tone: violet
-  nodes:
-    - { title: loadValueSetKey, sub: "props.loadValueSet?.(setKey)", tag: 值集合 }
-    - { title: searchValuesKey, sub: "props.searchValues?.(resolverKey, kw)", tag: 搜索 }
-    - { title: lookupValuesKey, sub: "props.lookupValues?.(resolverKey, values)", tag: 回显 }
-  next: "宿主 App :: :: 函数体在这里，组件看不见"
-- badge: LAYER 03
-  title: 宿主 App
-  desc: 决定缓存、决定打哪个接口
-  tone: green
-  nodes:
-    - { title: useValueSets, sub: "按 setKey 缓存 + inflight 复用", tag: 缓存 }
-    - { title: loadSearch / loadLookup, sub: "薄薄一层，透传 api.ts", tag: 透传 }
-    - { title: prefetchColumns, sub: "预览结果回来后预热结果列的 setKey", tag: 预热 }
-  next: "api 适配层 :: :: pb → 组件内部形状"
-- badge: LAYER 04
-  title: api 适配层
-  desc: value 是 JSON 字符串、I18n 是 zhCn/zhHk、status 是数字 —— 全在这里转
-  tone: amber
-  nodes:
-    - { title: getValueSet, sub: "toValueItems → parsePbScalar", tag: value-sets }
-    - { title: searchValues / lookupValues, sub: "toResolverItems → toI18nText", tag: resolver-options }
-  next: "服务端 :: :: 两个 GET，无 body"
-- badge: LAYER 05
-  title: 服务端
-  desc: 一个查投影，一个查内存常量表
-  tone: red
-  nodes:
-    - { title: GET /api/crowd/value-sets, sub: "5 秒 TTL 投影里找 set → toValueSet", tag: setKey 必填 }
-    - { title: GET /api/crowd/resolver-options, sub: "values 优先，否则 keyword 子串匹配", tag: resolverKey 必填 }
-  next: "数据 :: :: 一份在 MySQL，一份在代码里"
-- badge: LAYER 06
-  title: 数据
-  desc: 两条链路的终点完全不同
-  tone: muted
-  nodes:
-    - { title: crm_dc_value_set, sub: "enum_content JSON，原生标量", tag: MySQL }
-    - { title: resolvers.ts · STOCKS, sub: "21 条写死的股票，value + 三语 label", tag: 常量表, tone: amber }
+```arch
+svg: candidate-paths
+caption: 一次取值穿过五层，值集合和动态候选到服务端才分开。点任意零件看它这一层管什么，或者按下面两条导览各走一遍。
+parts:
+  meta:
+    label: metadata 字典
+    sub: 41 个画像 / 3 条关系 / 7 个业务域
+    detail: |
+      字段字典。每个字段带 `fieldType`（类型 + 枚举来源），来源写在 `setKey` 或 `resolverKey` 里。
+      ==候选值一条都不在这里==：所以它只有几 KB，而值集合可以有上万条。
+  ui:
+    label: 组件子树
+    sub: PortraitRow · RelationRow · ValueControl
+    detail: |
+      三个消费点：画像行 `useStoredItems(() => feature.valueSource)`；关系行的 `propSetItems` 批量预取；值控件的 remote-method。
+      组件包里 `grep 'fetch('` 零命中 —— 它不认识 HTTP。
+  inj:
+    label: 注入层
+    sub: InsightCombiner 的三行 provide
+    detail: |
+      把宿主的函数转给子组件，没给就退化成 `async () => []`。
+      `loadValueSetKey` / `searchValuesKey` / `lookupValuesKey` 就是组件与宿主之间的全部契约。
+  host:
+    label: 宿主 App
+    sub: useValueSets 缓存 + loadSearch / loadLookup
+    detail: |
+      决定「缓存还是请求」：按 `setKey` 缓存，inflight 复用；`staffId` 或 metadata `revision` 变化就清空。
+      `prefetchColumns` 还会在预览返回后预热结果列涉及的 setKey。
+  adp:
+    label: 适配层 api.ts
+    sub: pb → 组件内部形状
+    detail: |
+      1:1 转换：反序列化 `value`、`zhCn / zhHk / en` 转 `zh-CN / zh-HK / en`、`status: 0` 转 `DISABLED`。
+      ==只做形状转换，不做业务判断==；四步变形见 2.3。
+  routeA:
+    label: GET /api/crowd/value-sets
+    sub: setKey 必填
+    detail: |
+      从 5 秒 TTL 的投影里找集合，`JSON.stringify(item.value)` 之后返回 pb 形状。
+      集合停用、条目停用都照样返回，只为回显历史条件。
+  routeB:
+    label: GET /api/crowd/resolver-options
+    sub: keyword 搜索 / values 反查
+    detail: |
+      `values` 非空时忽略 `keyword` 和 `limit`；`keyword` 为空返回空列表。
+      当前解析器 `stock_search` 用一份 21 条的常量表同时实现搜索和反查。
+  mysql:
+    label: crm_dc_value_set
+    sub: enum_content JSON
+    detail: |
+      值的原型。每项带 `value` / `label` / `status` / `sortOrder`；停用是改 `status`，不是删行。
+  stocks:
+    label: resolvers.ts · STOCKS
+    sub: 21 条常量
+    detail: |
+      动态候选没有元数据表。真实实现是一次检索服务，demo 里是写死的数组；没有停用态，也不缓存。
+tours:
+  - id: valueset
+    label: 链路 A · 值集合
+    steps:
+      - { at: [ui], text: "用户选中「常驻城市」，这个字段的 valueSource 变成 `{ VALUE_SET, setKey: city }`。" }
+      - { at: [ui, inj], text: "`useStoredItems` 调注入的 `loadValueSet(city)`。==只有换字段才拉==，改操作符、改值都不拉。" }
+      - { at: [inj, host], text: "宿主先查缓存：有就返回，没有才发请求。" }
+      - { at: [host, adp, routeA, mysql], text: "缓存没命中才发请求：服务端从 5 秒投影里取出整个集合（含停用项）。" }
+      - { at: [adp, ui], text: "回来先过适配层（反序列化 value、转 I18n 键、status 0 → DISABLED），再上屏；停用项是灰的，名字仍在。" }
+  - id: dynamic
+    label: 链路 B · 动态候选
+    steps:
+      - { at: [ui, inj], text: "用户敲「腾讯」，值控件先取 `searchToken` 票据，再调 search(stock_search, 腾讯)。" }
+      - { at: [inj, host, adp], text: "一路转发。动态候选不打缓存：每次都重新问。" }
+      - { at: [routeB, stocks], text: "`GET resolver-options?keyword=腾讯` 在 21 条常量里做子串匹配。" }
+      - { at: [ui], text: "回来时票据不相等就整包丢弃 —— 旧响应永远盖不掉新结果。" }
+      - { at: [inj, host], text: "回显是另一条路：草稿里已存的取值用 `values=` 反查名字。" }
+      - { at: [adp, routeB], text: "同一个接口，`values` 非空时忽略 keyword 和 limit。" }
+```
+
+五层各管一件事，出问题时的表现也各不相同：
+
+```compare
+first: 这一层
+head: [只做一件事, 坏了会怎样]
+rows:
+  - 组件子树:
+      - "决定用哪个 `setKey` / `resolverKey`，渲染候选"
+      - "没给注入函数 → 下拉永远为空，但不报错"
+  - 注入层:
+      - "把宿主的函数 provide 给子组件"
+      - "key 对不上 → 子组件拿到默认空实现"
+  - 宿主 App:
+      - "缓存 / 失效 / 打哪个接口"
+      - "`staffId` 或 `revision` 变了不清缓存 → 看到上一个人的候选"
+  - 适配层:
+      - "pb 形状 → 组件形状，不改语义"
+      - "少转一个字段 → 停用项变成可选、标签变空"
+  - 服务端:
+      - "查投影或常量表，返回 pb"
+      - "`values` 和 `keyword` 传混 → 返回空列表"
 ```
 
 三个最容易以为错的地方，先摆出来：
@@ -385,6 +472,33 @@ rows:
   - lookupValues:
       - "宿主 loadLookup → api.lookupValues"
       - "GET /api/crowd/resolver-options?resolverKey=&values=（可重复）"
+```
+
+### 4.1 那为什么不把 pb 直接当组件模型
+
+```compare
+first: 方案
+head: [代价, 结果]
+rows:
+  - 组件内部直接用 pb 形状:
+      - "pb 的字段==全部可选==（proto 生成类型就是 optional），每个消费点都要兜底：`fieldType?.dataType ?? string`、`name?.zhCn ?? ''`、`status === 0` 判断是否停用"
+      - "省掉一个 300 行的 resolve，换来模板和 computed 里到处都是 `??`"
+  - 组件内部用规范化模型（现在的做法）:
+      - "多一次转换（`resolveCrowdMetadata` + `api.ts` 的 `toValueItems`）"
+      - "子树只认穷尽联合 `{ type: VALUE_SET, setKey }`，模板里不用兜底"
+```
+
+!!真正的理由不是「不好改组件内部模型」，而是线路形状还没定稿。!!
+
+技术方案自己写着：字段名按 proto 走 snake_case，但「HTTP 序列化后是否转成 camelCase、I18nText 的键是不是 zh-CN，待确认」；`value` 现在还是 JSON 标量字符串（proto 里用 string 传标量的通用约定）。如果把组件的公开模型钉死在这些还没定的线路细节上，协议一改成 snake_case 或 `zh_cn`，组件、宿主、测试就得跟着改一轮。
+
+```callout
+tone: violet
+icon: 🧭
+text: |
+  组件**对外 prop** 收的确实是 pb（`metadata: CrowdMetadata`），但那是入口处一次性 resolve。
+  **注入函数的返回值**用的是组件自己的 `ValueItem` —— 这两个位置性质不同：前者是「进来的数据要翻译一次」，
+  后者是「公开契约不该被某个协议的当前写法绑住」。适配层就是那条缝：线路怎么变，只改一处。
 ```
 
 ## 05 · 服务端这两个接口
