@@ -1,8 +1,10 @@
-[全景篇](../combination-overview/)讲了包的位置和地图，[机制篇](../combination-mechanics/)讲了草稿与校验。这一篇只回答「**长什么样**」：11 个组件每一个的真实渲染截图（不是示意图，是把组件单独挂到空页面上跑出来的实拍）、对外接口、拆分依据，以及一次用户编辑穿过五层组件的完整数据流。
+[全景篇](../combination-overview/)讲了包的位置和地图，[机制篇](../combination-mechanics/)讲了草稿与校验。这一篇只回答「**长什么样**」：12 个组件每一个的真实渲染截图（不是示意图，是把组件单独挂到空页面上跑出来的实拍）、对外接口、拆分依据，以及一次用户编辑穿过五层组件的完整数据流。
+
+截图对应 `crm-dsl-stru @ 7f2ec46`（2026-10-12，dsl/sql-builder 拆分之后）；每张都是把组件单独挂载渲染的实拍。
 
 ## 01 · 整体长这样
 
-下面是组件的完整状态：客户范围选了「指定团队 · 深圳一组」，包含区里两组条件（组间「或者」），第一组混了特征行和关系行，第二组有带属性过滤的关系行和一条 UID 行。**界面上每一个框、每一个下拉，都对应草稿里的一个字段** —— 对照着读，组件和协议就是一回事。
+下面是组件的完整状态：客户范围选了「指定团队 · 深圳一组」，包含区里两组条件（组间「或者」），第一组混了特征行、时间行和关系行，第二组有带属性过滤的关系行和一条 UID 行。壳拿到的 `metadata` 是 pb 读模型，进壳后先 `resolveCrowdMetadata()` 再往下传。**界面上每一个框、每一个下拉，都对应草稿里的一个字段** —— 对照着读，组件和协议就是一回事。
 
 ```shot
 img: 00-hero
@@ -12,7 +14,7 @@ caption: InsightCombiner 富草稿状态。这份界面产出的是 01 节那条
 
 ### 拆分的三条缝
 
-11 个 `.vue` 不是随便切的，缝开在三个地方：
+12 个 `.vue` 不是随便切的，缝开在三个地方：
 
 ```cards
 cols: 3
@@ -100,7 +102,15 @@ alt: PortraitRow 实拍
 caption: 一行 = 名字（级联）+ 操作符（按 applicableOps 过滤）+ 值（ValueControl 按形态渲染）。换字段时操作符重置成新字段第一个合法值。
 ```
 
-### RelationRow —— 关系行（最复杂的一个，507 行）
+日期 / 时间字段多一个分叉：操作符区不再是单下拉，而是 `TemporalOps`（「固定时间 / 最近X天 / X天之前…」模式 + 比较符两个下拉）：
+
+```shot
+img: 14b-portrait-temporal
+alt: 时间字段的两行
+caption: 同一个「注册时间」字段的两种模式：上行最近X天（比较符位禁用、值填 30）；下行固定时间 + 大于（值变成日期时间选择器，存的是 Unix 秒）。
+```
+
+### RelationRow —— 关系行（最复杂的一个，580 行）
 
 一行里有两种公式可切：**detail**（是否存在这样的关系记录）和 **times**（这样的记录有几条）。detail 有客体多选和可选的属性过滤，属性过滤是一组带自己 AND/OR 的子条件。
 
@@ -114,6 +124,14 @@ caption: detail 态：「包含这些 / 存在」+ 客体多选（腾讯 00700.H
 img: 07-relation-times
 alt: RelationRow times 形态实拍
 caption: times 态：第二格换成公式名（产品行显示「开通只数」），值区跟着变区间，客体位是「不限标的」占位 —— times 允许不点名对象。
+```
+
+关系还带一条**主键属性保护**：`isPrimaryKey = 1` 的属性会被自动带进属性过滤，而且不许改列名、在只出现一次时不许删：
+
+```shot
+img: 15-relation-primary
+alt: 主键属性保护区
+caption: 选中「FUTU-HK客户近N日主品类资产与仓位」后，主键属性「行情主品类V2」自动出现在属性过滤里：字段下拉灰掉（不能换列）、× 也是禁用的。这是选中关系时就由 relationDraft 补上的，不是人点出来的。
 ```
 
 ### UidRow —— 指定 UID
@@ -173,10 +191,10 @@ items:
     desc: "每一层只有一个业务事件 update:modelValue，参数永远是「这一层视角下的新对象」。行不知道组，组不知道区域，壳不知道宿主要拿草稿干什么。"
     tone: blue
   - title: metadata 是整份下传的
-    desc: "壳把整份 AudienceMetadata 原样传给 Section、Group、每一行。深层要的只是几个字段，==但一份传到底省掉了逐层挑选和透传== —— 数据只有几十 KB，简单赢了。"
+    desc: "壳先把 pb 读模型 resolve 成内部模型，再整份传给 Section、Group、每一行。深层要的只是几个字段，==但一份传到底省掉了逐层挑选和透传== —— 数据只有几十 KB，简单赢了。"
     tone: violet
   - title: 侧道只有一条
-    desc: "候选值加载走 provide/inject：壳 provide 两个函数，任何深度的 ValueControl / RelationRow 直接 inject。==值加载是唯一的横切需求==，再多一条就值得改成显式 props。"
+    desc: "候选值加载走 provide/inject：壳 provide 三个函数（loadValueSet / searchValues / lookupValues），任何深度的行组件直接 inject，再以函数 prop 递给 ValueControl。==值加载是唯一的横切需求==，再多一条就值得改成显式 props。"
     tone: green
 ```
 
@@ -186,13 +204,14 @@ items:
 first: 组件
 head: [props 进, 事件出, 一句话要点]
 rows:
-  - "InsightCombiner": ["modelValue · metadata · dataLevel · groups · scopeReady · loadValueSet · searchValues", "update:modelValue", "壳：provide 两个加载函数、watch 收窄 scope；只渲染 include"]
+  - "InsightCombiner": ["modelValue · metadata(pb) · dataLevel · groups · scopeReady · 三个加载函数", "update:modelValue", "壳：resolve 读模型、provide 加载函数、watch 收窄 scope；只渲染 include"]
   - "ScopeBar": ["modelValue(ScopeLeaf) · dataLevel · groups", "update:modelValue", "选项集 = allowedScopeKinds(dataLevel)"]
   - "ConditionNameSelect": ["modelValue · metadata", "update:modelValue", "domains 建树 + field:/relation: 前缀；DISABLED 可见不可选"]
+  - "TemporalOps": ["shape · op · operators · defaultExplain", "update:op", "时间字段的操作符区：模式 + 比较符两个下拉；固定时间的比较符顺序 gt/gte/lt/lte/eq/neq/默认值"]
   - "ConditionSection": ["modelValue(DraftTree) · title · accent · minGroups", "update:modelValue", "组间逻辑 + 组增删；≥2 组才显示逻辑胶囊"]
   - "ConditionGroup": ["modelValue(DraftTree) · metadata", "update:modelValue", "行级逻辑、幽灵行、每组一个 UID、行类型 convert"]
-  - "PortraitRow": ["modelValue · metadata", "update · convert", "换字段重置 op；操作符 = metadata.operators ∩ applicableOps"]
-  - "RelationRow": ["modelValue · metadata", "update · convert", "detail/times 两公式；客体三来源；props 可嵌 AND/OR"]
+  - "PortraitRow": ["modelValue · metadata", "update · convert", "换字段重置 op；操作符 = metadata.operators ∩ applicableOps；时间字段走 TemporalOps"]
+  - "RelationRow": ["modelValue · metadata", "update · convert", "detail/times 两公式；客体三来源；props 可嵌 AND/OR；主键属性不可改列、唯一时不可删"]
   - "UidRow": ["modelValue(UidLeaf)", "update:modelValue", "parseUids 解析粘贴；500 截断；保字符串"]
   - "ValueControl": ["inputForm · valueType · items · search · prefix/suffix", "defineModel → update:modelValue", "七形态一个组件；日期 ↔ Unix 秒；已选值回显（+ lookup 通道）"]
   - "LogicToggle": ["modelValue('AND'·'OR') · showConnectors · stackAlign", "update:modelValue", "三处复用的逻辑胶囊；连接线纯 CSS + ResizeObserver"]
@@ -202,17 +221,17 @@ rows:
 行组件的 `convert` 事件是行类型切换的出口：PortraitRow 里选到 `relation:xxx` 发 `blankDetail`，RelationRow 里选到 `field:xxx` 发 `portraitDraft` —— ConditionGroup 接住后原位替换（机制篇 02 节）。
 
 ```quiz
-- q: 为什么 RelationRow 有 507 行而 UidRow 只有 89 行？拆分时为什么不把 RelationRow 再拆？
+- q: 为什么 RelationRow 有 580 行而 UidRow 只有 88 行？拆分时为什么不把 RelationRow 再拆？
   a: |
     RelationRow 的大小来自三块真实差异：两种公式的操作符和值区不同、
     客体有三种候选值来源、属性过滤是一组带自己逻辑的子条件。
     这三块共享同一个草稿节点（DraftRelation），拆开就得把一个节点的编辑权
     分给多个组件，事件和状态同步反而变复杂。
-    对比之下 UidRow 只是一个文本框加一个解析函数，89 行已经把解析、截断、
+    对比之下 UidRow 只是一个文本框加一个解析函数，88 行已经把解析、截断、
     同步都写干净了。行数差不是失衡，是叶子本身的复杂度差。
 - q: 「metadata 整份下传」会不会浪费？为什么不挑好再传？
   a: |
-    AudienceMetadata 只有几十 KB 且不可变（revision 哈希锁定），整份下传让
+    读模型只有几十 KB 且不可变（revision 哈希锁定），shell resolve 一次、整份下传让
     每层组件的 props 契约都一样简单 —— 加一个深层组件不用改中间层的透传。
     真要省的是「深层改一份大对象」的心智成本，而这份数据从不被组件修改。
     这是典型的「数据小就别为省内存加复杂度」。

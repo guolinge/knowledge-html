@@ -10,6 +10,8 @@ text: |
 
 ## 01 · 受控数据流的四种更新模式
 
+壳收到的是 Data Admin 的 pb 读模型（`CrowdMetadata`），进组件后第一件事是 `resolveCrowdMetadata()` 转成内部模型，再往下传 —— 所以下面这些行组件拿到的 `metadata` 已经是解析后的形状。
+
 包里所有状态更新都是同一个形状：**拷一份、改一片、抛出去**。组件里找不到一处对 `props.modelValue` 的就地修改。具体到代码，更新只从四个入口发生（值控件那层用了 Vue 的 `defineModel`，但赋值同样编译成 `emit('update:modelValue')`，只是由行组件包成新叶子再往上抛）：
 
 ```spec
@@ -114,6 +116,8 @@ edges:
 ```
 
 转换时 op 取新类型的第一个合法操作符（`applicableOps(shape)[0]`），旧值整个丢弃 —— 两个类型的值形状不同，保留只会留下非法草稿。
+
+10-12 之后，特征行换成关系行走的是 `relationDraft(metadata, name)`：**除了建一个 detail 叶子，还会把这条关系里 `isPrimaryKey === 1` 的属性自动补进 `props`**（跳过 `uid` / `object_id` 这类主体列）。所以新建一条关系条件时，「必须带上的主键过滤」是加的时候就有的，不靠人记得点「+ 属性过滤」。
 
 ### UID 行的输入契约
 
@@ -261,11 +265,10 @@ config:
         - { op: not_in, control: "MULTI_SELECT / string" }
         - { op: is_null, control: "NONE / -" }
         - { op: is_not_null, control: "NONE / -" }
-    - key: last_trade_time
-      name: 末次成交时间
+    - key: register_at
+      name: 注册时间
       shape: range · long · 时间(2) · none
       source: NONE
-      mark: 示意 —— demo 种子没有时间字段，这是引擎分支
       sample: []
       ops:
         - { op: eq, control: "DATETIME_PICKER / unix_time" }
@@ -292,10 +295,10 @@ text: |
   `if (field === 'city')`。接入一个新字段 = Data Admin 插一行元数据，组件和
   SQL Builder 都不用发版。
 
-  两个诚实的事实：`last_trade_time` 这类时间字段在 demo 种子里**不存在**，
-  上面那组操作符是引擎能力的实跑（种子没有覆盖 contentType 1/2 的分支）；
-  `stock` 的 DYNAMIC 形状在真实 demo 里出现在**关系客体**上（holding 的 object），
-  画像字段用它是示意。
+  两个说明：`register_at` 是 demo 种子里的真实字段（contentType 2）；
+  但==时间字段在界面上的操作符区不是单下拉== —— 10-12 起它走 `TemporalOps` 组件
+  （「固定时间 / 最近X天 / X天之前…」模式 + 比较符两个下拉），见[组件内幕](../combination-internals/) 05 节。
+  `stock` 的 DYNAMIC 形状在真实 demo 里出现在**关系客体**上（holding 的 object），画像字段用它是示意。
 ```
 
 ## 04 · 候选值：三条管道，四处票据
@@ -414,11 +417,13 @@ const shownItems = computed(() => {
 
 调用方在提交前调 `buildQuery(draft)`。它只做**结构完整性检查**：字段选了没有、op 和值配对了吗、数组非空吗。字段存不存在、值类型对不对、枚举值合不合法，那是**语义校验**，需要 Catalog，在服务端跑。这个分工让组件能本地把「还没填完」拦下来，不用等一次网络往返。
 
+10-12 重构后，`buildQuery` 的实现也搬进了 `@insight/dsl`（组合包的 `draft.ts` 只剩再导出），服务端那层校验在 `@insight/sql-builder`。下面的报错全部是搬到 dsl 之后实跑的。
+
 按 op 分派的检查，每条规则下面都是实跑的真实报错。想自己试就点左边：
 
 ```demo
 widget: combination-build-lab
-title: 喂 16 份草稿，看哪份活下来
+title: 喂 18 份草稿，看哪份活下来
 actions: false
 config:
   groups:
@@ -464,6 +469,14 @@ config:
           draft: |
             { "type": "portrait", "field": "age",
               "op": "is_null", "value": 1 }
+        - name: 默认值 op（画像合法）✓
+          verdict: ok
+          draft: |
+            { "type": "portrait", "field": "trade_count_30d",
+              "op": "eq_default" }
+          out: |
+            { "type": "portrait", "field": "trade_count_30d",
+              "op": "eq_default" }
     - name: 关系行（relation）
       cases:
         - name: detail 的 objects 空
@@ -515,6 +528,15 @@ config:
             { "type": "relation", "relation": "holding",
               "formula": "detail", "op": "in", "objects": ["00700.HK"],
               "props": { "logic": "AND", "items": [] } }
+        - name: 属性上用默认值 op
+          verdict: err
+          code: OP_NOT_ALLOWED
+          message: "relation prop does not allow eq_default"
+          draft: |
+            { "type": "relation", "relation": "holding",
+              "formula": "detail", "op": "in", "objects": ["00700.HK"],
+              "props": { "logic": "AND", "items": [
+                { "field": "qty", "op": "eq_default" } ] } }
     - name: 结构与 UID
       cases:
         - name: uid 列表为空
@@ -605,6 +627,7 @@ head: [为什么]
 rows:
   - "受控组件 + 草稿外置": ["草稿的真相在宿主手里，组件可以随时销毁重建；宿主也有机会在接收前处理（如异步收窄 scope）", "代价是每次操作都要拷对象 —— 草稿很小，这个代价可以忽略"]
   - "加载函数注入而非组件发请求": ["组件不绑 HTTP 接口，才能在测试里替换、在不同宿主里复用", "`provide/inject` 让深层控件不用逐层透传 props"]
+  - "协议下沉 @insight/dsl": ["草稿类型、`buildQuery`、操作符表、形状判定全部搬进 dsl，组件和 BFF 引用的是同一份", "==一份协议两端共用==：组件不用维护镜像类型，服务端也能直接吃组件产出；代价是 dsl 成了跨端公共依赖，改它要两端一起过"]
   - "错误码复用 @insight/dsl": ["`buildQuery` 抛的 `CompileError` 和服务端编译器是同一套码", "调用方只需要认识一张错误码表；类型断言 `InsightQuery extends DraftQuery` 还保证了回显免转换"]
   - "界面只渲染 include": ["本期需求只圈人不做排除编辑", "但 `commit` 用 spread 合并，exclude 键==原样保留==，不会被界面清掉"]
   - "UID 保字符串": ["`Number` 上限 2^53-1，UID 是十进制整数字符串，比较和传输都不该过 number", "`parseUids` 的正则把这一条钉死了"]
@@ -616,7 +639,7 @@ rows:
 | 组件本地做 | 服务端做 |
 |-----------|---------|
 | 结构校验（buildQuery，不需要 Metadata） | 语义校验（字段存在、op 合法、值类型、枚举值 ENABLED） |
-| 控件形态与候选值（AudienceMetadata 就够） | 权限谓词（actor 注入，SCOPE_DENIED 整单拒绝） |
+| 控件形态与候选值（读模型就够） | 权限谓词（actor 注入，SCOPE_DENIED 整单拒绝） |
 | scope 收窄的交互反馈 | 编译 SQL；UID 上限、层级上限的最终裁决 |
 
 ## 08 · 速查
@@ -632,11 +655,13 @@ rows:
     v: |
       `useLabel()` 取 Metadata 多语言名的顺序：当前语言 → `zh-CN` → `zh-HK` → `en` → 空串。
       界面文案本身走 `messages.ts`（三语言同 key），两套体系。
-  - k: 操作符名字的两个来源
+  - k: 操作符名字的来源
     v: |
-      行上的操作符下拉用 `metadata.operators` 的多语言名；
-      关系 detail 的 op 用写死的 `t('exists') / t('notExists')`（存在/不存在）。
-      `ops.ts` 里还有一份中文硬编码 `OP_LABELS`，==导出了但组件内部没有用==，属于对外暴露的工具。
+      行上的操作符下拉用 `metadata.operators` 的多语言名（读模型里没有操作符表，
+      是 `resolveCrowdMetadata` 按 dsl 的 `OPERATOR_DISPLAY` 展开的）；
+      关系 detail 的 op 用 `t('exists') / t('notExists')`；
+      时间字段的模式下拉用 `TemporalOps` 里的本地 `opLabel()`。
+      dsl 导出的 `OP_LABELS` / `opLabel` 是给外部消费者和演示用的，组件内部不直接用。
   - k: AND/OR 的连接线
     v: |
       `LogicToggle` 的竖线和横线是 CSS 伪元素画的，长度靠 `ResizeObserver` 量

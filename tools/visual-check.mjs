@@ -166,10 +166,19 @@ function probeOnce(html) {
       CHROME,
       ['--headless', '--disable-gpu', '--dump-dom', '--virtual-time-budget=6000',
        '--window-size=1280,900', `file://${tmp}`],
-      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 60000 },
+      /* maxBuffer 必须放大：dump-dom 会把整页（含内联的 base64 截图）吐回 stdout，
+         默认 1MB 在「一页十几张内联图」的笔记上会直接 ENOBUFS ——
+         症状是连试三次都报「浏览器没跑起来」，而 Chrome 单独跑只要 1.6 秒。
+         实测：combination-internals（21 张内联截图）1.08MB 输出。 */
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 60000, maxBuffer: 64 * 1024 * 1024 },
     );
-  } catch {
-    return { ok: false, why: '浏览器没跑起来' };
+  } catch (e) {
+    return {
+      ok: false,
+      why: e && e.code === 'ENOBUFS'
+        ? 'Chrome 的输出超过 maxBuffer（页面内联资源太大）'
+        : '浏览器没跑起来',
+    };
   }
   const m = dom.match(/<pre id="vc-result">([\s\S]*?)<\/pre>/);
   /* 探针没回数据 = 它自己抛了异常。**不能算通过** ——

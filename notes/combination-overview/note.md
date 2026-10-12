@@ -1,6 +1,6 @@
 运营在圈选页点了几下：客户范围 = 本人，加一条「总资产 ≥ 100 万」，再粘贴一批 UID。这些下拉框、条件组、AND/OR 开关，全都不是洞察子应用自己写的，它们来自一个独立的 Vue 组件包 `@insight/combination`。
 
-这个包 22 个文件、2891 行。它的活可以一句话说完：**把 Metadata 渲染成圈选界面，把人的操作变成一份叫 DraftQuery 的草稿**。至于草稿怎么变成 SQL，它不管。
+这个包 22 个文件、2795 行。它的活可以一句话说完：**把 Metadata 渲染成圈选界面，把人的操作变成一份叫 DraftQuery 的草稿**。草稿协议本身住在 `@insight/dsl`，它只是消费方；草稿怎么变成 SQL，它也不管。
 
 ```callout
 tone: blue
@@ -10,7 +10,7 @@ text: |
 
   - 它在整条链路的哪个位置，边界在哪？
   - 「受控组件」「草稿」「DSL」「Metadata」这几个词各自指什么？
-  - 包里的 22 个文件怎么分工？
+  - 包里的 22 个文件怎么分工，协议为什么搬去了 `@insight/dsl`？
 
   每个控件怎么决策、候选值怎么加载、草稿怎么被检查，在[机制篇](../combination-mechanics/)。
 ```
@@ -26,16 +26,17 @@ text: |
   tone: muted
   nodes:
     - { title: "Data Admin（MySQL）", sub: "crm_dc_portrait / crm_dc_relation / ...", tag: 写 }
-    - { title: AudienceMetadata, sub: "GET /api/audience/metadata 的投影", tag: 读 }
-  next: "宿主拉一次 Metadata，全量传给组件 :: :: 组件自己不发请求"
+    - { title: CrowdMetadata, sub: "GET /api/audience/metadata 的 pb 投影", tag: 读 }
+    - { title: ResolvedCrowdMetadata, sub: "壳里 resolve 出来的内部模型", tag: 解析 }
+  next: "宿主拉一次 Metadata 传给壳；壳先 resolve 再喂给子树 :: :: 组件自己不发请求"
 
 - badge: LAYER 02
   title: 组件层 —— 这个包在这里
   desc: 把 Metadata 渲染成界面，把操作变成草稿
   tone: blue
   nodes:
-    - { title: InsightCombiner, sub: "壳：props 进、草稿事件出", tag: "11 个 .vue" }
-    - { title: DraftQuery, sub: "允许半填的编辑中间态", tag: "10 个 .ts" }
+    - { title: InsightCombiner, sub: "壳：props 进、草稿事件出", tag: "12 个 .vue" }
+    - { title: DraftQuery, sub: "允许半填的编辑中间态（协议在 dsl）", tag: "9 个 .ts" }
   next: "宿主在提交前调 buildQuery :: :: 组件只抛变更，不提交"
 
 - badge: LAYER 03
@@ -43,8 +44,8 @@ text: |
   desc: 草稿收窄成 DSL，服务端再查一遍
   tone: violet
   nodes:
-    - { title: buildQuery(draft), sub: "结构完整性检查，包内实现", tag: 调用方调 }
-    - { title: 服务端校验+编译, sub: "validateStructure + Semantics → compile", tag: "@insight/dsl" }
+    - { title: buildQuery(draft), sub: "结构完整性检查，实现也在 dsl", tag: "@insight/dsl" }
+    - { title: 服务端校验+编译, sub: "validateStructure + Semantics → compile", tag: "@insight/sql-builder" }
   next: "SQL 交给 DAL :: :: 组件对这一层不可见"
 
 - badge: LAYER 04
@@ -113,12 +114,13 @@ demo 宿主（`apps/client/src/App.vue`）的接法：
 | prop | 类型 | 干什么 |
 |------|------|--------|
 | `modelValue` | `DraftQuery` | 圈选草稿，v-model 绑定 |
-| `metadata` | `AudienceMetadata` | 字段、关系、操作符、业务域 |
+| `metadata` | `CrowdMetadata` | Data Admin 的 pb 读模型；壳内部 `resolveCrowdMetadata()` 转成 `ResolvedCrowdMetadata` 再喂子树 |
 | `dataLevel` | `'self' \| 'team' \| 'all'` | 当前登录人的数据级别 |
 | `groups` | `{id,name}[]` | 可见团队，team 范围的选项 |
 | `scopeReady` | `boolean`（默认 true） | 身份加载完了吗，没好不收窄 |
 | `loadValueSet` | `(setKey) => Promise<ValueItem[]>` | 宿主封装的值集合加载 |
 | `searchValues` | `(resolverKey, keyword) => Promise<ValueItem[]>` | 宿主封装的动态候选搜索 |
+| `lookupValues` | `(resolverKey, values) => Promise<ValueItem[]>` | 按 value 反查 label，回显已保存取值 |
 | 事件 | `update:modelValue` | 唯一的业务事件，参数是新草稿 |
 | 插槽 | `scope-prefix` | 范围选择器上方的一块地（demo 放了身份模拟器） |
 
@@ -193,20 +195,22 @@ demo 宿主（`apps/client/src/App.vue`）的接法：
 type _legalQueryIsDraft = Expect<InsightQuery extends DraftQuery ? true : false>;
 ```
 
-合法的 DSL 一定能当草稿用。所以「打开一张历史 DSL 回显」不需要转换，直接塞回组件就行；反方向才需要 `buildQuery` 收窄。错误码也是共用的：`buildQuery` 抛的 `CompileError` 来自 `@insight/dsl`，服务端编译器抛同一套码。
+合法的 DSL 一定能当草稿用。所以「打开一张历史 DSL 回显」不需要转换，直接塞回组件就行；反方向才需要 `buildQuery` 收窄。
+
+10-12 的重构把这两个类型和 `buildQuery` 一起搬进了 `@insight/dsl`：组合包的 `draft.ts` 现在只有 3 行，纯粹再导出 —— 组件和 BFF 共用同一份协议，错误码自然也还是同一套。
 
 ## 04 · Metadata：组件吃进去什么
 
-`metadata` prop 是一份 `AudienceMetadata`，由服务端从 `crm_dc_*` 那批表投影出来（那条线在[配置层那篇](../data-admin-to-ui/)）。组件拿到的版本**没有表名和列名**，只有业务语义：
+`metadata` prop 是 Data Admin 的 pb 读模型 `CrowdMetadata`（由服务端从 `crm_dc_*` 那批表投影出来，那条线在[配置层那篇](../data-admin-to-ui/)）：camelCase、I18n 是 `zhCn/zhHk/en`、status 是数字、类型信息嵌在 `fieldType` 里。壳拿到它就调 `resolveCrowdMetadata()` 转成内部模型 `ResolvedCrowdMetadata`，**子组件只消费解析后的模型**。两种形状都没有表名和列名，只有业务语义：
 
 ```cards
 cols: 3
 items:
-  - { title: revision, desc: "这份投影的哈希，任一条状态或文案变化都会变", tag: 整数, tone: muted }
+  - { title: revision, desc: "这份投影的内容哈希（字符串），任一条状态或文案变化都会变", tag: 字符串, tone: muted }
   - { title: domains, desc: "业务域树，字段的分组菜单按它长", tag: 树, tone: blue }
   - { title: operators, desc: "扁平操作符列表：key、多语言名、排序，相对时间带 template", tag: 字典, tone: blue }
   - { title: features, desc: "画像特征。每条带自己的 valueSource", tag: 主体, tone: violet }
-  - { title: relations, desc: "关系。客体在关系上，属性挂在 properties 里", tag: 主体, tone: violet }
+  - { title: relations, desc: "关系。客体在关系上，属性挂在 properties 里；`isPrimaryKey: 1` 的属性会被自动带上（见组件内幕）", tag: 主体, tone: violet }
 ```
 
 每条 feature / 关系属性身上都背着同一组**形状四元组**。组件里所有的「该显示什么」，追到底都是这四个字段决定的：
@@ -229,22 +233,22 @@ rows:
   - "`NONE`": ["没有候选值", "不加载，控件形态由 `controlFor` 决定"]
   - "`CUSTOM`": ["就带在 Metadata 里（items 数组）", "==组件拿到就可用，零请求=="]
   - "`VALUE_SET`": ["共享值集合，字段上只有 setKey", "下拉打开时调宿主注入的 `loadValueSet`，宿主侧缓存"]
-  - "`DYNAMIC`": ["字段上只有 resolverKey（如 stock_search）", "输入关键词后调 `searchValues`，按需搜索"]
+  - "`DYNAMIC`": ["字段上只有 resolverKey（如 stock_search）", "输入关键词后调 `searchValues`；已保存取值调 `lookupValues` 反查 label"]
 ```
 
-`CUSTOM` 和 `VALUE_SET` 的条目都带 `status`，停用的候选值照样返回：新建条件只用 ENABLED，回显旧条件时按 value 找回 label。`DYNAMIC` 没有停用态，已选值不在搜索结果里时用草稿里的原值回显。
+`CUSTOM` 和 `VALUE_SET` 的条目都带 `status`，停用的候选值照样返回：新建条件只用 ENABLED，回显旧条件时按 value 找回 label。`DYNAMIC` 没有停用态，已选值不在搜索结果里时靠注入的 `lookupValues` 补 label，补不到才显示原值。
 
 ## 05 · 包的地图
 
 ### 组件树
 
-11 个 `.vue`。行数是 `wc -l` 实测，差距很大：最复杂的 RelationRow 是最简单的 UidRow 的近六倍。
+12 个 `.vue`。行数是 `wc -l` 实测，差距很大：最复杂的 RelationRow 是最简单的 ConditionRow 的八倍多。
 
 ```tree
 - label: InsightCombiner.vue
-  sub: 148 行
+  sub: 154
   tone: violet
-  note: 壳。接 props、provide 两个加载函数、watch 收窄 scope
+  note: 壳。接 pb 读模型、resolve 成内部模型、provide 三个加载函数、watch 收窄 scope
   children:
     - label: ScopeBar.vue
       sub: 151
@@ -258,9 +262,13 @@ rows:
           note: 条件组。行级 AND/OR、幽灵行、每组一个 UID
           children:
             - { label: ConditionRow.vue, sub: 70, note: 行外壳：类型标签 + 删除按钮 }
-            - { label: PortraitRow.vue, sub: 147, note: 特征行：字段/操作符/值 }
-            - { label: RelationRow.vue, sub: 507, note: 关系行。detail/times、客体多选、嵌套 props 过滤 }
-            - { label: UidRow.vue, sub: 89, note: 指定 UID。粘贴解析、去重、500 截断 }
+            - label: PortraitRow.vue
+              sub: 172
+              note: 特征行：字段/操作符/值；日期时间字段走 TemporalOps
+              children:
+                - { label: TemporalOps.vue, sub: 108, note: 时间操作符：模式（固定时间/最近X天…）+ 比较符两个下拉（10-12 新增） }
+            - { label: RelationRow.vue, sub: 580, note: 关系行。detail/times、客体多选、嵌套 props 过滤、主键属性保护 }
+            - { label: UidRow.vue, sub: 88, note: 指定 UID。粘贴解析、去重、500 截断 }
     - label: ConditionNameSelect.vue
       sub: 110
       note: 业务域级联下拉，特征和关系混在一个菜单里
@@ -268,74 +276,74 @@ rows:
       sub: 120
       note: AND/OR 胶囊 + 上下连接线（ResizeObserver 量的）
     - label: ValueControl.vue
-      sub: 233
+      sub: 253
       note: 值控件。七种形态一个组件，形态由 controlFor 决定
 ```
 
 ### 非 Vue 的部分
 
-逻辑全部在这 10 个 `.ts` 里，`.vue` 只做渲染和事件转发：
+逻辑都在 9 个 `.ts` 里（另有 `env.d.ts`）。10-12 的重构后，这里只剩「组件自己要用的东西」，协议类文件都搬去了 `@insight/dsl`：
 
 ```spec
 title: packages/combination/src 的 TypeScript 层
-subtitle: "10 个文件 · 按行数排"
+subtitle: "9 个文件 · 按行数排"
 tone: violet
 rows:
-  - k: draft.ts (273)
-    v: |
-      **类型 + buildQuery**。DraftQuery 全家类型定义在这，草稿收窄成 DSL 的完整性检查也在这。它是组件与编译器之间唯一的关口。
   - k: query.ts (85)
     v: |
       **草稿工厂和纯函数**。建空查询/空组/各类叶子、加组加叶、`clampScope` 收窄、`parseUids` 粘贴解析。全部是无副作用的纯函数，好测。
-  - k: audience.ts (96)
+  - k: values.ts (69)
     v: |
-      **AudienceMetadata 类型**。整包对 Metadata 的理解都在这份类型里，和 `@insight/dsl` 的 `fieldType` 解耦。
-  - k: values.ts (56)
-    v: |
-      **候选值组合式函数**。CUSTOM 直取、VALUE_SET 加载（带过期票据防竞态）、DYNAMIC 搜索函数缓存。
-  - k: ops.ts (37)
-    v: |
-      **操作符常量**。中文标签表、三种公式各允许哪些 op（`RELATION_DETAIL_OPS` / `RELATION_TIMES_OPS` / `UID_OPS`）。
-  - k: messages.ts (152)
+      **候选值组合式函数**。CUSTOM 直取、VALUE_SET 加载（带过期票据防竞态）、DYNAMIC 的 search / resolve 两个函数缓存。
+  - k: messages.ts (155)
     v: |
       **三语言文案**。zh-CN / zh-HK / en，同一份 key。界面上的字只有两个来源：这份文件和 Metadata 里的多语言名。
-  - k: label.ts (14)
+  - k: index.ts (51)
     v: |
-      **useLabel()**。取多语言名的回退链：当前语言 → zh-CN → zh-HK → en。
+      **导出面**。默认导出组件 + 草稿工厂；协议那半边（`buildQuery`、`OP_LABELS`、`resolveCrowdMetadata`、类型）全部从 `@insight/dsl` 再导出 —— 宿主只 import 一次。
+  - k: label.ts (28)
+    v: |
+      **useLabel()**。取多语言名的回退链：当前语言 → zh-CN → zh-HK → en；`t()` 支持带参数（相对时间模板用）。
+  - k: relationDraft.ts (17)
+    v: |
+      **新建关系行的草稿工厂**。选中关系时按 `isPrimaryKey === 1` 的属性自动补上属性过滤（跳过 uid / object_id 这类主体列）。
   - k: conditionKey.ts (13)
     v: |
       **下拉的 key 前缀**。`field:xxx` / `relation:xxx`。特征和关系混在同一个级联菜单里，选完靠前缀分回去。
-  - k: context.ts (6)
+  - k: context.ts (7)
     v: |
-      **两个注入 key**。`loadValueSet` / `searchValues` 的 Symbol，provide 在壳里，inject 在值控件里。
-  - k: index.ts (23)
+      **三个注入 key**。`loadValueSet` / `searchValues` / `lookupValues` 的 Symbol，provide 在壳里，行组件和值控件在任意深度 inject。
+  - k: draft.ts (3)
     v: |
-      **导出面**。默认导出组件 + buildQuery + 草稿工厂 + 类型。宿主（和测试）只从这里 import。
+      **一行注释 + 一整组再导出**。草稿协议与 `buildQuery` 的实现住在 `@insight/dsl`，组件和 BFF 共用同一份。
 ```
 
 ### 它借了 @insight/dsl 的什么
 
-依赖方向是一条直线：`apps/client → @insight/combination → @insight/dsl`。组合包对 dsl 的引用一共 17 处 import，分布在 5 个子模块：
+依赖方向还是一条直线，但 10-12 之后变了性质：`apps/client → @insight/combination → @insight/dsl`，而 **`@insight/dsl` 现在是协议全家**（类型、草稿、操作符、形状判定），编译器新拆去了兄弟包 `@insight/sql-builder`。组合包对 dsl 的 31 处 import **全部走包根**，不再有子路径：
 
 ```compare
-first: 引自
-head: [几处 import, 借的是什么]
+first: 借的东西
+head: [在哪, 用在哪]
 rows:
-  - "`@insight/dsl/ast`": ["8", "Ops 常量、四种叶子的构造函数（`portraitLeaf` 等）、类型守卫（`isCompareOp` / `isScalarValue` / `isCountPair`）"]
-  - "`@insight/dsl/fieldType`": ["4", "==`applicableOps` 和 `controlFor`== —— 控件决策引擎，机制篇 03 节的主角"]
-  - "`@insight/dsl/context`": ["3", "`DataLevel` / `Actor` 类型（scope 收窄用）"]
-  - "`@insight/dsl`": ["1", "`CompileError` —— buildQuery 抛的错误码和编译器共用"]
-  - "`@insight/dsl/clock`": ["1", "时区换算：日期控件显示的字符串 ↔ Unix 秒（时间戳单位 10-11 起是秒）"]
+  - "协议类型": ["`@insight/dsl` 包根", "`CrowdMetadata` / `ResolvedCrowdMetadata` / `DraftQuery` 全家 / `ValueSource` / `OperatorMeta`"]
+  - "草稿与校验": ["同上", "`buildQuery`、`portraitDraft` / `blankDetail` 等构造函数 —— 组件不再自己维护一份"]
+  - "操作符表": ["同上", "`OP_LABELS` / `opLabel` / `RELATION_DETAIL_OPS` / `RELATION_TIMES_OPS` / `UID_OPS`（`OPERATOR_DISPLAY` 是 dsl 里的唯一来源）"]
+  - "形状判定": ["同上", "==`applicableOps` / `controlFor` / `isTemporalContent`== —— 控件决策引擎，机制篇 03 节的主角"]
+  - "读模型解析": ["同上", "`resolveCrowdMetadata()`：pb 形状 → 组件内部模型"]
+  - "时区换算": ["同上", "`clock`：日期控件显示的字符串 ↔ Unix 秒"]
+  - "错误类型": ["同上", "`CompileError` —— 结构校验的错误码，和编译器共用"]
 ```
 
 UI 依赖是 element-plus（全套控件）和 vue-i18n（文案）。除此之外没有别的运行时依赖。
 
 ## 06 · 继续往下
 
-- [组件图鉴](../combination-components/)：11 个组件的真实渲染截图、每个的对外接口、拆分依据与五层数据流。
+- [组件图鉴](../combination-components/)：12 个组件的真实渲染截图、每个的对外接口、拆分依据与五层数据流。
+- [组件内幕](../combination-internals/)：`components/` 里每个组件的父子联系、内部状态与数据流，全部对到当前代码。
 - [机制篇](../combination-mechanics/)：受控数据流的实现、一行怎么长出来（幽灵行与 convert）、控件决策引擎、候选值三条管道、buildQuery 检查清单、scope 收窄，每节配可操作的交互。
-- [配置层那篇](../data-admin-to-ui/)：Metadata 从 MySQL 到 `AudienceMetadata` 投影的那条线，含停用字段的回显规则。
-- [@insight/dsl 那篇](../insight-dsl/)：`buildQuery` 产出的 DSL 之后怎么被校验、编译成 SQL。
+- [配置层那篇](../data-admin-to-ui/)：Metadata 从 MySQL 到读模型投影的那条线，含停用字段的回显规则。
+- [@insight/dsl 那篇](../insight-dsl/)：草稿协议和 DSL 之后怎么被校验、编译成 SQL（注意那篇写的是拆分前的代码）。
 
 ```quiz
 - q: 组件里用户填到一半的条件（还没选操作符）存在哪？存在组件里吗？
@@ -350,7 +358,7 @@ UI 依赖是 element-plus（全套控件）和 vue-i18n（文案）。除此之�
     它抛的错误码（INCOMPLETE_LEAF 等）和 SQL Builder 共用一套。
 - q: 组件需要知道字段对应数据库里哪张表哪一列吗？
   a: |
-    完全不需要。`AudienceMetadata` 投影里没有表名列名，Catalog（物理映射）只发给
+    完全不需要。两份读模型投影里都没有表名列名，Catalog（物理映射）只发给
     Node BFF 侧的编译器。组件连 Catalog 都拿不到，这是「DSL 与物理模型解耦」在组件侧的体现：
     新增一个字段只改元数据，组件和 SQL Builder 都不用发版。
 ```

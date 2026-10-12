@@ -4,7 +4,7 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>@insight/combination：圈选条件是怎么被「画」出来的</title>
-<meta name="description" content="运营在界面上看到的圈选组件（客户范围、条件组、字段/操作符/值、指定 UID）由 22 个文件 2891 行的受控 Vue 包渲染。这篇讲清它在链路上的位置、先搞清几个词、包的地图 —— 机制篇单独一篇。" />
+<meta name="description" content="圈选组件包的全景：22 个文件 2795 行；读模型（pb → resolve）、草稿 vs DSL、Metadata 五件套、包的地图与依赖面。协议在 @insight/dsl，编译器在 @insight/sql-builder。" />
 <link rel="stylesheet" href="../../assets/theme.css?v=e6a9ffd3d6" />
   <link rel="stylesheet" href="../../assets/blocks.css?v=2cdcd8509f" />
   <link rel="stylesheet" href="../../assets/archify-embed.css?v=68fec0b81b" />
@@ -42,25 +42,25 @@
     <div class="hero">
       <span class="eyebrow">● 从零理解 · 模块</span>
       <h1>@insight/combination：圈选条件是怎么被「画」出来的</h1>
-      <p class="lede">运营在界面上看到的圈选组件（客户范围、条件组、字段/操作符/值、指定 UID）由 22 个文件 2891 行的受控 Vue 包渲染。这篇讲清它在链路上的位置、先搞清几个词、包的地图 —— 机制篇单独一篇。</p>
+      <p class="lede">圈选组件包的全景：22 个文件 2795 行；读模型（pb → resolve）、草稿 vs DSL、Metadata 五件套、包的地图与依赖面。协议在 @insight/dsl，编译器在 @insight/sql-builder。</p>
     </div>
 
 <aside class="needs">
       <p class="needs-title">读这篇之前，你需要先知道</p>
       <a class="need" href="../data-admin-to-ui/">← <b>1. 配置层</b><span>Data Admin 改一行 MySQL，界面跟着变</span></a>
     </aside>
-    <div class="provenance"><span><b>来源</b> 本仓库 crm-dsl-stru packages/combination/src/ 全部 22 个文件（2891 行，wc -l 实测）@ e7fdf40 · packages/combination/test/build.spec.ts、query.spec.ts（171 行） · packages/dsl/src/fieldType.ts（applicableOps / controlFor） · 技术方案【新 CRM】客群洞察技术方案 4.2 圈选组件设计 · npx tsx 实跑 buildQuery / applicableOps / controlFor 的真实输出（2026-10-10）</span><span><b>生成</b> 2026-10-10</span><span><b>模型</b> pi (openai-codex)</span></div>
+    <div class="provenance"><span><b>来源</b> 本仓库 crm-dsl-stru packages/combination/src/ 全部 22 个文件（12 .vue + 9 .ts + env.d.ts，2795 行，wc -l 实测）@ 7f2ec46（2026-10-12） · packages/dsl/src/audience.ts（pb 读模型 + resolveCrowdMetadata）、packages/dsl/src/operators.ts（OPERATOR_DISPLAY） · packages/sql-builder/src/index.ts（编译器入口） · apps/client/src/App.vue（宿主的 props 接法）</span><span><b>生成</b> 2026-10-10</span><span><b>模型</b> pi (openai-codex)</span></div>
     <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">Vue</span> <span class="tag tone-muted">圈选</span> <span class="tag tone-muted">受控组件</span> <span class="tag tone-muted">客群洞察</span> <span class="tag tone-muted">TypeScript</span></span></div>
 
 <p>运营在圈选页点了几下：客户范围 = 本人，加一条「总资产 ≥ 100 万」，再粘贴一批 UID。这些下拉框、条件组、AND/OR 开关，全都不是洞察子应用自己写的，它们来自一个独立的 Vue 组件包 <code>@insight/combination</code>。</p>
-<p>这个包 22 个文件、2891 行。它的活可以一句话说完：<strong>把 Metadata 渲染成圈选界面，把人的操作变成一份叫 DraftQuery 的草稿</strong>。至于草稿怎么变成 SQL，它不管。</p>
+<p>这个包 22 个文件、2795 行。它的活可以一句话说完：<strong>把 Metadata 渲染成圈选界面，把人的操作变成一份叫 DraftQuery 的草稿</strong>。草稿协议本身住在 <code>@insight/dsl</code>，它只是消费方；草稿怎么变成 SQL，它也不管。</p>
 <div class="callout tone-blue">
       <span class="ic">🎯</span>
       <div><p><strong>这篇回答三个问题</strong>：</p>
 <ul>
 <li>它在整条链路的哪个位置，边界在哪？</li>
 <li>「受控组件」「草稿」「DSL」「Metadata」这几个词各自指什么？</li>
-<li>包里的 22 个文件怎么分工？</li>
+<li>包里的 22 个文件怎么分工，协议为什么搬去了 <code>@insight/dsl</code>？</li>
 </ul>
 <p>每个控件怎么决策、候选值怎么加载、草稿怎么被检查，在<a href="../combination-mechanics/">机制篇</a>。</p>
 </div>
@@ -77,13 +77,17 @@
         <small>crm_dc_portrait / crm_dc_relation / ...</small>
         <span class="tag tone-muted">写</span>
       </div><div class="pnode">
-        <b>AudienceMetadata</b>
-        <small>GET /api/audience/metadata 的投影</small>
+        <b>CrowdMetadata</b>
+        <small>GET /api/audience/metadata 的 pb 投影</small>
         <span class="tag tone-muted">读</span>
+      </div><div class="pnode">
+        <b>ResolvedCrowdMetadata</b>
+        <small>壳里 resolve 出来的内部模型</small>
+        <span class="tag tone-muted">解析</span>
       </div></div>
       </div><div class="conn">
       <span class="stem"></span>
-      <span class="pill">宿主拉一次 Metadata，全量传给组件<span class="note">组件自己不发请求</span></span>
+      <span class="pill">宿主拉一次 Metadata 传给壳；壳先 resolve 再喂给子树<span class="note">组件自己不发请求</span></span>
       <span class="stem"></span><span class="head"></span>
     </div><div class="lane tone-blue">
         <div class="lane-meta">
@@ -94,11 +98,11 @@
         <div class="lane-body"><div class="pnode">
         <b>InsightCombiner</b>
         <small>壳：props 进、草稿事件出</small>
-        <span class="tag tone-blue">11 个 .vue</span>
+        <span class="tag tone-blue">12 个 .vue</span>
       </div><div class="pnode">
         <b>DraftQuery</b>
-        <small>允许半填的编辑中间态</small>
-        <span class="tag tone-blue">10 个 .ts</span>
+        <small>允许半填的编辑中间态（协议在 dsl）</small>
+        <span class="tag tone-blue">9 个 .ts</span>
       </div></div>
       </div><div class="conn">
       <span class="stem"></span>
@@ -112,12 +116,12 @@
         </div>
         <div class="lane-body"><div class="pnode">
         <b>buildQuery(draft)</b>
-        <small>结构完整性检查，包内实现</small>
-        <span class="tag tone-violet">调用方调</span>
+        <small>结构完整性检查，实现也在 dsl</small>
+        <span class="tag tone-violet">@insight/dsl</span>
       </div><div class="pnode">
         <b>服务端校验+编译</b>
         <small>validateStructure + Semantics → compile</small>
-        <span class="tag tone-violet">@insight/dsl</span>
+        <span class="tag tone-violet">@insight/sql-builder</span>
       </div></div>
       </div><div class="conn">
       <span class="stem"></span>
@@ -220,8 +224,8 @@
 </tr>
 <tr>
 <td><code>metadata</code></td>
-<td><code>AudienceMetadata</code></td>
-<td>字段、关系、操作符、业务域</td>
+<td><code>CrowdMetadata</code></td>
+<td>Data Admin 的 pb 读模型；壳内部 <code>resolveCrowdMetadata()</code> 转成 <code>ResolvedCrowdMetadata</code> 再喂子树</td>
 </tr>
 <tr>
 <td><code>dataLevel</code></td>
@@ -247,6 +251,11 @@
 <td><code>searchValues</code></td>
 <td><code>(resolverKey, keyword) =&gt; Promise&lt;ValueItem[]&gt;</code></td>
 <td>宿主封装的动态候选搜索</td>
+</tr>
+<tr>
+<td><code>lookupValues</code></td>
+<td><code>(resolverKey, values) =&gt; Promise&lt;ValueItem[]&gt;</code></td>
+<td>按 value 反查 label，回显已保存取值</td>
 </tr>
 <tr>
 <td>事件</td>
@@ -402,13 +411,14 @@
 <p>两个类型的关系是刻意的，测试文件里有一行类型断言：</p>
 <div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-ts">type _legalQueryIsDraft = Expect&lt;InsightQuery extends DraftQuery ? true : false&gt;;
 </code></pre></div>
-<p>合法的 DSL 一定能当草稿用。所以「打开一张历史 DSL 回显」不需要转换，直接塞回组件就行；反方向才需要 <code>buildQuery</code> 收窄。错误码也是共用的：<code>buildQuery</code> 抛的 <code>CompileError</code> 来自 <code>@insight/dsl</code>，服务端编译器抛同一套码。</p>
+<p>合法的 DSL 一定能当草稿用。所以「打开一张历史 DSL 回显」不需要转换，直接塞回组件就行；反方向才需要 <code>buildQuery</code> 收窄。</p>
+<p>10-12 的重构把这两个类型和 <code>buildQuery</code> 一起搬进了 <code>@insight/dsl</code>：组合包的 <code>draft.ts</code> 现在只有 3 行，纯粹再导出 —— 组件和 BFF 共用同一份协议，错误码自然也还是同一套。</p>
 <h2 id="metadata组件吃进去什么"><span class="num">04</span>Metadata：组件吃进去什么</h2>
-<p><code>metadata</code> prop 是一份 <code>AudienceMetadata</code>，由服务端从 <code>crm_dc_*</code> 那批表投影出来（那条线在<a href="../data-admin-to-ui/">配置层那篇</a>）。组件拿到的版本<strong>没有表名和列名</strong>，只有业务语义：</p>
+<p><code>metadata</code> prop 是 Data Admin 的 pb 读模型 <code>CrowdMetadata</code>（由服务端从 <code>crm_dc_*</code> 那批表投影出来，那条线在<a href="../data-admin-to-ui/">配置层那篇</a>）：camelCase、I18n 是 <code>zhCn/zhHk/en</code>、status 是数字、类型信息嵌在 <code>fieldType</code> 里。壳拿到它就调 <code>resolveCrowdMetadata()</code> 转成内部模型 <code>ResolvedCrowdMetadata</code>，<strong>子组件只消费解析后的模型</strong>。两种形状都没有表名和列名，只有业务语义：</p>
 <div class="cards" data-cols="3"><div class="ccard tone-muted">
-          <span class="tag tone-muted">整数</span>
+          <span class="tag tone-muted">字符串</span>
           <h4>revision</h4>
-          <p>这份投影的哈希，任一条状态或文案变化都会变</p>
+          <p>这份投影的内容哈希（字符串），任一条状态或文案变化都会变</p>
           
           
         </div><div class="ccard tone-blue">
@@ -432,7 +442,7 @@
         </div><div class="ccard tone-violet">
           <span class="tag tone-violet">主体</span>
           <h4>relations</h4>
-          <p>关系。客体在关系上，属性挂在 properties 里</p>
+          <p>关系。客体在关系上，属性挂在 properties 里；<code>isPrimaryKey: 1</code> 的属性会被自动带上（见组件内幕）</p>
           
           
         </div></div><p>每条 feature / 关系属性身上都背着同一组<strong>形状四元组</strong>。组件里所有的「该显示什么」，追到底都是这四个字段决定的：</p>
@@ -461,16 +471,16 @@
           
           
         </div></div><p>候选值来源单独说。同一个「值输入框」，四种字段的加载方式完全不同：</p>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>valueSource</th><th>候选值在哪</th><th>什么时候到手</th></tr></thead><tbody><tr><th><code>NONE</code></th><td data-label="候选值在哪">没有候选值</td><td data-label="什么时候到手">不加载，控件形态由 <code>controlFor</code> 决定</td></tr><tr><th><code>CUSTOM</code></th><td data-label="候选值在哪">就带在 Metadata 里（items 数组）</td><td data-label="什么时候到手"><mark class="mk-blue">组件拿到就可用，零请求</mark></td></tr><tr><th><code>VALUE_SET</code></th><td data-label="候选值在哪">共享值集合，字段上只有 setKey</td><td data-label="什么时候到手">下拉打开时调宿主注入的 <code>loadValueSet</code>，宿主侧缓存</td></tr><tr><th><code>DYNAMIC</code></th><td data-label="候选值在哪">字段上只有 resolverKey（如 stock_search）</td><td data-label="什么时候到手">输入关键词后调 <code>searchValues</code>，按需搜索</td></tr></tbody></table></div><p><code>CUSTOM</code> 和 <code>VALUE_SET</code> 的条目都带 <code>status</code>，停用的候选值照样返回：新建条件只用 ENABLED，回显旧条件时按 value 找回 label。<code>DYNAMIC</code> 没有停用态，已选值不在搜索结果里时用草稿里的原值回显。</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>valueSource</th><th>候选值在哪</th><th>什么时候到手</th></tr></thead><tbody><tr><th><code>NONE</code></th><td data-label="候选值在哪">没有候选值</td><td data-label="什么时候到手">不加载，控件形态由 <code>controlFor</code> 决定</td></tr><tr><th><code>CUSTOM</code></th><td data-label="候选值在哪">就带在 Metadata 里（items 数组）</td><td data-label="什么时候到手"><mark class="mk-blue">组件拿到就可用，零请求</mark></td></tr><tr><th><code>VALUE_SET</code></th><td data-label="候选值在哪">共享值集合，字段上只有 setKey</td><td data-label="什么时候到手">下拉打开时调宿主注入的 <code>loadValueSet</code>，宿主侧缓存</td></tr><tr><th><code>DYNAMIC</code></th><td data-label="候选值在哪">字段上只有 resolverKey（如 stock_search）</td><td data-label="什么时候到手">输入关键词后调 <code>searchValues</code>；已保存取值调 <code>lookupValues</code> 反查 label</td></tr></tbody></table></div><p><code>CUSTOM</code> 和 <code>VALUE_SET</code> 的条目都带 <code>status</code>，停用的候选值照样返回：新建条件只用 ENABLED，回显旧条件时按 value 找回 label。<code>DYNAMIC</code> 没有停用态，已选值不在搜索结果里时靠注入的 <code>lookupValues</code> 补 label，补不到才显示原值。</p>
 <h2 id="包的地图"><span class="num">05</span>包的地图</h2>
 <h3 id="组件树">组件树</h3>
-<p>11 个 <code>.vue</code>。行数是 <code>wc -l</code> 实测，差距很大：最复杂的 RelationRow 是最简单的 UidRow 的近六倍。</p>
+<p>12 个 <code>.vue</code>。行数是 <code>wc -l</code> 实测，差距很大：最复杂的 RelationRow 是最简单的 ConditionRow 的八倍多。</p>
 <div class="tree" data-tree><ul class="tlist"><li class="has-kids">
             <div class="tnode tone-violet" data-tree-node>
               <span class="tcaret" aria-hidden="true"></span>
               <b>InsightCombiner.vue</b>
-              <code>148 行</code>
-              <span class="tnote">壳。接 props、provide 两个加载函数、watch 收窄 scope</span>
+              <code>154</code>
+              <span class="tnote">壳。接 pb 读模型、resolve 成内部模型、provide 三个加载函数、watch 收窄 scope</span>
             </div>
             <ul class="tlist"><li>
             <div class="tnode tone-muted" data-tree-node>
@@ -502,27 +512,35 @@
               <span class="tnote">行外壳：类型标签 + 删除按钮</span>
             </div>
             
-          </li><li>
+          </li><li class="has-kids">
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>PortraitRow.vue</b>
+              <code>172</code>
+              <span class="tnote">特征行：字段/操作符/值；日期时间字段走 TemporalOps</span>
+            </div>
+            <ul class="tlist"><li>
             <div class="tnode tone-muted" data-tree-node>
               <span class="tdot" aria-hidden="true"></span>
-              <b>PortraitRow.vue</b>
-              <code>147</code>
-              <span class="tnote">特征行：字段/操作符/值</span>
+              <b>TemporalOps.vue</b>
+              <code>108</code>
+              <span class="tnote">时间操作符：模式（固定时间/最近X天…）+ 比较符两个下拉（10-12 新增）</span>
             </div>
             
+          </li></ul>
           </li><li>
             <div class="tnode tone-muted" data-tree-node>
               <span class="tdot" aria-hidden="true"></span>
               <b>RelationRow.vue</b>
-              <code>507</code>
-              <span class="tnote">关系行。detail/times、客体多选、嵌套 props 过滤</span>
+              <code>580</code>
+              <span class="tnote">关系行。detail/times、客体多选、嵌套 props 过滤、主键属性保护</span>
             </div>
             
           </li><li>
             <div class="tnode tone-muted" data-tree-node>
               <span class="tdot" aria-hidden="true"></span>
               <b>UidRow.vue</b>
-              <code>89</code>
+              <code>88</code>
               <span class="tnote">指定 UID。粘贴解析、去重、500 截断</span>
             </div>
             
@@ -548,65 +566,62 @@
             <div class="tnode tone-muted" data-tree-node>
               <span class="tdot" aria-hidden="true"></span>
               <b>ValueControl.vue</b>
-              <code>233</code>
+              <code>253</code>
               <span class="tnote">值控件。七种形态一个组件，形态由 controlFor 决定</span>
             </div>
             
           </li></ul>
           </li></ul></div><h3 id="非-vue-的部分">非 Vue 的部分</h3>
-<p>逻辑全部在这 10 个 <code>.ts</code> 里，<code>.vue</code> 只做渲染和事件转发：</p>
+<p>逻辑都在 9 个 <code>.ts</code> 里（另有 <code>env.d.ts</code>）。10-12 的重构后，这里只剩「组件自己要用的东西」，协议类文件都搬去了 <code>@insight/dsl</code>：</p>
 <div class="spec tone-violet">
-      <div class="spec-head"><b>packages/combination/src 的 TypeScript 层</b><span>10 个文件 · 按行数排</span></div>
+      <div class="spec-head"><b>packages/combination/src 的 TypeScript 层</b><span>9 个文件 · 按行数排</span></div>
       <div class="spec-body"><div class="srow">
-          <div class="sk">draft.ts (273)</div>
-          <div class="sv"><p><strong>类型 + buildQuery</strong>。DraftQuery 全家类型定义在这，草稿收窄成 DSL 的完整性检查也在这。它是组件与编译器之间唯一的关口。</p>
-</div>
-        </div><div class="srow">
           <div class="sk">query.ts (85)</div>
           <div class="sv"><p><strong>草稿工厂和纯函数</strong>。建空查询/空组/各类叶子、加组加叶、<code>clampScope</code> 收窄、<code>parseUids</code> 粘贴解析。全部是无副作用的纯函数，好测。</p>
 </div>
         </div><div class="srow">
-          <div class="sk">audience.ts (96)</div>
-          <div class="sv"><p><strong>AudienceMetadata 类型</strong>。整包对 Metadata 的理解都在这份类型里，和 <code>@insight/dsl</code> 的 <code>fieldType</code> 解耦。</p>
+          <div class="sk">values.ts (69)</div>
+          <div class="sv"><p><strong>候选值组合式函数</strong>。CUSTOM 直取、VALUE_SET 加载（带过期票据防竞态）、DYNAMIC 的 search / resolve 两个函数缓存。</p>
 </div>
         </div><div class="srow">
-          <div class="sk">values.ts (56)</div>
-          <div class="sv"><p><strong>候选值组合式函数</strong>。CUSTOM 直取、VALUE_SET 加载（带过期票据防竞态）、DYNAMIC 搜索函数缓存。</p>
-</div>
-        </div><div class="srow">
-          <div class="sk">ops.ts (37)</div>
-          <div class="sv"><p><strong>操作符常量</strong>。中文标签表、三种公式各允许哪些 op（<code>RELATION_DETAIL_OPS</code> / <code>RELATION_TIMES_OPS</code> / <code>UID_OPS</code>）。</p>
-</div>
-        </div><div class="srow">
-          <div class="sk">messages.ts (152)</div>
+          <div class="sk">messages.ts (155)</div>
           <div class="sv"><p><strong>三语言文案</strong>。zh-CN / zh-HK / en，同一份 key。界面上的字只有两个来源：这份文件和 Metadata 里的多语言名。</p>
 </div>
         </div><div class="srow">
-          <div class="sk">label.ts (14)</div>
-          <div class="sv"><p><strong>useLabel()</strong>。取多语言名的回退链：当前语言 → zh-CN → zh-HK → en。</p>
+          <div class="sk">index.ts (51)</div>
+          <div class="sv"><p><strong>导出面</strong>。默认导出组件 + 草稿工厂；协议那半边（<code>buildQuery</code>、<code>OP_LABELS</code>、<code>resolveCrowdMetadata</code>、类型）全部从 <code>@insight/dsl</code> 再导出 —— 宿主只 import 一次。</p>
+</div>
+        </div><div class="srow">
+          <div class="sk">label.ts (28)</div>
+          <div class="sv"><p><strong>useLabel()</strong>。取多语言名的回退链：当前语言 → zh-CN → zh-HK → en；<code>t()</code> 支持带参数（相对时间模板用）。</p>
+</div>
+        </div><div class="srow">
+          <div class="sk">relationDraft.ts (17)</div>
+          <div class="sv"><p><strong>新建关系行的草稿工厂</strong>。选中关系时按 <code>isPrimaryKey === 1</code> 的属性自动补上属性过滤（跳过 uid / object_id 这类主体列）。</p>
 </div>
         </div><div class="srow">
           <div class="sk">conditionKey.ts (13)</div>
           <div class="sv"><p><strong>下拉的 key 前缀</strong>。<code>field:xxx</code> / <code>relation:xxx</code>。特征和关系混在同一个级联菜单里，选完靠前缀分回去。</p>
 </div>
         </div><div class="srow">
-          <div class="sk">context.ts (6)</div>
-          <div class="sv"><p><strong>两个注入 key</strong>。<code>loadValueSet</code> / <code>searchValues</code> 的 Symbol，provide 在壳里，inject 在值控件里。</p>
+          <div class="sk">context.ts (7)</div>
+          <div class="sv"><p><strong>三个注入 key</strong>。<code>loadValueSet</code> / <code>searchValues</code> / <code>lookupValues</code> 的 Symbol，provide 在壳里，行组件和值控件在任意深度 inject。</p>
 </div>
         </div><div class="srow">
-          <div class="sk">index.ts (23)</div>
-          <div class="sv"><p><strong>导出面</strong>。默认导出组件 + buildQuery + 草稿工厂 + 类型。宿主（和测试）只从这里 import。</p>
+          <div class="sk">draft.ts (3)</div>
+          <div class="sv"><p><strong>一行注释 + 一整组再导出</strong>。草稿协议与 <code>buildQuery</code> 的实现住在 <code>@insight/dsl</code>，组件和 BFF 共用同一份。</p>
 </div>
         </div></div>
     </div><h3 id="它借了-insightdsl-的什么">它借了 @insight/dsl 的什么</h3>
-<p>依赖方向是一条直线：<code>apps/client → @insight/combination → @insight/dsl</code>。组合包对 dsl 的引用一共 17 处 import，分布在 5 个子模块：</p>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>引自</th><th>几处 import</th><th>借的是什么</th></tr></thead><tbody><tr><th><code>@insight/dsl/ast</code></th><td data-label="几处 import">8</td><td data-label="借的是什么">Ops 常量、四种叶子的构造函数（<code>portraitLeaf</code> 等）、类型守卫（<code>isCompareOp</code> / <code>isScalarValue</code> / <code>isCountPair</code>）</td></tr><tr><th><code>@insight/dsl/fieldType</code></th><td data-label="几处 import">4</td><td data-label="借的是什么"><mark class="mk-blue"><code>applicableOps</code> 和 <code>controlFor</code></mark> —— 控件决策引擎，机制篇 03 节的主角</td></tr><tr><th><code>@insight/dsl/context</code></th><td data-label="几处 import">3</td><td data-label="借的是什么"><code>DataLevel</code> / <code>Actor</code> 类型（scope 收窄用）</td></tr><tr><th><code>@insight/dsl</code></th><td data-label="几处 import">1</td><td data-label="借的是什么"><code>CompileError</code> —— buildQuery 抛的错误码和编译器共用</td></tr><tr><th><code>@insight/dsl/clock</code></th><td data-label="几处 import">1</td><td data-label="借的是什么">时区换算：日期控件显示的字符串 ↔ Unix 秒（时间戳单位 10-11 起是秒）</td></tr></tbody></table></div><p>UI 依赖是 element-plus（全套控件）和 vue-i18n（文案）。除此之外没有别的运行时依赖。</p>
+<p>依赖方向还是一条直线，但 10-12 之后变了性质：<code>apps/client → @insight/combination → @insight/dsl</code>，而 <strong><code>@insight/dsl</code> 现在是协议全家</strong>（类型、草稿、操作符、形状判定），编译器新拆去了兄弟包 <code>@insight/sql-builder</code>。组合包对 dsl 的 31 处 import <strong>全部走包根</strong>，不再有子路径：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>借的东西</th><th>在哪</th><th>用在哪</th></tr></thead><tbody><tr><th>协议类型</th><td data-label="在哪"><code>@insight/dsl</code> 包根</td><td data-label="用在哪"><code>CrowdMetadata</code> / <code>ResolvedCrowdMetadata</code> / <code>DraftQuery</code> 全家 / <code>ValueSource</code> / <code>OperatorMeta</code></td></tr><tr><th>草稿与校验</th><td data-label="在哪">同上</td><td data-label="用在哪"><code>buildQuery</code>、<code>portraitDraft</code> / <code>blankDetail</code> 等构造函数 —— 组件不再自己维护一份</td></tr><tr><th>操作符表</th><td data-label="在哪">同上</td><td data-label="用在哪"><code>OP_LABELS</code> / <code>opLabel</code> / <code>RELATION_DETAIL_OPS</code> / <code>RELATION_TIMES_OPS</code> / <code>UID_OPS</code>（<code>OPERATOR_DISPLAY</code> 是 dsl 里的唯一来源）</td></tr><tr><th>形状判定</th><td data-label="在哪">同上</td><td data-label="用在哪"><mark class="mk-blue"><code>applicableOps</code> / <code>controlFor</code> / <code>isTemporalContent</code></mark> —— 控件决策引擎，机制篇 03 节的主角</td></tr><tr><th>读模型解析</th><td data-label="在哪">同上</td><td data-label="用在哪"><code>resolveCrowdMetadata()</code>：pb 形状 → 组件内部模型</td></tr><tr><th>时区换算</th><td data-label="在哪">同上</td><td data-label="用在哪"><code>clock</code>：日期控件显示的字符串 ↔ Unix 秒</td></tr><tr><th>错误类型</th><td data-label="在哪">同上</td><td data-label="用在哪"><code>CompileError</code> —— 结构校验的错误码，和编译器共用</td></tr></tbody></table></div><p>UI 依赖是 element-plus（全套控件）和 vue-i18n（文案）。除此之外没有别的运行时依赖。</p>
 <h2 id="继续往下"><span class="num">06</span>继续往下</h2>
 <ul>
-<li><a href="../combination-components/">组件图鉴</a>：11 个组件的真实渲染截图、每个的对外接口、拆分依据与五层数据流。</li>
+<li><a href="../combination-components/">组件图鉴</a>：12 个组件的真实渲染截图、每个的对外接口、拆分依据与五层数据流。</li>
+<li><a href="../combination-internals/">组件内幕</a>：<code>components/</code> 里每个组件的父子联系、内部状态与数据流，全部对到当前代码。</li>
 <li><a href="../combination-mechanics/">机制篇</a>：受控数据流的实现、一行怎么长出来（幽灵行与 convert）、控件决策引擎、候选值三条管道、buildQuery 检查清单、scope 收窄，每节配可操作的交互。</li>
-<li><a href="../data-admin-to-ui/">配置层那篇</a>：Metadata 从 MySQL 到 <code>AudienceMetadata</code> 投影的那条线，含停用字段的回显规则。</li>
-<li><a href="../insight-dsl/">@insight/dsl 那篇</a>：<code>buildQuery</code> 产出的 DSL 之后怎么被校验、编译成 SQL。</li>
+<li><a href="../data-admin-to-ui/">配置层那篇</a>：Metadata 从 MySQL 到读模型投影的那条线，含停用字段的回显规则。</li>
+<li><a href="../insight-dsl/">@insight/dsl 那篇</a>：草稿协议和 DSL 之后怎么被校验、编译成 SQL（注意那篇写的是拆分前的代码）。</li>
 </ul>
 <div class="quiz"><details>
         <summary>组件里用户填到一半的条件（还没选操作符）存在哪？存在组件里吗？</summary>
@@ -622,7 +637,7 @@
 </div>
       </details><details>
         <summary>组件需要知道字段对应数据库里哪张表哪一列吗？</summary>
-        <div class="a"><p>完全不需要。<code>AudienceMetadata</code> 投影里没有表名列名，Catalog（物理映射）只发给
+        <div class="a"><p>完全不需要。两份读模型投影里都没有表名列名，Catalog（物理映射）只发给
 Node BFF 侧的编译器。组件连 Catalog 都拿不到，这是「DSL 与物理模型解耦」在组件侧的体现：
 新增一个字段只改元数据，组件和 SQL Builder 都不用发版。</p>
 </div>
@@ -630,7 +645,7 @@ Node BFF 侧的编译器。组件连 Catalog 都拿不到，这是「DSL 与物�
 
     <footer>
       <span>@insight/combination：圈选条件是怎么被「画」出来的</span>
-      <span>最后更新 2026-10-10 · 单文件可离线打开</span>
+      <span>最后更新 2026-10-12 · 单文件可离线打开</span>
     </footer>
   </main>
 </div>

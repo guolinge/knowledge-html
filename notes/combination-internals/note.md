@@ -1,4 +1,4 @@
-[组件图鉴](../combination-components/)给了 11 个组件的长相和对外接口，[机制篇](../combination-mechanics/)讲了草稿和校验。这一篇钻进 `src/components/` **文件夹本身**：10 个 `.vue` 逐个拆 —— 它提供什么功能、谁渲染它、它渲染谁、props 怎么进、事件怎么出、内部状态有哪些。每节配一张真实渲染截图。
+[组件图鉴](../combination-components/)给了 12 个组件的长相和对外接口，[机制篇](../combination-mechanics/)讲了草稿和校验。这一篇钻进 `src/components/` **文件夹本身**：11 个 `.vue` 逐个拆 —— 它提供什么功能、谁渲染它、它渲染谁、props 怎么进、事件怎么出、内部状态有哪些。每节配一张真实渲染截图。
 
 ```callout
 tone: blue
@@ -6,13 +6,13 @@ icon: 🧭
 text: |
   **口径说明（实事求是）**
 
-  - 代码版本：`crm-dsl-stru @ e8858fb`（2026-10-11）。行数、行为都以这一版为准。
+  - 代码版本：`crm-dsl-stru @ 7f2ec46`（2026-10-12）。行数、行为都以这一版为准；本篇在 10-12 深夜按这版重写过一轮（dsl / sql-builder 拆分、TemporalOps、主键属性都在这版里）。
   - 截图：真实渲染 —— 把组件单独挂到空页面上跑，Playwright 逐元素截图。
     数据是 fixture，但形状照 `apps/seed/src/demoCatalog.ts` 抄；独立挂载时按宿主契约
     `provide` 了 `loadValueSet / searchValues / lookupValues` 三个加载函数。
   - 标「实跑」的行为是 Playwright 真点击/真输入观察到的，不是从源码推的。
-  - ⚠ 前两篇写在 10-10（更早的代码）：那里说的「Unix 毫秒」「动态候选只有 search」
-    已经过期 —— 现在是**秒级时间戳**，动态候选多了一条 `resolve` 回显通道（本篇 11 节）。
+  - 三篇的版本差：全景/机制/图鉴最初写于 10-10 ~ 10-11 的代码，10-12 已同步到当前版本；
+    协议类文件（草稿、操作符表、读模型）现在都在 `@insight/dsl`，编译器在 `@insight/sql-builder`。
 ```
 
 ## 01 · 先看父子关系
@@ -21,7 +21,7 @@ text: |
 - label: InsightCombiner.vue
   sub: src/（不在 components/ 里）
   tone: violet
-  note: 外层壳：provide 三个加载函数、收窄 scope、只渲染 include
+  note: 外层壳：接 pb 读模型并 resolve、provide 三个加载函数、收窄 scope、只渲染 include
   children:
     - { label: ScopeBar.vue, sub: 151, note: 客户范围；无子组件 }
     - label: ConditionSection.vue
@@ -38,9 +38,13 @@ text: |
               sub: 70
               note: 行外壳：slot + 删除按钮
               children:
-                - { label: PortraitRow.vue, sub: 161, note: 特征行 }
-                - { label: RelationRow.vue, sub: 530, note: 关系行；内含第三处 LogicToggle }
-                - { label: UidRow.vue, sub: 89, note: 指定 UID 行 }
+                - label: PortraitRow.vue
+                  sub: 172
+                  note: 特征行
+                  children:
+                    - { label: TemporalOps.vue, sub: 108, note: 时间字段的操作符区（10-12 新增） }
+                - { label: RelationRow.vue, sub: 580, note: 关系行；内含第三处 LogicToggle；主键属性保护 }
+                - { label: UidRow.vue, sub: 88, note: 指定 UID 行 }
     - label: 被两行共用的小件
       note: 都由行组件直接 import
       children:
@@ -61,6 +65,7 @@ rows:
   - "ConditionRow → Portrait/Relation/UidRow": ["slot 内容", "行组件自己的 `update` / `convert`"]
   - "行组件 → ConditionNameSelect": ["`modelValue`：`field:city` 或 `relation:holding`", "`update:modelValue`（带前缀的 key）"]
   - "行组件 → ValueControl": ["`inputForm` / `valueType` / `items` / `search` / `resolveSelected` / `prefix` / `suffix` + `modelValue`", "`update:modelValue`（标量、数组或区间）"]
+  - "PortraitRow → TemporalOps": ["`shape`（算合法操作符）+ `op` + 读模型操作符表 + `defaultExplain`", "`update:op`（只改 op，值由 PortraitRow 清）"]
   - "InsightCombiner ⇢ 行组件（跨层）": ["三个注入 key：`loadValueSet` / `searchValues` / `lookupValues`（`context.ts`）", "无（单向）"]
 ```
 
@@ -227,11 +232,37 @@ caption: 「= 未发生交易」不是数据，是操作符：连续型数字或
 | 功能 | 特征叶子编辑：字段、操作符、值 |
 | props 进 | `modelValue`（DraftPortrait）、`metadata` |
 | 事件出 | `update:modelValue`（新叶子）；`convert`（用户选了关系名 → 发一个 blankDetail 让父层换行类型） |
-| 子组件 | `ConditionNameSelect`、操作符 `el-select`、`ValueControl` |
+| 子组件 | `ConditionNameSelect`、操作符 `el-select`（非时间字段）、`TemporalOps`（时间字段）、`ValueControl` |
 | 数据流 | `operators` = `metadata.operators` ∩ `applicableOps(feature)`；`currentControl` = `controlFor(feature, op)` 决定值控件；`onCondition` 按前缀分流（`relation:` → convert）；`onField` 换字段时把 op 重置成新字段第一个合法值；`onOp` 换操作符时**清掉旧值**；`onValue` 只 patch value |
 | 特判 | `operatorLabel()`：`eq_default` / `neq_default` 的显示名不是操作符表里的名字，而是「= <defaultValueExplain>」（缺省回退「默认值」） |
 
-## 09 · RelationRow —— 关系行（最大的一件，530 行）
+时间字段（contentType 1/2）的操作符区被换成 `TemporalOps`，同一个 ValueControl 继续管值：
+
+```shot
+img: 14b-portrait-temporal
+alt: 时间字段的两种模式
+caption: 上行：模式「最近X天」（比较符位禁用、值填 30）。下行：模式「固定时间」+ 比较符「大于」（值变成日期时间选择器，存的是 Unix 秒）。
+```
+
+### TemporalOps —— 时间字段的操作符区（10-12 新增）
+
+```shot
+img: 14a-temporal-ops
+alt: TemporalOps 两种形态
+caption: 左：模式选在「最近X天」——第二个下拉被禁用，只显示占位「=」。右：模式「固定时间」——第二个下拉列出该字段合法的比较符。
+```
+
+| 项 | 内容 |
+|----|------|
+| 功能 | 把「时间字段怎么比」拆成两个下拉：先选模式（固定时间 / 最近X天 / X天之前 / 最近X小时 / X小时之前），固定时间再选比较符 |
+| props 进 | `shape`（FieldShape，用来算合法操作符）、`op`（当前操作符）、`operators`（读模型的操作符表）、`defaultExplain`（默认值操作符的显示文案） |
+| 事件出 | `update:op` —— 只改 op。值由父组件 PortraitRow 清掉、由 ValueControl 重填 |
+| 局部状态 | 无。`mode` / `relative` / `compares` 都是 computed |
+| 关键细节 | 固定时间的比较符顺序写死为 `gt / gte / lt / lte / eq / neq / 默认值`，再用 `applicableOps(shape)` 和读模型里的操作符表两头过滤；从相对模式切回固定时间时，优先落回 `eq`（不合法就取第一个合法比较符） |
+
+它就是「形状驱动 UI」的又一层：`applicableOps` 说这个字段能用哪些 op，它把其中**相对时间那四个**挑出来当模式选项；是不是时间字段由 `isTemporalContent(contentType)` 判定，判定本身在 dsl 里。
+
+## 09 · RelationRow —— 关系行（最大的一件，580 行）
 
 ```shot
 img: 06-relation-detail
@@ -249,6 +280,12 @@ caption: 属性过滤展开两条：左侧出现「并且」胶囊（LogicToggle
 img: 07-relation-times
 alt: RelationRow times
 caption: times 形态：第二格换成「条数」类公式名（product 显示「开通只数」），值区变成区间，客体位是「不限标的」。
+```
+
+```shot
+img: 15-relation-primary
+alt: 主键属性保护区
+caption: 选中带主键属性的关系后，主键属性自动出现在属性过滤里：字段下拉灰掉、× 禁用。它由 relationDraft 在「选中关系」那一刻补进来，不靠人点「+ 属性过滤」。
 ```
 
 ```shot
@@ -275,6 +312,7 @@ rows:
   - "客体候选": ["三来源：CUSTOM（内联 options）/ VALUE_SET（`useResolvedItems` 预载）/ DYNAMIC（远程搜索 + `lookup` 回显）", "选中值不在候选里时，用 `rememberedObjects` 的记忆 label 兜底；没有记忆就显示原值"]
   - "客体 label 回显（新）": ["`watch([objectSource, selectedObjects])` → `objectResolveToken` → `valueSearch.resolve(...)` → 拿回 label 写进 rememberedObjects → `objectLabelTick` 触发 computed 重算", "==已保存的取值在没打开下拉时也能显示中文 label==，不依赖搜索"]
   - "属性过滤": ["`propItems` / `propLogic`；属性候选 `propSetItems` 按关系一次性预载（`propLoadToken` 防串）；每个属性的 op 用 `applicableOps` 过滤、控件用 `controlFor` 决定", "`setProps` 在删光时把 props 键整个移除；属性不支持 eq_default（buildQuery 会拒）"]
+  - "主键属性保护": ["选中关系时 `relationDraft` 按 `isPrimaryKey === 1` 自动补 props（跳过 uid / object_id）；字段下拉 `:disabled=\"isPrimaryField()\"`；删除按钮 `:disabled=\"isRequiredPrimary()\"`（主键且同名属性只剩一条时不可删）", "实测：再添一条同样的主键属性后，两行的删除按钮都变成可点 —— 保护的是「最后一条」，不是「这一条」"]
 ```
 
 ```callout
@@ -343,11 +381,12 @@ rows:
   - "ConditionSection": ["includeTree + metadata", "新 section 树", "ResizeObserver（组间留白）"]
   - "ConditionGroup": ["组节点 + metadata", "新组节点", "ResizeObserver（行级留白）"]
   - "ConditionRow": ["label + slot", "delete", "无"]
+  - "TemporalOps": ["shape · op · operators · defaultExplain", "update:op（只改 op）", "无（两个 select + 一组计算属性）"]
   - "LogicToggle": ["modelValue + 连接线参数", "新逻辑值", "无"]
   - "ScopeBar": ["ScopeLeaf + dataLevel + groups", "新 ScopeLeaf", "无"]
   - "ConditionNameSelect": ["key 字符串 + metadata", "新 key 字符串", "无（options 是 computed）"]
-  - "PortraitRow": ["特征叶子 + metadata", "新叶子 / convert", "无（全 computed）"]
-  - "RelationRow": ["关系叶子 + metadata", "新叶子 / convert", "rememberedObjects、propSetItems、4 个竞态令牌"]
+  - "PortraitRow": ["特征叶子 + metadata", "新叶子 / convert", "无（全 computed）；时间字段把操作符区交给 TemporalOps"]
+  - "RelationRow": ["关系叶子 + metadata", "新叶子 / convert", "rememberedObjects、propSetItems、3 个竞态令牌（objectSearch / objectResolve / propLoad）"]
   - "UidRow": ["UID 叶子", "新 UID 叶子", "text（文本镜像）"]
   - "ValueControl": ["形态 props + 值", "新值", "selectedLabels、remoteItems、searchToken"]
 ```
@@ -363,6 +402,8 @@ items:
   - RelationRow 的时间公式量词按 relation key 特判（product/holding），其它关系只有「条数」
   - ConditionSection 只渲染 type === 'group' 的子节点，别的节点会静默不显示
   - 三处 LogicToggle 的留白基准不同：组间 28px / 行级 16px / 属性侧固定 16px
+  - 主键属性的保护是「唯一时不可删」：实测再添一条同样的主键属性后，两行的删除按钮都变成可点（isRequiredPrimary 只挡「只剩一条」的那种删法）
+  - 时间字段的操作符区是 TemporalOps，不是通用下拉：固定时间的比较符顺序被写死成 gt/gte/lt/lte/eq/neq/默认值 两组
 ```
 
 ```quiz
