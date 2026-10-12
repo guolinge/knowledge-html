@@ -3636,7 +3636,7 @@ text: |
 | **`npm run probe:home`** | **首页外壳的冒烟探针** —— `check` / `visual-check` 都盖不到首页（内联 JS + 浏览器运行时状态）。改了 `tools/lib/home.mjs` 必跑，见「改了站点外壳」 |
 | **`npm run gaps -- <slug>`** | **图解缺口审计**：把该被逐段审的正文段落列出来（带行号 + 字数），并给出「段落 / 积木」比值。==写完之后必跑，见复盘 ⑦== |
 | `npm run check` | 校验积木语法 + YAML + 约定 + skill 与代码一致 + **skill 文档自己能不能渲染** |
-| `npm run view -- <slug>` | 构建单篇 + 打开（**默认就开**，它的用途就是这个；agent 验证时加 `--no-open`） |
+| `npm run view -- <slug>` | 构建单篇 + 打开（**默认就开**，它的用途就是这个；agent 验证时加 `--no-open`）。单篇构建**不动 `index.html`**：只有这一篇是渲染过的，其余篇的搜索正文会退化成原始 markdown。 |
 | **`npm run block -- <slug> <n>`** | **只看第 n 个积木**：量高 + 截图，打印截图路径。==默认不开浏览器==（人要看加 `--open`） |
 | `npm run block -- <slug> --list` | 列出这一篇的块（编号 + 行号 + 语言） |
 | `npm run build:standalone` | 重建全部产物（`dist/*.html` + 首页） |

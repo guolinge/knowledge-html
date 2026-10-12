@@ -191,7 +191,11 @@ function main() {
 
   const slugs = allDirs.filter((s) => !ONLY || s === ONLY).sort();
 
-  const existingSlugs = new Set(slugs);
+  /* 「已产出的笔记」按**磁盘上真实存在的全部笔记**算，不受 --only 影响。
+     踩过：这里原来用 `new Set(slugs)`，于是 `npm run view -- <slug>`（单篇构建）
+     把这篇的所有前置都渲染成「待产出」灰块，再跑一次全量构建又变回可点链接 ——
+     同一个产物两种构建模式不一致，dist/ 里来回抖。 */
+  const existingSlugs = new Set(allDirs);
 
   if (!slugs.length) {
     console.log('notes/ 下还没有笔记。用 npm run new -- <slug> 创建第一篇。');
@@ -310,14 +314,24 @@ function main() {
 
   // 首页索引：从磁盘汇总全部笔记，再用刚构建的条目覆盖。
   // 这样某篇写坏时它只是不能构建，不会从首页凭空消失。
-  const byslug = new Map(collectAll().map((e) => [e.slug, e]));
-  for (const e of entries) byslug.set(e.slug, e);
-  const allEntries = [...byslug.values()].sort((a, b) => a.slug.localeCompare(b.slug));
-  write(
-    path.join(ROOT, 'index.html'),
-    versionAssets(renderHome(allEntries, { site: '知识笔记', assetPrefix: '', plans })),
-  );
-  console.log(`  ✓ index.html (${allEntries.length} 篇)`);
+  //
+  // 单篇构建（--only）不写 index.html：那时只有这一篇是渲染过的，
+  // 其余篇会退化成 collectAll() 的原始 markdown 摘要 —— 整站搜索索引
+  // 被一次「只看一篇」的构建改差。踩过：`npm run view -- <slug>` 之后
+  // index.html 里其它 81 篇的搜索正文全变了，而用户只看了一篇。
+  // 首页的正确版本由全量构建（build / build:standalone / done）负责。
+  if (ONLY) {
+    console.log('  · index.html 没动（单篇构建只看 dist/' + ONLY + '.html）');
+  } else {
+    const byslug = new Map(collectAll().map((e) => [e.slug, e]));
+    for (const e of entries) byslug.set(e.slug, e);
+    const allEntries = [...byslug.values()].sort((a, b) => a.slug.localeCompare(b.slug));
+    write(
+      path.join(ROOT, 'index.html'),
+      versionAssets(renderHome(allEntries, { site: '知识笔记', assetPrefix: '', plans })),
+    );
+    console.log(`  ✓ index.html (${allEntries.length} 篇)`);
+  }
 
   if (errors) process.exitCode = 1;
 }
