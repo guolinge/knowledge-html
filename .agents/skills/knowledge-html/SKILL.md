@@ -385,9 +385,8 @@ text: |
 
 做法对应 `arch` 的 `parts` / `tours`；**节点里装什么**用同一个积木的 `bodies`（八种内容 + `badge` / `note`）。
 
-==最完整的一张示例是 [process-thread-relation 的 §02 地图](notes/process-thread-relation/note.md)==（`pt-map`：`bodies` + `scenarios` + `facts` + 两条导览都齐）。
-[server-code 首图](notes/server-code/note.md) 是只有 `parts` / `tours` 的简化版 ——
-只看它学不到「矩形里装什么」，而那才是整体图最容易塌掉的一半。
+==示例看 [process-thread-relation 的 §02 地图](notes/process-thread-relation/note.md)==（`pt-map`：`bodies` + `scenarios` + `facts` + 两条导览都齐）——
+整体图该长的样子，那里全都有。
 
 这和原则 ③ 里「画到读者已经认识的锚点」是同一件事的两种用法。
 那一条讲画布上的位置：这条链最后那个东西，读者是不是已经认识。
@@ -2491,7 +2490,8 @@ Label "请求" overlaps component "gateway"
 
 | 症状 | 改哪 |
 |---|---|
-| 屏幕利用率低 / 留白太多 | `theme.css` 的 `--shell` / `--prose` / `--gutter` |
+| 屏幕利用率低 / 留白太多 | `theme.css` 的 `--shell` / `--wide` / `--prose` / `--gutter` |
+| 宽屏上整体图还是很小、文字挤在一起 | 调大 `--wide`（图和积木的上限）；`--prose` 不动 |
 | 共享积木在窄屏被不可恢复地裁掉、关键控件不可达 | `blocks.css` 里做安全降级；优先局部滚动，不为手机重做图义 |
 | 目录 / 交互别扭 | `app.js` + `lib/page.mjs` |
 | 颜色不对 | `theme.css` 的 token |
@@ -2506,8 +2506,12 @@ Label "请求" overlaps component "gateway"
 `theme.css` 里三层控制：
 
 - `--prose`（880px）管**文字元素**（`p` / `h2` / `h3` / `ul` / `.callout` / `.quiz`）
-- `main` 的 `max-width`（1280px）管**整列上限**，防 4K 屏上积木被拉飞
+- `--wide`（1680px）管**整列上限** —— 图 / 积木 / 表格能用到这么宽，防 4K 屏上被拉飞
+- `--shell`（2000px）管外框，要装得下「目录列 + 整列」
 - **积木不受 `--prose` 限制**，自动用满整列
+
+==屏幕越宽，多出来的宽度全给图。== 所以调宽度先动 `--wide`，不要动 `--prose`：
+把 1680 调到 2200 会让 1920 屏上的整体图再宽一圈，而正文行宽一个字都不变。
 
 判断一个新积木该不该限宽：**它主要是文字还是图形？** 文字限，图形不限。
 

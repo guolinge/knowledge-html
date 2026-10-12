@@ -111,10 +111,10 @@ bodies:
     note: grep 'fetch(' 零命中
   inj:
     badge: 组件与宿主的全部契约
-    cells:
-      - { label: loadValueSet, sub: 值集合 }
-      - { label: searchValues, sub: 搜索 }
-      - { label: lookupValues, sub: 回显 }
+    rows:
+      - { k: loadValueSet, v: 值集合, link: host, tip: 宿主侧负责缓存与 HTTP }
+      - { k: searchValues, v: 搜索, link: host }
+      - { k: lookupValues, v: 回显, link: host }
     code: "inject(key, async () => [])"
     note: 没给就是空实现，不报错
   host:
