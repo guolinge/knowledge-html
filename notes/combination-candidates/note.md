@@ -133,6 +133,60 @@ tours:
       - { at: [adp, routeB], text: "同一个接口，`values` 非空时忽略 keyword 和 limit。" }
 ```
 
+上面是**地图**（谁在哪、归谁、两条链路在哪分叉）；下面这张是**分层流程** —— 同一批零件，换成从上到下的顺序，每一层挂着哪几个零件一眼扫完。
+
+```lane-stack
+- badge: LAYER 01
+  title: 组件子树
+  desc: 只认 metadata 和三个注入进来的函数
+  tone: blue
+  nodes:
+    - { title: PortraitRow, sub: "useStoredItems(() => feature.valueSource)", tag: 画像行 }
+    - { title: RelationRow, sub: "propSetItems 批量 + 客体 remote select", tag: 关系行, tone: violet }
+    - { title: ValueControl, sub: "remote-method → onSearch(keyword)", tag: 值控件, tone: violet }
+  next: "loadValueSet(setKey) :: :: 组件自己不发请求"
+- badge: LAYER 02
+  title: 注入层
+  desc: InsightCombiner 把调用方给的函数 provide 下去
+  tone: violet
+  nodes:
+    - { title: loadValueSetKey, sub: "props.loadValueSet?.(setKey)", tag: 值集合 }
+    - { title: searchValuesKey, sub: "props.searchValues?.(resolverKey, kw)", tag: 搜索 }
+    - { title: lookupValuesKey, sub: "props.lookupValues?.(resolverKey, values)", tag: 回显 }
+  next: "宿主 App :: :: 函数体在这里，组件看不见"
+- badge: LAYER 03
+  title: 宿主 App
+  desc: 决定缓存、决定打哪个接口
+  tone: green
+  nodes:
+    - { title: useValueSets, sub: "按 setKey 缓存 + inflight 复用", tag: 缓存 }
+    - { title: loadSearch / loadLookup, sub: "薄薄一层，透传 api.ts", tag: 透传 }
+    - { title: prefetchColumns, sub: "预览结果回来后预热结果列的 setKey", tag: 预热 }
+  next: "api 适配层 :: :: pb → 组件内部形状"
+- badge: LAYER 04
+  title: api 适配层
+  desc: value 是 JSON 字符串、I18n 是 zhCn/zhHk、status 是数字 —— 全在这里转
+  tone: amber
+  nodes:
+    - { title: getValueSet, sub: "toValueItems → parsePbScalar", tag: value-sets }
+    - { title: searchValues / lookupValues, sub: "toResolverItems → toI18nText", tag: resolver-options }
+  next: "服务端 :: :: 两个 GET，无 body"
+- badge: LAYER 05
+  title: 服务端
+  desc: 一个查投影，一个查内存常量表
+  tone: red
+  nodes:
+    - { title: GET /api/crowd/value-sets, sub: "5 秒 TTL 投影里找 set → toValueSet", tag: setKey 必填 }
+    - { title: GET /api/crowd/resolver-options, sub: "values 优先，否则 keyword 子串匹配", tag: resolverKey 必填 }
+  next: "数据 :: :: 一份在 MySQL，一份在代码里"
+- badge: LAYER 06
+  title: 数据
+  desc: 两条链路的终点完全不同
+  tone: muted
+  nodes:
+    - { title: crm_dc_value_set, sub: "enum_content JSON，原生标量", tag: MySQL }
+    - { title: resolvers.ts · STOCKS, sub: "21 条写死的股票，value + 三语 label", tag: 常量表, tone: amber }
+```
 五层各管一件事，出问题时的表现也各不相同：
 
 ```compare
