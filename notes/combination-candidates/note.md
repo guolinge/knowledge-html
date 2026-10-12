@@ -92,6 +92,8 @@ rows:
 
 每一层只做一件事：组件决定「用哪个 key」，注入层转发函数，宿主决定「缓存还是发 HTTP」，适配层把 pb 变形，服务端查表或查常量表。
 
+外层的框回答「它属于谁」：组件包和宿主同处浏览器；两条路由与动态候选的常量表同处 BFF 进程 —— ==所以只有值集合这一条链路要出进程去查库，动态候选不出==（demo 的常量表就在进程里；生产换成检索服务时会挪出这个框）。
+
 ```arch
 svg: candidate-paths
 bodies:
@@ -155,7 +157,7 @@ bodies:
       - { label: "00700.HK" }
       - { label: "09988.HK" }
     note: 共 21 条，没有停用态
-caption: 一次取值穿过五层，值集合和动态候选到服务端才分开。点任意零件看它这一层管什么，或者按下面两条导览各走一遍。
+caption: 一次取值穿过五层；值集合和动态候选到服务端才分开 —— 而且一个要出进程去查库，另一个不出。点区域看归属说明，点零件看完整归属路径，或按两条导览各走一遍；「多层归属框 / 只留一层分区」比较两种组织方式。
 parts:
   meta:
     label: metadata 字典
@@ -209,6 +211,34 @@ parts:
     sub: 21 条常量
     detail: |
       动态候选没有元数据表。真实实现是一次检索服务，demo 里是写死的数组；没有停用态，也不缓存。
+frames:
+  - id: browser
+    boundary: 0
+    kind: contains
+    label: 浏览器 · 用户侧
+    detail: 组件包和宿主跑在同一个页面里。HTTP 只发生在宿主这一侧，组件包只消费注入的函数。
+  - id: pkg
+    boundary: 1
+    parent: browser
+    kind: contains
+    label: 圈选组件包（@insight/combination）
+    detail: 组件子树加注入层。它不认识 HTTP，所有数据入口都是注入进来的三个函数。
+  - id: app
+    boundary: 2
+    parent: browser
+    kind: contains
+    label: 宿主应用（apps/client）
+    detail: 缓存、HTTP 和 pb → 内部形状的适配都在这一侧；它是这条链上唯一真正发请求的地方。
+  - id: bff
+    boundary: 3
+    kind: contains
+    label: Node BFF 进程（apps/server）
+    detail: 两条路由和动态候选的常量表同在这一个进程里 —— 链路 B 到这就结束了，不出进程；生产里常量表会换成外部检索服务，那时它也会被挪出这个框。
+  - id: db
+    boundary: 4
+    kind: contains
+    label: 外部数据源 · crm_dc_value_set
+    detail: 值集合的原型，在 BFF 进程外；BFF 的 5 秒内存投影从它来。动态候选不查它。
 tours:
   - id: valueset
     label: 链路 A · 值集合
@@ -360,8 +390,7 @@ messages:
   - { from: inj, to: host, label: "props.loadValueSet('city')", kind: sync, note: 2 }
   - { from: host, to: host, label: 查 cache / inflight, kind: self }
   - { from: host, to: srv, label: "GET /api/crowd/value-sets?setKey=city", kind: sync, note: 3 }
-  - { from: srv, to: srv, label: 查投影, kind: self }
-  - { from: srv, to: host, label: "items[] · value 是 JSON 标量字符串", kind: reply, note: 4 }
+  - { from: srv, to: host, label: "items[] · 从 5 秒投影里取，value 是 JSON 标量字符串", kind: reply, note: 4 }
   - { from: host, to: host, label: 适配 + 写缓存, kind: self }
   - { from: host, to: inj, label: "ValueItem[]", kind: reply }
   - { from: inj, to: vc, label: "ResolvedOption[] · DISABLED → disabled", kind: reply, note: 5 }
@@ -500,8 +529,7 @@ messages:
   - { from: vc, to: inj, label: "search('stock_search', '腾讯')", kind: sync, note: 1 }
   - { from: inj, to: host, label: "props.searchValues(resolverKey, keyword)", kind: sync }
   - { from: host, to: srv, label: "GET /resolver-options?…&keyword=腾讯", kind: sync, note: 2 }
-  - { from: srv, to: srv, label: 子串匹配, kind: self }
-  - { from: srv, to: host, label: "items[] · label 是 zhCn / zhHk / en", kind: reply, note: 3 }
+  - { from: srv, to: host, label: "items[] · 常量表子串匹配，label 是 zhCn / zhHk / en", kind: reply, note: 3 }
   - { from: host, to: inj, label: 键转 zh-CN / zh-HK / en, kind: reply }
   - { from: inj, to: vc, label: "ResolvedOption[]", kind: reply }
   - { from: vc, to: vc, label: 票据相等才写 remoteItems, kind: self, note: 4 }
