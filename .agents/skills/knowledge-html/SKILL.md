@@ -2530,6 +2530,11 @@ Label "请求" overlaps component "gateway"
 保留宽屏版面：`--shell: 2400px` 管页面外壳，`main` 跟可用视口走，
 `--prose: 1200px` 管正文行宽。当前没有 `--wide` 或 `main` 的 1280px 固定上限。
 
+==`main` 上不能加 `margin-inline: auto`== —— auto 会让 grid item 按 fit-content
+定宽，而宽图（arch / flow 的 svg 都是 `width: 100%`）没有内在宽度；一个最宽
+子元素只有 --prose 宽的页面，整列会坍到 --prose，`--shell` 调多大都没用。
+窄内容页要吃满视口，靠 grid 默认 stretch（2026-10-13 修过一次）。
+
 **版面变宽，不等于每张图都要等比放大。** SVG 的标题、行、badge、连线和间距一起缩放；
 只改 CSS `font-size` 会破坏已排好的节点内部布局。
 
