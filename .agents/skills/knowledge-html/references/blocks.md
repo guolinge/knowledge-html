@@ -395,6 +395,26 @@ rows:
   - 两条反向边（A→B 和 B→A）: ["两个标签画在同一个空隙里，叠成乱码", "现在会自动上下错开 15px"]
 ```
 
+#### 两个 group 不要在同一批 row 里并排
+
+`groups` 的框是成员节点的包围盒算出来的。两个 group 的成员交错排在同几行时，
+两个包围盒会相交 —— 先画的那个框，边线从另一个 group 的节点上穿过去。
+
+!!`visual-check` 不报这个：它查的是边、标签和溢出，不看 group 框。!!
+
+```compare
+first: 症状
+head: [会怎样, 怎么改]
+rows:
+  - "左右两列各一个 group，行号交错（row 0/1/2 左边、row 1/2/3 右边）":
+      - "先画的 group 框右边线穿过右边的节点"
+      - "把右边那个 group 整体挪到下面的行（先画完一条链，再画另一条）"
+```
+
+实测：2026-10-13 写 combination-i18n 的 global / local 作用域图，
+最初两列并排，蓝色框的右边线从「local messages」「某个组件」两个节点中间穿过；
+改成上下两条带（global 占 row 0~2，local 占 row 3~4）后干净，两个框不相邻也不相交。
+
 #### 阶梯 + 公共出口：这个形状 `flow` 画不了
 
 ```text
@@ -733,6 +753,9 @@ WIDGETS['my-widget'] = (root) => {
 ```
 
 可用的钩子：`[data-log="<name>"]`、`[data-run]`、`[data-reset]`、`[data-status]`。
+
+控件自己就带按钮（用 `config` 渲染整块 body）时，写上 `actions: false` —— 
+否则 demo 外壳还会多出一条「开始模拟 / 重置」工具栏，而它绑的 `[data-run]` 没人接，点了没反应。
 
 **② 在 note.md 里声明外壳：**
 
