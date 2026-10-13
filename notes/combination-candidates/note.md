@@ -94,6 +94,7 @@ rows:
 
 ```arch
 svg: candidate-paths
+maxScale: 1.4
 caption: 外层三层归属（浏览器 / 服务端 / 数据），里层两个包。点区域标题看这一层为什么这么分、包含谁；点零件看它的内容和相邻关系。两条链路的差异用上面的「场景」切。
 frames:
   - id: browser
