@@ -8,10 +8,12 @@
 tone: blue
 icon: 🧭
 text: |
-  **本篇结构**：两种字（00）→ 两条链路对照（01）→ vue-i18n 的两个作用域（02）→
-  组件库为什么把词条交出去（03）→ 数据名字那一半（04）→ 检查清单（05）。
+  **本篇结构**：两种字（00）→ 两条链路对照（01）→ useI18n 给了什么（02）→
+  t() 的查表顺序（03）→ 作用域 global / local（04）→ 组件库为什么把词条交出去（05）→
+  数据名字那一半（06）→ 检查清单（07）。
 
-  作用域结论与数据链路都是实测：SSR 探针跑 vue-i18n 9.14.5，协议取 FService 协议空间
+  卡在 `scope` 和 `t()` 就先读 02 / 03，它们是后面所有结论的地基。
+  机制结论都是实测：SSR 探针跑 vue-i18n 9.14.5，协议取 FService 协议空间
   `crm-crowd-service` v1.0.3（commit `51ede78d`）。
 ```
 
@@ -54,9 +56,138 @@ text: |
   合计 141 行词条。三个桶共用同一个 `typeof zhCN` 约束，漏一个 key 编译不过。
 ```
 
-## 02 · vue-i18n 的两个作用域
+## 02 · useI18n 给的四个东西
 
-vue-i18n 9 里，`useI18n()` 有**两个作用域**，取哪个决定了组件的 `t()` 去哪里查词条。
+`useI18n()` 是 Vue 的 composable（组合式函数），只在 `setup()` 里调用一次。它返回一套「给当前组件用的」查词条 API，同时定下「查哪一份词条」。和本篇有关的四个：
+
+```cards
+cols: 2
+items:
+  - { title: "useI18n()", desc: "在 setup() 里调用一次，把 API 绑到当前组件实例，并决定用哪个 composer", tag: 入口, tone: blue }
+  - { title: "composer", desc: "翻译器本体：locale + messages + fallback 规则打包成一个执行体。global 由宿主 app.use(i18n) 建，local 由组件自己建", tag: 两份来源, tone: violet }
+  - { title: "messages", desc: "按语言分桶的树，key 用 `.` 走层级：`t('group.title')`", tag: 查什么, tone: green }
+  - { title: "locale", desc: "当前语言，响应式；`t()` 每次调用都读它当时的値", tag: 查哪个桶, tone: amber }
+```
+
+四个东西在代码里长这样：
+
+```ts
+const { t, locale } = useI18n({ messages, useScope: 'local' });  // 略去 options 就是 global
+
+t('combinerTitle');        // '圈选条件'（当前 locale = 'zh-cn'）
+locale.value = 'en-us';    // 响应式：改它，用到 t 的模板会重渲染
+t('combinerTitle');        // 'Conditions'
+```
+
+```callout
+tone: amber
+icon: ⚠
+text: |
+  `useI18n()` 有两个前提，踩了都不报在页面上，只报在控制台：
+
+  - `createI18n({ legacy: false })`：用 legacy 模式（默认）时 `useI18n()` 抛 `Not available in legacy mode`。
+  - 宿主得先 `app.use(i18n)`：没装时抛 `Need to install with app.use function`。
+```
+
+## 03 · t() 是一次查表
+
+把 `t()` 当作「按 key 查表」的函数，后面就好读了：==t 的行为 = 查哪一份表 × 查哪个语言桶 × 没查到怎么办。==
+
+```flow
+grid: true
+nodes:
+  - { id: use, label: "useI18n()", sub: "拿到 composer + locale", row: 0, kind: frontend }
+  - { id: t, label: "t('combinerTitle')", sub: "在当前 composer 上执行", row: 1 }
+  - { id: find, label: "messages[locale] 按 key 逐层找", sub: "key 里的 . 就是层级", row: 2 }
+  - { id: hit, label: "返回字符串", sub: "'圈选条件'", row: 3, tone: green }
+  - { id: miss, label: "按顺序回落", sub: "root → fallbackLocale", row: 3, tone: amber }
+  - { id: key, label: "返回 key 本身", sub: "控制台 warn", row: 4, tone: red }
+edges:
+  - { from: use, to: t }
+  - { from: t, to: find }
+  - { from: find, to: hit, label: "命中" }
+  - { from: find, to: miss, label: "没命中" }
+  - { from: miss, to: key, label: "仍未命中" }
+```
+
+回落的顺序（每步命中就停）：
+
+```compare
+first: 步骤
+head: [命中就返回, 没命中就往下]
+rows:
+  - "① `composer.messages[locale]` 按 key 逐层找": ["返回字符串，最常见的一条", "往下走"]
+  - "② 回落 root（local → global）": ["返回 global 里的值", "往下走"]
+  - "③ 回落 fallbackLocale": ["返回 fallback 语言里的值", "往下走"]
+  - "④ 都没有": ["—", "返回 key 本身 + 控制台 warn"]
+```
+
+### 实测：六种输入的真实输出
+
+用 SSR 探针跑（vue 3.5.43 + vue-i18n 9.14.5，global messages 是 `{ 'zh-cn': { g: '全局中文', group: { title: '分组标题' } }, 'en-us': {...} }`，local messages 是 `{ 'zh-cn': { l: '本地中文', g: '本地覆盖' } }`）：
+
+```compare
+first: 调用
+head: [真实输出, 说明]
+rows:
+  - "`t('group.title')`": ["`分组标题`", "key 里的 `.` 就是层级"]
+  - "`t('l')`（只在 local 里）": ["`本地中文`", "local 里有就用 local 的"]
+  - "`t('g')`（local 和 global 都有）": ["`本地覆盖`", "同名时 local 赢"]
+  - "`t('hostOnly')`（local 没有、global 有）": ["`宿主中文`", "回落 root（global）"]
+  - "`t('nope')`（哪都没有）": ["`nope`", "原样返回 key，控制台一条 warn"]
+  - "`locale` 改成 `en-us` 后再 `t('combinerTitle')`": ["`Conditions`", "`t()` 每次读当前 locale"]
+```
+
+下面这个控件把这些行为做成可点的查表器：选 composer、语言、key，看它一步步落。
+
+```demo
+widget: i18n-lookup
+actions: false
+title: t(key) 在哪里命中，又在哪里落空
+config:
+  langs:
+    - { id: zh-cn, label: 简体中文 }
+    - { id: en-us, label: English }
+  fallbackLocale: zh-cn
+  global:
+    zh-cn: { combinerTitle: 圈选条件, hostOnly: 宿主中文, group: { title: 分组标题 } }
+    en-us: { combinerTitle: Conditions, group: { title: Group title } }
+  local:
+    zh-cn: { combinerTitle: 本地覆盖, localOnly: 只在 local 里 }
+    en-us: { combinerTitle: local override }
+  keys:
+    - { key: combinerTitle, note: 两份都有 }
+    - { key: hostOnly, note: 只在 global }
+    - { key: localOnly, note: 只在 local }
+    - { key: group.title, note: 嵌套键，只在 global }
+    - { key: nope, note: 哪都没有 }
+```
+
+> 控件按上面的查找顺序模拟；`fallbackLocale` 那一步简化成「在 global 里再找一次」。
+
+### 一个反直觉的细节：fallbackRoot 在 local 上取的是 root 的
+
+````callout
+tone: red
+icon: 🩸
+text: |
+  local composer 找不到 key 时会回落 global（`fallbackRoot` 默认 `true`）。想关掉它，
+  在组件里写 `useI18n({ useScope: 'local', fallbackRoot: false })` ==不生效==：
+
+  ```js
+  // vue-i18n 9.14.5 · vue-i18n.mjs:2601
+  const _fallbackRoot = isLocalScope
+      ? root.fallbackRoot                              // ← local 用 root 上那一份
+      : isBoolean(options.fallbackRoot) ? options.fallbackRoot : true;
+  ```
+
+  实测：组件里写 `false` 仍会回落（拿到 `宿主中文`）；改在 `createI18n({ fallbackRoot: false })`
+  上写，才真的不回落（拿到 key `hostOnly`）。demo 里那个开关模拟的就是 root 上这一份。
+````
+
+## 04 · 查哪一份 composer：global 与 local
+
+02 节说 `useI18n()` 会绑定一个 composer，`t()` 在它上面执行。到底绑哪一份，由 `scope` 决定：
 
 ```flow
 grid: true
@@ -116,7 +247,7 @@ child:  combinerTitle=圈选条件 | onlyLocal=onlyLocal
 
 !!笔记里的 `useScope: 'local'` 常被当成「给这棵子树设置语言」，实际只覆盖当前组件一层。!!
 
-## 03 · 组件库的契约：词条交出去，实例借用宿主的
+## 05 · 组件库的契约：词条交出去，实例借用宿主的
 
 组件的 12 个组件全部用 `useLabel()`（内部就是 `useI18n()`），没有一处自建 i18n 实例。这是刻意的：
 
@@ -175,16 +306,16 @@ rows:
       - "一棵组件树里出现多份 locale 状态，宿主切语言要挨个通知；组件包还得自己装一个 vue-i18n 版本，和宿主那份不是同一个实例时会有两份运行时"
       - { text: 不选, tone: red }
   - "组件用 `useScope: 'local'` 声明词条":
-      - "local 只覆盖声明它的那个组件一层（02 节实测），11 个子组件要各自声明一遍，47 个 key 抄 12 份"
+      - "local 只覆盖声明它的那个组件一层（04 节实测），11 个子组件要各自声明一遍，47 个 key 抄 12 份"
       - { text: 不选, tone: red }
   - "词条导出、宿主合并、组件读 global":
       - "locale 只有一份真相，子组件天然能查到词条，组件包不锁 vue-i18n 版本"
       - { text: 当前做法, tone: green }
 ```
 
-!!只 `app.use(i18n)`、忘了合并 `combinationMessages`，页面上会直接显示 `combinerTitle` 这样的 key。!! vue-i18n 找不到 key 时返回 key 本身，不报错，也不空白。02 节的探针里 `onlyLocal=onlyLocal` 就是同一个行为。
+!!只 `app.use(i18n)`、忘了合并 `combinationMessages`，页面上会直接显示 `combinerTitle` 这样的 key。!! vue-i18n 找不到 key 时返回 key 本身，不报错，也不空白。03 节的探针里 `onlyLocal=onlyLocal` 就是同一个行为。
 
-## 04 · 数据名字那一半：由服务端翻译
+## 06 · 数据名字那一半：由服务端翻译
 
 字段名、关系名、值集合的 label 不归 SDK 管。它们在 Data Admin 里配置，请求时按调用方的语言本地化成**单个字符串**再下发：
 
@@ -262,7 +393,7 @@ config:
 
 !!切语言时不能只按 `revision` 判断要不要换元数据。!! `revision` 是投影内容哈希，它不保证随语言变化；圈选页的做法是 `watch(locale)` 时带 `force: true` 直接换一份新的，并清掉值集合缓存。
 
-## 05 · 检查清单
+## 07 · 检查清单
 
 ```checklist
 tone: warn
@@ -286,6 +417,12 @@ text: |
 ```
 
 ```quiz
+- q: "`t('x.y')` 没命中时，vue-i18n 按什么顺序往下找？"
+  a: |
+    ① 当前 composer 的 `messages[locale]` 按 `.` 逐层找；
+    ② local composer 的话，回落 root（global）的同语言桶；
+    ③ 回落 `fallbackLocale`；
+    ④ 都没有就返回 key 本身，并在控制台 warn。每一步命中就停。
 - q: "组件里的 12 个组件都调用 useI18n()，为什么不能各自声明 useScope: 'local' 把自己的词条带进去？"
   a: |
     local scope 只对声明它的那个组件实例生效，子组件调用 useI18n() 拿到的还是 global。

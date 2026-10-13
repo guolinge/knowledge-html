@@ -8952,6 +8952,155 @@ WIDGETS['mysql-2pc-crash'] = (root) => {
     pick(langs[0].id);
   };
 
+  /* ============================================================
+     控件：i18n-lookup —— t(key) 在哪里命中、又在哪里落空
+     ------------------------------------------------------------
+     按 vue-i18n 的查找顺序模拟：当前 composer 的 messages[locale] →
+     （local 时）回落 root（global）→ 回落 fallbackLocale → 返回 key 本身。
+     每一步命中就停；右侧把走过的步骤逐步列出来。
+
+     config:
+       langs:          [{ id, label }]
+       fallbackLocale: 'zh-cn'
+       global:         { <lang>: { ...messages } }   // 宿主 app.use(i18n) 建的那一份
+       local:          { <lang>: { ... } }           // 组件 useI18n({ useScope: 'local' }) 的那一份
+       keys:           [{ key, note }]
+  ============================================================ */
+  WIDGETS['i18n-lookup'] = (root) => {
+    const cfg = cfgOf(root);
+    const langs = cfg.langs || [];
+    const globalMsgs = cfg.global || {};
+    const localMsgs = cfg.local || {};
+    const keys = cfg.keys || [];
+    const fallbackLocale = cfg.fallbackLocale || (langs[0] && langs[0].id);
+    if (langs.length < 2 || !keys.length) return;
+    const box = mountOf(root);
+    const statusEl = root.querySelector('[data-status]');
+
+    let locale = langs[0].id;
+    let scope = 'global';
+    let rootFallback = true;   // createI18n({ fallbackRoot })：local 缺键时是否回 root
+    let current = keys[0].key;
+
+    /* assets 里给的这个演示树是字面值，不需要防注入；路径不存在就返回 undefined */
+    const walk = (tree, loc, path) => {
+      let cur = tree && tree[loc];
+      const segs = String(path).split('.');
+      for (const seg of segs) {
+        if (cur == null || typeof cur !== 'object') return undefined;
+        cur = cur[seg];
+      }
+      return typeof cur === 'string' ? cur : undefined;
+    };
+
+    /* —— 控件区 —— */
+    const ctrl = el('div', 'lk-ctrl');
+
+    const segLang = el('div', 'lk-seg');
+    const langBtns = langs.map((l) => {
+      const b = el('button', 'lk-btn');
+      b.append(el('b', '', l.label));
+      b.addEventListener('click', () => { locale = l.id; run(); });
+      segLang.append(b);
+      return b;
+    });
+
+    const segScope = el('div', 'lk-seg');
+    const scopeBtns = [['global', 'useI18n()'], ['local', "useScope: 'local'"]].map(([id, label]) => {
+      const b = el('button', 'lk-btn');
+      b.append(el('span', 'lk-mono', label));
+      b.addEventListener('click', () => { scope = id; run(); });
+      segScope.append(b);
+      return b;
+    });
+
+    const toggle = el('button', 'lk-toggle');
+    toggle.addEventListener('click', () => { rootFallback = !rootFallback; run(); });
+
+    const keyRow = el('div', 'lk-keys');
+    const keyBtns = keys.map((k) => {
+      const b = el('button', 'lk-key');
+      b.append(el('code', 'lk-mono', k.key), el('span', 'lk-note', k.note || ''));
+      b.addEventListener('click', () => { current = k.key; run(); });
+      keyRow.append(b);
+      return b;
+    });
+
+    const ctrlBlock = (label, node) => {
+      const w = el('div', 'lk-block');
+      w.append(el('div', 'lk-label', label), node);
+      return w;
+    };
+    ctrl.append(ctrlBlock('locale（当前语言）', segLang), ctrlBlock('哪个 composer', segScope));
+    ctrl.append(ctrlBlock('root.fallbackRoot', toggle), ctrlBlock('查哪个 key', keyRow));
+
+    /* —— 结果区 —— */
+    const out = el('div', 'lk-out');
+    const outHead = el('div', 'lk-label', '查找过程');
+    const steps = el('div', 'lk-steps');
+    const result = el('div', 'lk-result');
+    out.append(outHead, steps, result);
+
+    const grid = el('div', 'lk-grid');
+    grid.append(ctrl, out);
+    box.append(grid);
+
+    function run() {
+      langBtns.forEach((b, i) => b.classList.toggle('on', langs[i].id === locale));
+      scopeBtns.forEach((b, i) => b.classList.toggle('on', (i === 0 ? 'global' : 'local') === scope));
+      keyBtns.forEach((b, i) => b.classList.toggle('on', keys[i].key === current));
+      toggle.classList.toggle('on', rootFallback);
+      toggle.textContent = 'fallbackRoot = ' + (rootFallback ? 'true' : 'false');
+
+      const list = [];
+      let value;
+      if (scope === 'local') {
+        value = walk(localMsgs, locale, current);
+        list.push({ t: "local.messages['" + locale + "'] 找 " + current, v: value === undefined ? '没有' : '命中 ' + value, ok: value !== undefined });
+        if (value === undefined) {
+          if (rootFallback) {
+            value = walk(globalMsgs, locale, current);
+            list.push({ t: "回落 root：global.messages['" + locale + "']", v: value === undefined ? '没有' : '命中 ' + value, ok: value !== undefined });
+          } else {
+            list.push({ t: 'root.fallbackRoot = false', v: '不回落 root', ok: false });
+          }
+        }
+      } else {
+        value = walk(globalMsgs, locale, current);
+        list.push({ t: "global.messages['" + locale + "'] 找 " + current, v: value === undefined ? '没有' : '命中 ' + value, ok: value !== undefined });
+      }
+      if (value === undefined) {
+        /* 回落 fallbackLocale：先看当前作用域那一份，local 再看 root（fallbackRoot 控制） */
+        if (scope === 'local') {
+          const fbLocal = walk(localMsgs, fallbackLocale, current);
+          list.push({ t: "回落 fallbackLocale：local.messages['" + fallbackLocale + "']", v: fbLocal === undefined ? '没有' : '命中 ' + fbLocal, ok: fbLocal !== undefined });
+          if (fbLocal !== undefined) value = fbLocal;
+        }
+        if (value === undefined && (scope === 'global' || rootFallback)) {
+          const fbRoot = walk(globalMsgs, fallbackLocale, current);
+          list.push({ t: "回落 fallbackLocale：global.messages['" + fallbackLocale + "']", v: fbRoot === undefined ? '没有' : '命中 ' + fbRoot, ok: fbRoot !== undefined });
+          if (fbRoot !== undefined) value = fbRoot;
+        }
+      }
+      if (value === undefined) {
+        value = current;
+        list.push({ t: '都没命中', v: '返回 key 本身，控制台 warn', ok: false });
+      }
+
+      steps.textContent = '';
+      list.forEach((s, i) => {
+        const row = el('div', 'lk-step' + (s.ok ? ' is-ok' : ' is-miss'));
+        row.append(el('span', 'lk-idx', String(i + 1)), el('span', 'lk-act', s.t), el('span', 'lk-val', s.v));
+        steps.append(row);
+      });
+      result.textContent = "t('" + current + "') → " + value;
+      result.classList.toggle('is-miss', value === current);
+      if (statusEl) statusEl.textContent = scope === 'local' ? 'local composer' : 'global composer';
+    }
+
+    run();
+  };
+
   /* ---------- 挂载 ---------- */
   document.querySelectorAll('[data-widget]').forEach((root) => {
     var name = root.getAttribute('data-widget');

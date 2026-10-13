@@ -4,9 +4,9 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>组合器的两套「字」：界面文案与数据名字</title>
-<meta name="description" content="圈选界面上的每个字有两个来源：组件包与宿主自带的界面文案（三语、在本地合并进 global messages、切语言即变）和 Data Admin 下发的数据名字（单语、服务端按 clientLang 翻译、切语言要重拉）。含 vue-i18n global/local 作用域的实测结论与可切换语言的交互 demo。" />
+<meta name="description" content="从 useI18n 的机制讲起：t() 是一次查表（composer → locale → messages → 回落 → 返回 key），查哪一份 composer 由 scope 决定。再分两条链路看圈选界面上的字：界面文案（组件包与宿主自带的界面词条，三语、宿主合并进 global messages、切语言即变）和 Data Admin 下发的数据名字（单语、服务端按 clientLang 翻译、切语言要重拉）。含 vue-i18n 的 SSR 实测与两个可交互控件。" />
 <link rel="stylesheet" href="../../assets/theme.css?v=b918ec5c83" />
-  <link rel="stylesheet" href="../../assets/blocks.css?v=eb96db7e32" />
+  <link rel="stylesheet" href="../../assets/blocks.css?v=cad5b999c1" />
   <link rel="stylesheet" href="../../assets/archify-embed.css?v=68fec0b81b" />
 </head>
 <body>
@@ -29,7 +29,11 @@
       <a href="../../index.html" class="sub">← 全部笔记</a>
       <a href="#界面上同时住着两种字">界面上同时住着两种字</a>
       <a href="#两条链路的对照">两条链路的对照</a>
-      <a href="#vue-i18n-的两个作用域">vue-i18n 的两个作用域</a>
+      <a href="#usei18n-给的四个东西">useI18n 给的四个东西</a>
+      <a href="#t-是一次查表">t() 是一次查表</a>
+      <a href="#实测六种输入的真实输出" class="sub">实测：六种输入的真实输出</a>
+      <a href="#一个反直觉的细节fallbackroot-在-local-上取的是-root-的" class="sub">一个反直觉的细节：fallbackRoot 在 local 上取的是 root 的</a>
+      <a href="#查哪一份-composerglobal-与-local">查哪一份 composer：global 与 local</a>
       <a href="#组件库的契约词条交出去实例借用宿主的">组件库的契约：词条交出去，实例借用宿主的</a>
       <a href="#数据名字那一半由服务端翻译">数据名字那一半：由服务端翻译</a>
       <a href="#检查清单">检查清单</a>
@@ -39,24 +43,26 @@
     <div class="hero">
       <span class="eyebrow">● 从零理解 · 机制</span>
       <h1>组合器的两套「字」：界面文案与数据名字</h1>
-      <p class="lede">圈选界面上的每个字有两个来源：组件包与宿主自带的界面文案（三语、在本地合并进 global messages、切语言即变）和 Data Admin 下发的数据名字（单语、服务端按 clientLang 翻译、切语言要重拉）。含 vue-i18n global/local 作用域的实测结论与可切换语言的交互 demo。</p>
+      <p class="lede">从 useI18n 的机制讲起：t() 是一次查表（composer → locale → messages → 回落 → 返回 key），查哪一份 composer 由 scope 决定。再分两条链路看圈选界面上的字：界面文案（组件包与宿主自带的界面词条，三语、宿主合并进 global messages、切语言即变）和 Data Admin 下发的数据名字（单语、服务端按 clientLang 翻译、切语言要重拉）。含 vue-i18n 的 SSR 实测与两个可交互控件。</p>
     </div>
 
 <aside class="needs">
       <p class="needs-title">读这篇之前，你需要先知道</p>
       <a class="need" href="../combination-overview/">← <b>5. 组件层</b><span>受控的圈选组件包：Metadata 驱动渲染，草稿收窄成 DSL</span></a>
     </aside>
-    <div class="provenance"><span><b>来源</b> audience_web packages/combination/src/messages.ts（zhCN / zhHK / en 三个语言桶各 47 个 key，逐桶数过）、src/label.ts（LabelText = string | I18nText，label() 两条分支）、src/index.ts（导出 combinationMessages）；12 个组件 + values.ts 调 useLabel()，无一处自建 i18n；package.json 里 vue-i18n / vue / element-plus 是 peerDependency——2026-10-13 工作区状态 · audience_web packages/dsl/src/audience.ts（读模型注释：name / label 是「当前请求语言下」的单个字符串，SDK 不再存三键、不做多语言兜底）、packages/dsl/test/audience.spec.ts · audience_web client/src/locale.ts（combinationMessages 合并进三个 locale 桶）、client/src/views/combine/index.vue（watch(locale) → loadMeta({ force: true }) 并清值集合缓存） · audience_web server/app/lib/crowd/adapt.ts（name / label 原样透传，适配层只剩 JSON 标量字符串与 status 转换）、server/node_modules/@futu/agudo/app/extend/helper.js（getSrpcHeader 把 ctx.env.lang 作为 clientLang 塞进下游 header） · FService 协议空间 crm-crowd-service v1.0.3 / commit 51ede78d（2026-10-13 14:01 生成的正式制品）：crm_crowd_metadata_service.proto 中 CrowdPortrait / CrowdRelation / ValueItem / ResolverOption 的 name / label 均为 optional string，注释写「当前请求语言下的名称」 · 实测（2026-10-13）：SSR 探针 vue 3.5.43 + vue-i18n 9.14.5 —— 父组件 useScope: 'local' 渲染出本地词条，子组件 useI18n() 命中宿主 global 的 combinerTitle，未合并的 onlyLocal 原样返回 key · crm-dsl-stru packages/dsl/src/audience.ts @ 9b269dc（对照用的旧状态：当时读模型是三键 zhCn / zhHk / en，BFF 适配层负责把单语言包装成三键）</span><span><b>生成</b> 2026-10-13</span><span><b>模型</b> pi (openai-codex)</span></div>
-    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">vue-i18n</span> <span class="tag tone-muted">i18n</span> <span class="tag tone-muted">圈选</span> <span class="tag tone-muted">受控组件</span> <span class="tag tone-muted">客群洞察</span></span></div>
+    <div class="provenance"><span><b>来源</b> 实测（2026-10-13，SSR 探针，vue 3.5.43 + vue-i18n 9.14.5，在 audience_web 仓跑）：① 嵌套键 t('group.title') 命中；② local 独有键命中、local 与 global 同名时 local 赢；③ local 缺键回落 root（拿到 global 的值）；④ 哪都没有时原样返回 key；⑤ locale.value 改动后 t() 立刻读到新语言；⑥ 未 app.use(i18n) 抛 `Need to install with app.use function`；⑦ legacy: true 时 useI18n() 抛 `Not available in legacy mode`；⑧ 组件里写 fallbackRoot: false 无效，createI18n({ fallbackRoot: false }) 才生效 · vue-i18n 9.14.5 源码：node_modules/.pnpm/vue-i18n@9.14.5*/dist/vue-i18n.mjs:2601 —— `const _fallbackRoot = isLocalScope ? root.fallbackRoot : isBoolean(options.fallbackRoot) ? options.fallbackRoot : true;`（local scope 取 root 的设置） · audience_web packages/combination/src/messages.ts（zhCN / zhHK / en 三个语言桶各 47 个 key，逐桶数过）、src/label.ts（LabelText = string | I18nText，label() 两条分支）、src/index.ts（导出 combinationMessages）；12 个组件 + values.ts 调 useLabel()，无一处自建 i18n；package.json 里 vue-i18n / vue / element-plus 是 peerDependency——2026-10-13 工作区状态 · audience_web packages/dsl/src/audience.ts（读模型注释：name / label 是「当前请求语言下」的单个字符串，SDK 不再存三键、不做多语言兜底）、packages/dsl/test/audience.spec.ts · audience_web client/src/locale.ts（combinationMessages 合并进三个 locale 桶）、client/src/views/combine/index.vue（watch(locale) → loadMeta({ force: true }) 并清值集合缓存） · audience_web server/app/lib/crowd/adapt.ts（name / label 原样透传，适配层只剩 JSON 标量字符串与 status 转换）、server/node_modules/@futu/agudo/app/extend/helper.js（getSrpcHeader 把 ctx.env.lang 作为 clientLang 塞进下游 header） · FService 协议空间 crm-crowd-service v1.0.3 / commit 51ede78d（2026-10-13 14:01 生成的正式制品）：crm_crowd_metadata_service.proto 中 CrowdPortrait / CrowdRelation / ValueItem / ResolverOption 的 name / label 均为 optional string，注释写「当前请求语言下的名称」 · crm-dsl-stru packages/dsl/src/audience.ts @ 9b269dc（对照用的旧状态：当时读模型是三键 zhCn / zhHk / en，BFF 适配层负责把单语言包装成三键）</span><span><b>生成</b> 2026-10-13</span><span><b>模型</b> pi (openai-codex)</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">vue-i18n</span> <span class="tag tone-muted">i18n</span> <span class="tag tone-muted">Vue composable</span> <span class="tag tone-muted">圈选</span> <span class="tag tone-muted">客群洞察</span></span></div>
 
 <p><a href="../combination-overview/">组合器全景</a> 讲了组件包由哪些文件组成，<a href="../combination-mechanics/">组件机制</a> 讲了它怎么工作。这一篇回答一个更小的问题：</p>
 <p><strong>圈选界面上每一个字，是谁翻译出来的？</strong></p>
 <p>答案有两个。组件自带的界面文案（<code>圈选条件</code>、<code>查询</code>）和 Data Admin 配置的数据名字（<code>近30天成交笔数</code>、<code>港股</code>），走的是两条完全不同的链路：一条是本地的三语词条，切语言下一帧就变；另一条是服务端按请求语言挑好的一种名字，切语言要重新拉。混在一起想，就会问出「组件为什么不自己带一套 i18n」这种看着合理、方向错了的问题。</p>
 <div class="callout tone-blue">
       <span class="ic">🧭</span>
-      <div><p><strong>本篇结构</strong>：两种字（00）→ 两条链路对照（01）→ vue-i18n 的两个作用域（02）→
-组件库为什么把词条交出去（03）→ 数据名字那一半（04）→ 检查清单（05）。</p>
-<p>作用域结论与数据链路都是实测：SSR 探针跑 vue-i18n 9.14.5，协议取 FService 协议空间
+      <div><p><strong>本篇结构</strong>：两种字（00）→ 两条链路对照（01）→ useI18n 给了什么（02）→
+t() 的查表顺序（03）→ 作用域 global / local（04）→ 组件库为什么把词条交出去（05）→
+数据名字那一半（06）→ 检查清单（07）。</p>
+<p>卡在 <code>scope</code> 和 <code>t()</code> 就先读 02 / 03，它们是后面所有结论的地基。
+机制结论都是实测：SSR 探针跑 vue-i18n 9.14.5，协议取 FService 协议空间
 <code>crm-crowd-service</code> v1.0.3（commit <code>51ede78d</code>）。</p>
 </div>
     </div><h2 id="界面上同时住着两种字"><span class="num">00</span>界面上同时住着两种字</h2>
@@ -74,12 +80,125 @@
       <div><p><code>packages/combination/src/messages.ts</code> 实测：<code>zhCN</code> / <code>zhHK</code> / <code>en</code> 三个语言桶各 <strong>47 个 key</strong>，
 合计 141 行词条。三个桶共用同一个 <code>typeof zhCN</code> 约束，漏一个 key 编译不过。</p>
 </div>
-    </div><h2 id="vue-i18n-的两个作用域"><span class="num">02</span>vue-i18n 的两个作用域</h2>
-<p>vue-i18n 9 里，<code>useI18n()</code> 有<strong>两个作用域</strong>，取哪个决定了组件的 <code>t()</code> 去哪里查词条。</p>
-<div class="flowd has-grid has-groups" data-flow data-edges="[{&quot;from&quot;:&quot;host&quot;,&quot;to&quot;:&quot;msg&quot;,&quot;label&quot;:&quot;传入 messages&quot;},{&quot;from&quot;:&quot;msg&quot;,&quot;to&quot;:&quot;comb&quot;},{&quot;from&quot;:&quot;comb&quot;,&quot;to&quot;:&quot;child&quot;,&quot;label&quot;:&quot;命中 ✅&quot;},{&quot;from&quot;:&quot;parent&quot;,&quot;to&quot;:&quot;kid&quot;,&quot;dashed&quot;:true,&quot;tone&quot;:&quot;red&quot;,&quot;label&quot;:&quot;❌ 不传递&quot;}]" style="--flow-marker:url(#fa-1)">
+    </div><h2 id="usei18n-给的四个东西"><span class="num">02</span>useI18n 给的四个东西</h2>
+<p><code>useI18n()</code> 是 Vue 的 composable（组合式函数），只在 <code>setup()</code> 里调用一次。它返回一套「给当前组件用的」查词条 API，同时定下「查哪一份词条」。和本篇有关的四个：</p>
+<div class="cards" data-cols="2"><div class="ccard tone-blue">
+          <span class="tag tone-blue">入口</span>
+          <h4>useI18n()</h4>
+          <p>在 setup() 里调用一次，把 API 绑到当前组件实例，并决定用哪个 composer</p>
+          
+          
+        </div><div class="ccard tone-violet">
+          <span class="tag tone-violet">两份来源</span>
+          <h4>composer</h4>
+          <p>翻译器本体：locale + messages + fallback 规则打包成一个执行体。global 由宿主 app.use(i18n) 建，local 由组件自己建</p>
+          
+          
+        </div><div class="ccard tone-green">
+          <span class="tag tone-green">查什么</span>
+          <h4>messages</h4>
+          <p>按语言分桶的树，key 用 <code>.</code> 走层级：<code>t('group.title')</code></p>
+          
+          
+        </div><div class="ccard tone-amber">
+          <span class="tag tone-amber">查哪个桶</span>
+          <h4>locale</h4>
+          <p>当前语言，响应式；<code>t()</code> 每次调用都读它当时的値</p>
+          
+          
+        </div></div><p>四个东西在代码里长这样：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-ts">const { t, locale } = useI18n({ messages, useScope: 'local' });  // 略去 options 就是 global
+
+t('combinerTitle');        // '圈选条件'（当前 locale = 'zh-cn'）
+locale.value = 'en-us';    // 响应式：改它，用到 t 的模板会重渲染
+t('combinerTitle');        // 'Conditions'
+</code></pre></div>
+<div class="callout tone-amber">
+      <span class="ic">⚠</span>
+      <div><p><code>useI18n()</code> 有两个前提，踩了都不报在页面上，只报在控制台：</p>
+<ul>
+<li><code>createI18n({ legacy: false })</code>：用 legacy 模式（默认）时 <code>useI18n()</code> 抛 <code>Not available in legacy mode</code>。</li>
+<li>宿主得先 <code>app.use(i18n)</code>：没装时抛 <code>Need to install with app.use function</code>。</li>
+</ul>
+</div>
+    </div><h2 id="t-是一次查表"><span class="num">03</span>t() 是一次查表</h2>
+<p>把 <code>t()</code> 当作「按 key 查表」的函数，后面就好读了：<mark class="mk-blue">t 的行为 = 查哪一份表 × 查哪个语言桶 × 没查到怎么办。</mark></p>
+<div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;use&quot;,&quot;to&quot;:&quot;t&quot;},{&quot;from&quot;:&quot;t&quot;,&quot;to&quot;:&quot;find&quot;},{&quot;from&quot;:&quot;find&quot;,&quot;to&quot;:&quot;hit&quot;,&quot;label&quot;:&quot;命中&quot;},{&quot;from&quot;:&quot;find&quot;,&quot;to&quot;:&quot;miss&quot;,&quot;label&quot;:&quot;没命中&quot;},{&quot;from&quot;:&quot;miss&quot;,&quot;to&quot;:&quot;key&quot;,&quot;label&quot;:&quot;仍未命中&quot;}]" style="--flow-marker:url(#fa-1)">
       <svg class="flowd-svg" aria-hidden="true">
         <defs>
           <marker id="fa-1" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-muted" data-id="use">
+              
+              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="3" width="11" height="8.5" rx="1.5"/><path d="M2.5 6h11"/></svg>
+              <b>useI18n()</b>
+              <small>拿到 composer + locale</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-muted" data-id="t">
+              
+              
+              <b>t('combinerTitle')</b>
+              <small>在当前 composer 上执行</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-muted" data-id="find">
+              
+              
+              <b>messages[locale] 按 key 逐层找</b>
+              <small>key 里的 . 就是层级</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="hit">
+              
+              
+              <b>返回字符串</b>
+              <small>'圈选条件'</small>
+            </div><div class="fnode tone-amber" data-id="miss">
+              
+              
+              <b>按顺序回落</b>
+              <small>root → fallbackLocale</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-red" data-id="key">
+              
+              
+              <b>返回 key 本身</b>
+              <small>控制台 warn</small>
+            </div></div></div>
+      
+    </div><p>回落的顺序（每步命中就停）：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>步骤</th><th>命中就返回</th><th>没命中就往下</th></tr></thead><tbody><tr><th>① <code>composer.messages[locale]</code> 按 key 逐层找</th><td data-label="命中就返回">返回字符串，最常见的一条</td><td data-label="没命中就往下">往下走</td></tr><tr><th>② 回落 root（local → global）</th><td data-label="命中就返回">返回 global 里的值</td><td data-label="没命中就往下">往下走</td></tr><tr><th>③ 回落 fallbackLocale</th><td data-label="命中就返回">返回 fallback 语言里的值</td><td data-label="没命中就往下">往下走</td></tr><tr><th>④ 都没有</th><td data-label="命中就返回">—</td><td data-label="没命中就往下">返回 key 本身 + 控制台 warn</td></tr></tbody></table></div><h3 id="实测六种输入的真实输出">实测：六种输入的真实输出</h3>
+<p>用 SSR 探针跑（vue 3.5.43 + vue-i18n 9.14.5，global messages 是 <code>{ 'zh-cn': { g: '全局中文', group: { title: '分组标题' } }, 'en-us': {...} }</code>，local messages 是 <code>{ 'zh-cn': { l: '本地中文', g: '本地覆盖' } }</code>）：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>调用</th><th>真实输出</th><th>说明</th></tr></thead><tbody><tr><th><code>t('group.title')</code></th><td data-label="真实输出"><code>分组标题</code></td><td data-label="说明">key 里的 <code>.</code> 就是层级</td></tr><tr><th><code>t('l')</code>（只在 local 里）</th><td data-label="真实输出"><code>本地中文</code></td><td data-label="说明">local 里有就用 local 的</td></tr><tr><th><code>t('g')</code>（local 和 global 都有）</th><td data-label="真实输出"><code>本地覆盖</code></td><td data-label="说明">同名时 local 赢</td></tr><tr><th><code>t('hostOnly')</code>（local 没有、global 有）</th><td data-label="真实输出"><code>宿主中文</code></td><td data-label="说明">回落 root（global）</td></tr><tr><th><code>t('nope')</code>（哪都没有）</th><td data-label="真实输出"><code>nope</code></td><td data-label="说明">原样返回 key，控制台一条 warn</td></tr><tr><th><code>locale</code> 改成 <code>en-us</code> 后再 <code>t('combinerTitle')</code></th><td data-label="真实输出"><code>Conditions</code></td><td data-label="说明"><code>t()</code> 每次读当前 locale</td></tr></tbody></table></div><p>下面这个控件把这些行为做成可点的查表器：选 composer、语言、key，看它一步步落。</p>
+<div class="demo" data-widget="i18n-lookup" data-config="{&quot;langs&quot;:[{&quot;id&quot;:&quot;zh-cn&quot;,&quot;label&quot;:&quot;简体中文&quot;},{&quot;id&quot;:&quot;en-us&quot;,&quot;label&quot;:&quot;English&quot;}],&quot;fallbackLocale&quot;:&quot;zh-cn&quot;,&quot;global&quot;:{&quot;zh-cn&quot;:{&quot;combinerTitle&quot;:&quot;圈选条件&quot;,&quot;hostOnly&quot;:&quot;宿主中文&quot;,&quot;group&quot;:{&quot;title&quot;:&quot;分组标题&quot;}},&quot;en-us&quot;:{&quot;combinerTitle&quot;:&quot;Conditions&quot;,&quot;group&quot;:{&quot;title&quot;:&quot;Group title&quot;}}},&quot;local&quot;:{&quot;zh-cn&quot;:{&quot;combinerTitle&quot;:&quot;本地覆盖&quot;,&quot;localOnly&quot;:&quot;只在 local 里&quot;},&quot;en-us&quot;:{&quot;combinerTitle&quot;:&quot;local override&quot;}},&quot;keys&quot;:[{&quot;key&quot;:&quot;combinerTitle&quot;,&quot;note&quot;:&quot;两份都有&quot;},{&quot;key&quot;:&quot;hostOnly&quot;,&quot;note&quot;:&quot;只在 global&quot;},{&quot;key&quot;:&quot;localOnly&quot;,&quot;note&quot;:&quot;只在 local&quot;},{&quot;key&quot;:&quot;group.title&quot;,&quot;note&quot;:&quot;嵌套键，只在 global&quot;},{&quot;key&quot;:&quot;nope&quot;,&quot;note&quot;:&quot;哪都没有&quot;}]}">
+      <div class="demo-head">
+        <span class="title">t(key) 在哪里命中，又在哪里落空</span>
+        <span class="status" data-status></span>
+        <span class="spacer"></span>
+        
+      </div>
+      <div class="demo-body custom" data-mount></div>
+    </div><blockquote>
+<p>控件按上面的查找顺序模拟；<code>fallbackLocale</code> 那一步简化成「在 global 里再找一次」。</p>
+</blockquote>
+<h3 id="一个反直觉的细节fallbackroot-在-local-上取的是-root-的">一个反直觉的细节：fallbackRoot 在 local 上取的是 root 的</h3>
+<div class="callout tone-red">
+      <span class="ic">🩸</span>
+      <div><p>local composer 找不到 key 时会回落 global（<code>fallbackRoot</code> 默认 <code>true</code>）。想关掉它，
+在组件里写 <code>useI18n({ useScope: 'local', fallbackRoot: false })</code> <mark class="mk-blue">不生效</mark>：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-js">// vue-i18n 9.14.5 · vue-i18n.mjs:2601
+const _fallbackRoot = isLocalScope
+    ? root.fallbackRoot                              // ← local 用 root 上那一份
+    : isBoolean(options.fallbackRoot) ? options.fallbackRoot : true;
+</code></pre></div>
+<p>实测：组件里写 <code>false</code> 仍会回落（拿到 <code>宿主中文</code>）；改在 <code>createI18n({ fallbackRoot: false })</code>
+上写，才真的不回落（拿到 key <code>hostOnly</code>）。demo 里那个开关模拟的就是 root 上这一份。</p>
+</div>
+    </div><h2 id="查哪一份-composerglobal-与-local"><span class="num">04</span>查哪一份 composer：global 与 local</h2>
+<p>02 节说 <code>useI18n()</code> 会绑定一个 composer，<code>t()</code> 在它上面执行。到底绑哪一份，由 <code>scope</code> 决定：</p>
+<div class="flowd has-grid has-groups" data-flow data-edges="[{&quot;from&quot;:&quot;host&quot;,&quot;to&quot;:&quot;msg&quot;,&quot;label&quot;:&quot;传入 messages&quot;},{&quot;from&quot;:&quot;msg&quot;,&quot;to&quot;:&quot;comb&quot;},{&quot;from&quot;:&quot;comb&quot;,&quot;to&quot;:&quot;child&quot;,&quot;label&quot;:&quot;命中 ✅&quot;},{&quot;from&quot;:&quot;parent&quot;,&quot;to&quot;:&quot;kid&quot;,&quot;dashed&quot;:true,&quot;tone&quot;:&quot;red&quot;,&quot;label&quot;:&quot;❌ 不传递&quot;}]" style="--flow-marker:url(#fa-2)">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa-2" viewBox="0 0 10 10" refX="9" refY="5"
                   markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
             <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
           </marker>
@@ -167,7 +286,7 @@ child:  combinerTitle=圈选条件 | onlyLocal=onlyLocal
 </table>
 <p><mark class="mk-blue">子组件永远读不到父组件的 local scope。</mark> 这不是配置问题，是 vue-i18n 的设计：local scope 只服务于声明它的那个实例，不做树形继承。</p>
 <p><mark class="mk-amber">笔记里的 <code>useScope: 'local'</code> 常被当成「给这棵子树设置语言」，实际只覆盖当前组件一层。</mark></p>
-<h2 id="组件库的契约词条交出去实例借用宿主的"><span class="num">03</span>组件库的契约：词条交出去，实例借用宿主的</h2>
+<h2 id="组件库的契约词条交出去实例借用宿主的"><span class="num">05</span>组件库的契约：词条交出去，实例借用宿主的</h2>
 <p>组件的 12 个组件全部用 <code>useLabel()</code>（内部就是 <code>useI18n()</code>），没有一处自建 i18n 实例。这是刻意的：</p>
 <div class="cards" data-cols="3"><div class="ccard tone-blue">
           <span class="tag tone-blue">peerDependency</span>
@@ -209,8 +328,8 @@ export const i18n = createI18n({
 </code></pre></div>
 <p><code>...combinationMessages['zh-CN']</code> 在前，宿主自己的词条在后：同名 key 时宿主覆盖组件，业务文案优先。</p>
 <p>为什么不让组件自建实例 + local scope？对照一下就清楚了：</p>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>做法</th><th>会发生什么</th><th>结论</th></tr></thead><tbody><tr><th>组件自建 <code>createI18n</code>，每个组件带自己的词条</th><td data-label="会发生什么">一棵组件树里出现多份 locale 状态，宿主切语言要挨个通知；组件包还得自己装一个 vue-i18n 版本，和宿主那份不是同一个实例时会有两份运行时</td><td data-label="结论"><span class="tag tone-red">不选</span></td></tr><tr><th>组件用 <code>useScope: 'local'</code> 声明词条</th><td data-label="会发生什么">local 只覆盖声明它的那个组件一层（02 节实测），11 个子组件要各自声明一遍，47 个 key 抄 12 份</td><td data-label="结论"><span class="tag tone-red">不选</span></td></tr><tr><th>词条导出、宿主合并、组件读 global</th><td data-label="会发生什么">locale 只有一份真相，子组件天然能查到词条，组件包不锁 vue-i18n 版本</td><td data-label="结论"><span class="tag tone-green">当前做法</span></td></tr></tbody></table></div><p><mark class="mk-amber">只 <code>app.use(i18n)</code>、忘了合并 <code>combinationMessages</code>，页面上会直接显示 <code>combinerTitle</code> 这样的 key。</mark> vue-i18n 找不到 key 时返回 key 本身，不报错，也不空白。02 节的探针里 <code>onlyLocal=onlyLocal</code> 就是同一个行为。</p>
-<h2 id="数据名字那一半由服务端翻译"><span class="num">04</span>数据名字那一半：由服务端翻译</h2>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>做法</th><th>会发生什么</th><th>结论</th></tr></thead><tbody><tr><th>组件自建 <code>createI18n</code>，每个组件带自己的词条</th><td data-label="会发生什么">一棵组件树里出现多份 locale 状态，宿主切语言要挨个通知；组件包还得自己装一个 vue-i18n 版本，和宿主那份不是同一个实例时会有两份运行时</td><td data-label="结论"><span class="tag tone-red">不选</span></td></tr><tr><th>组件用 <code>useScope: 'local'</code> 声明词条</th><td data-label="会发生什么">local 只覆盖声明它的那个组件一层（04 节实测），11 个子组件要各自声明一遍，47 个 key 抄 12 份</td><td data-label="结论"><span class="tag tone-red">不选</span></td></tr><tr><th>词条导出、宿主合并、组件读 global</th><td data-label="会发生什么">locale 只有一份真相，子组件天然能查到词条，组件包不锁 vue-i18n 版本</td><td data-label="结论"><span class="tag tone-green">当前做法</span></td></tr></tbody></table></div><p><mark class="mk-amber">只 <code>app.use(i18n)</code>、忘了合并 <code>combinationMessages</code>，页面上会直接显示 <code>combinerTitle</code> 这样的 key。</mark> vue-i18n 找不到 key 时返回 key 本身，不报错，也不空白。03 节的探针里 <code>onlyLocal=onlyLocal</code> 就是同一个行为。</p>
+<h2 id="数据名字那一半由服务端翻译"><span class="num">06</span>数据名字那一半：由服务端翻译</h2>
 <p>字段名、关系名、值集合的 label 不归 SDK 管。它们在 Data Admin 里配置，请求时按调用方的语言本地化成<strong>单个字符串</strong>再下发：</p>
 <div class="seqd has-grid" data-seq data-n="3"
       style="--seq-fill:url(#s-fill-1);--seq-open:url(#s-fill-1-open)">
@@ -269,7 +388,7 @@ function label(text: LabelText): string {
       </div>
       <div class="demo-body custom" data-mount></div>
     </div><p><mark class="mk-amber">切语言时不能只按 <code>revision</code> 判断要不要换元数据。</mark> <code>revision</code> 是投影内容哈希，它不保证随语言变化；圈选页的做法是 <code>watch(locale)</code> 时带 <code>force: true</code> 直接换一份新的，并清掉值集合缓存。</p>
-<h2 id="检查清单"><span class="num">05</span>检查清单</h2>
+<h2 id="检查清单"><span class="num">07</span>检查清单</h2>
 <ul class="check warn"><li>页面上出现了 <code>combinerTitle</code> 这样的 key：宿主只 app.use(i18n)，没合并 combinationMessages</li><li>切了语言，标题/按钮没变：组件词条没并进 global，或宿主没有响应 locale 变化</li><li>切了语言，字段名还是旧语言：元数据要重新拉一次，且不能只靠 revision 判断</li><li>英文环境下字段名仍是中文：检查下游 header 的 clientLang 有没有带下去</li><li>把 Data Admin 的 name 当 I18nText 查 locale：它是单语字符串，查了也不会变</li></ul><div class="callout tone-amber">
       <span class="ic">⏳</span>
       <div><p><strong>时效（2026-10-13）</strong>：SDK 的读模型原本按三键（<code>zhCn</code> / <code>zhHk</code> / <code>en</code>）设计，
@@ -279,6 +398,13 @@ status 数字转 <code>ENABLED</code> / <code>DISABLED</code>。改动当时在 
 引用这段结论前先看一眼 <code>packages/dsl/src/audience.ts</code> 的注释。</p>
 </div>
     </div><div class="quiz"><details>
+        <summary><code>t('x.y')</code> 没命中时，vue-i18n 按什么顺序往下找？</summary>
+        <div class="a"><p>① 当前 composer 的 <code>messages[locale]</code> 按 <code>.</code> 逐层找；
+② local composer 的话，回落 root（global）的同语言桶；
+③ 回落 <code>fallbackLocale</code>；
+④ 都没有就返回 key 本身，并在控制台 warn。每一步命中就停。</p>
+</div>
+      </details><details>
         <summary>组件里的 12 个组件都调用 useI18n()，为什么不能各自声明 useScope: 'local' 把自己的词条带进去？</summary>
         <div class="a"><p>local scope 只对声明它的那个组件实例生效，子组件调用 useI18n() 拿到的还是 global。
 12 个组件要各自复制一份 47 个 key 的词条，仍然是各查各的；
@@ -305,6 +431,6 @@ status 数字转 <code>ENABLED</code> / <code>DISABLED</code>。改动当时在 
   </main>
 </div>
 
-<script src="../../assets/app.js?v=5ea664acdb"></script>
+<script src="../../assets/app.js?v=c02d3f4a26"></script>
 </body>
 </html>
