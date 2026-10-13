@@ -90,7 +90,7 @@ rows:
 
 ## 01 · 先看全图：一次取值穿过五层
 
-每一层只做一件事：组件决定「用哪个 key」，注入层转发函数，宿主决定「缓存还是发 HTTP」，适配层把 pb 变形，服务端查表或查常量表。
+每一层只做一件事：组件决定「用哪个 key」，注入层转发函数，宿主决定「缓存还是发 HTTP」，适配层把 pb 变形，服务端读内存投影或查常量表。
 
 外层的框回答「它属于谁」：组件包和宿主同处浏览器；两条路由与动态候选的常量表同处 BFF 进程 —— ==所以只有值集合这一条链路要出进程去查库，动态候选不出==（demo 的常量表就在进程里；生产换成检索服务时会挪出这个框）。
 
@@ -144,6 +144,14 @@ bodies:
       - { k: values, v: 按 value 反查 }
       - { k: limit, v: 默认 20 / 最大 50 }
     note: values 优先，忽略 keyword
+  proj:
+    badge: 进程内 · 5 秒 TTL
+    rows:
+      - { k: 内容, v: 六张元数据表的全量读模型 }
+      - { k: 刷新, v: 过期才重读，并发共用一次查询 }
+      - { k: 谁在读, v: "value-sets / metadata / catalog / 预览 / 建快照" }
+    code: "const CACHE_TTL_MS = 5_000"
+    note: 改一行 MySQL，最多 5 秒后整条链路一起变
   mysql:
     badge: 值的原型
     rows:
@@ -201,6 +209,13 @@ parts:
     detail: |
       `values` 非空时忽略 `keyword` 和 `limit`；`keyword` 为空返回空列表。
       当前解析器 `stock_search` 用一份 21 条的常量表同时实现搜索和反查。
+  proj:
+    label: 内存投影 · MetadataRows
+    sub: 六张表全量读模型 · 5 秒 TTL
+    detail: |
+      `getMetadataRows()` 在服务端进程里只留一份快照：5 秒内直接复用，过期才重读六张表，
+      同一个窗口里的并发请求共用一次查询（`inflight`，防缓存击穿）。
+      ==它不只喂 `value-sets`== —— `/metadata`、`/catalog`、预览和建快照读的都是它。
   mysql:
     label: crm_dc_value_set
     sub: enum_content JSON
@@ -246,7 +261,7 @@ tours:
       - { at: [ui], text: "用户选中「常驻城市」，这个字段的 valueSource 变成 `{ VALUE_SET, setKey: city }`。" }
       - { at: [ui, inj], text: "`useStoredItems` 调注入的 `loadValueSet(city)`。==只有换字段才拉==，改操作符、改值都不拉。" }
       - { at: [inj, host], text: "宿主先查缓存：有就返回，没有才发请求。" }
-      - { at: [host, adp, routeA, mysql], text: "缓存没命中才发请求：服务端从内存快照（5 秒 TTL）取出整个集合，含停用项。" }
+      - { at: [host, adp, routeA, proj, mysql], text: "缓存没命中才发请求：`routeA` 从内存投影（5 秒 TTL）里 find 这个 setKey；投影过期时才回表重读。" }
       - { at: [adp, ui], text: "回来先过适配层（反序列化 value、转 I18n 键、status 0 → DISABLED），再上屏；停用项是灰的，名字仍在。" }
   - id: dynamic
     label: 链路 B · 动态候选
