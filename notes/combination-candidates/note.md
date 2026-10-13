@@ -92,84 +92,130 @@ rows:
 
 每一层只做一件事：组件决定「用哪个 key」，注入层转发函数，宿主决定「缓存还是发 HTTP」，适配层把 pb 变形，服务端读内存投影或查常量表。
 
-外层的框回答「它属于谁」：组件包和宿主同处浏览器；两条路由与动态候选的常量表同处 BFF 进程 —— ==所以只有值集合这一条链路要出进程去查库，动态候选不出==（demo 的常量表就在进程里；生产换成检索服务时会挪出这个框）。
-
 ```arch
 svg: candidate-paths
+maxScale: 1.4
+caption: 外层三层归属（浏览器 / 服务端进程 / 进程外的数据源），里层两个包。点区域标题看这一层为什么这么分、包含谁；点零件看它的内容和相邻关系。两条链路的差异用上面的「场景」切。
+frames:
+  - id: browser
+    flat: true
+    boundary: 0
+    kind: logical
+    label: 浏览器 · 一次取值的发起侧
+    detail: 组件包和宿主应用同在一侧：组件决定用哪个 key，宿主决定缓存还是发 HTTP。左边那份 metadata 是服务端下发的字典，不归这一侧。
+  - id: combination
+    boundary: 1
+    parent: browser
+    kind: contains
+    label: 圈选组件包 @insight/combination
+    detail: 只依赖 @insight/dsl。它不认识 HTTP，也不持有候选值 —— 只把 setKey / resolverKey 交给注入进来的函数。
+  - id: hostapp
+    boundary: 2
+    parent: browser
+    kind: contains
+    label: 宿主应用 apps/client
+    detail: 三个注入函数在这里落地；缓存、失效、结果列预热，以及最后那次请求，都在这一层。
+  - id: server
+    flat: true
+    boundary: 3
+    kind: contains
+    label: Node BFF 进程（apps/server）
+    detail: 两个 GET、5 秒内存投影、动态候选的常量表都在这一个进程里 —— ==只有值集合那条链路要出进程去查库==（生产里常量表会换成外部检索服务，那时它也会挪出这个框）。
+  - id: store
+    flat: true
+    boundary: 4
+    kind: contains
+    label: 外部数据源 · crm_dc_value_set
+    detail: 值集合的原型：MySQL 里的一行 enum_content（配置）。它在 BFF 进程外，BFF 的 5 秒投影从它重建；动态候选不查它。
+scenarios:
+  - id: valueset
+    label: 链路 A · 值集合
+    note: 换字段拉一次，之后一路用缓存。动态候选那条支路不参与。
+    dim: [routeB, stocks]
+  - id: dynamic
+    label: 链路 B · 动态候选
+    note: 每次输入都重新问一遍。值集合那条支路（含投影和 MySQL）不参与。
+    dim: [routeA, proj, mysql]
 bodies:
   meta:
     badge: 只有引用键
     rows:
-      - { k: portraits, v: 41 个（1 个停用） }
-      - { k: relations, v: "3 条" }
+      - { k: portraits, v: 41 个（1 个停用）, link: ui, tip: 界面上能选的特征都从这来 }
+      - { k: relations, v: "3 条", link: ui }
       - { k: domains, v: "7 个（1 个停用）" }
     code: "value_set → setKey: city"
-    note: 没有候选值，也没有表名列名
+    note: 候选值一条都不在这里
   ui:
     rows:
-      - { k: PortraitRow, v: useStoredItems, link: inj, tip: 换字段才拉；改操作符、改值都不拉 }
-      - { k: RelationRow, v: propSetItems }
-      - { k: ValueControl, v: remote-method }
+      - { k: PortraitRow, v: useStoredItems, when: valueset, link: inj, tip: 换字段才拉；改操作符、改值都不拉 }
+      - { k: RelationRow, v: propSetItems, when: valueset }
+      - { k: ValueControl, v: onSearch(keyword), when: dynamic, link: inj, tip: 每次输入都是一次真实请求 }
+      - { k: RelationRow, v: 客体 remote-method, when: dynamic }
     note: grep 'fetch(' 零命中
   inj:
     badge: 组件与宿主的全部契约
     rows:
-      - { k: loadValueSet, v: 值集合, link: host, tip: 宿主侧负责缓存与 HTTP }
-      - { k: searchValues, v: 搜索, link: host }
-      - { k: lookupValues, v: 回显, link: host }
+      - { k: loadValueSet, v: 值集合, when: valueset, link: host, tip: 宿主侧负责缓存与 HTTP }
+      - { k: searchValues, v: 搜索, when: dynamic, link: host }
+      - { k: lookupValues, v: 回显, when: dynamic, link: host }
     code: "inject(key, async () => [])"
     note: 没给就是空实现，不报错
   host:
     badge: 唯一发 HTTP 的地方
     rows:
-      - { k: cache, v: 按 setKey 缓存 }
-      - { k: inflight, v: 同 key 复用 }
-      - { k: 失效, v: staffId / revision }
+      - { k: cache, v: 按 setKey 缓存, when: valueset }
+      - { k: inflight, v: 同 key 复用, when: valueset }
+      - { k: 失效, v: staffId / revision, when: valueset }
+      - { k: search, v: 每次输入都发, when: dynamic }
+      - { k: lookup, v: 已选值用 values= 反查, when: dynamic }
+      - { k: cache, v: 不缓存，也不合并请求, when: dynamic }
     note: 预热结果列的 setKey
   adp:
     pairs:
-      - { from: "\"440300\"", to: "440300", note: JSON 标量 }
+      - { from: "\"440300\"", to: "440300", note: JSON 标量, link: routeA, tip: 值集合响应里 value 是 JSON 字符串 }
       - { from: zhCn, to: "zh-CN" }
       - { from: "status: 0", to: DISABLED }
     note: 只做形状转换，不做业务判断
   routeA:
-    badge: 5 秒投影
+    badge: 查 5 秒投影
     rows:
       - { k: 入参, v: setKey 必填 }
-      - { k: 出参, v: "items[] 含停用" }
+      - { k: 出参, v: "items[] 含停用", link: adp, tip: 交给适配层翻译 }
       - { k: 错误, v: 400 / 404 }
-  routeB:
-    rows:
-      - { k: keyword, v: 子串匹配 }
-      - { k: values, v: 按 value 反查 }
-      - { k: limit, v: 默认 20 / 最大 50 }
-    note: values 优先，忽略 keyword
+      - { k: 数据从哪来, v: 内存投影 · MetadataRows, link: proj, tip: 不直连 MySQL；投影过期才回表 }
   proj:
     badge: 进程内 · 5 秒 TTL
     rows:
       - { k: 内容, v: 六张元数据表的全量读模型 }
       - { k: 刷新, v: 过期才重读，并发共用一次查询 }
-      - { k: 谁在读, v: "value-sets / metadata / catalog / 预览 / 建快照" }
+      - { k: 谁在读, v: "value-sets / metadata / catalog / 预览 / 建快照", link: routeA }
     code: "const CACHE_TTL_MS = 5_000"
     note: 改一行 MySQL，最多 5 秒后整条链路一起变
+  routeB:
+    rows:
+      - { k: keyword, v: 子串匹配 }
+      - { k: values, v: 按 value 反查, link: adp }
+      - { k: limit, v: 默认 20 / 最大 50 }
+    note: values 优先，忽略 keyword
   mysql:
     badge: 值的原型
     rows:
       - { k: value, v: "\"440300\"" }
       - { k: label, v: 深圳 / Shenzhen }
-      - { k: status, v: "0（停用）" }
+      - { k: status, v: "0（停用）", link: routeA, tip: 停用项照常返回，只为回显历史条件 }
     code: "// 停用改 status，不删行"
   stocks:
+    badge: demo · 进程内常量表
     cells:
-      - { label: SEMI, sub: 板块 }
+      - { label: SEMI, sub: 板块, link: routeB, tip: 21 条里的一条，搜索和反查用的是同一份 }
       - { label: "00700.HK" }
       - { label: "09988.HK" }
     note: 共 21 条，没有停用态
-caption: 一次取值穿过五层；值集合和动态候选到服务端才分开 —— 而且一个要出进程去查库，另一个不出。点区域看归属说明，点零件看完整归属路径，或按两条导览各走一遍；「多层归属框 / 只留一层分区」比较两种组织方式。
 parts:
   meta:
     label: metadata 字典
     sub: 41 个画像 / 3 条关系 / 7 个业务域
+    facts: { 数据在哪: Data Admin 投影, 形态: 字段字典, 停用态: 每条带 status, 缓存: 5 秒内存快照, 变一次: 改 MySQL 后 ≤5 秒 }
     detail: |
       字段字典。每个字段带 `fieldType`（类型 + 枚举来源），来源写在 `setKey` 或 `resolverKey` 里。
       ==候选值一条都不在这里==：所以它只有几 KB，而值集合可以有上万条。
@@ -188,6 +234,7 @@ parts:
   host:
     label: 宿主 App
     sub: useValueSets 缓存 + loadSearch / loadLookup
+    facts: { 数据在哪: 浏览器内存, 形态: "ValueItem[]", 停用态: 转成 disabled, 缓存: 按 setKey 缓存, 变一次: staffId / revision 变化即清 }
     detail: |
       决定「缓存还是请求」：按 `setKey` 缓存，inflight 复用；`staffId` 或 metadata `revision` 变化就清空。
       `prefetchColumns` 还会在预览返回后预热结果列涉及的 setKey。
@@ -197,63 +244,40 @@ parts:
     detail: |
       1:1 转换：反序列化 `value`、`zhCn / zhHk / en` 转 `zh-CN / zh-HK / en`、`status: 0` 转 `DISABLED`。
       ==只做形状转换，不做业务判断==；四步变形见 2.3。
+  proj:
+    label: 内存投影 · MetadataRows
+    sub: 六张表全量读模型 · 5 秒 TTL
+    facts: { 位置: BFF 进程内, 内容: 六张表全量读模型, 刷新: 5 秒 TTL（过期才重读）, 并发: inflight 共用一次查询, 谁在读: value-sets / metadata / catalog / 预览 / 建快照 }
+    detail: |
+      `getMetadataRows()` 在服务端进程里只留一份快照：5 秒内直接复用，过期才重读六张表，
+      同一个窗口里的并发请求共用一次查询（`inflight`，防缓存击穿）。
+      ==它不只喂 `value-sets`== —— `/metadata`、`/catalog`、预览和建快照读的都是它。
   routeA:
     label: GET /api/crowd/value-sets
     sub: setKey 必填
+    facts: { 入参: setKey 必填, 判据: 直接取全集, 出参: 整集合（含停用）, 错误: 400 / 404 }
     detail: |
       从**内存快照**（`MetadataRows`，5 秒 TTL）里找集合，`JSON.stringify(item.value)` 之后返回 pb 形状。
       集合停用、条目停用都照样返回，只为回显历史条件。什么是这份快照，见 05 节。
   routeB:
     label: GET /api/crowd/resolver-options
     sub: keyword 搜索 / values 反查
+    facts: { 入参: keyword 或 values, 判据: 子串匹配 / 按值反查, 出参: 命中的一小批, 错误: 400 / 404 }
     detail: |
       `values` 非空时忽略 `keyword` 和 `limit`；`keyword` 为空返回空列表。
       当前解析器 `stock_search` 用一份 21 条的常量表同时实现搜索和反查。
-  proj:
-    label: 内存投影 · MetadataRows
-    sub: 六张表全量读模型 · 5 秒 TTL
-    detail: |
-      `getMetadataRows()` 在服务端进程里只留一份快照：5 秒内直接复用，过期才重读六张表，
-      同一个窗口里的并发请求共用一次查询（`inflight`，防缓存击穿）。
-      ==它不只喂 `value-sets`== —— `/metadata`、`/catalog`、预览和建快照读的都是它。
   mysql:
     label: crm_dc_value_set
     sub: enum_content JSON
+    facts: { 数据在哪: MySQL crm_dc_value_set, 形态: enum_content JSON, 停用态: 有（status 0，不删行）, 缓存: 同一份 5 秒快照, 变一次: 改一行 MySQL }
     detail: |
       值的原型。每项带 `value` / `label` / `status` / `sortOrder`；停用是改 `status`，不是删行。
   stocks:
     label: resolvers.ts · STOCKS
     sub: 21 条常量
+    facts: { 数据在哪: 代码里的常量表, 形态: 21 条数组, 停用态: 没有, 缓存: 不缓存, 变一次: 改代码发版 }
     detail: |
-      动态候选没有元数据表。真实实现是一次检索服务，demo 里是写死的数组；没有停用态，也不缓存。
-frames:
-  - id: browser
-    boundary: 0
-    kind: contains
-    label: 浏览器 · 用户侧
-    detail: 组件包和宿主跑在同一个页面里。HTTP 只发生在宿主这一侧，组件包只消费注入的函数。
-  - id: pkg
-    boundary: 1
-    parent: browser
-    kind: contains
-    label: 圈选组件包（@insight/combination）
-    detail: 组件子树加注入层。它不认识 HTTP，所有数据入口都是注入进来的三个函数。
-  - id: app
-    boundary: 2
-    parent: browser
-    kind: contains
-    label: 宿主应用（apps/client）
-    detail: 缓存、HTTP 和 pb → 内部形状的适配都在这一侧；它是这条链上唯一真正发请求的地方。
-  - id: bff
-    boundary: 3
-    kind: contains
-    label: Node BFF 进程（apps/server）
-    detail: 两条路由和动态候选的常量表同在这一个进程里 —— 链路 B 到这就结束了，不出进程；生产里常量表会换成外部检索服务，那时它也会被挪出这个框。
-  - id: db
-    boundary: 4
-    kind: contains
-    label: 外部数据源 · crm_dc_value_set
-    detail: 值集合的原型，在 BFF 进程外；BFF 的 5 秒内存投影从它来。动态候选不查它。
+      动态候选没有元数据表。这份常量表就写在 BFF 的 `resolvers.ts` 里（所以它在这个进程框内）；生产实现是一次检索服务，那时它会挪出这个框。没有停用态，也不缓存。
 tours:
   - id: valueset
     label: 链路 A · 值集合
@@ -261,17 +285,16 @@ tours:
       - { at: [ui], text: "用户选中「常驻城市」，这个字段的 valueSource 变成 `{ VALUE_SET, setKey: city }`。" }
       - { at: [ui, inj], text: "`useStoredItems` 调注入的 `loadValueSet(city)`。==只有换字段才拉==，改操作符、改值都不拉。" }
       - { at: [inj, host], text: "宿主先查缓存：有就返回，没有才发请求。" }
-      - { at: [host, adp, routeA, proj, mysql], text: "缓存没命中才发请求：`routeA` 从内存投影（5 秒 TTL）里 find 这个 setKey；投影过期时才回表重读。" }
+      - { at: [host, adp, routeA, proj, mysql], text: "缓存没命中才发请求：`routeA` 从内存投影（5 秒 TTL）里 find 这个 setKey；投影过期时才回表重读，含停用项。" }
       - { at: [adp, ui], text: "回来先过适配层（反序列化 value、转 I18n 键、status 0 → DISABLED），再上屏；停用项是灰的，名字仍在。" }
   - id: dynamic
     label: 链路 B · 动态候选
     steps:
       - { at: [ui, inj], text: "用户敲「腾讯」，值控件先取 `searchToken` 票据，再调 search(stock_search, 腾讯)。" }
-      - { at: [inj, host, adp], text: "一路转发。动态候选不打缓存：每次都重新问。" }
+      - { at: [inj, host, adp], text: "一路转发。动态候选不走缓存：每次都重新问。" }
       - { at: [routeB, stocks], text: "`GET resolver-options?keyword=腾讯` 在 21 条常量里做子串匹配。" }
       - { at: [ui], text: "回来时票据不相等就整包丢弃 —— 旧响应永远盖不掉新结果。" }
-      - { at: [inj, host], text: "回显是另一条路：草稿里已存的取值用 `values=` 反查名字。" }
-      - { at: [adp, routeB], text: "同一个接口，`values` 非空时忽略 keyword 和 limit。" }
+      - { at: [host, adp, routeB], text: "回显是另一条路：草稿里已存的取值用 `values=` 反查名字，同一个接口、忽略 keyword 和 limit。" }
 ```
 
 上面是**地图**（谁在哪、归谁、两条链路在哪分叉）；下面这张是**分层流程** —— 同一批零件，换成从上到下的顺序，每一层挂着哪几个零件一眼扫完。

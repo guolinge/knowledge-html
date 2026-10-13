@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { applyArchFrames, archWidth, restoreBoundaryBoxes } from './arch-frames.mjs';
+import { applyArchFrames, archWidth, namespaceFigureIds, restoreBoundaryBoxes } from './arch-frames.mjs';
 
 const svg = `<svg viewBox="0 0 500 240">
 <rect data-composition-frame-id="0" x="10" y="10" width="450" height="200"/><text>outer</text>
@@ -52,6 +52,25 @@ test('membership mismatch, intersecting siblings, clipped child, title crowding 
   assert.throws(()=>applyArchFrames(corrected,[frames[0],{...frames[1],parent:undefined}]),/同级区域/);
   assert.throws(()=>applyArchFrames(corrected.replace('height="250"','height="80"'),frames),/完整包住/);
   assert.throws(()=>applyArchFrames(corrected.replace('x="50" y="50"','x="50" y="20"'),frames),/24px/);
+});
+test('inlined figures get prefixed ids; references follow; data-* stay untouched', () => {
+  const raw = '<svg viewBox="0 0 10 10" aria-labelledby="archify-diagram-title archify-diagram-description" data-node-id="a" data-composition-frame-id="0"><title id="archify-diagram-title">t</title><marker id="arrowhead"/><pattern id="grid"/><g id="node-a" data-nb-link="b"><rect fill="url(#grid)" marker-end="url(#arrowhead)"/></g><use href="#node-a"/></svg>';
+  const out = namespaceFigureIds(raw, 'pt-map');
+  assert.match(out, / aria-labelledby="pt-map-archify-diagram-title pt-map-archify-diagram-description"/);
+  assert.match(out, /<marker id="pt-map-arrowhead"\/>/);
+  assert.match(out, /fill="url\(#pt-map-grid\)" marker-end="url\(#pt-map-arrowhead\)"/);
+  assert.match(out, /<g id="pt-map-node-a" data-nb-link="b">/);
+  assert.match(out, /<use href="#pt-map-node-a"\/>/);
+  assert.match(out, /data-composition-frame-id="0"/);
+  assert.doesNotMatch(out, /id="arrowhead"/);
+});
+test('two figures with the same name must not collide', () => {
+  const raw = '<svg viewBox="0 0 10 10"><pattern id="grid"/><rect fill="url(#grid)"/></svg>';
+  const a = namespaceFigureIds(raw, 'dup');
+  const b = namespaceFigureIds(raw, 'dup');
+  assert.match(a, /id="dup-grid"/);
+  assert.match(b, /id="dup-2-grid"/);
+  assert.match(b, /url\(#dup-2-grid\)/);
 });
 test('maxScale defaults to native width; authored prototype ratio preserved', () => {
   assert.equal(archWidth(svg),500);
