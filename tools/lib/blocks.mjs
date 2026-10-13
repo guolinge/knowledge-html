@@ -16,11 +16,23 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import YAML from 'yaml';
 import { applyNodeBodies } from './node-body.mjs';
-import { applyArchFrames, archWidth } from './arch-frames.mjs';
+import { applyArchFrames, archWidth, namespaceFigureIds, resetFigureIds } from './arch-frames.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 
 /* ---------- 小工具 ---------- */
+
+/* 同一页里 flow 图的箭头 id 靠它保持唯一；每页渲染前由 resetInlineIds 清零。 */
+let flowSeq = 0;
+/* 同一页里时序图的箭头 id 靠它保持唯一 */
+let seqSeq = 0;
+
+/** 每页渲染开始前清一次（见 arch-frames.mjs 里的同名接口） */
+export function resetInlineIds() {
+  flowSeq = 0;
+  seqSeq = 0;
+  resetFigureIds();
+}
 
 /** 把 "抽取 :: Extract :: 把数据从业务库拿出来" 拆成三段 */
 function splitConn(spec) {
@@ -396,6 +408,7 @@ const KIND_TONE = {
      带分支/汇合的流程图。lane-stack 只能画直线，这个能画图。
      节点按 row 分行，列位置自动均分；连线由 app.js 测量后画成 SVG 路径。 */
   function flow(body) {
+    /* 同一个页面上可能有好几张 flow 图 —— 箭头 id 靠它保持唯一（见下面 markerId） */
     const cfg = YAML.parse(body) || {};
     const nodes = cfg.nodes || [];
     const edges = cfg.edges || [];
@@ -467,12 +480,18 @@ const KIND_TONE = {
         : '';
 
     const edgeData = esc(JSON.stringify(edges));
+    /* 每张 flow 图一个自己的箭头 id。
+       HTML 要求 id 全页唯一，而箭头形状写死在每一张图里 —— 都用 `id="fa"` 时，
+       同页第二张之后的图会去引用**第一张**的箭头（现在形状一样所以看不出来，
+       哪天要单独调粗某一个就会静默不生效）。真正的 id 通过 --flow-marker 传给 CSS，
+       app.js 画双向箭头时也从 DOM 里读它。 */
+    const markerId = `fa-${(flowSeq += 1)}`;
     return `<div class="flowd${cfg.grid ? ' has-grid' : ''}${
       groupBoxes ? ' has-groups' : ''
-    }" data-flow data-edges="${edgeData}">
+    }" data-flow data-edges="${edgeData}" style="--flow-marker:url(#${markerId})">
       <svg class="flowd-svg" aria-hidden="true">
         <defs>
-          <marker id="fa" viewBox="0 0 10 10" refX="9" refY="5"
+          <marker id="${markerId}" viewBox="0 0 10 10" refX="9" refY="5"
                   markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
             <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
           </marker>
@@ -536,14 +555,19 @@ const KIND_TONE = {
       ? ` data-segs="${esc(JSON.stringify(segs))}"`
       : '';
 
-    return `<div class="seqd${cfg.grid ? ' has-grid' : ''}" data-seq data-n="${n}"${segAttr}>
+    /* 两个箭头 id 也按图唯一（同页两张时序图时不能都叫 s-fill / s-open）；
+       真正的 id 通过 --seq-fill / --seq-open 传给 CSS。 */
+    const fillId = `s-fill-${(seqSeq += 1)}`;
+
+    return `<div class="seqd${cfg.grid ? ' has-grid' : ''}" data-seq data-n="${n}"${segAttr}
+      style="--seq-fill:url(#${fillId});--seq-open:url(#${fillId}-open)">
       <svg class="seqd-svg" aria-hidden="true">
         <defs>
-          <marker id="s-fill" viewBox="0 0 10 10" refX="9" refY="5"
+          <marker id="${fillId}" viewBox="0 0 10 10" refX="9" refY="5"
                   markerWidth="7" markerHeight="7" orient="auto-start-reverse">
             <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
           </marker>
-          <marker id="s-open" viewBox="0 0 10 10" refX="9" refY="5"
+          <marker id="${fillId}-open" viewBox="0 0 10 10" refX="9" refY="5"
                   markerWidth="8" markerHeight="8" orient="auto-start-reverse">
             <path d="M 0 0 L 10 5 L 0 10" fill="none" stroke="currentColor" stroke-width="1.4"/>
           </marker>
@@ -650,7 +674,9 @@ const KIND_TONE = {
       }
     }
     const framed = applyArchFrames(fs.readFileSync(file, 'utf8'), cfg.frames);
-    const svg = applyNodeBodies(framed.svg, cfg.bodies, name, cfg.scenarios);
+    /* 内联时的 id 前缀：同页多张 arch 图各自带着 arrowhead / grid / title，不加前缀就撞车。
+       放在 bodies / frames 之后 —— 那两个函数靠 `id="node-x"` 和数据属性找节点。 */
+    const svg = namespaceFigureIds(applyNodeBodies(framed.svg, cfg.bodies, name, cfg.scenarios), name);
     const width = archWidth(svg, cfg.maxScale);
 
     /* 可选的交互数据。
@@ -1361,6 +1387,24 @@ export function lintFences(html, src = '') {
  * 没闭合就会一路吞到下一个同名闭合标签。
  * 想展示这类标签，用反引号包起来（会转义成 &lt;script&gt;）。
  */
+/**
+ * 同页重复 id。HTML 要求 id 全页唯一，而每张图自带的 id 是固定的一套
+ * （arch 的 arrowhead / grid / title，flow 的 fa）—— 同页放两张就撞车，浏览器只认第一张那份，
+ * 读屏会把第二张之后的图名念成第一张的。构建期直接报出来，不靠以后有人发现。
+ */
+export function lintDuplicateIds(html) {
+  const issues = [];
+  const seen = new Map();
+  for (const m of html.matchAll(/\sid="([^"]+)"/g)) {
+    const id = m[1];
+    if (!seen.has(id)) { seen.set(id, 1); continue; }
+    const n = seen.get(id) + 1;
+    seen.set(id, n);
+    if (n === 2) issues.push(`页面上有重复的 id「${id}」—— 同一张图被内联了两次，或某个积木没给内部 id 加前缀`);
+  }
+  return issues;
+}
+
 export function lintRawHtml(_html, src = '') {
   const issues = [];
   if (!src) return issues;

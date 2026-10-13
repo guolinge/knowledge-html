@@ -6,7 +6,7 @@
 <title>epoll 到底做了什么</title>
 <meta name="description" content="三条需求对上三样东西。内核里它就是两张表：登记表一直记着你关心谁，就绪表只装这一刻真有事的那几个。分水岭是「谁把 fd 放进就绪表」—— 从「我去查」变成「你来告诉我」。整体图带每一步的内核代码。" />
 <link rel="stylesheet" href="../../assets/theme.css?v=b918ec5c83" />
-  <link rel="stylesheet" href="../../assets/blocks.css?v=e670f1128c" />
+  <link rel="stylesheet" href="../../assets/blocks.css?v=4aaac4b40f" />
   <link rel="stylesheet" href="../../assets/archify-embed.css?v=68fec0b81b" />
 </head>
 <body>
@@ -51,30 +51,30 @@
 
 <figure class="archfig" data-arch style="--arch-max-width:1386px" data-pano data-parts='{"thr":{"label":"你的线程","sub":"三个调用，一个循环","detail":"你写的代码就这么多：==登记一次，然后循环收货==。\n阻塞等待、找就绪者、挂回调、叫醒 —— 这些都不在这段代码里，\n在内核里。下面每个格子都配了对应的内核代码，标了文件和函数名。\n","code":"int epfd = epoll_create1(0);\n\nstruct epoll_event ev = { .events = EPOLLIN, .data.fd = listen_fd };\nepoll_ctl(epfd, EPOLL_CTL_ADD, listen_fd, &ev);  // 每个 fd 只登记这一次\n// 以后 accept 来的 conn_fd 也各 ADD 一次，之后不用再管\n\nstruct epoll_event out[64];\nfor (;;) {\n    int n = epoll_wait(epfd, out, 64, -1);  // 睡到有事为止\n    for (int i = 0; i < n; i++)\n        handle(out[i].data.fd);             // out 里全是就绪的\n}\n"},"rbr":{"label":"红黑树 · 登记表","sub":"epoll_ctl 往里加，一直在","detail":"==「内核那头记着」的数据结构就是它==。ADD 建一个 epitem 插进树，\nDEL 摘掉；不删它就一直在，所以你不用每轮重新交代。\n登记时它还顺手办了一件事：调这个 fd 自己的 poll 方法 ——\n==队列在哪，fd 自己最清楚==。\n","code":"// fs/eventpoll.c · do_epoll_ctl(EPOLL_CTL_ADD) → ep_insert\nepi = ep_alloc_epitem(ep, event, tf);  // 每个 fd 一个 epitem\nep_register_epitem(ctx, ep, epi, ...); // 挂到文件、进程\nep_rbtree_insert(ep, epi);             // 插进红黑树：登记长期有效\n\ninit_poll_funcptr(&epq.pt, ep_ptable_queue_proc);\nrevents = ep_item_poll(epi, &epq.pt, 1);\n// ↑ 调这个 fd 自己的 poll 方法。socket 的 tcp_poll 会调\n//   poll_wait(file, sk_sleep(sk), pt) —— 它自己的等待队列\n//   就从这扇门交出来（select/poll 走的是同一扇门）\n"},"wqA":{"label":"连接 A 的等待队列","sub":"A 的回调挂在这 —— 每个 fd 一份","detail":"==「回调挂在这」的完整意思，就在这一格==：**每个登记的 fd，\n都会在它自己的等待队列上挂一份 `ep_poll_callback`**。\nA 有一份，B 也有一份（左边的格子），互不相干。\n挂一次一直在，直到 DEL 或 fd 关闭。\n","code":"/* 挂载：epoll_ctl(ADD) 时，每个登记的 fd 走一遍\n   fs/eventpoll.c · ep_ptable_queue_proc */\ninit_waitqueue_func_entry(&pwq->wait, ep_poll_callback); // 回调是谁\npwq->base = epi;                     // 记住：我为哪个 fd 服务\nadd_wait_queue(whead, &pwq->wait);   // 挂到这个 fd 自己的队列上\n\n/* 触发：数据到的那一刻（同一个函数的另一半）\n   fs/eventpoll.c · ep_poll_callback */\nepi = ep_item_from_wait(wait);              // 找回：我是为谁挂的\nlist_add_tail(&epi->rdllink, &ep->rdllist); // ← 把它挂进就绪表\nif (waitqueue_active(&ep->wq))\n    wake_up(&ep->wq);                       // ← 顺手叫醒 epoll_wait\n"},"wqB":{"label":"连接 B 的等待队列","sub":"B 的那份 —— 此刻还没响","detail":"B 也有一份一模一样的挂载：同一个回调函数、同样记着「我为 B 服务」，\n挂在 B 自己的队列上。\n==「每一个 fd 都一样吗」的答案：是== —— 每个登记的 fd\n都有属于自己的一份，区别只是有没有被敲响过。\n"},"sockA":{"label":"连接 A · socket","sub":"这一刻有数据（B 没有）","detail":"数据落进 A 的接收缓冲区，内核沿着中断一路找到这条 socket，\n然后敲它自己的等待队列。敲的是 ==socket 自己的==队列，\n不是 epoll 实例里的什么东西 —— 这就是「回调挂在目标 fd 上」的确切含义。\n","code":"// net/core/sock.c · 数据到达的那一刻\nvoid sock_def_readable(struct sock *sk)\n{\n    wq = rcu_dereference(sk->sk_wq);\n    if (skwq_has_sleeper(wq))\n        wake_up_interruptible_sync_poll(&wq->wait, EPOLLIN | ...);\n        // ↑ 敲这条 socket 自己的等待队列：\n        //   挂在上面的每份 ep_poll_callback 逐个被调用\n}\n"},"nic":{"label":"网卡 · 数据到","sub":"中断 → 协议栈 → 接收缓冲区","detail":"整条链路的物理起点：网卡收到包，中断，协议栈按四元组找到这条 socket，\n把数据放进它的接收缓冲区，然后才有右边那记 wake_up。\n==「谁把 fd 放进就绪表」的第一推动力在这里，不在你的循环里==。\n"},"ewq":{"label":"实例的等待队列 ep->wq","sub":"epoll_wait 睡在这里","detail":"==图里的第二张等待队列==，也是「谁通知 epoll_wait」的答案所在：\nepoll_wait 进来先看一眼就绪表，空的话就睡在这条队列上。\n叫醒它的就是回调里那记 `wake_up(&ep->wq)` ——\n==发通知的和往就绪表挂东西的，是同一个回调==。\n","code":"// fs/eventpoll.c · ep_poll（epoll_wait 的内核实现）\neavail = ep_events_available(ep);         // 先看一眼：就绪表空吗\nwhile (1) {\n    if (eavail)\n        return ep_try_send_events(ep, events, maxevents); // 有货 → 拷走\n    if (timed_out) return 0;\n    __add_wait_queue_exclusive(&ep->wq, &wait);  // 空 → 睡到 ep->wq 上\n    schedule_hrtimeout_range(to, slack, HRTIMER_MODE_ABS);\n}\n"},"rdl":{"label":"就绪链表 rdllist","sub":"只装这一刻真有事的","detail":"回调把它放进来，epoll_wait 把它拷走。\n==这张表永远很短==：没有人遍历去找就绪者，\n就绪是「事件经过时顺手挂进来」的。\n拷走之后登记表一个字节都不动 —— LT 模式下没处理完的\n还会被挂回来，那是下一篇的正题。\n","code":"// fs/eventpoll.c · ep_send_events：把就绪表逐项拷回用户数组\nep_start_scan(ep, &scan_batch);  // 把 rdllist 整体摘下来\nlist_for_each_entry_safe(epi, tmp, &scan_batch, rdllink)\n    ep_deliver_event(ep, epi, &pt, &events, &scan_batch); // 逐项拷给用户\n"}}' data-tours='[{"id":"journey","label":"一条事件的完整旅程","steps":[{"at":["thr","rbr"],"text":"起点是你写的三个调用。`epoll_ctl` 把 fd 登记进红黑树，==加完一直在== ——「内核那头记着」落到数据结构上就是这棵树。","code":"epi = ep_alloc_epitem(ep, event, tf);\nep_rbtree_insert(ep, epi);"},{"at":["rbr","wqA","wqB"],"text":"登记的同时，每个 fd 都得到==一份属于自己的回调==，挂在它自己的等待队列上 —— A 一份、B 一份，互不相干。","code":"init_waitqueue_func_entry(&pwq->wait, ep_poll_callback);\npwq->base = epi;                        // 记住我为谁服务\nadd_wait_queue(whead, &pwq->wait);      // 挂到它自己的队列上"},{"at":["nic"],"text":"数据到：中断、协议栈、接收缓冲区。==整条链的第一推动力在硬件这一格==，从这一刻起，主动权在内核手里。"},{"at":["sockA","wqA"],"text":"内核找到这条 socket，敲它自己的等待队列 —— 挂在上面的那份回调被调用。","code":"wake_up_interruptible_sync_poll(&wq->wait, EPOLLIN | ...);"},{"at":["wqA","rdl"],"text":"回调做第一件事：==把这个 fd 挂进就绪表==。放进去的动作发生在「数据到的时刻」，不是「你去问的时刻」。","code":"epi = ep_item_from_wait(wait);\nlist_add_tail(&epi->rdllink, &ep->rdllist);"},{"at":["wqA","ewq"],"text":"同一个回调顺手做第二件事：==`wake_up(&ep->wq)`==。==「谁通知 epoll_wait」的答案就是这一行== —— 记账的和敲门的是同一个函数。","code":"if (waitqueue_active(&ep->wq))\n    wake_up(&ep->wq);"},{"at":["ewq","rdl"],"text":"睡在 ep->wq 上的 epoll_wait 醒来，确认就绪表非空，把这一批拷回用户数组。==「取走」是拷贝，登记表不动==。","code":"return ep_try_send_events(ep, events, maxevents);"},{"at":["thr"],"text":"你的循环拿到 n 个就绪事件，挨个处理。==从睡到醒，你一行代码都没跑== —— 收包、分发、记账、叫醒，全是内核在干活。"}]},{"id":"per-fd","label":"回调挂在哪：每个 fd 一份","steps":[{"at":["rbr"],"text":"epoll_ctl 怎么知道该把回调挂到哪？==它不猜== —— 调这个 fd 自己的 poll 方法，驱动按 `poll_wait` 协议把自己的等待队列交出来。select / poll 挂 pollwake 走的也是这扇门。","code":"init_poll_funcptr(&epq.pt, ep_ptable_queue_proc);\nrevents = ep_item_poll(epi, &epq.pt, 1);  // ← fd 自己的 poll 方法"},{"at":["wqA"],"text":"A 的那份：一个回调函数、一句「我为谁服务」、一次 `add_wait_queue`。==挂在 A 自己的队列上，不是挂在 epoll 实例里==。","code":"init_waitqueue_func_entry(&pwq->wait, ep_poll_callback);\npwq->base = epi;\nadd_wait_queue(whead, &pwq->wait);"},{"at":["wqB"],"text":"B 的那份一模一样，挂在 B 自己的队列上，此刻还没响过。==所以「回调挂在这」不是一个格子，是每个登记的 fd 各自的一份=="}]},{"id":"wake","label":"epoll_wait 什么时候拿、谁通知它","steps":[{"at":["ewq"],"text":"epoll_wait 进来==先查再睡==：就绪表非空就直接拷走返回，一行都不多跑；空了才睡到 ep->wq 上。","code":"eavail = ep_events_available(ep);\nif (eavail) return ep_try_send_events(...);\n__add_wait_queue_exclusive(&ep->wq, &wait);  // 空 → 睡"},{"at":["wqA"],"text":"通知者是它：数据到 → 敲 socket 队列 → 回调被调 → 回调顺手 `wake_up(&ep->wq)`。==通知不需要任何新机制，就是挂就绪表的那个回调多说了一句话==","code":"if (waitqueue_active(&ep->wq))\n    wake_up(&ep->wq);   // 叫醒睡在 ep->wq 上的 epoll_wait"},{"at":["rdl"],"text":"醒来后从就绪表把这一批拷走。==取走的是拷贝== —— 登记还在、LT 模式下没处理完的还会挂回来。","code":"ep_start_scan(ep, &scan_batch);\nlist_for_each_entry_safe(epi, tmp, &scan_batch, rdllink)\n    ep_deliver_event(ep, epi, &pt, &events, &scan_batch);"},{"at":["thr"],"text":"你的线程拿到 n 个事件，继续跑 handle。==整个「等待」期间它睡在 ep->wq 上，不占 CPU=="}]}]'>
       
-      <div class="arch-canvas"><svg viewBox="0 0 1386 598" role="img" aria-labelledby="archify-diagram-title archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
-        <title id="archify-diagram-title">登记 → 挂回调 → 数据到 → 叫醒 → 取走：每一步的代码落在哪</title>
-        <desc id="archify-diagram-description">两个等待队列都画了出来：每个登记的 fd 一份回调（挂在它自己的队列上），epoll_wait 睡在实例自己的队列上</desc>
+      <div class="arch-canvas"><svg viewBox="0 0 1386 598" role="img" aria-labelledby="epoll-flow-archify-diagram-title epoll-flow-archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
+        <title id="epoll-flow-archify-diagram-title">登记 → 挂回调 → 数据到 → 叫醒 → 取走：每一步的代码落在哪</title>
+        <desc id="epoll-flow-archify-diagram-description">两个等待队列都画了出来：每个登记的 fd 一份回调（挂在它自己的队列上），epoll_wait 睡在实例自己的队列上</desc>
         <!-- Definitions -->
         <defs>
-          <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+          <marker id="epoll-flow-arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
             <polygon points="0 0, 10 3.5, 0 7" class="m-default" />
           </marker>
-          <marker id="arrowhead-emphasis" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+          <marker id="epoll-flow-arrowhead-emphasis" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
             <polygon points="0 0, 10 3.5, 0 7" class="m-emphasis" />
           </marker>
-          <marker id="arrowhead-security" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+          <marker id="epoll-flow-arrowhead-security" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
             <polygon points="0 0, 10 3.5, 0 7" class="m-security" />
           </marker>
-          <marker id="arrowhead-dashed" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+          <marker id="epoll-flow-arrowhead-dashed" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
             <polygon points="0 0, 10 3.5, 0 7" class="m-dashed" />
           </marker>
-          <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+          <pattern id="epoll-flow-grid" width="40" height="40" patternUnits="userSpaceOnUse">
             <path d="M 40 0 L 0 0 0 40" class="c-grid" stroke-width="0.5"/>
           </pattern>
         </defs>
 
         <!-- Background Grid -->
-        <rect width="100%" height="100%" fill="url(#grid)" />
+        <rect width="100%" height="100%" fill="url(#epoll-flow-grid)" />
 
         <!-- Boundaries (behind everything) -->
         <rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="0" x="19" y="44" width="232" height="102" rx="12" class="c-region" stroke-width="1"/>
@@ -87,17 +87,17 @@
         <text x="1112" y="62" class="t-cloud" font-size="9" font-weight="600">硬件</text>
 
         <!-- Connection paths (before components for correct z-order) -->
-        <path data-edge-from="thr" data-edge-to="rbr" data-edge-label="登记一次" data-edge-key="0" data-edge-id="e1" data-composition-points="225,98;249,98;249,116;276,116;276,100;300,100" d="M 225 98 L 241 98 Q 249 98 249 106 L 249 108 Q 249 116 257 116 L 268 116 Q 276 116 276 108 L 276 108 Q 276 100 284 100 L 300 100" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
-        <path data-edge-from="rbr" data-edge-to="wqB" data-edge-label="每个登记的 fd 都挂一份" data-edge-key="1" data-edge-id="e3" data-composition-points="400,130;400,260" d="M 400 130 L 400 260" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
-        <path data-edge-from="rbr" data-edge-to="wqA" data-edge-label="经 poll_wait 挂上 ep_poll_callback" data-edge-key="2" data-edge-id="e2" data-composition-points="500,100;530,100;530,215;660,215;660,260" d="M 500 100 L 522 100 Q 530 100 530 108 L 530 207 Q 530 215 538 215 L 652 215 Q 660 215 660 223 L 660 260" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
-        <path data-edge-from="nic" data-edge-to="sockA" data-edge-label="中断：数据落进接收缓冲区" data-edge-key="3" data-edge-id="e5" data-composition-points="1225,130;1225,195;925,195;925,260" d="M 1225 130 L 1225 187 Q 1225 195 1217 195 L 933 195 Q 925 195 925 203 L 925 260" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
-        <path data-edge-from="sockA" data-edge-to="wqA" data-edge-label="wake_up 敲它自己的队列" data-edge-key="4" data-edge-id="e4" data-composition-points="820,290;760,290" d="M 820 290 L 760 290" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
-        <path data-edge-from="wqA" data-edge-to="rdl" data-edge-label="回调把 fd 挂进就绪表" data-edge-key="5" data-edge-id="e6" data-composition-points="660,320;660,390;930,390;930,450" d="M 660 320 L 660 382 Q 660 390 668 390 L 922 390 Q 930 390 930 398 L 930 450" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
-        <path data-edge-from="wqA" data-edge-to="ewq" data-edge-label="回调顺手 wake_up(ep-&gt;wq)" data-edge-key="6" data-edge-id="e7" data-composition-points="560,290;520,290;520,480;560,480" d="M 560 290 L 528 290 Q 520 290 520 298 L 520 472 Q 520 480 528 480 L 560 480" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
-        <path data-edge-from="rdl" data-edge-to="thr" data-edge-label="被叫醒，从就绪表拷走这一批" data-edge-key="7" data-edge-id="e8" data-composition-points="930,510;930,560;135,560;135,126" d="M 930 510 L 930 552 Q 930 560 922 560 L 143 560 Q 135 560 135 552 L 135 126" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="thr" data-edge-to="rbr" data-edge-label="登记一次" data-edge-key="0" data-edge-id="e1" data-composition-points="225,98;249,98;249,116;276,116;276,100;300,100" d="M 225 98 L 241 98 Q 249 98 249 106 L 249 108 Q 249 116 257 116 L 268 116 Q 276 116 276 108 L 276 108 Q 276 100 284 100 L 300 100" class="a-default" stroke-width="1.5" marker-end="url(#epoll-flow-arrowhead)"/>
+        <path data-edge-from="rbr" data-edge-to="wqB" data-edge-label="每个登记的 fd 都挂一份" data-edge-key="1" data-edge-id="e3" data-composition-points="400,130;400,260" d="M 400 130 L 400 260" class="a-default" stroke-width="1.5" marker-end="url(#epoll-flow-arrowhead)"/>
+        <path data-edge-from="rbr" data-edge-to="wqA" data-edge-label="经 poll_wait 挂上 ep_poll_callback" data-edge-key="2" data-edge-id="e2" data-composition-points="500,100;530,100;530,215;660,215;660,260" d="M 500 100 L 522 100 Q 530 100 530 108 L 530 207 Q 530 215 538 215 L 652 215 Q 660 215 660 223 L 660 260" class="a-default" stroke-width="1.5" marker-end="url(#epoll-flow-arrowhead)"/>
+        <path data-edge-from="nic" data-edge-to="sockA" data-edge-label="中断：数据落进接收缓冲区" data-edge-key="3" data-edge-id="e5" data-composition-points="1225,130;1225,195;925,195;925,260" d="M 1225 130 L 1225 187 Q 1225 195 1217 195 L 933 195 Q 925 195 925 203 L 925 260" class="a-default" stroke-width="1.5" marker-end="url(#epoll-flow-arrowhead)"/>
+        <path data-edge-from="sockA" data-edge-to="wqA" data-edge-label="wake_up 敲它自己的队列" data-edge-key="4" data-edge-id="e4" data-composition-points="820,290;760,290" d="M 820 290 L 760 290" class="a-default" stroke-width="1.5" marker-end="url(#epoll-flow-arrowhead)"/>
+        <path data-edge-from="wqA" data-edge-to="rdl" data-edge-label="回调把 fd 挂进就绪表" data-edge-key="5" data-edge-id="e6" data-composition-points="660,320;660,390;930,390;930,450" d="M 660 320 L 660 382 Q 660 390 668 390 L 922 390 Q 930 390 930 398 L 930 450" class="a-default" stroke-width="1.5" marker-end="url(#epoll-flow-arrowhead)"/>
+        <path data-edge-from="wqA" data-edge-to="ewq" data-edge-label="回调顺手 wake_up(ep-&gt;wq)" data-edge-key="6" data-edge-id="e7" data-composition-points="560,290;520,290;520,480;560,480" d="M 560 290 L 528 290 Q 520 290 520 298 L 520 472 Q 520 480 528 480 L 560 480" class="a-default" stroke-width="1.5" marker-end="url(#epoll-flow-arrowhead)"/>
+        <path data-edge-from="rdl" data-edge-to="thr" data-edge-label="被叫醒，从就绪表拷走这一批" data-edge-key="7" data-edge-id="e8" data-composition-points="930,510;930,560;135,560;135,126" d="M 930 510 L 930 552 Q 930 560 922 560 L 143 560 Q 135 560 135 552 L 135 126" class="a-default" stroke-width="1.5" marker-end="url(#epoll-flow-arrowhead)"/>
 
         <!-- Components -->
-        <g id="node-thr" data-node-id="thr" data-node-label="你的线程" tabindex="0" role="button" aria-label="Focus 你的线程, 登记一次，然后循环收货, 你的进程" aria-pressed="false" data-node-kind="backend" data-node-sublabel="登记一次，然后循环收货" data-node-context="你的进程">
+        <g id="epoll-flow-node-thr" data-node-id="thr" data-node-label="你的线程" tabindex="0" role="button" aria-label="Focus 你的线程, 登记一次，然后循环收货, 你的进程" aria-pressed="false" data-node-kind="backend" data-node-sublabel="登记一次，然后循环收货" data-node-context="你的进程">
           <title>你的线程 · 登记一次，然后循环收货 · 你的进程</title>
           <rect x="45" y="70" width="180" height="56" rx="6" class="c-mask"/>
           <rect x="45" y="70" width="180" height="56" rx="6" class="c-backend" stroke-width="1.5"/>
@@ -108,7 +108,7 @@
         <text data-detail="context" x="135" y="112" class="t-muted" font-size="9" text-anchor="middle">登记一次，然后循环收货</text>
         </g>
 
-        <g id="node-rbr" data-node-id="rbr" data-node-label="红黑树 · 登记表" tabindex="0" role="button" aria-label="Focus 红黑树 · 登记表, 每个登记的 fd 一个 epitem，一直在, 内核" aria-pressed="false" data-node-kind="external" data-node-sublabel="每个登记的 fd 一个 epitem，一直在" data-node-context="内核">
+        <g id="epoll-flow-node-rbr" data-node-id="rbr" data-node-label="红黑树 · 登记表" tabindex="0" role="button" aria-label="Focus 红黑树 · 登记表, 每个登记的 fd 一个 epitem，一直在, 内核" aria-pressed="false" data-node-kind="external" data-node-sublabel="每个登记的 fd 一个 epitem，一直在" data-node-context="内核">
           <title>红黑树 · 登记表 · 每个登记的 fd 一个 epitem，一直在 · 内核</title>
           <rect x="300" y="70" width="200" height="60" rx="6" class="c-mask"/>
           <rect x="300" y="70" width="200" height="60" rx="6" class="c-external" stroke-width="1.5"/>
@@ -120,7 +120,7 @@
         <text data-detail="context" x="400" y="114" class="t-muted" font-size="9" text-anchor="middle">每个登记的 fd 一个 epitem，一直在</text>
         </g>
 
-        <g id="node-wqB" data-node-id="wqB" data-node-label="连接 B 的等待队列" tabindex="0" role="button" aria-label="Focus 连接 B 的等待队列, B 的那份回调挂着待命, 内核" aria-pressed="false" data-node-kind="security" data-node-sublabel="B 的那份回调挂着待命" data-node-context="内核">
+        <g id="epoll-flow-node-wqB" data-node-id="wqB" data-node-label="连接 B 的等待队列" tabindex="0" role="button" aria-label="Focus 连接 B 的等待队列, B 的那份回调挂着待命, 内核" aria-pressed="false" data-node-kind="security" data-node-sublabel="B 的那份回调挂着待命" data-node-context="内核">
           <title>连接 B 的等待队列 · B 的那份回调挂着待命 · 内核</title>
           <rect x="300" y="260" width="200" height="60" rx="6" class="c-mask"/>
           <rect x="300" y="260" width="200" height="60" rx="6" class="c-security" stroke-width="1.5"/>
@@ -132,7 +132,7 @@
         <text data-detail="context" x="400" y="304" class="t-muted" font-size="9" text-anchor="middle">B 的那份回调挂着待命</text>
         </g>
 
-        <g id="node-wqA" data-node-id="wqA" data-node-label="连接 A 的等待队列" tabindex="0" role="button" aria-label="Focus 连接 A 的等待队列, A 的回调挂在这 —— 每个 fd 一份, 内核" aria-pressed="false" data-node-kind="security" data-node-sublabel="A 的回调挂在这 —— 每个 fd 一份" data-node-context="内核">
+        <g id="epoll-flow-node-wqA" data-node-id="wqA" data-node-label="连接 A 的等待队列" tabindex="0" role="button" aria-label="Focus 连接 A 的等待队列, A 的回调挂在这 —— 每个 fd 一份, 内核" aria-pressed="false" data-node-kind="security" data-node-sublabel="A 的回调挂在这 —— 每个 fd 一份" data-node-context="内核">
           <title>连接 A 的等待队列 · A 的回调挂在这 —— 每个 fd 一份 · 内核</title>
           <rect x="560" y="260" width="200" height="60" rx="6" class="c-mask"/>
           <rect x="560" y="260" width="200" height="60" rx="6" class="c-security" stroke-width="1.5"/>
@@ -144,7 +144,7 @@
         <text data-detail="context" x="660" y="304" class="t-muted" font-size="9" text-anchor="middle">A 的回调挂在这 —— 每个 fd 一份</text>
         </g>
 
-        <g id="node-sockA" data-node-id="sockA" data-node-label="连接 A · socket" tabindex="0" role="button" aria-label="Focus 连接 A · socket, 这一刻有数据（B 没有）, 内核" aria-pressed="false" data-node-kind="database" data-node-sublabel="这一刻有数据（B 没有）" data-node-context="内核">
+        <g id="epoll-flow-node-sockA" data-node-id="sockA" data-node-label="连接 A · socket" tabindex="0" role="button" aria-label="Focus 连接 A · socket, 这一刻有数据（B 没有）, 内核" aria-pressed="false" data-node-kind="database" data-node-sublabel="这一刻有数据（B 没有）" data-node-context="内核">
           <title>连接 A · socket · 这一刻有数据（B 没有） · 内核</title>
           <rect x="820" y="260" width="210" height="60" rx="6" class="c-mask"/>
           <rect x="820" y="260" width="210" height="60" rx="6" class="c-database" stroke-width="1.5"/>
@@ -156,7 +156,7 @@
         <text data-detail="context" x="925" y="304" class="t-muted" font-size="9" text-anchor="middle">这一刻有数据（B 没有）</text>
         </g>
 
-        <g id="node-nic" data-node-id="nic" data-node-label="网卡 · 数据到" tabindex="0" role="button" aria-label="Focus 网卡 · 数据到, 中断 → 协议栈 → 接收缓冲区, 硬件" aria-pressed="false" data-node-kind="cloud" data-node-sublabel="中断 → 协议栈 → 接收缓冲区" data-node-context="硬件">
+        <g id="epoll-flow-node-nic" data-node-id="nic" data-node-label="网卡 · 数据到" tabindex="0" role="button" aria-label="Focus 网卡 · 数据到, 中断 → 协议栈 → 接收缓冲区, 硬件" aria-pressed="false" data-node-kind="cloud" data-node-sublabel="中断 → 协议栈 → 接收缓冲区" data-node-context="硬件">
           <title>网卡 · 数据到 · 中断 → 协议栈 → 接收缓冲区 · 硬件</title>
           <rect x="1130" y="70" width="190" height="60" rx="6" class="c-mask"/>
           <rect x="1130" y="70" width="190" height="60" rx="6" class="c-cloud" stroke-width="1.5"/>
@@ -167,7 +167,7 @@
         <text data-detail="context" x="1225" y="114" class="t-muted" font-size="9" text-anchor="middle">中断 → 协议栈 → 接收缓冲区</text>
         </g>
 
-        <g id="node-ewq" data-node-id="ewq" data-node-label="实例的等待队列 ep-&gt;wq" tabindex="0" role="button" aria-label="Focus 实例的等待队列 ep-&gt;wq, epoll_wait 睡在这里, 内核" aria-pressed="false" data-node-kind="security" data-node-sublabel="epoll_wait 睡在这里" data-node-context="内核">
+        <g id="epoll-flow-node-ewq" data-node-id="ewq" data-node-label="实例的等待队列 ep-&gt;wq" tabindex="0" role="button" aria-label="Focus 实例的等待队列 ep-&gt;wq, epoll_wait 睡在这里, 内核" aria-pressed="false" data-node-kind="security" data-node-sublabel="epoll_wait 睡在这里" data-node-context="内核">
           <title>实例的等待队列 ep-&gt;wq · epoll_wait 睡在这里 · 内核</title>
           <rect x="560" y="450" width="220" height="60" rx="6" class="c-mask"/>
           <rect x="560" y="450" width="220" height="60" rx="6" class="c-security" stroke-width="1.5"/>
@@ -179,7 +179,7 @@
         <text data-detail="context" x="670" y="494" class="t-muted" font-size="9" text-anchor="middle">epoll_wait 睡在这里</text>
         </g>
 
-        <g id="node-rdl" data-node-id="rdl" data-node-label="就绪链表 rdllist" tabindex="0" role="button" aria-label="Focus 就绪链表 rdllist, 只装这一刻真有事的, 内核" aria-pressed="false" data-node-kind="external" data-node-sublabel="只装这一刻真有事的" data-node-context="内核">
+        <g id="epoll-flow-node-rdl" data-node-id="rdl" data-node-label="就绪链表 rdllist" tabindex="0" role="button" aria-label="Focus 就绪链表 rdllist, 只装这一刻真有事的, 内核" aria-pressed="false" data-node-kind="external" data-node-sublabel="只装这一刻真有事的" data-node-context="内核">
           <title>就绪链表 rdllist · 只装这一刻真有事的 · 内核</title>
           <rect x="830" y="450" width="200" height="60" rx="6" class="c-mask"/>
           <rect x="830" y="450" width="200" height="60" rx="6" class="c-external" stroke-width="1.5"/>
@@ -425,6 +425,6 @@ wake_up(&amp;ep-&gt;wq)。记账的和敲门的是同一个函数，
   </main>
 </div>
 
-<script src="../../assets/app.js?v=5ae1b3242f"></script>
+<script src="../../assets/app.js?v=0260babc63"></script>
 </body>
 </html>

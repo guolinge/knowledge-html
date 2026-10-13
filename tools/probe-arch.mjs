@@ -26,6 +26,13 @@ setTimeout(()=>{
  check('存在多层归属图',!!fig);
  if(!fig){finish();return;}
  const svg=fig.querySelector('svg'),nodes=[...svg.querySelectorAll('[data-node-id]')],frames=[...svg.querySelectorAll('[data-frame]')];
+ const figureIds=[...document.querySelectorAll('[data-arch] svg [id]')].map(n=>n.id);
+ const repeated=[...new Set(figureIds.filter((id,i)=>figureIds.indexOf(id)!==i))];
+ check('同页多张 arch 图的内部 id 不重复',!repeated.length,JSON.stringify(repeated));
+ check('每张图的图名指向自己',[...document.querySelectorAll('[data-arch] svg')].every(s=>{
+  const labels=(s.getAttribute('aria-labelledby')||'').split(/\\s+/).filter(Boolean);
+  return labels.length>0&&labels.every(id=>s.querySelector('#'+CSS.escape(id)));
+ }));
  const meta=JSON.parse(fig.dataset.frames), byId=id=>frames.find(f=>f.dataset.frame===id);
  const bounds=id=>rect(byId(id).querySelector('rect'));
  check('所有声明区域都可读可点',frames.length===meta.length&&frames.every(f=>visible(f)&&f.getAttribute('tabindex')==='0'));

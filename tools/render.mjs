@@ -12,7 +12,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import MarkdownIt from 'markdown-it';
-import { blocksPlugin, addAnchors, lintFences, lintLinkifyStars, lintRawHtml } from './lib/blocks.mjs';
+import { blocksPlugin, addAnchors, lintFences, lintLinkifyStars, lintRawHtml, lintDuplicateIds, resetInlineIds } from './lib/blocks.mjs';
 import { renderPage } from './lib/page.mjs';
 import { renderHome } from './lib/home.mjs';
 import { readAllPlans, attachNotes, needsHtml } from './lib/plan.mjs';
@@ -251,6 +251,7 @@ function main() {
     let anchored;
     let toc;
     try {
+      resetInlineIds();   // 内联图内部的 id 后缀按页从 1 起，--only 与全量构建才一致
       ({ html: anchored, toc } = addAnchors(md.render(src, env)));
     } catch (e) {
       // 一篇写坏不应该阻塞其他笔记的构建
@@ -259,7 +260,7 @@ function main() {
       continue;
     }
 
-    const issues = [...lintNote(meta, src, env.warnings), ...lintFences(anchored, src), ...lintLinkifyStars(anchored, src), ...lintRawHtml(anchored, src)];
+    const issues = [...lintNote(meta, src, env.warnings), ...lintFences(anchored, src), ...lintLinkifyStars(anchored, src), ...lintRawHtml(anchored, src), ...lintDuplicateIds(anchored)];
     for (const it of issues) console.warn(`  ⚠ ${slug}: ${it}`);
     warnings += issues.length;
 

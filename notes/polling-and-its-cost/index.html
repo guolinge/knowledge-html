@@ -6,7 +6,7 @@
 <title>轮询：不等了，去问</title>
 <meta name="description" content="「等待不该占用执行资源」落到操作上，第一步就是别让线程等、让它去问 —— 一个线程终于能招呼多个连接。但「问」自己欠下两个病：白问太多（3N 的名单搬运），而且名单每次都要重新交一遍。第二个才是 epoll 存在的理由。" />
 <link rel="stylesheet" href="../../assets/theme.css?v=b918ec5c83" />
-  <link rel="stylesheet" href="../../assets/blocks.css?v=e670f1128c" />
+  <link rel="stylesheet" href="../../assets/blocks.css?v=4aaac4b40f" />
   <link rel="stylesheet" href="../../assets/archify-embed.css?v=68fec0b81b" />
 </head>
 <body>
@@ -123,30 +123,30 @@ for (;;) {
 <p><strong>所以「底层是怎么转换的」这个问法，本身就问错了 —— 底层什么都没转换。</strong> 真正变的，是 <code>read</code> 在「数据没到」那一刻走的那条分支：</p>
 <figure class="archfig" data-arch style="--arch-max-width:1428px" data-pano data-parts='{"tA":{"label":"线程 A","sub":"上一篇的一个执行单位","detail":"它是 ==accept 返回那一刻 `pthread_create` 造出来的== —— 一条连接配一个，造它的唯一理由就是让它在 `read` 上站着等。那一刻缓冲区是空的，==阻塞的 read 不会返回==：内核把这条执行流挂到连接 1 的等待队列上、让它让出 CPU。数据到来之前它什么都干不了。"},"tB":{"label":"线程 B","sub":"一模一样的处境","detail":"也是 accept 时 `pthread_create` 造的，只是挂在了连接 2 上。==500 条连接就是 500 次 pthread_create、500 个这样的线程==，绝大部分时间在睡。"},"c1":{"label":"连接 1 · socket","sub":"没变的东西","detail":"四元组、接收缓冲区、等待队列 —— 和右边那个「连接 1 · socket」是**同一个东西**。变的不是它，是等它的人的等法。"},"c2":{"label":"连接 2 · socket","sub":"同上","detail":"同一个 socket，另一条连接；它的等待队列上睡着线程 B。"},"cpuL":{"label":"CPU","sub":"此刻不在跑你的代码","detail":"500 个线程全在睡，CPU 在跑别的进程。==这就是上一篇那句「用执行资源去买等待」==：买来的就是这一片睡眠。"},"tX":{"label":"线程 X","sub":"这一篇唯一的一个","detail":"==它不是为哪条连接造的：整个进程里 `pthread_create` 一次都没调==，跑轮询的就是进程启动时自带的那个主线程 —— 以前它卡在 `accept` 上等新连接，现在它把「问」也干了。它也调 `read`、也面对空缓冲区，但 fd 上有 `O_NONBLOCK`，==内核不挂它，直接把 EAGAIN 还给它==。"},"cR1":{"label":"连接 1 · socket","sub":"被问的其中一个","detail":"缓冲区是空的，这次 read 的全部产出就是一句 EAGAIN。==注意它自己什么都没变==：缓冲区、等待队列都在，只是这会儿队列上没有睡觉的人。"},"cR2":{"label":"连接 2 · socket","sub":"同上","detail":"也是空的，也是一句 EAGAIN。一轮里大部分的问都落在这种格子上。"},"cR3":{"label":"连接 3 · socket","sub":"这一轮唯一有数据的","detail":"缓冲区里有 200 字节 —— 这次 read 把数据带回来，线程处理它，然后继续问下一个。==一轮几百次系统调用，有收获的可能就这一两次== —— 正是接下来两节要算的账。"},"cpuR":{"label":"CPU","sub":"从头到尾跑的都是它","detail":"线程 X 永远在跑：问、问、问、处理、问。==同一台机器，左边它在跑别人，右边它一直在跑你== —— 「等待不再占用执行资源」落到机器上就是这个样子。"}}' data-tours='[{"id":"two-endings","label":"一次 read 的两种结局","steps":[{"at":["tA","c1"],"text":"上一篇的世界从 accept 开始：==每回来一条连接，`pthread_create` 造一个线程==，让它去调 `read(连接 1)`。缓冲区是空的 → 内核把它挂到连接 1 的等待队列上、让出 CPU —— 这次 read 要等数据来了才有返回。"},{"at":["tA","cpuL"],"text":"于是线程 A 睡了。==它不是「慢」，是不在场==：CPU 在跑别人的代码。"},{"at":["tB","c2"],"text":"线程 B 的处境一模一样 —— 它也是 accept 时造出来的。500 条连接就要 500 次 `pthread_create` ==因为一个被挂走的线程，连「去问问别的连接」都做不到==。"},{"at":["tX"],"text":"换到这一篇，先看这个线程是从哪来的：==不是新造的==。整个进程里 `pthread_create` 一次都没调 —— 跑轮询的就是进程启动时自带的那个主线程，以前它卡在 accept 上，现在它把「问」也干了。==线程数从此跟连接数无关。=="},{"at":["tX","cR1"],"text":"它也问连接 1，缓冲区也是空的 —— 但 `O_NONBLOCK` 让内核不挂它，==立刻把 EAGAIN 还给它==。"},{"at":["tX","cR3"],"text":"拿回一句「还没好」，它转头去问下一个。问到连接 3，缓冲区里有数据 —— 这次 read 真的把数据带回来了。"},{"at":["tX","cpuR"],"text":"全程线程 X 没离开过 CPU。==同一台机器、同一批 socket，变的只有「数据没到」那一刻内核走哪条分支== —— 这就是两个世界的全部差别。"}]},{"id":"what-changed","label":"什么变了，什么没变","steps":[{"at":["c1","cR1"],"text":"先看没变的：两边的「连接 1 · socket」是同一个东西 —— 四元组、接收缓冲区、等待队列一样不少。==底层没有「转换」这回事。=="},{"at":["tA","tX"],"text":"变的是人，而且是两边不同时辰出现的：左边的线程 ==accept 时 pthread_create 造==，一条连接一个；右边这个线程 ==进程一起来就在==，500 条连接共用它。"},{"at":["cpuL","cpuR"],"text":"落到 CPU 上看得最清楚：左边它跑的是别人（你的线程全在睡），右边它从头到尾跑你的这一个。"},{"at":["tX","cR3"],"text":"代价也已经在这张图上了：==每一问都是一次系统调用==，右边这一轮 3 问里 2 问是白问 —— 后面会算这笔账。"}]}]'>
       
-      <div class="arch-canvas"><svg viewBox="0 0 1428 572" role="img" aria-labelledby="archify-diagram-title archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
-        <title id="archify-diagram-title">同一次 read，两种结局：线程被挂到哪，决定一个线程能招呼几条连接</title>
-        <desc id="archify-diagram-description">连接 socket、缓冲区、四元组一个都没变，变的只有「数据没到」那一刻的分支</desc>
+      <div class="arch-canvas"><svg viewBox="0 0 1428 572" role="img" aria-labelledby="blocking-vs-polling-archify-diagram-title blocking-vs-polling-archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
+        <title id="blocking-vs-polling-archify-diagram-title">同一次 read，两种结局：线程被挂到哪，决定一个线程能招呼几条连接</title>
+        <desc id="blocking-vs-polling-archify-diagram-description">连接 socket、缓冲区、四元组一个都没变，变的只有「数据没到」那一刻的分支</desc>
         <!-- Definitions -->
         <defs>
-          <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+          <marker id="blocking-vs-polling-arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
             <polygon points="0 0, 10 3.5, 0 7" class="m-default" />
           </marker>
-          <marker id="arrowhead-emphasis" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+          <marker id="blocking-vs-polling-arrowhead-emphasis" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
             <polygon points="0 0, 10 3.5, 0 7" class="m-emphasis" />
           </marker>
-          <marker id="arrowhead-security" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+          <marker id="blocking-vs-polling-arrowhead-security" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
             <polygon points="0 0, 10 3.5, 0 7" class="m-security" />
           </marker>
-          <marker id="arrowhead-dashed" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+          <marker id="blocking-vs-polling-arrowhead-dashed" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
             <polygon points="0 0, 10 3.5, 0 7" class="m-dashed" />
           </marker>
-          <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+          <pattern id="blocking-vs-polling-grid" width="40" height="40" patternUnits="userSpaceOnUse">
             <path d="M 40 0 L 0 0 0 40" class="c-grid" stroke-width="0.5"/>
           </pattern>
         </defs>
 
         <!-- Background Grid -->
-        <rect width="100%" height="100%" fill="url(#grid)" />
+        <rect width="100%" height="100%" fill="url(#blocking-vs-polling-grid)" />
 
         <!-- Boundaries (behind everything) -->
         <rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="0" x="52" y="82" width="696" height="332" rx="12" class="c-region" stroke-width="1"/>
@@ -156,14 +156,14 @@ for (;;) {
         <text x="780" y="50" class="t-cloud" font-size="9" font-weight="600">这一篇 · 非阻塞 + 一个线程轮询：500 条连接还是 1 个线程</text>
 
         <!-- Connection paths (before components for correct z-order) -->
-        <path data-edge-from="tA" data-edge-to="c1" data-edge-label="read：没数据 → 挂到它的等待队列" data-edge-key="0" data-edge-id="b1" data-composition-points="280,142;500,142" d="M 280 142 L 500 142" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
-        <path data-edge-from="tB" data-edge-to="c2" data-edge-label="read：没数据 → 挂起" data-edge-key="1" data-edge-id="b2" data-composition-points="280,252;500,252" d="M 280 252 L 500 252" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
-        <path data-edge-from="tX" data-edge-to="cR1" data-edge-label="好了吗 → EAGAIN" data-edge-key="2" data-edge-id="p1" data-composition-points="900,170;900,146;1116,146;1116,92;1140,92" d="M 900 170 L 900 154 Q 900 146 908 146 L 1108 146 Q 1116 146 1116 138 L 1116 100 Q 1116 92 1124 92 L 1140 92" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
-        <path data-edge-from="tX" data-edge-to="cR2" data-edge-label="好了吗 → EAGAIN" data-edge-key="3" data-edge-id="p2" data-composition-points="1000,202;1024,202;1024,228;1116,228;1116,212;1140,212" d="M 1000 202 L 1016 202 Q 1024 202 1024 210 L 1024 220 Q 1024 228 1032 228 L 1108 228 Q 1116 228 1116 220 L 1116 220 Q 1116 212 1124 212 L 1140 212" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
-        <path data-edge-from="tX" data-edge-to="cR3" data-edge-label="好了吗 → 有数据，读走" data-edge-key="4" data-edge-id="p3" data-composition-points="900,234;900,258;1116,258;1116,332;1140,332" d="M 900 234 L 900 250 Q 900 258 908 258 L 1108 258 Q 1116 258 1116 266 L 1116 324 Q 1116 332 1124 332 L 1140 332" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
+        <path data-edge-from="tA" data-edge-to="c1" data-edge-label="read：没数据 → 挂到它的等待队列" data-edge-key="0" data-edge-id="b1" data-composition-points="280,142;500,142" d="M 280 142 L 500 142" class="a-default" stroke-width="1.5" marker-end="url(#blocking-vs-polling-arrowhead)"/>
+        <path data-edge-from="tB" data-edge-to="c2" data-edge-label="read：没数据 → 挂起" data-edge-key="1" data-edge-id="b2" data-composition-points="280,252;500,252" d="M 280 252 L 500 252" class="a-default" stroke-width="1.5" marker-end="url(#blocking-vs-polling-arrowhead)"/>
+        <path data-edge-from="tX" data-edge-to="cR1" data-edge-label="好了吗 → EAGAIN" data-edge-key="2" data-edge-id="p1" data-composition-points="900,170;900,146;1116,146;1116,92;1140,92" d="M 900 170 L 900 154 Q 900 146 908 146 L 1108 146 Q 1116 146 1116 138 L 1116 100 Q 1116 92 1124 92 L 1140 92" class="a-default" stroke-width="1.5" marker-end="url(#blocking-vs-polling-arrowhead)"/>
+        <path data-edge-from="tX" data-edge-to="cR2" data-edge-label="好了吗 → EAGAIN" data-edge-key="3" data-edge-id="p2" data-composition-points="1000,202;1024,202;1024,228;1116,228;1116,212;1140,212" d="M 1000 202 L 1016 202 Q 1024 202 1024 210 L 1024 220 Q 1024 228 1032 228 L 1108 228 Q 1116 228 1116 220 L 1116 220 Q 1116 212 1124 212 L 1140 212" class="a-default" stroke-width="1.5" marker-end="url(#blocking-vs-polling-arrowhead)"/>
+        <path data-edge-from="tX" data-edge-to="cR3" data-edge-label="好了吗 → 有数据，读走" data-edge-key="4" data-edge-id="p3" data-composition-points="900,234;900,258;1116,258;1116,332;1140,332" d="M 900 234 L 900 250 Q 900 258 908 258 L 1108 258 Q 1116 258 1116 266 L 1116 324 Q 1116 332 1124 332 L 1140 332" class="a-emphasis" stroke-width="1.8" marker-end="url(#blocking-vs-polling-arrowhead-emphasis)"/>
 
         <!-- Components -->
-        <g id="node-tA" data-node-id="tA" data-node-label="线程 A" tabindex="0" role="button" aria-label="Focus 线程 A, accept 来一条，pthread_create 造一个, 上一篇 · 阻塞 + 一连接一线程：500 条连接 = 500 个线程" aria-pressed="false" data-node-kind="backend" data-node-sublabel="accept 来一条，pthread_create 造一个" data-node-context="上一篇 · 阻塞 + 一连接一线程：500 条连接 = 500 个线程">
+        <g id="blocking-vs-polling-node-tA" data-node-id="tA" data-node-label="线程 A" tabindex="0" role="button" aria-label="Focus 线程 A, accept 来一条，pthread_create 造一个, 上一篇 · 阻塞 + 一连接一线程：500 条连接 = 500 个线程" aria-pressed="false" data-node-kind="backend" data-node-sublabel="accept 来一条，pthread_create 造一个" data-node-context="上一篇 · 阻塞 + 一连接一线程：500 条连接 = 500 个线程">
           <title>线程 A · accept 来一条，pthread_create 造一个 · 上一篇 · 阻塞 + 一连接一线程：500 条连接 = 500 个线程</title>
           <rect x="80" y="110" width="200" height="64" rx="6" class="c-mask"/>
           <rect x="80" y="110" width="200" height="64" rx="6" class="c-backend" stroke-width="1.5"/>
@@ -174,7 +174,7 @@ for (;;) {
         <text data-detail="context" x="180" y="156" class="t-muted" font-size="8.8" text-anchor="middle">accept 来一条，pthread_create 造一个</text>
         </g>
 
-        <g id="node-tB" data-node-id="tB" data-node-label="线程 B" tabindex="0" role="button" aria-label="Focus 线程 B, accept 来一条，pthread_create 造一个, 上一篇 · 阻塞 + 一连接一线程：500 条连接 = 500 个线程" aria-pressed="false" data-node-kind="backend" data-node-sublabel="accept 来一条，pthread_create 造一个" data-node-context="上一篇 · 阻塞 + 一连接一线程：500 条连接 = 500 个线程">
+        <g id="blocking-vs-polling-node-tB" data-node-id="tB" data-node-label="线程 B" tabindex="0" role="button" aria-label="Focus 线程 B, accept 来一条，pthread_create 造一个, 上一篇 · 阻塞 + 一连接一线程：500 条连接 = 500 个线程" aria-pressed="false" data-node-kind="backend" data-node-sublabel="accept 来一条，pthread_create 造一个" data-node-context="上一篇 · 阻塞 + 一连接一线程：500 条连接 = 500 个线程">
           <title>线程 B · accept 来一条，pthread_create 造一个 · 上一篇 · 阻塞 + 一连接一线程：500 条连接 = 500 个线程</title>
           <rect x="80" y="220" width="200" height="64" rx="6" class="c-mask"/>
           <rect x="80" y="220" width="200" height="64" rx="6" class="c-backend" stroke-width="1.5"/>
@@ -185,7 +185,7 @@ for (;;) {
         <text data-detail="context" x="180" y="266" class="t-muted" font-size="8.8" text-anchor="middle">accept 来一条，pthread_create 造一个</text>
         </g>
 
-        <g id="node-c1" data-node-id="c1" data-node-label="连接 1 · socket" tabindex="0" role="button" aria-label="Focus 连接 1 · socket, 缓冲区空 · 线程 A 睡在它的等待队列上, 上一篇 · 阻塞 + 一连接一线程：500 条连接 = 500 个线程" aria-pressed="false" data-node-kind="database" data-node-sublabel="缓冲区空 · 线程 A 睡在它的等待队列上" data-node-context="上一篇 · 阻塞 + 一连接一线程：500 条连接 = 500 个线程">
+        <g id="blocking-vs-polling-node-c1" data-node-id="c1" data-node-label="连接 1 · socket" tabindex="0" role="button" aria-label="Focus 连接 1 · socket, 缓冲区空 · 线程 A 睡在它的等待队列上, 上一篇 · 阻塞 + 一连接一线程：500 条连接 = 500 个线程" aria-pressed="false" data-node-kind="database" data-node-sublabel="缓冲区空 · 线程 A 睡在它的等待队列上" data-node-context="上一篇 · 阻塞 + 一连接一线程：500 条连接 = 500 个线程">
           <title>连接 1 · socket · 缓冲区空 · 线程 A 睡在它的等待队列上 · 上一篇 · 阻塞 + 一连接一线程：500 条连接 = 500 个线程</title>
           <rect x="500" y="110" width="220" height="64" rx="6" class="c-mask"/>
           <rect x="500" y="110" width="220" height="64" rx="6" class="c-database" stroke-width="1.5"/>
@@ -197,7 +197,7 @@ for (;;) {
         <text data-detail="context" x="610" y="156" class="t-muted" font-size="9" text-anchor="middle">缓冲区空 · 线程 A 睡在它的等待队列上</text>
         </g>
 
-        <g id="node-c2" data-node-id="c2" data-node-label="连接 2 · socket" tabindex="0" role="button" aria-label="Focus 连接 2 · socket, 缓冲区空 · 线程 B 睡在它的等待队列上, 上一篇 · 阻塞 + 一连接一线程：500 条连接 = 500 个线程" aria-pressed="false" data-node-kind="database" data-node-sublabel="缓冲区空 · 线程 B 睡在它的等待队列上" data-node-context="上一篇 · 阻塞 + 一连接一线程：500 条连接 = 500 个线程">
+        <g id="blocking-vs-polling-node-c2" data-node-id="c2" data-node-label="连接 2 · socket" tabindex="0" role="button" aria-label="Focus 连接 2 · socket, 缓冲区空 · 线程 B 睡在它的等待队列上, 上一篇 · 阻塞 + 一连接一线程：500 条连接 = 500 个线程" aria-pressed="false" data-node-kind="database" data-node-sublabel="缓冲区空 · 线程 B 睡在它的等待队列上" data-node-context="上一篇 · 阻塞 + 一连接一线程：500 条连接 = 500 个线程">
           <title>连接 2 · socket · 缓冲区空 · 线程 B 睡在它的等待队列上 · 上一篇 · 阻塞 + 一连接一线程：500 条连接 = 500 个线程</title>
           <rect x="500" y="220" width="220" height="64" rx="6" class="c-mask"/>
           <rect x="500" y="220" width="220" height="64" rx="6" class="c-database" stroke-width="1.5"/>
@@ -209,7 +209,7 @@ for (;;) {
         <text data-detail="context" x="610" y="266" class="t-muted" font-size="9" text-anchor="middle">缓冲区空 · 线程 B 睡在它的等待队列上</text>
         </g>
 
-        <g id="node-cpuL" data-node-id="cpuL" data-node-label="CPU" tabindex="0" role="button" aria-label="Focus CPU, 此刻在跑别人的代码, 上一篇 · 阻塞 + 一连接一线程：500 条连接 = 500 个线程" aria-pressed="false" data-node-kind="cloud" data-node-sublabel="此刻在跑别人的代码" data-node-context="上一篇 · 阻塞 + 一连接一线程：500 条连接 = 500 个线程">
+        <g id="blocking-vs-polling-node-cpuL" data-node-id="cpuL" data-node-label="CPU" tabindex="0" role="button" aria-label="Focus CPU, 此刻在跑别人的代码, 上一篇 · 阻塞 + 一连接一线程：500 条连接 = 500 个线程" aria-pressed="false" data-node-kind="cloud" data-node-sublabel="此刻在跑别人的代码" data-node-context="上一篇 · 阻塞 + 一连接一线程：500 条连接 = 500 个线程">
           <title>CPU · 此刻在跑别人的代码 · 上一篇 · 阻塞 + 一连接一线程：500 条连接 = 500 个线程</title>
           <rect x="270" y="330" width="220" height="64" rx="6" class="c-mask"/>
           <rect x="270" y="330" width="220" height="64" rx="6" class="c-cloud" stroke-width="1.5"/>
@@ -220,7 +220,7 @@ for (;;) {
         <text data-detail="context" x="380" y="376" class="t-muted" font-size="9" text-anchor="middle">此刻在跑别人的代码</text>
         </g>
 
-        <g id="node-tX" data-node-id="tX" data-node-label="线程 X" tabindex="0" role="button" aria-label="Focus 线程 X, 进程起来时就有的主线程，不是新造的, 这一篇 · 非阻塞 + 一个线程轮询：500 条连接还是 1 个线程" aria-pressed="false" data-node-kind="backend" data-node-sublabel="进程起来时就有的主线程，不是新造的" data-node-context="这一篇 · 非阻塞 + 一个线程轮询：500 条连接还是 1 个线程">
+        <g id="blocking-vs-polling-node-tX" data-node-id="tX" data-node-label="线程 X" tabindex="0" role="button" aria-label="Focus 线程 X, 进程起来时就有的主线程，不是新造的, 这一篇 · 非阻塞 + 一个线程轮询：500 条连接还是 1 个线程" aria-pressed="false" data-node-kind="backend" data-node-sublabel="进程起来时就有的主线程，不是新造的" data-node-context="这一篇 · 非阻塞 + 一个线程轮询：500 条连接还是 1 个线程">
           <title>线程 X · 进程起来时就有的主线程，不是新造的 · 这一篇 · 非阻塞 + 一个线程轮询：500 条连接还是 1 个线程</title>
           <rect x="800" y="170" width="200" height="64" rx="6" class="c-mask"/>
           <rect x="800" y="170" width="200" height="64" rx="6" class="c-backend" stroke-width="1.5"/>
@@ -231,7 +231,7 @@ for (;;) {
         <text data-detail="context" x="900" y="216" class="t-muted" font-size="9" text-anchor="middle">进程起来时就有的主线程，不是新造的</text>
         </g>
 
-        <g id="node-cpuR" data-node-id="cpuR" data-node-label="CPU" tabindex="0" role="button" aria-label="Focus CPU, 从头到尾都在跑这一个线程, 这一篇 · 非阻塞 + 一个线程轮询：500 条连接还是 1 个线程" aria-pressed="false" data-node-kind="cloud" data-node-sublabel="从头到尾都在跑这一个线程" data-node-context="这一篇 · 非阻塞 + 一个线程轮询：500 条连接还是 1 个线程">
+        <g id="blocking-vs-polling-node-cpuR" data-node-id="cpuR" data-node-label="CPU" tabindex="0" role="button" aria-label="Focus CPU, 从头到尾都在跑这一个线程, 这一篇 · 非阻塞 + 一个线程轮询：500 条连接还是 1 个线程" aria-pressed="false" data-node-kind="cloud" data-node-sublabel="从头到尾都在跑这一个线程" data-node-context="这一篇 · 非阻塞 + 一个线程轮询：500 条连接还是 1 个线程">
           <title>CPU · 从头到尾都在跑这一个线程 · 这一篇 · 非阻塞 + 一个线程轮询：500 条连接还是 1 个线程</title>
           <rect x="800" y="420" width="200" height="64" rx="6" class="c-mask"/>
           <rect x="800" y="420" width="200" height="64" rx="6" class="c-cloud" stroke-width="1.5"/>
@@ -242,7 +242,7 @@ for (;;) {
         <text data-detail="context" x="900" y="466" class="t-muted" font-size="9" text-anchor="middle">从头到尾都在跑这一个线程</text>
         </g>
 
-        <g id="node-cR1" data-node-id="cR1" data-node-label="连接 1 · socket" tabindex="0" role="button" aria-label="Focus 连接 1 · socket, 缓冲区空 → 答一句 EAGAIN, 这一篇 · 非阻塞 + 一个线程轮询：500 条连接还是 1 个线程" aria-pressed="false" data-node-kind="database" data-node-sublabel="缓冲区空 → 答一句 EAGAIN" data-node-context="这一篇 · 非阻塞 + 一个线程轮询：500 条连接还是 1 个线程">
+        <g id="blocking-vs-polling-node-cR1" data-node-id="cR1" data-node-label="连接 1 · socket" tabindex="0" role="button" aria-label="Focus 连接 1 · socket, 缓冲区空 → 答一句 EAGAIN, 这一篇 · 非阻塞 + 一个线程轮询：500 条连接还是 1 个线程" aria-pressed="false" data-node-kind="database" data-node-sublabel="缓冲区空 → 答一句 EAGAIN" data-node-context="这一篇 · 非阻塞 + 一个线程轮询：500 条连接还是 1 个线程">
           <title>连接 1 · socket · 缓冲区空 → 答一句 EAGAIN · 这一篇 · 非阻塞 + 一个线程轮询：500 条连接还是 1 个线程</title>
           <rect x="1140" y="60" width="220" height="64" rx="6" class="c-mask"/>
           <rect x="1140" y="60" width="220" height="64" rx="6" class="c-database" stroke-width="1.5"/>
@@ -254,7 +254,7 @@ for (;;) {
         <text data-detail="context" x="1250" y="106" class="t-muted" font-size="9" text-anchor="middle">缓冲区空 → 答一句 EAGAIN</text>
         </g>
 
-        <g id="node-cR2" data-node-id="cR2" data-node-label="连接 2 · socket" tabindex="0" role="button" aria-label="Focus 连接 2 · socket, 缓冲区空 → 答一句 EAGAIN, 这一篇 · 非阻塞 + 一个线程轮询：500 条连接还是 1 个线程" aria-pressed="false" data-node-kind="database" data-node-sublabel="缓冲区空 → 答一句 EAGAIN" data-node-context="这一篇 · 非阻塞 + 一个线程轮询：500 条连接还是 1 个线程">
+        <g id="blocking-vs-polling-node-cR2" data-node-id="cR2" data-node-label="连接 2 · socket" tabindex="0" role="button" aria-label="Focus 连接 2 · socket, 缓冲区空 → 答一句 EAGAIN, 这一篇 · 非阻塞 + 一个线程轮询：500 条连接还是 1 个线程" aria-pressed="false" data-node-kind="database" data-node-sublabel="缓冲区空 → 答一句 EAGAIN" data-node-context="这一篇 · 非阻塞 + 一个线程轮询：500 条连接还是 1 个线程">
           <title>连接 2 · socket · 缓冲区空 → 答一句 EAGAIN · 这一篇 · 非阻塞 + 一个线程轮询：500 条连接还是 1 个线程</title>
           <rect x="1140" y="180" width="220" height="64" rx="6" class="c-mask"/>
           <rect x="1140" y="180" width="220" height="64" rx="6" class="c-database" stroke-width="1.5"/>
@@ -266,7 +266,7 @@ for (;;) {
         <text data-detail="context" x="1250" y="226" class="t-muted" font-size="9" text-anchor="middle">缓冲区空 → 答一句 EAGAIN</text>
         </g>
 
-        <g id="node-cR3" data-node-id="cR3" data-node-label="连接 3 · socket" tabindex="0" role="button" aria-label="Focus 连接 3 · socket, 缓冲区有数据 → 读走 200 字节, 这一篇 · 非阻塞 + 一个线程轮询：500 条连接还是 1 个线程" aria-pressed="false" data-node-kind="database" data-node-sublabel="缓冲区有数据 → 读走 200 字节" data-node-context="这一篇 · 非阻塞 + 一个线程轮询：500 条连接还是 1 个线程">
+        <g id="blocking-vs-polling-node-cR3" data-node-id="cR3" data-node-label="连接 3 · socket" tabindex="0" role="button" aria-label="Focus 连接 3 · socket, 缓冲区有数据 → 读走 200 字节, 这一篇 · 非阻塞 + 一个线程轮询：500 条连接还是 1 个线程" aria-pressed="false" data-node-kind="database" data-node-sublabel="缓冲区有数据 → 读走 200 字节" data-node-context="这一篇 · 非阻塞 + 一个线程轮询：500 条连接还是 1 个线程">
           <title>连接 3 · socket · 缓冲区有数据 → 读走 200 字节 · 这一篇 · 非阻塞 + 一个线程轮询：500 条连接还是 1 个线程</title>
           <rect x="1140" y="300" width="220" height="64" rx="6" class="c-mask"/>
           <rect x="1140" y="300" width="220" height="64" rx="6" class="c-database" stroke-width="1.5"/>
@@ -347,30 +347,30 @@ for (;;) {
 <p>前面那段轮询代码落到机器上，就是下面这几个对象之间的一圈行走：外圈问「有没有新连接」，内圈把名单挨个问一遍，问完回外圈。<mark class="mk-blue">只有两条路会跳出「问」这个动作，而且没有一条是「睡」</mark>：</p>
 <figure class="archfig" data-arch style="--arch-max-width:1048px" data-pano data-parts='{"thread":{"label":"主线程","sub":"进程自带的那个","detail":"==它就是跑这段代码的线程==：进程启动时就有，全程没有 pthread_create。一圈里它只干两件事：① 问监听 socket「有新连接吗」，② 把名单挨个问一遍。"},"list":{"label":"你的数组 fds[]","sub":"② 遍历的就是它","detail":"accept 每取到一个新 fd，先给它设上 `O_NONBLOCK`（Linux 上新 fd 不继承监听 fd 的标记），再记进这个数组。==内圈 for 遍历的就是它== —— 数组第 i 个元素就是第 i 条连接。"},"lsock":{"label":"监听 socket · 非阻塞","sub":"① 的对象","detail":"队列里有没有「握手完成」的连接，accept 一问便知。==设了 O_NONBLOCK==：没有就立刻回 EAGAIN，线程不卡；有就取走一个。"},"accq":{"label":"accept 队列","sub":"新连接先到这","detail":"三次握手完成的==那一刻==，内核就把连接 socket 建好、放进这个队列 —— 不等你的程序。accept 做的只是「取走一个」：这也是首图说的「交付，不是创建」。"},"crest":{"label":"连接 1 · 连接 2 · ……","sub":"绝大多数问是它们","detail":"缓冲区都是空的，read 一律立刻回 EAGAIN。==一次问不花什么，但一圈要问 n 次== —— 白问就是这么来的（下一节算这笔账）。"},"c3":{"label":"连接 3 · socket","sub":"这一圈唯一的收获","detail":"缓冲区里有 200 字节。read 这次把数据带回来，r>0，==handle 就地处理它==，处理完 i++ 继续问剩下的。"}}' data-tours='[{"id":"one-round","label":"①② 两步走一圈","steps":[{"at":["thread"],"text":"先认清 actor：==这条线程进程一起来就有==，下面每个动作都是它做的 —— 整个进程没有第二条线程。"},{"at":["thread","lsock"],"text":"① accept(监听 fd)：有新连接吗？监听 socket 设了非阻塞 —— ==队列空就立刻回 EAGAIN==，线程不卡，直接进 ②。"},{"at":["lsock","accq"],"text":"新连接在见你之前就存在了：握手完成那一刻内核把它建好、放进 accept 队列。accept ==取走一个==，得到新 fd。"},{"at":["thread","list"],"text":"新 fd 设上 O_NONBLOCK（Linux 上不继承，得单独设），==记进数组== —— 名单就是这样一圈圈长起来的。"},{"at":["thread","crest"],"text":"② 内圈 for：read(fds[i])。绝大多数连接的缓冲区是空的 → ==一律 EAGAIN，i++ 问下一个==。白问，但不睡。"},{"at":["thread","c3"],"text":"问到连接 3：缓冲区里有 200 字节 —— read 把数据带回来，==handle 就地处理==，然后继续。"},{"at":["list"],"text":"名单走完 → 回到 ①。==一圈 = 1 次 accept + n 次 read==，永不停，也永不睡。"}]},{"id":"listen-fd","label":"监听 fd 为什么要设非阻塞","steps":[{"at":["thread","lsock"],"text":"假如不设：accept 会==卡在「等新连接」上== —— 队列空的时候，整条线程被挂起，名单上一万多条连接没人问。"},{"at":["lsock","accq"],"text":"设了之后：队列空 → 立刻回 EAGAIN（==这不是错误==，是「这会儿没有，稍后再试」）；队列里有 → 取走一个，得到新 fd。"},{"at":["thread","list"],"text":"真实的事件循环里更常见的是==把队列一口气取空==：accept 到 EAGAIN 为止，再去干别的 —— 取一个只要一次系统调用，卡住一次的代价是整条线程。"},{"at":["list"],"text":"两个生产细节：设非阻塞先 `F_GETFL` 取出原 flag 再 `| O_NONBLOCK`，别把别的标记冲掉；Linux 上 accept 回来的新 fd 不继承 —— 用 `accept4(…, SOCK_NONBLOCK)` 或单独再设一次。"}]}]'>
       
-      <div class="arch-canvas"><svg viewBox="0 0 1048 632" role="img" aria-labelledby="archify-diagram-title archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
-        <title id="archify-diagram-title">一圈轮询，在机器上经过谁</title>
-        <desc id="archify-diagram-description">左边是进程里的线程和名单，右边是内核里的 socket；流程用下面的「导览」走</desc>
+      <div class="arch-canvas"><svg viewBox="0 0 1048 632" role="img" aria-labelledby="poll-round-archify-diagram-title poll-round-archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
+        <title id="poll-round-archify-diagram-title">一圈轮询，在机器上经过谁</title>
+        <desc id="poll-round-archify-diagram-description">左边是进程里的线程和名单，右边是内核里的 socket；流程用下面的「导览」走</desc>
         <!-- Definitions -->
         <defs>
-          <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+          <marker id="poll-round-arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
             <polygon points="0 0, 10 3.5, 0 7" class="m-default" />
           </marker>
-          <marker id="arrowhead-emphasis" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+          <marker id="poll-round-arrowhead-emphasis" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
             <polygon points="0 0, 10 3.5, 0 7" class="m-emphasis" />
           </marker>
-          <marker id="arrowhead-security" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+          <marker id="poll-round-arrowhead-security" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
             <polygon points="0 0, 10 3.5, 0 7" class="m-security" />
           </marker>
-          <marker id="arrowhead-dashed" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+          <marker id="poll-round-arrowhead-dashed" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
             <polygon points="0 0, 10 3.5, 0 7" class="m-dashed" />
           </marker>
-          <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+          <pattern id="poll-round-grid" width="40" height="40" patternUnits="userSpaceOnUse">
             <path d="M 40 0 L 0 0 0 40" class="c-grid" stroke-width="0.5"/>
           </pattern>
         </defs>
 
         <!-- Background Grid -->
-        <rect width="100%" height="100%" fill="url(#grid)" />
+        <rect width="100%" height="100%" fill="url(#poll-round-grid)" />
 
         <!-- Boundaries (behind everything) -->
         <rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="0" x="92" y="272" width="306" height="272" rx="12" class="c-region" stroke-width="1"/>
@@ -380,14 +380,14 @@ for (;;) {
         <text x="680" y="70" class="t-cloud" font-size="9" font-weight="600">内核</text>
 
         <!-- Connection paths (before components for correct z-order) -->
-        <path data-edge-from="thread" data-edge-to="lsock" data-edge-label="① accept：有新连接吗" data-edge-key="0" data-edge-id="a1" data-composition-points="120,332;96,332;96,112;700,112" d="M 120 332 L 104 332 Q 96 332 96 324 L 96 120 Q 96 112 104 112 L 700 112" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
-        <path data-edge-from="lsock" data-edge-to="accq" data-edge-label="握手完成的连接排在这" data-edge-key="1" data-edge-id="a2" data-composition-points="840,144;840,210" d="M 840 144 L 840 210" class="a-dashed" stroke-width="1.5" marker-end="url(#arrowhead-dashed)"/>
-        <path data-edge-from="thread" data-edge-to="list" data-edge-label="新 fd 设上 O_NONBLOCK → 进名单" data-edge-key="2" data-edge-id="a3" data-composition-points="245,364;245,460" d="M 245 364 L 245 460" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
-        <path data-edge-from="thread" data-edge-to="crest" data-edge-label="② read：EAGAIN" data-edge-key="3" data-edge-id="a4" data-composition-points="370,325;535,325;535,372;700,372" d="M 370 325 L 527 325 Q 535 325 535 333 L 535 364 Q 535 372 543 372 L 700 372" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
-        <path data-edge-from="thread" data-edge-to="c3" data-edge-label="② read：200 字节" data-edge-key="4" data-edge-id="a6" data-composition-points="370,339;535,339;535,512;700,512" d="M 370 339 L 527 339 Q 535 339 535 347 L 535 504 Q 535 512 543 512 L 700 512" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
+        <path data-edge-from="thread" data-edge-to="lsock" data-edge-label="① accept：有新连接吗" data-edge-key="0" data-edge-id="a1" data-composition-points="120,332;96,332;96,112;700,112" d="M 120 332 L 104 332 Q 96 332 96 324 L 96 120 Q 96 112 104 112 L 700 112" class="a-default" stroke-width="1.5" marker-end="url(#poll-round-arrowhead)"/>
+        <path data-edge-from="lsock" data-edge-to="accq" data-edge-label="握手完成的连接排在这" data-edge-key="1" data-edge-id="a2" data-composition-points="840,144;840,210" d="M 840 144 L 840 210" class="a-dashed" stroke-width="1.5" marker-end="url(#poll-round-arrowhead-dashed)"/>
+        <path data-edge-from="thread" data-edge-to="list" data-edge-label="新 fd 设上 O_NONBLOCK → 进名单" data-edge-key="2" data-edge-id="a3" data-composition-points="245,364;245,460" d="M 245 364 L 245 460" class="a-default" stroke-width="1.5" marker-end="url(#poll-round-arrowhead)"/>
+        <path data-edge-from="thread" data-edge-to="crest" data-edge-label="② read：EAGAIN" data-edge-key="3" data-edge-id="a4" data-composition-points="370,325;535,325;535,372;700,372" d="M 370 325 L 527 325 Q 535 325 535 333 L 535 364 Q 535 372 543 372 L 700 372" class="a-default" stroke-width="1.5" marker-end="url(#poll-round-arrowhead)"/>
+        <path data-edge-from="thread" data-edge-to="c3" data-edge-label="② read：200 字节" data-edge-key="4" data-edge-id="a6" data-composition-points="370,339;535,339;535,512;700,512" d="M 370 339 L 527 339 Q 535 339 535 347 L 535 504 Q 535 512 543 512 L 700 512" class="a-emphasis" stroke-width="1.8" marker-end="url(#poll-round-arrowhead-emphasis)"/>
 
         <!-- Components -->
-        <g id="node-thread" data-node-id="thread" data-node-label="主线程" tabindex="0" role="button" aria-label="Focus 主线程, 进程自带的 · 没有 pthread_create, 你的进程 · 用户态" aria-pressed="false" data-node-kind="backend" data-node-sublabel="进程自带的 · 没有 pthread_create" data-node-context="你的进程 · 用户态">
+        <g id="poll-round-node-thread" data-node-id="thread" data-node-label="主线程" tabindex="0" role="button" aria-label="Focus 主线程, 进程自带的 · 没有 pthread_create, 你的进程 · 用户态" aria-pressed="false" data-node-kind="backend" data-node-sublabel="进程自带的 · 没有 pthread_create" data-node-context="你的进程 · 用户态">
           <title>主线程 · 进程自带的 · 没有 pthread_create · 你的进程 · 用户态</title>
           <rect x="120" y="300" width="250" height="64" rx="6" class="c-mask"/>
           <rect x="120" y="300" width="250" height="64" rx="6" class="c-backend" stroke-width="1.5"/>
@@ -398,7 +398,7 @@ for (;;) {
         <text data-detail="context" x="245" y="346" class="t-muted" font-size="9" text-anchor="middle">进程自带的 · 没有 pthread_create</text>
         </g>
 
-        <g id="node-list" data-node-id="list" data-node-label="你的数组 fds[]" tabindex="0" role="button" aria-label="Focus 你的数组 fds[], accept 进来的连接都记在这, 你的进程 · 用户态" aria-pressed="false" data-node-kind="backend" data-node-sublabel="accept 进来的连接都记在这" data-node-context="你的进程 · 用户态">
+        <g id="poll-round-node-list" data-node-id="list" data-node-label="你的数组 fds[]" tabindex="0" role="button" aria-label="Focus 你的数组 fds[], accept 进来的连接都记在这, 你的进程 · 用户态" aria-pressed="false" data-node-kind="backend" data-node-sublabel="accept 进来的连接都记在这" data-node-context="你的进程 · 用户态">
           <title>你的数组 fds[] · accept 进来的连接都记在这 · 你的进程 · 用户态</title>
           <rect x="120" y="460" width="250" height="64" rx="6" class="c-mask"/>
           <rect x="120" y="460" width="250" height="64" rx="6" class="c-backend" stroke-width="1.5"/>
@@ -409,7 +409,7 @@ for (;;) {
         <text data-detail="context" x="245" y="506" class="t-muted" font-size="9" text-anchor="middle">accept 进来的连接都记在这</text>
         </g>
 
-        <g id="node-lsock" data-node-id="lsock" data-node-label="监听 socket · 非阻塞" tabindex="0" role="button" aria-label="Focus 监听 socket · 非阻塞, 0.0.0.0:80 · 它只管接新连接, 内核" aria-pressed="false" data-node-kind="database" data-node-sublabel="0.0.0.0:80 · 它只管接新连接" data-node-context="内核">
+        <g id="poll-round-node-lsock" data-node-id="lsock" data-node-label="监听 socket · 非阻塞" tabindex="0" role="button" aria-label="Focus 监听 socket · 非阻塞, 0.0.0.0:80 · 它只管接新连接, 内核" aria-pressed="false" data-node-kind="database" data-node-sublabel="0.0.0.0:80 · 它只管接新连接" data-node-context="内核">
           <title>监听 socket · 非阻塞 · 0.0.0.0:80 · 它只管接新连接 · 内核</title>
           <rect x="700" y="80" width="280" height="64" rx="6" class="c-mask"/>
           <rect x="700" y="80" width="280" height="64" rx="6" class="c-database" stroke-width="1.5"/>
@@ -421,7 +421,7 @@ for (;;) {
         <text data-detail="context" x="840" y="126" class="t-muted" font-size="9" text-anchor="middle">0.0.0.0:80 · 它只管接新连接</text>
         </g>
 
-        <g id="node-accq" data-node-id="accq" data-node-label="accept 队列" tabindex="0" role="button" aria-label="Focus accept 队列, 握手完成的连接在这排队, 内核" aria-pressed="false" data-node-kind="database" data-node-sublabel="握手完成的连接在这排队" data-node-context="内核">
+        <g id="poll-round-node-accq" data-node-id="accq" data-node-label="accept 队列" tabindex="0" role="button" aria-label="Focus accept 队列, 握手完成的连接在这排队, 内核" aria-pressed="false" data-node-kind="database" data-node-sublabel="握手完成的连接在这排队" data-node-context="内核">
           <title>accept 队列 · 握手完成的连接在这排队 · 内核</title>
           <rect x="700" y="210" width="280" height="64" rx="6" class="c-mask"/>
           <rect x="700" y="210" width="280" height="64" rx="6" class="c-database" stroke-width="1.5"/>
@@ -433,7 +433,7 @@ for (;;) {
         <text data-detail="context" x="840" y="256" class="t-muted" font-size="9" text-anchor="middle">握手完成的连接在这排队</text>
         </g>
 
-        <g id="node-crest" data-node-id="crest" data-node-label="连接 1 · 连接 2 · ……" tabindex="0" role="button" aria-label="Focus 连接 1 · 连接 2 · ……, 缓冲区都是空的 → 一律 EAGAIN, 内核" aria-pressed="false" data-node-kind="database" data-node-sublabel="缓冲区都是空的 → 一律 EAGAIN" data-node-context="内核">
+        <g id="poll-round-node-crest" data-node-id="crest" data-node-label="连接 1 · 连接 2 · ……" tabindex="0" role="button" aria-label="Focus 连接 1 · 连接 2 · ……, 缓冲区都是空的 → 一律 EAGAIN, 内核" aria-pressed="false" data-node-kind="database" data-node-sublabel="缓冲区都是空的 → 一律 EAGAIN" data-node-context="内核">
           <title>连接 1 · 连接 2 · …… · 缓冲区都是空的 → 一律 EAGAIN · 内核</title>
           <rect x="700" y="340" width="280" height="64" rx="6" class="c-mask"/>
           <rect x="700" y="340" width="280" height="64" rx="6" class="c-database" stroke-width="1.5"/>
@@ -445,7 +445,7 @@ for (;;) {
         <text data-detail="context" x="840" y="386" class="t-muted" font-size="9" text-anchor="middle">缓冲区都是空的 → 一律 EAGAIN</text>
         </g>
 
-        <g id="node-c3" data-node-id="c3" data-node-label="连接 3 · socket" tabindex="0" role="button" aria-label="Focus 连接 3 · socket, 缓冲区有 200 字节, 内核" aria-pressed="false" data-node-kind="database" data-node-sublabel="缓冲区有 200 字节" data-node-context="内核">
+        <g id="poll-round-node-c3" data-node-id="c3" data-node-label="连接 3 · socket" tabindex="0" role="button" aria-label="Focus 连接 3 · socket, 缓冲区有 200 字节, 内核" aria-pressed="false" data-node-kind="database" data-node-sublabel="缓冲区有 200 字节" data-node-context="内核">
           <title>连接 3 · socket · 缓冲区有 200 字节 · 内核</title>
           <rect x="700" y="480" width="280" height="64" rx="6" class="c-mask"/>
           <rect x="700" y="480" width="280" height="64" rx="6" class="c-database" stroke-width="1.5"/>
@@ -522,14 +522,15 @@ for (;;) {
 <hr>
 <h2 id="病二名单每次都要重新交一遍"><span class="num">07</span>病二：名单每次都要重新交一遍</h2>
 <p>这是更要命的一个，也是很多讲 epoll 的材料直接跳过去的那一步。</p>
-<div class="seqd has-grid" data-seq data-n="2" data-segs="[{&quot;from&quot;:1,&quot;to&quot;:3,&quot;label&quot;:&quot;每调用一次，全部重来&quot;}]">
+<div class="seqd has-grid" data-seq data-n="2" data-segs="[{&quot;from&quot;:1,&quot;to&quot;:3,&quot;label&quot;:&quot;每调用一次，全部重来&quot;}]"
+      style="--seq-fill:url(#s-fill-1);--seq-open:url(#s-fill-1-open)">
       <svg class="seqd-svg" aria-hidden="true">
         <defs>
-          <marker id="s-fill" viewBox="0 0 10 10" refX="9" refY="5"
+          <marker id="s-fill-1" viewBox="0 0 10 10" refX="9" refY="5"
                   markerWidth="7" markerHeight="7" orient="auto-start-reverse">
             <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
           </marker>
-          <marker id="s-open" viewBox="0 0 10 10" refX="9" refY="5"
+          <marker id="s-fill-1-open" viewBox="0 0 10 10" refX="9" refY="5"
                   markerWidth="8" markerHeight="8" orient="auto-start-reverse">
             <path d="M 0 0 L 10 5 L 0 10" fill="none" stroke="currentColor" stroke-width="1.4"/>
           </marker>
@@ -689,6 +690,6 @@ epoll 的圈里多了一个 epoll_wait：线程在这唯一的一个睡处睡着
   </main>
 </div>
 
-<script src="../../assets/app.js?v=5ae1b3242f"></script>
+<script src="../../assets/app.js?v=0260babc63"></script>
 </body>
 </html>

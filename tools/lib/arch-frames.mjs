@@ -1,11 +1,60 @@
 /* 整体图的区域语义与画布尺度。
  * 坐标、节点、连线仍由 archify 生成；这里只修正被截平的区域底边并包装可探索的框。
  * frames 未声明时不增加区域交互。父子关系显式声明，不把相交集合猜成包含。
+ *
+ * 还负责内联时的 id 命名空间 —— 每页可以放好几张 arch 图，而每张图自带的 id 是固定的
+ * （`arrowhead` / `grid` / `archify-diagram-title` / `node-*`），而 HTML 要求 id 全页唯一。
  */
 const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 const attr = (text, key) => (text.match(new RegExp(`\\b${key}="([^"]*)"`)) || [])[1];
 const decode = (text) => String(text).replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
 const FRAME = /<rect\b[^>]*data-composition-frame-id="\d+"[^>]*\/>\s*<text\b[^>]*>[\s\S]*?<\/text>/g;
+/** 每页渲染开始前清一次：内联图内部的 id 后缀要按页从 1 开始，
+ * 否则 `--only` 单篇构建和全量构建会给出不同的 id，产物就会来回摇。
+ * （id 只需要在一页内唯一，所以不需要跨页累加。） */
+export function resetFigureIds() {
+  SEQUENCE.clear();
+}
+
+/** 同一页内联同名图时用来递增加尾，避免前缀自己又撞上 */
+const SEQUENCE = new Map();
+
+/**
+ * 内联时给 SVG 里的 id 加图名前缀 —— 不改 assets/arch 里的文件，也不重生成图。
+ *
+ * 为什么需要：每张 arch 图都自带一套固定 id（`arrowhead` / `grid` / `archify-diagram-title` /
+ * `node-*`）。同一页放两张以上时它们会重名，而 HTML 里 id 必须全页唯一 ——
+ * 浏览器解析 `url(#arrowhead)`、`aria-labelledby` 时只认**第一张图**那份。
+ * 今天各图定义恰好一模一样，所以看不出毛病；一旦某张图换了箭头或网格密度，
+ * 改了也不生效，而且不报错。最容易看见的一处是读屏：第二张之后的图会被念成第一张的图名。
+ *
+ *   · 定义：` id="x"` → ` id="<name>-x"`（必须是 `\sid=`，别误伤 `data-*-id="…"`）
+ *   · 引用：`url(#x)` / `href="#x"` / `aria-labelledby` 里的每个 token
+ *   · 同名图在同一页出现两次时，第二张自动加序号 —— 否则前缀相同、照样撞
+ */
+export function namespaceFigureIds(svg, name) {
+  if (typeof name !== 'string' || !name.trim()) throw new Error('内联 arch 图需要图名才能给 id 加前缀');
+  const used = SEQUENCE.get(name) || 0;
+  SEQUENCE.set(name, used + 1);
+  const prefix = used ? `${name}-${used + 1}` : name;
+  // 引用也算在内：万一个引用没对应的定义，留着不管就会静默指到**第一张图**去
+  const ids = new Set([...svg.matchAll(/\sid="([^"]+)"/g)].map((m) => m[1]));
+  for (const m of svg.matchAll(/url\(#([^)\s]+)\)/g)) ids.add(m[1]);
+  for (const m of svg.matchAll(/href="#([^"]+)"/g)) ids.add(m[1]);
+  for (const m of svg.matchAll(/aria-labelledby="([^"]*)"/g)) m[1].split(/\s+/).filter(Boolean).forEach((id) => ids.add(id));
+  if (!ids.size) return svg;
+  let out = svg.replace(/\sid="([^"]+)"/g, (match, id) => ` id="${esc(prefix)}-${esc(id)}"`);
+  // 先换长的：`grid` 与 `grid-2` 并存时，短的先换会把长的前缀弄错
+  for (const id of [...ids].sort((a, b) => b.length - a.length)) {
+    const to = `${prefix}-${id}`;
+    const quoted = id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    out = out
+      .replaceAll(`url(#${id})`, `url(#${to})`)
+      .replaceAll(`href="#${id}"`, `href="#${to}"`)
+      .replace(new RegExp(`(aria-labelledby="[^"]*?)\\b${quoted}(?=["\\s])`, 'g'), `$1${to}`);
+  }
+  return out;
+}
 
 /** archify 会将父子框底边截到相同坐标。恢复成员包围盒 + pad，并留下成员身份供离线构建读取。 */
 export function restoreBoundaryBoxes(svg, spec) {

@@ -37,7 +37,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import MarkdownIt from 'markdown-it';
-import { blocksPlugin, blockNames, addAnchors, lintFences, lintLinkifyStars, lintRawHtml } from './lib/blocks.mjs';
+import { blocksPlugin, blockNames, addAnchors, lintFences, lintLinkifyStars, lintRawHtml, resetInlineIds } from './lib/blocks.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CHROME =
@@ -156,6 +156,7 @@ const env = { file: `notes/${slug}/note.md`, warnings: [] };
 
 let body;
 try {
+  resetInlineIds();
   ({ html: body } = addAnchors(md.render(target.text, env)));
 } catch (e) {
   console.error(`\n  ✗ 第 ${n} 个块（${target.lang}）渲染失败\n`);
