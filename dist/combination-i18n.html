@@ -6379,6 +6379,7 @@ svg[data-preset="blueprint"] .c-security-group,
       <a href="#t-是一次查表">t() 是一次查表</a>
       <a href="#实测六种输入的真实输出" class="sub">实测：六种输入的真实输出</a>
       <a href="#一个反直觉的细节fallbackroot-在-local-上取的是-root-的" class="sub">一个反直觉的细节：fallbackRoot 在 local 上取的是 root 的</a>
+      <a href="#locale-一变为什么整片文案立刻重画">locale 一变，为什么整片文案立刻重画</a>
       <a href="#组件库的契约词条交出去实例借用宿主的">组件库的契约：词条交出去，实例借用宿主的</a>
       <a href="#数据名字那一半由服务端翻译">数据名字那一半：由服务端翻译</a>
       <a href="#检查清单">检查清单</a>
@@ -6403,12 +6404,11 @@ svg[data-preset="blueprint"] .c-security-group,
 <p>答案有两个。组件自带的界面文案（<code>圈选条件</code>、<code>查询</code>）和 Data Admin 配置的数据名字（<code>近30天成交笔数</code>、<code>港股</code>），走的是两条完全不同的链路：一条是本地的三语词条，切语言下一帧就变；另一条是服务端按请求语言挑好的一种名字，切语言要重新拉。混在一起想，就会问出「组件为什么不自己带一套 i18n」这种看着合理、方向错了的问题。</p>
 <div class="callout tone-blue">
       <span class="ic">🧭</span>
-      <div><p><strong>本篇结构</strong>：两种字（00）→ 两条链路对照（01）→ useI18n 给了什么（02）→
-宿主装配（03）→ 组件实例与两份 composer（04）→ t() 的查表顺序（05）→
-组件库为什么把词条交出去（06）→ 数据名字那一半（07）→ 检查清单（08）。</p>
-<p>卡在 <code>scope</code> 和 <code>t()</code> 就按 02 → 03 → 04 → 05 的顺序读：四个零件 → 装配 →
-每个实例怎么拿到 composer → 拿到之后怎么查表。
-机制结论都是实测：SSR 探针跑 vue-i18n 9.14.5 + 源码，协议取 FService 协议空间
+      <div><p><strong>两条线</strong>：机制线 00–06（界面文案：谁翻译、怎么装、怎么查、切语言为什么立刻变），
+数据线 07–08（Data Admin 的字段名，单语、要重新请求）。</p>
+<p><strong>机制线的读法</strong>：四个零件（02）→ 宿主装配（03）→ 组件实例（04）→ t() 查表（05）→
+切语言为什么重画（06）。卡在 <code>scope</code> 和 <code>t()</code> 就从 02 顺着读。</p>
+<p>机制结论都是实测：SSR 探针跑 vue-i18n 9.14.5 + 源码行号，协议取 FService 协议空间
 <code>crm-crowd-service</code> v1.0.3（commit <code>51ede78d</code>）。</p>
 </div>
     </div><h2 id="界面上同时住着两种字"><span class="num">00</span>界面上同时住着两种字</h2>
@@ -6473,7 +6473,7 @@ t('combinerTitle');        // 'Conditions'
 const i18n = createI18n({ legacy: false, locale, fallbackLocale, messages: {...} });  // ① 词条在这里合并
 app.use(i18n);                                                                        // ② 触发 vue-i18n 的 install
 </code></pre></div>
-<p><code>createI18n</code> 收到的 <code>messages</code> 已经是「宿主词条 + 组件词条」合并后的树；<code>app.use(i18n)</code> 调用 vue-i18n 的 <code>install(app)</code>，它做两件事：把 i18n 实例 <code>provide</code> 到 app 上（<code>vue-i18n.mjs:2271</code> 的 <code>app.provide(app.__VUE_I18N_SYMBOL__, i18n)</code>），再给 Options API 挂 <code>$t</code>。做完这两步，<mark class="mk-blue">全应用就有了一根注入管和一个唯一的 composer</mark>：</p>
+<p><code>createI18n</code> 收到的 <code>messages</code> 已经是「宿主词条 + 组件词条」合并后的树；<code>app.use(i18n)</code> 调用 vue-i18n 的 <code>install(app)</code>，它做两件事：把 i18n 实例 <code>provide</code> 到 app 上（<code>vue-i18n.mjs:2271</code> 的 <code>app.provide(app.__VUE_I18N_SYMBOL__, i18n)</code>），再给 Options API 挂 <code>$t</code>。做完这两步，<mark class="mk-blue">全应用就有了一根注入管和一份共用的 composer</mark>：</p>
 <figure class="archfig" data-arch style="--arch-max-width:1222px" data-boundaries="nested" data-pano data-tours='[{"id":"boot","label":"装配顺序","steps":[{"at":["hostmsg","combomsg"],"text":"两处词条在宿主工程里合并，==同名 key 宿主覆盖组件==。"},{"at":["merge","i18n"],"text":"合并结果作为 messages 传给 createI18n；它返回 i18n，i18n.global 就是那个 composer。"},{"at":["install","provide"],"text":"app.use(i18n) 触发 install：provide 出注入管，再给 Options API 挂 $t。"}]}]' data-frames='[{"id":"entries","flat":true,"boundary":0,"kind":"contains","label":"宿主工程 · 两处词条（跟代码一起发布）","detail":"宿主的业务文案在 common/i18n/*.json，组件包的界面文案在 messages.ts（47 个 key × 3 语）。两处都跟各自的代码一起发布。","members":["hostmsg","combomsg","merge"],"depth":1},{"id":"vuei18n","boundary":1,"kind":"contains","label":"vue-i18n 实例（createI18n 产物）","detail":"i18n.global 就是 04 节说的 global composer：locale、messages、fallback 规则都装在里面。","members":["i18n","composer"],"depth":1},{"id":"appinst","flat":true,"boundary":2,"kind":"contains","label":"Vue app 实例（createApp 产物）· provide 发生在这里","detail":"install 把 i18n 实例 provide 到 app 上。这个 symbol 之后被每一个组件 inject。","members":["install","provide","app"],"depth":1}]'>
       <div class="arch-boundary-ui">
           <div class="arch-boundary-toolbar"><span class="arch-boundary-label">边界</span>
@@ -6484,7 +6484,7 @@ app.use(i18n);                                                                  
           <div class="arch-address-box" aria-live="polite"><div data-arch-address>点一个零件，看完整归属路径；点一个区域标题，看这一层的含义。</div>
             <div data-arch-frame-detail>最外框表示逻辑资源域，不表示所有对象在一块内存里。每层边界的标题说明分组依据。</div></div>
         </div>
-      <div class="arch-canvas"><svg viewBox="0 0 940 860" role="img" aria-labelledby="i18n-setup-archify-diagram-title i18n-setup-archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
+      <div class="arch-canvas"><svg viewBox="0 0 940 900" role="img" aria-labelledby="i18n-setup-archify-diagram-title i18n-setup-archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
         <title id="i18n-setup-archify-diagram-title">宿主装配：global composer 是怎么建起来的</title>
         <desc id="i18n-setup-archify-diagram-description">app.use(i18n) 之后，provide 出一份 composer；词条在 createI18n 之前就合并好了</desc>
         <!-- Definitions -->
@@ -6510,187 +6510,200 @@ app.use(i18n);                                                                  
         <rect width="100%" height="100%" fill="url(#i18n-setup-grid)" />
 
         <!-- Boundaries (behind everything) -->
-        <g class="arch-frame" data-frame="entries" data-depth="1" data-frame-flat="true" data-frame-kind="contains" role="button" tabindex="0" aria-pressed="false" aria-label="宿主工程 · 两处词条（跟代码一起发布）"><title>宿主的业务文案在 common/i18n/*.json，组件包的界面文案在 messages.ts（47 个 key × 3 语）。两处都跟各自的代码一起发布。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="0" data-frame-members="hostmsg combomsg merge" x="6" y="76" width="568" height="388" rx="12" class="c-region" stroke-width="1"/>
+        <g class="arch-frame" data-frame="entries" data-depth="1" data-frame-flat="true" data-frame-kind="contains" role="button" tabindex="0" aria-pressed="false" aria-label="宿主工程 · 两处词条（跟代码一起发布）"><title>宿主的业务文案在 common/i18n/*.json，组件包的界面文案在 messages.ts（47 个 key × 3 语）。两处都跟各自的代码一起发布。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="0" data-frame-members="hostmsg combomsg merge" x="6" y="76" width="568" height="334" rx="12" class="c-region" stroke-width="1"/>
         <text x="14" y="94" class="t-cloud" font-size="9" font-weight="600">宿主工程 · 两处词条（跟代码一起发布）</text></g>
 
-        <g class="arch-frame" data-frame="vuei18n" data-depth="1" data-frame-flat="false" data-frame-kind="contains" role="button" tabindex="0" aria-pressed="false" aria-label="vue-i18n 实例（createI18n 产物）"><title>i18n.global 就是 04 节说的 global composer：locale、messages、fallback 规则都装在里面。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="1" data-frame-members="i18n composer" x="580" y="280" width="360" height="530" rx="12" class="c-region" stroke-width="1"/>
-        <text x="588" y="298" class="t-cloud" font-size="9" font-weight="600">vue-i18n 实例（createI18n 产物）</text></g>
+        <g class="arch-frame" data-frame="vuei18n" data-depth="1" data-frame-flat="false" data-frame-kind="contains" role="button" tabindex="0" aria-pressed="false" aria-label="vue-i18n 实例（createI18n 产物）"><title>i18n.global 就是 04 节说的 global composer：locale、messages、fallback 规则都装在里面。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="1" data-frame-members="i18n composer" x="580" y="210" width="360" height="530" rx="12" class="c-region" stroke-width="1"/>
+        <text x="588" y="228" class="t-cloud" font-size="9" font-weight="600">vue-i18n 实例（createI18n 产物）</text></g>
 
-        <g class="arch-frame" data-frame="appinst" data-depth="1" data-frame-flat="true" data-frame-kind="contains" role="button" tabindex="0" aria-pressed="false" aria-label="Vue app 实例（createApp 产物）· provide 发生在这里"><title>install 把 i18n 实例 provide 到 app 上。这个 symbol 之后被每一个组件 inject。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="2" data-frame-members="install provide app" x="6" y="526" width="568" height="292" rx="12" class="c-region" stroke-width="1"/>
-        <text x="14" y="544" class="t-cloud" font-size="9" font-weight="600">Vue app 实例（createApp 产物）· provide 发生在这里</text></g>
+        <g class="arch-frame" data-frame="appinst" data-depth="1" data-frame-flat="true" data-frame-kind="contains" role="button" tabindex="0" aria-pressed="false" aria-label="Vue app 实例（createApp 产物）· provide 发生在这里"><title>install 把 i18n 实例 provide 到 app 上。这个 symbol 之后被每一个组件 inject。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="2" data-frame-members="install provide app" x="6" y="436" width="568" height="418" rx="12" class="c-region" stroke-width="1"/>
+        <text x="14" y="454" class="t-cloud" font-size="9" font-weight="600">Vue app 实例（createApp 产物）· provide 发生在这里</text></g>
 
         <!-- Connection paths (before components for correct z-order) -->
-        <path data-edge-from="hostmsg" data-edge-to="merge" data-edge-label="spread" data-edge-key="0" data-edge-id="host-merge" data-composition-points="260,160;430,160;430,320" d="M 260 160 L 422 160 Q 430 160 430 168 L 430 320" class="a-default" stroke-width="1.5" marker-end="url(#i18n-setup-arrowhead)"/>
-        <path data-edge-from="combomsg" data-edge-to="merge" data-edge-label="spread" data-edge-key="1" data-edge-id="combo-merge" data-composition-points="150,350;150,375;320,375" d="M 150 350 L 150 367 Q 150 375 158 375 L 320 375" class="a-default" stroke-width="1.5" marker-end="url(#i18n-setup-arrowhead)"/>
-        <path data-edge-from="merge" data-edge-to="i18n" data-edge-label="messages" data-edge-key="2" data-edge-id="merge-i18n" data-composition-points="540,388;620,388" d="M 540 388 L 620 388" class="a-default" stroke-width="1.5" marker-end="url(#i18n-setup-arrowhead)"/>
-        <path data-edge-from="i18n" data-edge-to="composer" data-edge-label="i18n.global" data-edge-key="3" data-edge-id="i18n-composer" data-composition-points="740,470;740,510;760,510;760,550" d="M 740 470 L 740 502 Q 740 510 748 510 L 752 510 Q 760 510 760 518 L 760 550" class="a-default" stroke-width="1.5" marker-end="url(#i18n-setup-arrowhead)"/>
-        <path data-edge-from="i18n" data-edge-to="install" data-edge-label="插件实例" data-edge-key="4" data-edge-id="i18n-install" data-composition-points="620,402;596,402;596,536;430,536;430,560" d="M 620 402 L 604 402 Q 596 402 596 410 L 596 528 Q 596 536 588 536 L 438 536 Q 430 536 430 544 L 430 560" class="a-default" stroke-width="1.5" marker-end="url(#i18n-setup-arrowhead)"/>
-        <path data-edge-from="install" data-edge-to="provide" data-edge-label="provide symbol" data-edge-key="5" data-edge-id="install-provide" data-composition-points="430,656;430,700" d="M 430 656 L 430 700" class="a-default" stroke-width="1.5" marker-end="url(#i18n-setup-arrowhead)"/>
-        <path data-edge-from="provide" data-edge-to="composer" data-edge-label="挂载后组件 inject 的就是这份" data-edge-key="6" data-edge-id="provide-composer" data-composition-points="540,742;564,742;564,794;760,794;760,770" d="M 540 742 L 556 742 Q 564 742 564 750 L 564 786 Q 564 794 572 794 L 752 794 Q 760 794 760 786 L 760 770" class="a-dashed" stroke-width="1.5" marker-end="url(#i18n-setup-arrowhead-dashed)"/>
+        <path data-edge-from="hostmsg" data-edge-to="merge" data-edge-label="spread" data-edge-key="0" data-edge-id="host-merge" data-composition-points="260,166;430,166;430,258" d="M 260 166 L 422 166 Q 430 166 430 174 L 430 258" class="a-default" stroke-width="1.5" marker-end="url(#i18n-setup-arrowhead)"/>
+        <path data-edge-from="combomsg" data-edge-to="merge" data-edge-label="spread" data-edge-key="1" data-edge-id="combo-merge" data-composition-points="260,313;320,313" d="M 260 313 L 320 313" class="a-default" stroke-width="1.5" marker-end="url(#i18n-setup-arrowhead)"/>
+        <path data-edge-from="merge" data-edge-to="i18n" data-edge-label="messages" data-edge-key="2" data-edge-id="merge-i18n" data-composition-points="540,318;620,318" d="M 540 318 L 620 318" class="a-default" stroke-width="1.5" marker-end="url(#i18n-setup-arrowhead)"/>
+        <path data-edge-from="i18n" data-edge-to="composer" data-edge-label="i18n.global" data-edge-key="3" data-edge-id="i18n-composer" data-composition-points="740,400;740,435;760,435;760,470" d="M 740 400 L 740 427 Q 740 435 748 435 L 752 435 Q 760 435 760 443 L 760 470" class="a-default" stroke-width="1.5" marker-end="url(#i18n-setup-arrowhead)"/>
+        <path data-edge-from="i18n" data-edge-to="install" data-edge-label="插件实例" data-edge-key="4" data-edge-id="i18n-install" data-composition-points="620,332;596,332;596,446;430,446;430,470" d="M 620 332 L 604 332 Q 596 332 596 340 L 596 438 Q 596 446 588 446 L 438 446 Q 430 446 430 454 L 430 470" class="a-default" stroke-width="1.5" marker-end="url(#i18n-setup-arrowhead)"/>
+        <path data-edge-from="install" data-edge-to="provide" data-edge-label="provide symbol" data-edge-key="5" data-edge-id="install-provide" data-composition-points="430,574;430,700" d="M 430 574 L 430 700" class="a-default" stroke-width="1.5" marker-end="url(#i18n-setup-arrowhead)"/>
+        <path data-edge-from="provide" data-edge-to="composer" data-edge-label="挂载后组件 inject 的就是这份" data-edge-key="6" data-edge-id="provide-composer" data-composition-points="540,760;760,760;760,700" d="M 540 760 L 752 760 Q 760 760 760 752 L 760 700" class="a-dashed" stroke-width="1.5" marker-end="url(#i18n-setup-arrowhead-dashed)"/>
 
         <!-- Components -->
-        <g id="i18n-setup-node-hostmsg" data-node-id="hostmsg" data-node-label="宿主 common/i18n/*.json" tabindex="0" role="button" aria-label="Focus 宿主 common/i18n/*.json, 业务文案 · 随宿主发布, 宿主工程 · 两处词条（跟代码一起发布）" aria-pressed="false" data-node-kind="frontend" data-node-sublabel="业务文案 · 随宿主发布" data-node-context="宿主工程 · 两处词条（跟代码一起发布）">
+        <g id="i18n-setup-node-hostmsg" data-nb="1" data-node-id="hostmsg" data-node-label="宿主 common/i18n/*.json" tabindex="0" role="button" aria-label="Focus 宿主 common/i18n/*.json, 业务文案 · 随宿主发布, 宿主工程 · 两处词条（跟代码一起发布）" aria-pressed="false" data-node-kind="frontend" data-node-sublabel="业务文案 · 随宿主发布" data-node-context="宿主工程 · 两处词条（跟代码一起发布）">
           <title>宿主 common/i18n/*.json · 业务文案 · 随宿主发布 · 宿主工程 · 两处词条（跟代码一起发布）</title>
-          <rect x="40" y="110" width="220" height="100" rx="6" class="c-mask"/>
-          <rect x="40" y="110" width="220" height="100" rx="6" class="c-frontend" stroke-width="1.5"/>
+          <rect x="40" y="110" width="220" height="112" rx="6" class="c-mask"/>
+          <rect x="40" y="110" width="220" height="112" rx="6" class="c-frontend" stroke-width="1.5"/>
           <g aria-hidden="true" data-semantic-sigil="frontend" class="semantic-sigil s-frontend" transform="translate(46 116) scale(0.6875)">
             <rect x="2" y="3" width="12" height="10" rx="2"/>
             <path d="M2 6.5h12"/>
             <circle cx="4.1" cy="4.8" r=".7" class="sigil-fill"/>
             <circle cx="6.3" cy="4.8" r=".7" class="sigil-fill"/>
           </g>
-          <text data-detail-anchor x="150" y="158" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">宿主 common/i18n/*.json</text>
-        <text data-detail="context" x="150" y="174" class="t-muted" font-size="9" text-anchor="middle">业务文案 · 随宿主发布</text>
+          <text class="nb-title" x="74" y="131" font-size="10.5" font-weight="600">宿主 common/i18n/*.json</text>
+          <line class="nb-hr" x1="48" y1="138" x2="252" y2="138"/>
+          <text class="nb-k" x="52" y="169" font-size="9">内容</text><text class="nb-v" x="115.0" y="169" font-size="9">页面标题、按钮、提示语</text>
+          <text class="nb-k" x="52" y="183" font-size="9">发布</text><text class="nb-v" x="115.0" y="183" font-size="9">跟宿主一起发版</text>
+          <text class="nb-k" x="52" y="197" font-size="9">与组件词条</text><text class="nb-v" x="115.0" y="197" font-size="9">合并时宿主优先</text>
         </g>
 
-        <g id="i18n-setup-node-combomsg" data-node-id="combomsg" data-node-label="组件包 messages.ts" tabindex="0" role="button" aria-label="Focus 组件包 messages.ts, 47 个 key × 3 语言 · 随包发布, 宿主工程 · 两处词条（跟代码一起发布）" aria-pressed="false" data-node-kind="frontend" data-node-sublabel="47 个 key × 3 语言 · 随包发布" data-node-tag="@futuweb/audience-combination" data-node-context="宿主工程 · 两处词条（跟代码一起发布）">
+        <g id="i18n-setup-node-combomsg" data-nb="1" data-node-id="combomsg" data-node-label="组件包 messages.ts" tabindex="0" role="button" aria-label="Focus 组件包 messages.ts, 47 个 key × 3 语言 · 随包发布, 宿主工程 · 两处词条（跟代码一起发布）" aria-pressed="false" data-node-kind="frontend" data-node-sublabel="47 个 key × 3 语言 · 随包发布" data-node-tag="@futuweb/audience-combination" data-node-context="宿主工程 · 两处词条（跟代码一起发布）">
           <title>组件包 messages.ts · 47 个 key × 3 语言 · 随包发布 · 宿主工程 · 两处词条（跟代码一起发布） · @futuweb/audience-combination</title>
-          <rect x="40" y="250" width="220" height="100" rx="6" class="c-mask"/>
-          <rect x="40" y="250" width="220" height="100" rx="6" class="c-frontend" stroke-width="1.5"/>
+          <rect x="40" y="250" width="220" height="126" rx="6" class="c-mask"/>
+          <rect x="40" y="250" width="220" height="126" rx="6" class="c-frontend" stroke-width="1.5"/>
           <g aria-hidden="true" data-semantic-sigil="frontend" class="semantic-sigil s-frontend" transform="translate(46 256) scale(0.6875)">
             <rect x="2" y="3" width="12" height="10" rx="2"/>
             <path d="M2 6.5h12"/>
             <circle cx="4.1" cy="4.8" r=".7" class="sigil-fill"/>
             <circle cx="6.3" cy="4.8" r=".7" class="sigil-fill"/>
           </g>
-          <text data-detail-anchor x="150" y="298" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">组件包 messages.ts</text>
-        <text data-detail="context" x="150" y="314" class="t-muted" font-size="9" text-anchor="middle">47 个 key × 3 语言 · 随包发布</text>
-        <text data-detail="fine" x="150" y="342" class="t-frontend" font-size="7" text-anchor="middle">@futuweb/audience-combination</text>
+          <text class="nb-title" x="74" y="271" font-size="10.5" font-weight="600">组件包 messages.ts</text>
+          <line class="nb-hr" x1="48" y1="278" x2="252" y2="278"/>
+          <text class="nb-k" x="52" y="309" font-size="9">内容</text><text class="nb-v" x="93.4" y="309" font-size="9">圈选条件 / 包含 / 查询…</text>
+          <text class="nb-k" x="52" y="323" font-size="9">体量</text><text class="nb-v" x="93.4" y="323" font-size="9">47 个 key × 3 语言</text>
+          <text class="nb-k" x="52" y="337" font-size="9">发布</text><text class="nb-v" x="93.4" y="337" font-size="9">@futuweb/audience-combination 发版</text>
+          <text class="nb-k" x="52" y="351" font-size="9">谁合并</text><text class="nb-v" x="93.4" y="351" font-size="9">宿主，见左下的 client/src/locale.ts</text>
         </g>
 
         <g id="i18n-setup-node-merge" data-nb="1" data-node-id="merge" data-node-label="client/src/locale.ts" tabindex="0" role="button" aria-label="Focus client/src/locale.ts, createI18n({ messages }) 之前 spread 合并, 宿主工程 · 两处词条（跟代码一起发布）" aria-pressed="false" data-node-kind="backend" data-node-sublabel="createI18n({ messages }) 之前 spread 合并" data-node-tag="同名 key 宿主覆盖组件" data-node-context="宿主工程 · 两处词条（跟代码一起发布）">
           <title>client/src/locale.ts · createI18n({ messages }) 之前 spread 合并 · 宿主工程 · 两处词条（跟代码一起发布） · 同名 key 宿主覆盖组件</title>
-          <rect x="320" y="320" width="220" height="110" rx="6" class="c-mask"/>
-          <rect x="320" y="320" width="220" height="110" rx="6" class="c-backend" stroke-width="1.5"/>
-          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(326 326) scale(0.6875)">
+          <rect x="320" y="258" width="220" height="110" rx="6" class="c-mask"/>
+          <rect x="320" y="258" width="220" height="110" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(326 264) scale(0.6875)">
             <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
           </g>
-          <text class="nb-title" x="354" y="341" font-size="10.5" font-weight="600">client/src/locale.ts</text>
-          <line class="nb-hr" x1="328" y1="348" x2="532" y2="348"/>
-          <text class="nb-k" x="332" y="378" font-size="9">宿主词条</text><text class="nb-v" x="384.2" y="378" font-size="9">common/i18n/*.json</text>
-          <text class="nb-k" x="332" y="392" font-size="9">组件词条</text><text class="nb-v" x="384.2" y="392" font-size="9">combinationMessages（47 key × 3）</text>
-          <text class="nb-k" x="332" y="406" font-size="9">同名 key</text><text class="nb-v" x="384.2" y="406" font-size="9">宿主覆盖组件</text>
+          <text class="nb-title" x="354" y="279" font-size="10.5" font-weight="600">client/src/locale.ts</text>
+          <line class="nb-hr" x1="328" y1="286" x2="532" y2="286"/>
+          <text class="nb-k" x="332" y="316" font-size="9">宿主词条</text><text class="nb-v" x="384.2" y="316" font-size="9">common/i18n/*.json</text>
+          <text class="nb-k" x="332" y="330" font-size="9">组件词条</text><text class="nb-v" x="384.2" y="330" font-size="9">combinationMessages（47 key × 3）</text>
+          <text class="nb-k" x="332" y="344" font-size="9">同名 key</text><text class="nb-v" x="384.2" y="344" font-size="9">宿主覆盖组件</text>
         </g>
 
         <g id="i18n-setup-node-i18n" data-nb="1" data-node-id="i18n" data-node-label="createI18n({...})" tabindex="0" role="button" aria-label="Focus createI18n({...}), 返回 i18n 实例，i18n.global 就是 global composer, vue-i18n 实例（createI18n 产物）" aria-pressed="false" data-node-kind="backend" data-node-sublabel="返回 i18n 实例，i18n.global 就是 global composer" data-node-tag="vue-i18n 9" data-node-context="vue-i18n 实例（createI18n 产物）">
           <title>createI18n({...}) · 返回 i18n 实例，i18n.global 就是 global composer · vue-i18n 实例（createI18n 产物） · vue-i18n 9</title>
-          <rect x="620" y="320" width="240" height="150" rx="6" class="c-mask"/>
-          <rect x="620" y="320" width="240" height="150" rx="6" class="c-backend" stroke-width="1.5"/>
-          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(626 326) scale(0.6875)">
+          <rect x="620" y="250" width="240" height="150" rx="6" class="c-mask"/>
+          <rect x="620" y="250" width="240" height="150" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(626 256) scale(0.6875)">
             <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
           </g>
-          <rect class="nb-badge" x="754.4" y="328" width="93.6" height="15" rx="7.5"/>
-          <text class="nb-badge-t" x="801.2" y="339" font-size="8" text-anchor="middle">createI18n 的产物</text>
-          <text class="nb-title" x="654" y="341" font-size="9.2" font-weight="600">createI18n({...})</text>
-          <line class="nb-hr" x1="628" y1="348" x2="852" y2="348"/>
-          <g class="nb-spot" data-nb-spot="1" tabindex="0" role="button" data-nb-link="composer"><rect class="nb-hit" x="627" y="394" width="226.0" height="14"/><text class="nb-k" x="632" y="405" font-size="9">i18n.global</text><text class="nb-v" x="700.4" y="405" font-size="9">global composer 本体</text></g>
-          <text class="nb-k" x="632" y="419" font-size="9">legacy</text><text class="nb-v" x="700.4" y="419" font-size="9">false（useI18n 的前提）</text>
+          <rect class="nb-badge" x="754.4" y="258" width="93.6" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="801.2" y="269" font-size="8" text-anchor="middle">createI18n 的产物</text>
+          <text class="nb-title" x="654" y="271" font-size="9.2" font-weight="600">createI18n({...})</text>
+          <line class="nb-hr" x1="628" y1="278" x2="852" y2="278"/>
+          <g class="nb-spot" data-nb-spot="1" tabindex="0" role="button" data-nb-link="composer"><rect class="nb-hit" x="627" y="324" width="226.0" height="14"/><text class="nb-k" x="632" y="335" font-size="9">i18n.global</text><text class="nb-v" x="700.4" y="335" font-size="9">global composer 本体</text></g>
+          <text class="nb-k" x="632" y="349" font-size="9">legacy</text><text class="nb-v" x="700.4" y="349" font-size="9">false（useI18n 的前提）</text>
         </g>
 
         <g id="i18n-setup-node-composer" data-nb="1" data-node-id="composer" data-node-label="global composer" tabindex="0" role="button" aria-label="Focus global composer, 全应用唯一一份, vue-i18n 实例（createI18n 产物）" aria-pressed="false" data-node-kind="database" data-node-sublabel="全应用唯一一份" data-node-context="vue-i18n 实例（createI18n 产物）">
           <title>global composer · 全应用唯一一份 · vue-i18n 实例（createI18n 产物）</title>
-          <rect x="620" y="550" width="280" height="220" rx="6" class="c-mask"/>
-          <rect x="620" y="550" width="280" height="220" rx="6" class="c-database" stroke-width="1.5"/>
-          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(626 556) scale(0.6875)">
+          <rect x="620" y="470" width="280" height="230" rx="6" class="c-mask"/>
+          <rect x="620" y="470" width="280" height="230" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(626 476) scale(0.6875)">
             <ellipse cx="8" cy="4" rx="5" ry="2"/>
             <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
           </g>
-          <text class="nb-title" x="654" y="571" font-size="10.5" font-weight="600">global composer</text>
-          <line class="nb-hr" x1="628" y1="578" x2="892" y2="578"/>
-          <text class="nb-k" x="632" y="656" font-size="9">locale</text><text class="nb-v" x="716.6" y="656" font-size="9">ref('zh-cn')，响应式</text>
-          <text class="nb-k" x="632" y="670" font-size="9">messages</text><text class="nb-v" x="716.6" y="670" font-size="9">两处词条合并后的树</text>
-          <text class="nb-k" x="632" y="684" font-size="9">fallbackLocale</text><text class="nb-v" x="716.6" y="684" font-size="9">'zh-cn'（vue-i18n 默认 en-US）</text>
-          <text class="nb-k" x="632" y="698" font-size="9">fallbackRoot</text><text class="nb-v" x="716.6" y="698" font-size="9">true（local 缺键时回落 root）</text>
+          <text class="nb-title" x="654" y="491" font-size="10.5" font-weight="600">global composer</text>
+          <line class="nb-hr" x1="628" y1="498" x2="892" y2="498"/>
+          <text class="nb-k" x="632" y="581" font-size="9">locale</text><text class="nb-v" x="716.6" y="581" font-size="9">ref('zh-cn')，响应式</text>
+          <text class="nb-k" x="632" y="595" font-size="9">messages</text><text class="nb-v" x="716.6" y="595" font-size="9">两处词条合并后的树</text>
+          <text class="nb-k" x="632" y="609" font-size="9">fallbackLocale</text><text class="nb-v" x="716.6" y="609" font-size="9">'zh-cn'（vue-i18n 默认 en-US）</text>
+          <text class="nb-k" x="632" y="623" font-size="9">fallbackRoot</text><text class="nb-v" x="716.6" y="623" font-size="9">true（local 缺键时回落 root）</text>
         </g>
 
-        <g id="i18n-setup-node-app" data-node-id="app" data-node-label="createApp(App)" tabindex="0" role="button" aria-label="Focus createApp(App), Vue 应用实例, Vue app 实例（createApp 产物）—— provide 发生在这里" aria-pressed="false" data-node-kind="frontend" data-node-sublabel="Vue 应用实例" data-node-context="Vue app 实例（createApp 产物）—— provide 发生在这里">
+        <g id="i18n-setup-node-app" data-nb="1" data-node-id="app" data-node-label="createApp(App)" tabindex="0" role="button" aria-label="Focus createApp(App), Vue 应用实例, Vue app 实例（createApp 产物）—— provide 发生在这里" aria-pressed="false" data-node-kind="frontend" data-node-sublabel="Vue 应用实例" data-node-context="Vue app 实例（createApp 产物）—— provide 发生在这里">
           <title>createApp(App) · Vue 应用实例 · Vue app 实例（createApp 产物）—— provide 发生在这里</title>
-          <rect x="40" y="560" width="220" height="80" rx="6" class="c-mask"/>
-          <rect x="40" y="560" width="220" height="80" rx="6" class="c-frontend" stroke-width="1.5"/>
-          <g aria-hidden="true" data-semantic-sigil="frontend" class="semantic-sigil s-frontend" transform="translate(46 566) scale(0.6875)">
+          <rect x="40" y="570" width="220" height="104" rx="6" class="c-mask"/>
+          <rect x="40" y="570" width="220" height="104" rx="6" class="c-frontend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="frontend" class="semantic-sigil s-frontend" transform="translate(46 576) scale(0.6875)">
             <rect x="2" y="3" width="12" height="10" rx="2"/>
             <path d="M2 6.5h12"/>
             <circle cx="4.1" cy="4.8" r=".7" class="sigil-fill"/>
             <circle cx="6.3" cy="4.8" r=".7" class="sigil-fill"/>
           </g>
-          <text data-detail-anchor x="150" y="598" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">createApp(App)</text>
-        <text data-detail="context" x="150" y="614" class="t-muted" font-size="9" text-anchor="middle">Vue 应用实例</text>
+          <text class="nb-title" x="74" y="591" font-size="10.5" font-weight="600">createApp(App)</text>
+          <line class="nb-hr" x1="48" y1="598" x2="252" y2="598"/>
+          <text class="nb-k" x="52" y="625" font-size="9">产物</text><text class="nb-v" x="93.4" y="625" font-size="9">一个 Vue 应用实例</text>
+          <text class="nb-k" x="52" y="639" font-size="9">它提供</text><text class="nb-v" x="93.4" y="639" font-size="9">组件树 + 依赖注入的根</text>
+          <text class="nb-k" x="52" y="653" font-size="9">谁在用</text><text class="nb-v" x="93.4" y="653" font-size="9">app.use(i18n) → install</text>
         </g>
 
         <g id="i18n-setup-node-install" data-nb="1" data-node-id="install" data-node-label="app.use(i18n) → install(app)" tabindex="0" role="button" aria-label="Focus app.use(i18n) → install(app), vue-i18n 的插件安装 · vue-i18n.mjs:2264, Vue app 实例（createApp 产物）—— provide 发生在这里" aria-pressed="false" data-node-kind="backend" data-node-sublabel="vue-i18n 的插件安装 · vue-i18n.mjs:2264" data-node-context="Vue app 实例（createApp 产物）—— provide 发生在这里">
           <title>app.use(i18n) → install(app) · vue-i18n 的插件安装 · vue-i18n.mjs:2264 · Vue app 实例（createApp 产物）—— provide 发生在这里</title>
-          <rect x="320" y="560" width="220" height="96" rx="6" class="c-mask"/>
-          <rect x="320" y="560" width="220" height="96" rx="6" class="c-backend" stroke-width="1.5"/>
-          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(326 566) scale(0.6875)">
+          <rect x="320" y="470" width="220" height="104" rx="6" class="c-mask"/>
+          <rect x="320" y="470" width="220" height="104" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(326 476) scale(0.6875)">
             <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
           </g>
-          <text class="nb-title" x="354" y="581" font-size="10.3" font-weight="600">app.use(i18n) → install(app)</text>
-          <line class="nb-hr" x1="328" y1="588" x2="532" y2="588"/>
-          <g class="nb-spot" data-nb-spot="1" tabindex="0" role="button" data-nb-link="provide"><rect class="nb-hit" x="327" y="600" width="206.0" height="14"/><text class="nb-k" x="332" y="611" font-size="9">①</text><text class="nb-v" x="346.4" y="611" font-size="9">app.provide(symbol, i18n)</text></g>
-          <text class="nb-k" x="332" y="625" font-size="9">②</text><text class="nb-v" x="346.4" y="625" font-size="9">injectGlobalFields：给 Options API 挂 $t</text>
-          <text class="nb-k" x="332" y="639" font-size="9">③</text><text class="nb-v" x="346.4" y="639" font-size="9">注册 &lt;i18n-t&gt; 组件与 v-t 指令</text>
+          <text class="nb-title" x="354" y="491" font-size="10.3" font-weight="600">app.use(i18n) → install(app)</text>
+          <line class="nb-hr" x1="328" y1="498" x2="532" y2="498"/>
+          <g class="nb-spot" data-nb-spot="1" tabindex="0" role="button" data-nb-link="provide"><rect class="nb-hit" x="327" y="514" width="206.0" height="14"/><text class="nb-k" x="332" y="525" font-size="9">①</text><text class="nb-v" x="346.4" y="525" font-size="9">app.provide(symbol, i18n)</text></g>
+          <text class="nb-k" x="332" y="539" font-size="9">②</text><text class="nb-v" x="346.4" y="539" font-size="9">injectGlobalFields：给 Options API 挂 $t</text>
+          <text class="nb-k" x="332" y="553" font-size="9">③</text><text class="nb-v" x="346.4" y="553" font-size="9">注册 &lt;i18n-t&gt; 组件与 v-t 指令</text>
         </g>
 
-        <g id="i18n-setup-node-provide" data-node-id="provide" data-node-label="app.provide(symbol, i18n)" tabindex="0" role="button" aria-label="Focus app.provide(symbol, i18n), 给整棵组件树一根注入管, Vue app 实例（createApp 产物）—— provide 发生在这里" aria-pressed="false" data-node-kind="security" data-node-sublabel="给整棵组件树一根注入管" data-node-context="Vue app 实例（createApp 产物）—— provide 发生在这里">
+        <g id="i18n-setup-node-provide" data-nb="1" data-node-id="provide" data-node-label="app.provide(symbol, i18n)" tabindex="0" role="button" aria-label="Focus app.provide(symbol, i18n), 给整棵组件树一根注入管, Vue app 实例（createApp 产物）—— provide 发生在这里" aria-pressed="false" data-node-kind="security" data-node-sublabel="给整棵组件树一根注入管" data-node-context="Vue app 实例（createApp 产物）—— provide 发生在这里">
           <title>app.provide(symbol, i18n) · 给整棵组件树一根注入管 · Vue app 实例（createApp 产物）—— provide 发生在这里</title>
-          <rect x="320" y="700" width="220" height="84" rx="6" class="c-mask"/>
-          <rect x="320" y="700" width="220" height="84" rx="6" class="c-security" stroke-width="1.5"/>
+          <rect x="320" y="700" width="220" height="120" rx="6" class="c-mask"/>
+          <rect x="320" y="700" width="220" height="120" rx="6" class="c-security" stroke-width="1.5"/>
           <g aria-hidden="true" data-semantic-sigil="security" class="semantic-sigil s-security" transform="translate(326 706) scale(0.6875)">
             <path d="M8 2.2 13 4v3.5c0 3.1-1.8 5.4-5 6.5-3.2-1.1-5-3.4-5-6.5V4Z"/>
             <path d="m5.8 8 1.5 1.5 3-3"/>
           </g>
-          <text data-detail-anchor x="430" y="740" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">app.provide(symbol, i18n)</text>
-        <text data-detail="context" x="430" y="756" class="t-muted" font-size="9" text-anchor="middle">给整棵组件树一根注入管</text>
+          <text class="nb-title" x="354" y="721" font-size="10.5" font-weight="600">app.provide(symbol, i18n)</text>
+          <line class="nb-hr" x1="328" y1="728" x2="532" y2="728"/>
+          <text class="nb-k" x="332" y="756" font-size="9">注什么</text><text class="nb-v" x="373.4" y="756" font-size="9">(symbol, i18n) 这一对</text>
+          <text class="nb-k" x="332" y="770" font-size="9">symbol</text><text class="nb-v" x="373.4" y="770" font-size="9">app.__VUE_I18N_SYMBOL__</text>
+          <text class="nb-k" x="332" y="784" font-size="9">谁取</text><text class="nb-v" x="373.4" y="784" font-size="9">每个组件的 inject(symbol)（下一张图）</text>
+          <text class="nb-k" x="332" y="798" font-size="9">取回后</text><text class="nb-v" x="373.4" y="798" font-size="9">还要读 i18n.global 才是 composer</text>
         </g>
 
         <!-- Connection labels -->
         <g data-detail="context" data-edge-from="hostmsg" data-edge-to="merge" data-edge-label="spread" data-edge-key="0" data-edge-id="host-merge">
-          <rect x="410.6" y="220" width="38.8" height="14" rx="3" class="c-mask"/>
-          <text x="430" y="230" class="t-muted" font-size="8" text-anchor="middle">spread</text>
+          <rect x="410.6" y="192" width="38.8" height="14" rx="3" class="c-mask"/>
+          <text x="430" y="202" class="t-muted" font-size="8" text-anchor="middle">spread</text>
         </g>
         <g data-detail="context" data-edge-from="combomsg" data-edge-to="merge" data-edge-label="spread" data-edge-key="1" data-edge-id="combo-merge">
-          <rect x="215.6" y="355" width="38.8" height="14" rx="3" class="c-mask"/>
-          <text x="235" y="365" class="t-muted" font-size="8" text-anchor="middle">spread</text>
+          <rect x="270.6" y="293" width="38.8" height="14" rx="3" class="c-mask"/>
+          <text x="290" y="303" class="t-muted" font-size="8" text-anchor="middle">spread</text>
         </g>
         <g data-detail="context" data-edge-from="merge" data-edge-to="i18n" data-edge-label="messages" data-edge-key="2" data-edge-id="merge-i18n">
-          <rect x="555.8" y="368" width="48.4" height="14" rx="3" class="c-mask"/>
-          <text x="580" y="378" class="t-muted" font-size="8" text-anchor="middle">messages</text>
+          <rect x="555.8" y="298" width="48.4" height="14" rx="3" class="c-mask"/>
+          <text x="580" y="308" class="t-muted" font-size="8" text-anchor="middle">messages</text>
         </g>
         <g data-detail="context" data-edge-from="i18n" data-edge-to="composer" data-edge-label="i18n.global" data-edge-key="3" data-edge-id="i18n-composer">
-          <rect x="718.6" y="490" width="62.8" height="14" rx="3" class="c-mask"/>
-          <text x="750" y="500" class="t-muted" font-size="8" text-anchor="middle">i18n.global</text>
+          <rect x="718.6" y="415" width="62.8" height="14" rx="3" class="c-mask"/>
+          <text x="750" y="425" class="t-muted" font-size="8" text-anchor="middle">i18n.global</text>
         </g>
         <g data-detail="context" data-edge-from="i18n" data-edge-to="install" data-edge-label="插件实例" data-edge-key="4" data-edge-id="i18n-install">
-          <rect x="571.8" y="449" width="48.4" height="14" rx="3" class="c-mask"/>
-          <text x="596" y="459" class="t-muted" font-size="8" text-anchor="middle">插件实例</text>
+          <rect x="571.8" y="369" width="48.4" height="14" rx="3" class="c-mask"/>
+          <text x="596" y="379" class="t-muted" font-size="8" text-anchor="middle">插件实例</text>
         </g>
         <g data-detail="context" data-edge-from="install" data-edge-to="provide" data-edge-label="provide symbol" data-edge-key="5" data-edge-id="install-provide">
-          <rect x="391.4" y="660" width="77.2" height="14" rx="3" class="c-mask"/>
-          <text x="430" y="670" class="t-muted" font-size="8" text-anchor="middle">provide symbol</text>
+          <rect x="391.4" y="578" width="77.2" height="14" rx="3" class="c-mask"/>
+          <text x="430" y="588" class="t-muted" font-size="8" text-anchor="middle">provide symbol</text>
         </g>
         <g data-detail="context" data-edge-from="provide" data-edge-to="composer" data-edge-label="挂载后组件 inject 的就是这份" data-edge-key="6" data-edge-id="provide-composer">
-          <rect x="627.8" y="800" width="144.4" height="14" rx="3" class="c-mask"/>
-          <text x="700" y="810" class="t-messagebus" font-size="8" text-anchor="middle">挂载后组件 inject 的就是这份</text>
+          <rect x="687.8" y="710" width="144.4" height="14" rx="3" class="c-mask"/>
+          <text x="760" y="720" class="t-messagebus" font-size="8" text-anchor="middle">挂载后组件 inject 的就是这份</text>
         </g>
 
         <!-- Legend -->
         <g data-legend data-legend-bridge>
-          <text x="40" y="824" class="t-primary" font-size="12" font-weight="650">Legend</text>
-          <g data-legend-semantic-kind="frontend" data-legend-kind="frontend" data-legend-label="Frontend" data-legend-x="40" data-legend-baseline="844" data-legend-width="83">
-            <rect x="40" y="835" width="16" height="10" rx="2.5" class="c-frontend" stroke-width="1"/>
-            <text x="62" y="844" class="t-muted" font-size="10" font-weight="500">Frontend</text>
+          <text x="40" y="864" class="t-primary" font-size="12" font-weight="650">Legend</text>
+          <g data-legend-semantic-kind="frontend" data-legend-kind="frontend" data-legend-label="Frontend" data-legend-x="40" data-legend-baseline="884" data-legend-width="83">
+            <rect x="40" y="875" width="16" height="10" rx="2.5" class="c-frontend" stroke-width="1"/>
+            <text x="62" y="884" class="t-muted" font-size="10" font-weight="500">Frontend</text>
           </g>
-          <g data-legend-semantic-kind="backend" data-legend-kind="backend" data-legend-label="Backend" data-legend-x="145" data-legend-baseline="844" data-legend-width="78">
-            <rect x="145" y="835" width="16" height="10" rx="2.5" class="c-backend" stroke-width="1"/>
-            <text x="167" y="844" class="t-muted" font-size="10" font-weight="500">Backend</text>
+          <g data-legend-semantic-kind="backend" data-legend-kind="backend" data-legend-label="Backend" data-legend-x="145" data-legend-baseline="884" data-legend-width="78">
+            <rect x="145" y="875" width="16" height="10" rx="2.5" class="c-backend" stroke-width="1"/>
+            <text x="167" y="884" class="t-muted" font-size="10" font-weight="500">Backend</text>
           </g>
-          <g data-legend-semantic-kind="database" data-legend-kind="database" data-legend-label="Database" data-legend-x="245" data-legend-baseline="844" data-legend-width="83">
-            <rect x="245" y="835" width="16" height="10" rx="2.5" class="c-database" stroke-width="1"/>
-            <text x="267" y="844" class="t-muted" font-size="10" font-weight="500">Database</text>
+          <g data-legend-semantic-kind="database" data-legend-kind="database" data-legend-label="Database" data-legend-x="245" data-legend-baseline="884" data-legend-width="83">
+            <rect x="245" y="875" width="16" height="10" rx="2.5" class="c-database" stroke-width="1"/>
+            <text x="267" y="884" class="t-muted" font-size="10" font-weight="500">Database</text>
           </g>
-          <g data-legend-semantic-kind="security" data-legend-kind="security" data-legend-label="Security" data-legend-x="350" data-legend-baseline="844" data-legend-width="83">
-            <rect x="350" y="835" width="16" height="10" rx="2.5" class="c-security" stroke-width="1"/>
-            <text x="372" y="844" class="t-muted" font-size="10" font-weight="500">Security</text>
+          <g data-legend-semantic-kind="security" data-legend-kind="security" data-legend-label="Security" data-legend-x="350" data-legend-baseline="884" data-legend-width="83">
+            <rect x="350" y="875" width="16" height="10" rx="2.5" class="c-security" stroke-width="1"/>
+            <text x="372" y="884" class="t-muted" font-size="10" font-weight="500">Security</text>
           </g>
         </g>
       </svg></div>
@@ -6712,7 +6725,7 @@ app.use(i18n);                                                                  
 const i18n = inject(app.__VUE_I18N_SYMBOL__);   // ② 沿注入管拿回 i18n 实例
 const gl = i18n.global;                         // ③ scope=global 时，返回值就是 gl 本体
 </code></pre></div>
-<figure class="archfig" data-arch style="--arch-max-width:1690px" data-boundaries="nested" data-pano data-tours='[{"id":"inject","label":"一次 useI18n() 的诞生（global）","steps":[{"at":["host"],"text":"装配期 provide(symbol, i18n)，即上一张图的那根管。"},{"at":["combiner"],"text":"setup() 里 useI18n()：getCurrentInstance() 拿到当前实例，inject(symbol) 拿回 i18n。"},{"at":["gl"],"text":"scope=global（不传 options）→ 返回值就是 gl 本体。"}]},{"id":"localbirth","label":"一次 local composer 的诞生","steps":[{"at":["parentLocal"],"text":"useScope: &#39;local&#39; → createComposer({ messages, __root: gl })：__root 指回全局那一份。"},{"at":["registry"],"text":"__setInstance(instance, composer)，挂在实例注册表上，==只属于这个实例==。"},{"at":["kid"],"text":"子组件 useI18n() 仍然 inject(symbol) 拿到 gl —— 父的 local 从来不在这根管里。"}]}]' data-frames='[{"id":"tree","flat":true,"boundary":0,"kind":"contains","label":"挂载后的组件实例树（每个实例 setup 时各自 useI18n()）","detail":"12 个组件（组合器本体 + 11 个子组件）都调 useI18n()，没有任何一处自建 i18n 实例。","members":["combiner","child","parentLocal","kid"],"depth":1},{"id":"localscope","boundary":1,"parent":"tree","kind":"contains","label":"声明 local 的实例 —— local composer 只属于它","detail":"local composer 存在实例注册表里（Map<instance, composer>），从不 provide。子组件 inject 到的仍然是 gl。","members":["parentLocal","kid"],"depth":2}]'>
+<figure class="archfig" data-arch style="--arch-max-width:1690px" data-boundaries="nested" data-pano data-tours='[{"id":"inject","label":"一次 useI18n() 的诞生（global）","steps":[{"at":["host"],"text":"装配期 provide(symbol, i18n)，即上一张图的那根管。"},{"at":["combiner"],"text":"setup() 里 useI18n()：getCurrentInstance() 拿到当前实例，inject(symbol) 拿回 i18n。"},{"at":["gl"],"text":"scope=global（不传 options）→ 返回值就是 gl 本体。"}]},{"id":"localbirth","label":"一次 local composer 的诞生","steps":[{"at":["parentLocal"],"text":"useScope: &#39;local&#39; → createComposer({ messages, __root: gl })：__root 指回全局那一份。"},{"at":["registry"],"text":"__setInstance(instance, composer)，挂在实例注册表上，==只属于这个实例==。"},{"at":["kid"],"text":"子组件 useI18n() 仍然 inject(symbol) 拿到 gl：父的 local 从来不在这根管里。"}]}]' data-frames='[{"id":"tree","flat":true,"boundary":0,"kind":"contains","label":"挂载后的组件实例树（每个实例 setup 时各自 useI18n()）","detail":"12 个组件（组合器本体 + 11 个子组件）都调 useI18n()，没有任何一处自建 i18n 实例。","members":["combiner","child","parentLocal","kid"],"depth":1},{"id":"localscope","boundary":1,"parent":"tree","kind":"contains","label":"声明 local 的实例 · local composer 挂在这一层，不往下传","detail":"框里只有声明它的那一个实例。local composer 存在实例注册表里（Map<instance, composer>），从不 provide，右边的子组件虽然在组件树上属于它，inject 到的仍然是 gl。","members":["parentLocal"],"depth":2}]'>
       <div class="arch-boundary-ui">
           <div class="arch-boundary-toolbar"><span class="arch-boundary-label">边界</span>
             <button type="button" data-boundary-mode="nested" aria-pressed="true">多层归属框</button>
@@ -6751,8 +6764,8 @@ const gl = i18n.global;                         // ③ scope=global 时，返回
         <g class="arch-frame" data-frame="tree" data-depth="1" data-frame-flat="true" data-frame-kind="contains" role="button" tabindex="0" aria-pressed="false" aria-label="挂载后的组件实例树（每个实例 setup 时各自 useI18n()）"><title>12 个组件（组合器本体 + 11 个子组件）都调 useI18n()，没有任何一处自建 i18n 实例。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="0" data-frame-members="combiner child parentLocal kid" x="440" y="30" width="730" height="620" rx="12" class="c-region" stroke-width="1"/>
         <text x="448" y="48" class="t-cloud" font-size="9" font-weight="600">挂载后的组件实例树（每个实例 setup 时各自 useI18n()）</text></g>
 
-        <g class="arch-frame" data-frame="localscope" data-depth="2" data-frame-flat="false" data-frame-kind="contains" role="button" tabindex="0" aria-pressed="false" aria-label="声明 local 的实例 —— local composer 只属于它"><title>local composer 存在实例注册表里（Map&lt;instance, composer&gt;），从不 provide。子组件 inject 到的仍然是 gl。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="1" data-frame-members="parentLocal kid" x="454" y="424" width="702" height="212" rx="12" class="c-region" stroke-width="1"/>
-        <text x="462" y="442" class="t-cloud" font-size="9" font-weight="600">声明 local 的实例 —— local composer 只属于它</text></g>
+        <g class="arch-frame" data-frame="localscope" data-depth="2" data-frame-flat="false" data-frame-kind="contains" role="button" tabindex="0" aria-pressed="false" aria-label="声明 local 的实例 · local composer 挂在这一层，不往下传"><title>框里只有声明它的那一个实例。local composer 存在实例注册表里（Map&lt;instance, composer&gt;），从不 provide，右边的子组件虽然在组件树上属于它，inject 到的仍然是 gl。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="1" data-frame-members="parentLocal" x="454" y="424" width="352" height="212" rx="12" class="c-region" stroke-width="1"/>
+        <text x="462" y="442" class="t-cloud" font-size="9" font-weight="600">声明 local 的实例 · local composer 挂在这一层，不往下传</text></g>
 
         <!-- Connection paths (before components for correct z-order) -->
         <path data-edge-from="host" data-edge-to="combiner" data-edge-label="inject(symbol)" data-edge-key="0" data-edge-id="host-combiner" data-composition-points="320,150;344,150;344,166;456,166;456,135;480,135" d="M 320 150 L 336 150 Q 344 150 344 158 L 344 158 Q 344 166 352 166 L 448 166 Q 456 166 456 158 L 456 143 Q 456 135 464 135 L 480 135" class="a-default" stroke-width="1.5" marker-end="url(#i18n-instances-arrowhead)"/>
@@ -6761,9 +6774,10 @@ const gl = i18n.global;                         // ③ scope=global 时，返回
         <path data-edge-from="child" data-edge-to="gl" data-edge-label="11 个子组件同样拿到 gl" data-edge-key="3" data-edge-id="child-gl" data-composition-points="480,315;420,315;420,570;360,570" d="M 480 315 L 428 315 Q 420 315 420 323 L 420 562 Q 420 570 412 570 L 360 570" class="a-default" stroke-width="1.5" marker-end="url(#i18n-instances-arrowhead)"/>
         <path data-edge-from="parentLocal" data-edge-to="gl" data-edge-label="__root 指针" data-edge-key="4" data-edge-id="local-gl" data-composition-points="480,530;420,530;420,570;360,570" d="M 480 530 L 428 530 Q 420 530 420 538 L 420 562 Q 420 570 412 570 L 360 570" class="a-default" stroke-width="1.5" marker-end="url(#i18n-instances-arrowhead)"/>
         <path data-edge-from="parentLocal" data-edge-to="registry" data-edge-label="__setInstance" data-edge-key="5" data-edge-id="local-registry" data-composition-points="630,610;630,740" d="M 630 610 L 630 740" class="a-default" stroke-width="1.5" marker-end="url(#i18n-instances-arrowhead)"/>
+        <path data-edge-from="combiner" data-edge-to="child" data-edge-label="渲染子组件" data-edge-key="6" data-edge-id="tree-child" data-composition-points="620,200;620,260" d="M 620 200 L 620 260" class="a-default" stroke-width="1.5" marker-end="url(#i18n-instances-arrowhead)"/>
 
         <!-- Components -->
-        <g id="i18n-instances-node-host" data-node-id="host" data-node-label="Vue app 实例" tabindex="0" role="button" aria-label="Focus Vue app 实例, app.use(i18n) → app.provide(symbol, i18n), Architecture component" aria-pressed="false" data-node-kind="frontend" data-node-sublabel="app.use(i18n) → app.provide(symbol, i18n)" data-node-tag="装配期，见图 A" data-node-context="Architecture component">
+        <g id="i18n-instances-node-host" data-nb="1" data-node-id="host" data-node-label="Vue app 实例" tabindex="0" role="button" aria-label="Focus Vue app 实例, app.use(i18n) → app.provide(symbol, i18n), Architecture component" aria-pressed="false" data-node-kind="frontend" data-node-sublabel="app.use(i18n) → app.provide(symbol, i18n)" data-node-tag="装配期，见图 A" data-node-context="Architecture component">
           <title>Vue app 实例 · app.use(i18n) → app.provide(symbol, i18n) · Architecture component · 装配期，见图 A</title>
           <rect x="40" y="90" width="280" height="120" rx="6" class="c-mask"/>
           <rect x="40" y="90" width="280" height="120" rx="6" class="c-frontend" stroke-width="1.5"/>
@@ -6773,9 +6787,11 @@ const gl = i18n.global;                         // ③ scope=global 时，返回
             <circle cx="4.1" cy="4.8" r=".7" class="sigil-fill"/>
             <circle cx="6.3" cy="4.8" r=".7" class="sigil-fill"/>
           </g>
-          <text data-detail-anchor x="180" y="148" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">Vue app 实例</text>
-        <text data-detail="context" x="180" y="164" class="t-muted" font-size="9" text-anchor="middle">app.use(i18n) → app.provide(symbol, i18n)</text>
-        <text data-detail="fine" x="180" y="202" class="t-frontend" font-size="7" text-anchor="middle">装配期，见图 A</text>
+          <text class="nb-title" x="74" y="111" font-size="10.5" font-weight="600">Vue app 实例</text>
+          <line class="nb-hr" x1="48" y1="118" x2="312" y2="118"/>
+          <text class="nb-k" x="52" y="153" font-size="9">做过什么</text><text class="nb-v" x="104.2" y="153" font-size="9">provide(symbol, i18n)（03 节）</text>
+          <text class="nb-k" x="52" y="167" font-size="9">现在干嘛</text><text class="nb-v" x="104.2" y="167" font-size="9">被每个实例 inject</text>
+          <text class="nb-k" x="52" y="181" font-size="9">它不认识</text><text class="nb-v" x="104.2" y="181" font-size="9">任何组件里的 t()</text>
         </g>
 
         <g id="i18n-instances-node-combiner" data-nb="1" data-node-id="combiner" data-node-label="InsightCombiner 实例" tabindex="0" role="button" aria-label="Focus InsightCombiner 实例, setup() → useI18n(), 挂载后的组件实例树（每个实例 setup 时各自 useI18n()）" aria-pressed="false" data-node-kind="frontend" data-node-sublabel="setup() → useI18n()" data-node-context="挂载后的组件实例树（每个实例 setup 时各自 useI18n()）">
@@ -6795,7 +6811,7 @@ const gl = i18n.global;                         // ③ scope=global 时，返回
           <g class="nb-spot" data-nb-spot="1" tabindex="0" role="button" data-nb-link="gl"><rect class="nb-hit" x="487" y="155" width="266.0" height="14"/><text class="nb-k" x="492" y="166" font-size="9">scope</text><text class="nb-v" x="528.0" y="166" font-size="9">global → 返回 gl 本体</text></g>
         </g>
 
-        <g id="i18n-instances-node-child" data-node-id="child" data-node-label="ConditionSection 等 11 个子组件" tabindex="0" role="button" aria-label="Focus ConditionSection 等 11 个子组件, setup() → useI18n(), 挂载后的组件实例树（每个实例 setup 时各自 useI18n()）" aria-pressed="false" data-node-kind="frontend" data-node-sublabel="setup() → useI18n()" data-node-context="挂载后的组件实例树（每个实例 setup 时各自 useI18n()）">
+        <g id="i18n-instances-node-child" data-nb="1" data-node-id="child" data-node-label="ConditionSection 等 11 个子组件" tabindex="0" role="button" aria-label="Focus ConditionSection 等 11 个子组件, setup() → useI18n(), 挂载后的组件实例树（每个实例 setup 时各自 useI18n()）" aria-pressed="false" data-node-kind="frontend" data-node-sublabel="setup() → useI18n()" data-node-context="挂载后的组件实例树（每个实例 setup 时各自 useI18n()）">
           <title>ConditionSection 等 11 个子组件 · setup() → useI18n() · 挂载后的组件实例树（每个实例 setup 时各自 useI18n()）</title>
           <rect x="480" y="260" width="280" height="110" rx="6" class="c-mask"/>
           <rect x="480" y="260" width="280" height="110" rx="6" class="c-frontend" stroke-width="1.5"/>
@@ -6805,12 +6821,15 @@ const gl = i18n.global;                         // ③ scope=global 时，返回
             <circle cx="4.1" cy="4.8" r=".7" class="sigil-fill"/>
             <circle cx="6.3" cy="4.8" r=".7" class="sigil-fill"/>
           </g>
-          <text data-detail-anchor x="620" y="313" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">ConditionSection 等 11 个子组件</text>
-        <text data-detail="context" x="620" y="329" class="t-muted" font-size="9" text-anchor="middle">setup() → useI18n()</text>
+          <text class="nb-title" x="514" y="281" font-size="10.5" font-weight="600">ConditionSection 等 11 个子组件</text>
+          <line class="nb-hr" x1="488" y1="288" x2="752" y2="288"/>
+          <text class="nb-k" x="492" y="318" font-size="9">体量</text><text class="nb-v" x="528.0" y="318" font-size="9">11 个组件，逐个都调 useI18n()</text>
+          <text class="nb-k" x="492" y="332" font-size="9">scope</text><text class="nb-v" x="528.0" y="332" font-size="9">global（不传 options）</text>
+          <text class="nb-k" x="492" y="346" font-size="9">内部</text><text class="nb-v" x="528.0" y="346" font-size="9">同 combiner：inject(symbol) → gl</text>
         </g>
 
-        <g id="i18n-instances-node-parentLocal" data-nb="1" data-node-id="parentLocal" data-node-label="某个组件" tabindex="0" role="button" aria-label="Focus 某个组件, useI18n({ messages, useScope: &#39;local&#39; }), 挂载后的组件实例树（每个实例 setup 时各自 useI18n()） › 声明 local 的实例 —— local composer 只属于它" aria-pressed="false" data-node-kind="frontend" data-node-sublabel="useI18n({ messages, useScope: &#39;local&#39; })" data-node-tag="声明了 local" data-node-context="挂载后的组件实例树（每个实例 setup 时各自 useI18n()） › 声明 local 的实例 —— local composer 只属于它">
-          <title>某个组件 · useI18n({ messages, useScope: &#39;local&#39; }) · 挂载后的组件实例树（每个实例 setup 时各自 useI18n()） › 声明 local 的实例 —— local composer 只属于它 · 声明了 local</title>
+        <g id="i18n-instances-node-parentLocal" data-nb="1" data-node-id="parentLocal" data-node-label="某个组件" tabindex="0" role="button" aria-label="Focus 某个组件, useI18n({ messages, useScope: ‘local’ }), 挂载后的组件实例树（每个实例 setup 时各自 useI18n()） › 声明 local 的实例 · local composer 挂在这一层，不往下传" aria-pressed="false" data-node-kind="frontend" data-node-sublabel="useI18n({ messages, useScope: ‘local’ })" data-node-tag="声明了 local" data-node-context="挂载后的组件实例树（每个实例 setup 时各自 useI18n()） › 声明 local 的实例 · local composer 挂在这一层，不往下传">
+          <title>某个组件 · useI18n({ messages, useScope: ‘local’ }) · 挂载后的组件实例树（每个实例 setup 时各自 useI18n()） › 声明 local 的实例 · local composer 挂在这一层，不往下传 · 声明了 local</title>
           <rect x="480" y="450" width="300" height="160" rx="6" class="c-mask"/>
           <rect x="480" y="450" width="300" height="160" rx="6" class="c-frontend" stroke-width="1.5"/>
           <g aria-hidden="true" data-semantic-sigil="frontend" class="semantic-sigil s-frontend" transform="translate(486 456) scale(0.6875)">
@@ -6828,8 +6847,8 @@ const gl = i18n.global;                         // ③ scope=global 时，返回
           <g class="nb-spot" data-nb-spot="1" tabindex="0" role="button" data-nb-link="registry"><rect class="nb-hit" x="487" y="550" width="286.0" height="14"/><text class="nb-k" x="492" y="561" font-size="9">注册</text><text class="nb-v" x="528.0" y="561" font-size="9">__setInstance(instance, composer)</text></g>
         </g>
 
-        <g id="i18n-instances-node-kid" data-node-id="kid" data-node-label="它自己的子组件" tabindex="0" role="button" aria-label="Focus 它自己的子组件, setup() → useI18n(), 挂载后的组件实例树（每个实例 setup 时各自 useI18n()） › 声明 local 的实例 —— local composer 只属于它" aria-pressed="false" data-node-kind="frontend" data-node-sublabel="setup() → useI18n()" data-node-tag="读到的还是 global" data-node-context="挂载后的组件实例树（每个实例 setup 时各自 useI18n()） › 声明 local 的实例 —— local composer 只属于它">
-          <title>它自己的子组件 · setup() → useI18n() · 挂载后的组件实例树（每个实例 setup 时各自 useI18n()） › 声明 local 的实例 —— local composer 只属于它 · 读到的还是 global</title>
+        <g id="i18n-instances-node-kid" data-nb="1" data-node-id="kid" data-node-label="它自己的子组件" tabindex="0" role="button" aria-label="Focus 它自己的子组件, setup() → useI18n(), 挂载后的组件实例树（每个实例 setup 时各自 useI18n()）" aria-pressed="false" data-node-kind="frontend" data-node-sublabel="setup() → useI18n()" data-node-tag="读到的还是 global" data-node-context="挂载后的组件实例树（每个实例 setup 时各自 useI18n()）">
+          <title>它自己的子组件 · setup() → useI18n() · 挂载后的组件实例树（每个实例 setup 时各自 useI18n()） · 读到的还是 global</title>
           <rect x="830" y="450" width="300" height="110" rx="6" class="c-mask"/>
           <rect x="830" y="450" width="300" height="110" rx="6" class="c-frontend" stroke-width="1.5"/>
           <g aria-hidden="true" data-semantic-sigil="frontend" class="semantic-sigil s-frontend" transform="translate(836 456) scale(0.6875)">
@@ -6838,9 +6857,11 @@ const gl = i18n.global;                         // ③ scope=global 时，返回
             <circle cx="4.1" cy="4.8" r=".7" class="sigil-fill"/>
             <circle cx="6.3" cy="4.8" r=".7" class="sigil-fill"/>
           </g>
-          <text data-detail-anchor x="980" y="503" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">它自己的子组件</text>
-        <text data-detail="context" x="980" y="519" class="t-muted" font-size="9" text-anchor="middle">setup() → useI18n()</text>
-        <text data-detail="fine" x="980" y="552" class="t-frontend" font-size="7" text-anchor="middle">读到的还是 global</text>
+          <text class="nb-title" x="864" y="471" font-size="10.5" font-weight="600">它自己的子组件</text>
+          <line class="nb-hr" x1="838" y1="478" x2="1122" y2="478"/>
+          <text class="nb-k" x="842" y="508" font-size="9">父组件</text><text class="nb-v" x="910.4" y="508" font-size="9">左边那个有 local 的实例</text>
+          <text class="nb-k" x="842" y="522" font-size="9">自己 inject</text><text class="nb-v" x="910.4" y="522" font-size="9">只认 symbol → gl</text>
+          <text class="nb-k" x="842" y="536" font-size="9">结果</text><text class="nb-v" x="910.4" y="536" font-size="9">父的 local 里的 key 在这里查不到</text>
         </g>
 
         <g id="i18n-instances-node-gl" data-nb="1" data-node-id="gl" data-node-label="global composer" tabindex="0" role="button" aria-label="Focus global composer, app.use(i18n) 建的那一份, Architecture component" aria-pressed="false" data-node-kind="database" data-node-sublabel="app.use(i18n) 建的那一份" data-node-context="Architecture component">
@@ -6853,10 +6874,10 @@ const gl = i18n.global;                         // ③ scope=global 时，返回
           </g>
           <text class="nb-title" x="74" y="451" font-size="10.5" font-weight="600">global composer</text>
           <line class="nb-hr" x1="48" y1="458" x2="352" y2="458"/>
-          <text class="nb-k" x="52" y="566" font-size="9">locale</text><text class="nb-v" x="136.6" y="566" font-size="9">ref('zh-cn')，响应式</text>
+          <text class="nb-k" x="52" y="566" font-size="9">locale</text><text class="nb-v" x="136.6" y="566" font-size="9">ref('zh-cn')，响应式（06 节讲它怎么触发重渲染）</text>
           <text class="nb-k" x="52" y="580" font-size="9">messages</text><text class="nb-v" x="136.6" y="580" font-size="9">两处词条合并后的树</text>
           <text class="nb-k" x="52" y="594" font-size="9">fallbackLocale</text><text class="nb-v" x="136.6" y="594" font-size="9">'zh-cn'</text>
-          <text class="nb-k" x="52" y="608" font-size="9">fallbackRoot</text><text class="nb-v" x="136.6" y="608" font-size="9">true（03 节的回落开关读它）</text>
+          <text class="nb-k" x="52" y="608" font-size="9">fallbackRoot</text><text class="nb-v" x="136.6" y="608" font-size="9">true（05 节的回落开关读它）</text>
         </g>
 
         <g id="i18n-instances-node-registry" data-nb="1" data-node-id="registry" data-node-label="实例注册表" tabindex="0" role="button" aria-label="Focus 实例注册表, __getInstance / __setInstance · Map&lt;instance, composer&gt;, Architecture component" aria-pressed="false" data-node-kind="database" data-node-sublabel="__getInstance / __setInstance · Map&lt;instance, composer&gt;" data-node-context="Architecture component">
@@ -6898,6 +6919,10 @@ const gl = i18n.global;                         // ③ scope=global 时，返回
         <g data-detail="context" data-edge-from="parentLocal" data-edge-to="registry" data-edge-label="__setInstance" data-edge-key="5" data-edge-id="local-registry">
           <rect x="593.8" y="614" width="72.4" height="14" rx="3" class="c-mask"/>
           <text x="630" y="624" class="t-muted" font-size="8" text-anchor="middle">__setInstance</text>
+        </g>
+        <g data-detail="context" data-edge-from="combiner" data-edge-to="child" data-edge-label="渲染子组件" data-edge-key="6" data-edge-id="tree-child">
+          <rect x="591" y="222" width="58" height="14" rx="3" class="c-mask"/>
+          <text x="620" y="232" class="t-muted" font-size="8" text-anchor="middle">渲染子组件</text>
         </g>
 
         <!-- Legend -->
@@ -6958,7 +6983,7 @@ child:  combinerTitle=圈选条件 | onlyLocal=onlyLocal
 从不 <code>provide</code>。子组件的 <code>useI18n()</code> 只会 <code>inject(symbol)</code> 拿回应用级的 i18n，
 再走一遍 global 分支，父实例的 local 不在这根管里。</p>
 <p>顺带：local composer 身上带着 <code>__root = gl</code>（创建时塞进去的），
-03 节「local 缺键回落 root」那条线走的就是它。</p>
+05 节「local 缺键回落 root」那条线走的就是它。</p>
 </div>
     </div><h2 id="t-是一次查表"><span class="num">05</span>t() 是一次查表</h2>
 <p>把 <code>t()</code> 当作「按 key 查表」的函数，后面就好读了：<mark class="mk-blue">t 的行为 = 查哪一份表 × 查哪个语言桶 × 没查到怎么办。</mark></p>
@@ -7032,7 +7057,251 @@ const _fallbackRoot = isLocalScope
 <p>实测：组件里写 <code>false</code> 仍会回落（拿到 <code>宿主中文</code>）；改在 <code>createI18n({ fallbackRoot: false })</code>
 上写，才真的不回落（拿到 key <code>hostOnly</code>）。demo 里那个开关模拟的就是 root 上这一份。</p>
 </div>
-    </div><h2 id="组件库的契约词条交出去实例借用宿主的"><span class="num">06</span>组件库的契约：词条交出去，实例借用宿主的</h2>
+    </div><h2 id="locale-一变为什么整片文案立刻重画"><span class="num">06</span>locale 一变，为什么整片文案立刻重画</h2>
+<p>前两节讲的是「谁持有哪份 composer」。这一节回答另一个问题：切语言之后，为什么界面文案<strong>下一帧就变</strong>，而字段名不变。</p>
+<p>秘密只有一句话：<mark class="mk-blue"><code>composer.locale</code> 是一个响应式 ref，而 <code>t()</code> 在渲染时读了它。</mark></p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-ts">// vue-i18n.mjs:466：composer.locale 是个 computed，背后是 _locale 这个 ref
+const locale = computed({
+  get: () =&gt; _locale.value,
+  set: (val) =&gt; { _locale.value = val; /* ... */ },
+});
+</code></pre></div>
+<p>组件渲染时调用 <code>t('combinerTitle')</code>，解析过程读了 <code>_locale.value</code>，Vue 就把「这个渲染 effect 依赖 locale」记进依赖表。之后宿主执行 <code>i18n.global.locale.value = 'en-us'</code>，Vue 把依赖它的渲染函数重新执行一遍 —— 整片文案就换了：</p>
+<figure class="archfig" data-arch style="--arch-max-width:1534px" data-boundaries="nested" data-pano data-tours='[{"id":"switch","label":"切一次语言的完整路径","steps":[{"at":["switch","apply"],"text":"宿主切语言 → applyLocale：把 &#39;en-us&#39; 写进 composer 的 locale ref。"},{"at":["dep"],"text":"Vue 的依赖表里，渲染时读过 locale 的那些 effect 全部失效。"},{"at":["rerender","render"],"text":"它们被重新执行；这一次 t(&#39;combinerTitle&#39;) 读到的是 &#39;en-us&#39;。"},{"at":["dom"],"text":"DOM 里的文案换掉。==全程没有任何网络请求。=="},{"at":["name"],"text":"字段名在另一条链上：它是服务端下发的一份普通数据，不跟着重跑。"}]}]' data-frames='[{"id":"trigger","flat":true,"boundary":0,"kind":"contains","label":"触发 · 宿主切语言","detail":"用户在语言选择器上点一下，或者主应用 context 的 locale 变了；applyLocale 把新值写进 composer 的 locale ref。","members":["switch","apply"],"depth":1},{"id":"reactive","boundary":1,"kind":"contains","label":"响应式 · Vue 记得谁读过 locale，谁就得重跑","detail":"渲染函数执行时读过 _locale.value（t 内部读的），这个 effect 就被登记在 locale 的依赖里。locale 一变，它们全部失效。","members":["dep","rerender"],"depth":1},{"id":"paint","boundary":2,"kind":"contains","label":"渲染 · 重新执行一次","detail":"重新执行的是渲染函数，不是重新挂载组件，setup() 不会再跑一遍。","members":["render","dom"],"depth":1},{"id":"contrast","flat":true,"boundary":3,"kind":"contains","label":"对照 · 不在这条链上的一半","detail":"Data Admin 下发的字段名是普通数据，没有依赖 locale，服务端也不会回调浏览器，它要重新请求才会变，见 08 节。","members":["name"],"depth":1}]'>
+      <div class="arch-boundary-ui">
+          <div class="arch-boundary-toolbar"><span class="arch-boundary-label">边界</span>
+            <button type="button" data-boundary-mode="nested" aria-pressed="true">多层归属框</button>
+            <button type="button" data-boundary-mode="flat" aria-pressed="false">只留一层分区</button>
+            <button type="button" data-arch-reset>恢复全图</button>
+          </div>
+          <div class="arch-address-box" aria-live="polite"><div data-arch-address>点一个零件，看完整归属路径；点一个区域标题，看这一层的含义。</div>
+            <div data-arch-frame-detail>最外框表示逻辑资源域，不表示所有对象在一块内存里。每层边界的标题说明分组依据。</div></div>
+        </div>
+      <div class="arch-canvas"><svg viewBox="0 0 1180 784" role="img" aria-labelledby="i18n-render-archify-diagram-title i18n-render-archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
+        <title id="i18n-render-archify-diagram-title">切一次语言：文案为什么立刻变</title>
+        <desc id="i18n-render-archify-diagram-description">locale 是一个 ref，渲染时读过它的组件都会被重新执行一遍；字段名不在这条链上</desc>
+        <!-- Definitions -->
+        <defs>
+          <marker id="i18n-render-arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-default" />
+          </marker>
+          <marker id="i18n-render-arrowhead-emphasis" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-emphasis" />
+          </marker>
+          <marker id="i18n-render-arrowhead-security" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-security" />
+          </marker>
+          <marker id="i18n-render-arrowhead-dashed" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-dashed" />
+          </marker>
+          <pattern id="i18n-render-grid" width="40" height="40" patternUnits="userSpaceOnUse">
+            <path d="M 40 0 L 0 0 0 40" class="c-grid" stroke-width="0.5"/>
+          </pattern>
+        </defs>
+
+        <!-- Background Grid -->
+        <rect width="100%" height="100%" fill="url(#i18n-render-grid)" />
+
+        <!-- Boundaries (behind everything) -->
+        <g class="arch-frame" data-frame="trigger" data-depth="1" data-frame-flat="true" data-frame-kind="contains" role="button" tabindex="0" aria-pressed="false" aria-label="触发 · 宿主切语言"><title>用户在语言选择器上点一下，或者主应用 context 的 locale 变了；applyLocale 把新值写进 composer 的 locale ref。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="0" data-frame-members="switch apply" x="10" y="50" width="660" height="180" rx="12" class="c-region" stroke-width="1"/>
+        <text x="18" y="68" class="t-cloud" font-size="9" font-weight="600">触发 · 宿主切语言</text></g>
+
+        <g class="arch-frame" data-frame="reactive" data-depth="1" data-frame-flat="false" data-frame-kind="contains" role="button" tabindex="0" aria-pressed="false" aria-label="响应式 · Vue 记得谁读过 locale，谁就得重跑"><title>渲染函数执行时读过 _locale.value（t 内部读的），这个 effect 就被登记在 locale 的依赖里。locale 一变，它们全部失效。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="1" data-frame-members="dep rerender" x="710" y="50" width="380" height="370" rx="12" class="c-region" stroke-width="1"/>
+        <text x="718" y="68" class="t-cloud" font-size="9" font-weight="600">响应式 · Vue 记得谁读过 locale，谁就得重跑</text></g>
+
+        <g class="arch-frame" data-frame="paint" data-depth="1" data-frame-flat="false" data-frame-kind="contains" role="button" tabindex="0" aria-pressed="false" aria-label="渲染 · 重新执行一次"><title>重新执行的是渲染函数，不是重新挂载组件，setup() 不会再跑一遍。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="2" data-frame-members="render dom" x="710" y="430" width="380" height="330" rx="12" class="c-region" stroke-width="1"/>
+        <text x="718" y="448" class="t-cloud" font-size="9" font-weight="600">渲染 · 重新执行一次</text></g>
+
+        <g class="arch-frame" data-frame="contrast" data-depth="1" data-frame-flat="true" data-frame-kind="contains" role="button" tabindex="0" aria-pressed="false" aria-label="对照 · 不在这条链上的一半"><title>Data Admin 下发的字段名是普通数据，没有依赖 locale，服务端也不会回调浏览器，它要重新请求才会变，见 08 节。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="3" data-frame-members="name" x="10" y="430" width="360" height="210" rx="12" class="c-region" stroke-width="1"/>
+        <text x="18" y="448" class="t-cloud" font-size="9" font-weight="600">对照 · 不在这条链上的一半</text></g>
+
+        <!-- Connection paths (before components for correct z-order) -->
+        <path data-edge-from="switch" data-edge-to="apply" data-edge-label="调用" data-edge-key="0" data-edge-id="switch-apply" data-composition-points="300,140;360,140" d="M 300 140 L 360 140" class="a-default" stroke-width="1.5" marker-end="url(#i18n-render-arrowhead)"/>
+        <path data-edge-from="apply" data-edge-to="dep" data-edge-label="locale.value = &#39;en-us&#39;" data-edge-key="1" data-edge-id="apply-dep" data-composition-points="640,140;664,140;664,161;716,161;716,145;740,145" d="M 640 140 L 656 140 Q 664 140 664 148 L 664 153 Q 664 161 672 161 L 708 161 Q 716 161 716 153 L 716 153 Q 716 145 724 145 L 740 145" class="a-default" stroke-width="1.5" marker-end="url(#i18n-render-arrowhead)"/>
+        <path data-edge-from="dep" data-edge-to="rerender" data-edge-label="标记失效" data-edge-key="2" data-edge-id="dep-rerender" data-composition-points="900,210;900,280" d="M 900 210 L 900 280" class="a-default" stroke-width="1.5" marker-end="url(#i18n-render-arrowhead)"/>
+        <path data-edge-from="rerender" data-edge-to="render" data-edge-label="重跑" data-edge-key="3" data-edge-id="rerender-render" data-composition-points="900,390;900,460" d="M 900 390 L 900 460" class="a-default" stroke-width="1.5" marker-end="url(#i18n-render-arrowhead)"/>
+        <path data-edge-from="render" data-edge-to="dom" data-edge-label="写入新文案" data-edge-key="4" data-edge-id="render-dom" data-composition-points="900,570;900,630" d="M 900 570 L 900 630" class="a-default" stroke-width="1.5" marker-end="url(#i18n-render-arrowhead)"/>
+        <path data-edge-from="name" data-edge-to="dom" data-edge-label="字段名不在链上：要重新请求才变" data-edge-key="5" data-edge-id="name-dom" data-composition-points="340,535;540,535;540,680;740,680" d="M 340 535 L 532 535 Q 540 535 540 543 L 540 672 Q 540 680 548 680 L 740 680" class="a-dashed" stroke-width="1.5" marker-end="url(#i18n-render-arrowhead-dashed)"/>
+
+        <!-- Components -->
+        <g id="i18n-render-node-switch" data-node-id="switch" data-node-label="语言选择器 / 主应用 context" tabindex="0" role="button" aria-label="Focus 语言选择器 / 主应用 context, 人切了语言, 触发 · 宿主切语言" aria-pressed="false" data-node-kind="frontend" data-node-sublabel="人切了语言" data-node-tag="触发" data-node-context="触发 · 宿主切语言">
+          <title>语言选择器 / 主应用 context · 人切了语言 · 触发 · 宿主切语言 · 触发</title>
+          <rect x="40" y="90" width="260" height="100" rx="6" class="c-mask"/>
+          <rect x="40" y="90" width="260" height="100" rx="6" class="c-frontend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="frontend" class="semantic-sigil s-frontend" transform="translate(46 96) scale(0.6875)">
+            <rect x="2" y="3" width="12" height="10" rx="2"/>
+            <path d="M2 6.5h12"/>
+            <circle cx="4.1" cy="4.8" r=".7" class="sigil-fill"/>
+            <circle cx="6.3" cy="4.8" r=".7" class="sigil-fill"/>
+          </g>
+          <text data-detail-anchor x="170" y="138" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">语言选择器 / 主应用 context</text>
+        <text data-detail="context" x="170" y="154" class="t-muted" font-size="9" text-anchor="middle">人切了语言</text>
+        <text data-detail="fine" x="170" y="182" class="t-frontend" font-size="7" text-anchor="middle">触发</text>
+        </g>
+
+        <g id="i18n-render-node-apply" data-nb="1" data-node-id="apply" data-node-label="applyLocale(code)" tabindex="0" role="button" aria-label="Focus applyLocale(code), client/src/locale.ts, 触发 · 宿主切语言" aria-pressed="false" data-node-kind="backend" data-node-sublabel="client/src/locale.ts" data-node-context="触发 · 宿主切语言">
+          <title>applyLocale(code) · client/src/locale.ts · 触发 · 宿主切语言</title>
+          <rect x="360" y="80" width="280" height="120" rx="6" class="c-mask"/>
+          <rect x="360" y="80" width="280" height="120" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(366 86) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text class="nb-title" x="394" y="101" font-size="10.5" font-weight="600">applyLocale(code)</text>
+          <line class="nb-hr" x1="368" y1="108" x2="632" y2="108"/>
+          <g class="nb-spot" data-nb-spot="1" tabindex="0" role="button" data-nb-link="dep"><rect class="nb-hit" x="367" y="132" width="266.0" height="14"/><text class="nb-k" x="372" y="143" font-size="9">写什么</text><text class="nb-v" x="413.4" y="143" font-size="9">i18n.global.locale.value = 'en-us'</text></g>
+          <text class="nb-k" x="372" y="157" font-size="9">谁触发</text><text class="nb-v" x="413.4" y="157" font-size="9">宿主 locale 变化（applyLocale）</text>
+          <text class="nb-k" x="372" y="171" font-size="9">还会做</text><text class="nb-v" x="413.4" y="171" font-size="9">dayjs / Element Plus 的语言也跟着切</text>
+        </g>
+
+        <g id="i18n-render-node-dep" data-nb="1" data-node-id="dep" data-node-label="Vue 的依赖表" tabindex="0" role="button" aria-label="Focus Vue 的依赖表, 渲染时读过 locale 的那些 effect, 响应式 · Vue 记得谁读过 locale，谁就得重跑" aria-pressed="false" data-node-kind="backend" data-node-sublabel="渲染时读过 locale 的那些 effect" data-node-tag="响应式" data-node-context="响应式 · Vue 记得谁读过 locale，谁就得重跑">
+          <title>Vue 的依赖表 · 渲染时读过 locale 的那些 effect · 响应式 · Vue 记得谁读过 locale，谁就得重跑 · 响应式</title>
+          <rect x="740" y="80" width="320" height="130" rx="6" class="c-mask"/>
+          <rect x="740" y="80" width="320" height="130" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(746 86) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text class="nb-title" x="774" y="101" font-size="10.5" font-weight="600">Vue 的依赖表</text>
+          <line class="nb-hr" x1="748" y1="108" x2="1052" y2="108"/>
+          <text class="nb-k" x="752" y="148" font-size="9">谁在里面</text><text class="nb-v" x="804.2" y="148" font-size="9">渲染时调过 t() 的那些组件</text>
+          <text class="nb-k" x="752" y="162" font-size="9">怎么登记</text><text class="nb-v" x="804.2" y="162" font-size="9">t() 读 _locale.value，effect 被收集</text>
+          <text class="nb-k" x="752" y="176" font-size="9">没读过的</text><text class="nb-v" x="804.2" y="176" font-size="9">不受影响，不重跑</text>
+        </g>
+
+        <g id="i18n-render-node-rerender" data-nb="1" data-node-id="rerender" data-node-label="重新执行渲染函数" tabindex="0" role="button" aria-label="Focus 重新执行渲染函数, 不是重新挂载组件，只是再跑一遍, 响应式 · Vue 记得谁读过 locale，谁就得重跑" aria-pressed="false" data-node-kind="backend" data-node-sublabel="不是重新挂载组件，只是再跑一遍" data-node-context="响应式 · Vue 记得谁读过 locale，谁就得重跑">
+          <title>重新执行渲染函数 · 不是重新挂载组件，只是再跑一遍 · 响应式 · Vue 记得谁读过 locale，谁就得重跑</title>
+          <rect x="740" y="280" width="320" height="110" rx="6" class="c-mask"/>
+          <rect x="740" y="280" width="320" height="110" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(746 286) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text class="nb-title" x="774" y="301" font-size="10.5" font-weight="600">重新执行渲染函数</text>
+          <line class="nb-hr" x1="748" y1="308" x2="1052" y2="308"/>
+          <text class="nb-k" x="752" y="338" font-size="9">是重跑</text><text class="nb-v" x="798.8" y="338" font-size="9">不是重新挂载</text>
+          <text class="nb-k" x="752" y="352" font-size="9">setup()</text><text class="nb-v" x="798.8" y="352" font-size="9">不会再执行一次</text>
+          <text class="nb-k" x="752" y="366" font-size="9">代价</text><text class="nb-v" x="798.8" y="366" font-size="9">一次 diff，通常只有文本节点变化</text>
+        </g>
+
+        <g id="i18n-render-node-render" data-nb="1" data-node-id="render" data-node-label="组件 render() → t(key)" tabindex="0" role="button" aria-label="Focus 组件 render() → t(key), 这次读到的已经是新 locale, 渲染 · 重新执行一次" aria-pressed="false" data-node-kind="frontend" data-node-sublabel="这次读到的已经是新 locale" data-node-context="渲染 · 重新执行一次">
+          <title>组件 render() → t(key) · 这次读到的已经是新 locale · 渲染 · 重新执行一次</title>
+          <rect x="740" y="460" width="320" height="110" rx="6" class="c-mask"/>
+          <rect x="740" y="460" width="320" height="110" rx="6" class="c-frontend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="frontend" class="semantic-sigil s-frontend" transform="translate(746 466) scale(0.6875)">
+            <rect x="2" y="3" width="12" height="10" rx="2"/>
+            <path d="M2 6.5h12"/>
+            <circle cx="4.1" cy="4.8" r=".7" class="sigil-fill"/>
+            <circle cx="6.3" cy="4.8" r=".7" class="sigil-fill"/>
+          </g>
+          <text class="nb-title" x="774" y="481" font-size="10.5" font-weight="600">组件 render() → t(key)</text>
+          <line class="nb-hr" x1="748" y1="488" x2="1052" y2="488"/>
+          <text class="nb-k" x="752" y="525" font-size="9">这次读到</text><text class="nb-v" x="804.2" y="525" font-size="9">locale = 'en-us'</text>
+          <g class="nb-spot" data-nb-spot="1" tabindex="0" role="button" data-nb-link="dom"><rect class="nb-hit" x="747" y="528" width="306.0" height="14"/><text class="nb-k" x="752" y="539" font-size="9">查表过程</text><text class="nb-v" x="804.2" y="539" font-size="9">就是 05 节那条链</text></g>
+        </g>
+
+        <g id="i18n-render-node-dom" data-node-id="dom" data-node-label="DOM 里的文案" tabindex="0" role="button" aria-label="Focus DOM 里的文案, 圈选条件 → Conditions, 渲染 · 重新执行一次" aria-pressed="false" data-node-kind="frontend" data-node-sublabel="圈选条件 → Conditions" data-node-context="渲染 · 重新执行一次">
+          <title>DOM 里的文案 · 圈选条件 → Conditions · 渲染 · 重新执行一次</title>
+          <rect x="740" y="630" width="320" height="100" rx="6" class="c-mask"/>
+          <rect x="740" y="630" width="320" height="100" rx="6" class="c-frontend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="frontend" class="semantic-sigil s-frontend" transform="translate(746 636) scale(0.6875)">
+            <rect x="2" y="3" width="12" height="10" rx="2"/>
+            <path d="M2 6.5h12"/>
+            <circle cx="4.1" cy="4.8" r=".7" class="sigil-fill"/>
+            <circle cx="6.3" cy="4.8" r=".7" class="sigil-fill"/>
+          </g>
+          <text data-detail-anchor x="900" y="678" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">DOM 里的文案</text>
+        <text data-detail="context" x="900" y="694" class="t-muted" font-size="9" text-anchor="middle">圈选条件 → Conditions</text>
+        </g>
+
+        <g id="i18n-render-node-name" data-nb="1" data-node-id="name" data-node-label="Data Admin 的字段名" tabindex="0" role="button" aria-label="Focus Data Admin 的字段名, 近30天成交笔数（存在普通 ref 里）, 对照 · 不在这条链上的一半" aria-pressed="false" data-node-kind="database" data-node-sublabel="近30天成交笔数（存在普通 ref 里）" data-node-tag="对照" data-node-context="对照 · 不在这条链上的一半">
+          <title>Data Admin 的字段名 · 近30天成交笔数（存在普通 ref 里） · 对照 · 不在这条链上的一半 · 对照</title>
+          <rect x="40" y="460" width="300" height="150" rx="6" class="c-mask"/>
+          <rect x="40" y="460" width="300" height="150" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(46 466) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <text class="nb-title" x="74" y="481" font-size="10.5" font-weight="600">Data Admin 的字段名</text>
+          <line class="nb-hr" x1="48" y1="488" x2="332" y2="488"/>
+          <text class="nb-k" x="52" y="538" font-size="9">来源</text><text class="nb-v" x="104.2" y="538" font-size="9">GET /api/crowd/metadata</text>
+          <text class="nb-k" x="52" y="552" font-size="9">生命周期</text><text class="nb-v" x="104.2" y="552" font-size="9">跟页面数据走，不跟 locale</text>
+          <g class="nb-spot" data-nb-spot="1" tabindex="0" role="button" data-nb-link="dom"><rect class="nb-hit" x="47" y="555" width="286.0" height="14"/><text class="nb-k" x="52" y="566" font-size="9">切语言</text><text class="nb-v" x="104.2" y="566" font-size="9">重新请求才变（08 节）</text></g>
+        </g>
+
+        <!-- Connection labels -->
+        <g data-detail="context" data-edge-from="switch" data-edge-to="apply" data-edge-label="调用" data-edge-key="0" data-edge-id="switch-apply">
+          <rect x="315" y="120" width="30" height="14" rx="3" class="c-mask"/>
+          <text x="330" y="130" class="t-muted" font-size="8" text-anchor="middle">调用</text>
+        </g>
+        <g data-detail="context" data-edge-from="apply" data-edge-to="dep" data-edge-label="locale.value = &#39;en-us&#39;" data-edge-key="1" data-edge-id="apply-dep">
+          <rect x="606.2" y="204" width="115.6" height="14" rx="3" class="c-mask"/>
+          <text x="664" y="214" class="t-muted" font-size="8" text-anchor="middle">locale.value = &#39;en-us&#39;</text>
+        </g>
+        <g data-detail="context" data-edge-from="dep" data-edge-to="rerender" data-edge-label="标记失效" data-edge-key="2" data-edge-id="dep-rerender">
+          <rect x="875.8" y="214" width="48.4" height="14" rx="3" class="c-mask"/>
+          <text x="900" y="224" class="t-muted" font-size="8" text-anchor="middle">标记失效</text>
+        </g>
+        <g data-detail="context" data-edge-from="rerender" data-edge-to="render" data-edge-label="重跑" data-edge-key="3" data-edge-id="rerender-render">
+          <rect x="885" y="394" width="30" height="14" rx="3" class="c-mask"/>
+          <text x="900" y="404" class="t-muted" font-size="8" text-anchor="middle">重跑</text>
+        </g>
+        <g data-detail="context" data-edge-from="render" data-edge-to="dom" data-edge-label="写入新文案" data-edge-key="4" data-edge-id="render-dom">
+          <rect x="871" y="574" width="58" height="14" rx="3" class="c-mask"/>
+          <text x="900" y="584" class="t-muted" font-size="8" text-anchor="middle">写入新文案</text>
+        </g>
+        <g data-detail="context" data-edge-from="name" data-edge-to="dom" data-edge-label="字段名不在链上：要重新请求才变" data-edge-key="5" data-edge-id="name-dom">
+          <rect x="463" y="587.5" width="154" height="14" rx="3" class="c-mask"/>
+          <text x="540" y="597.5" class="t-messagebus" font-size="8" text-anchor="middle">字段名不在链上：要重新请求才变</text>
+        </g>
+
+        <!-- Legend -->
+
+      </svg></div>
+      <figcaption>一次切语言的完整链路：宿主改 locale ref → Vue 依赖表把读过它的渲染函数标为失效 → 重跑 → DOM 换文案。右下角那条虚线是对照：字段名不在这条链上，要重新请求才变。</figcaption>
+      <div class="pano-ui"></div>
+      <p class="arch-hint"><span class="idle">点头上的任意一个框看它的关系，点区域标题看分组含义，点零件看完整归属路径；框里的每一行 / 每个格子都能点，跳到它指向的零件</span><span class="focused">再点一次空白处取消</span></p>
+    </figure><p>实测（<code>watchEffect</code> 等价于组件渲染 effect）：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-ts">const i18n = createI18n({ legacy: false, locale: 'zh-cn', messages: {
+  'zh-cn': { title: '圈选条件' }, 'en-us': { title: 'Conditions' } } });
+
+let runs = 0;
+const stop = watchEffect(() =&gt; { runs += 1; i18n.global.t('title'); });  // 渲染时调 t()
+await nextTick();                     // runs = 1
+i18n.global.locale.value = 'en-us';   // 宿主切语言
+await nextTick();                     // runs = 2，且 t('title') === 'Conditions'
+</code></pre></div>
+<p>对照：一个什么都不读的 effect，locale 变了它不重跑（<code>runs</code> 1 → 1）。</p>
+<p>三件事从这里长出来：</p>
+<table>
+<thead>
+<tr>
+<th>观察</th>
+<th>为什么</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>界面文案不用重新请求</td>
+<td>三语词条都在内存里，重跑渲染函数就够了</td>
+</tr>
+<tr>
+<td>整个子树一起变</td>
+<td>读过 locale 的组件都重跑；没读过的（比如纯渲染 props 的）不动</td>
+</tr>
+<tr>
+<td>字段名不变</td>
+<td>它是 Data Admin 下发的一份普通数据，不在这条依赖链上</td>
+</tr>
+</tbody>
+</table>
+<div class="callout tone-amber">
+      <span class="ic">⚠</span>
+      <div><p><mark class="mk-blue">「下一帧就变」有两个边界</mark>，踩了会觉得响应式失灵：</p>
+<ul>
+<li>只重跑<strong>读过 locale 的</strong>渲染函数；组件不会重新挂载，<code>setup()</code> 不会再执行一次。</li>
+<li>词条如果在 <code>setup()</code> 里读出来存进普通变量（<code>const title = t('x')</code>），它不会跟着变：
+响应式只在渲染函数、<code>computed</code>、<code>watch</code> 里生效。</li>
+</ul>
+</div>
+    </div><h2 id="组件库的契约词条交出去实例借用宿主的"><span class="num">07</span>组件库的契约：词条交出去，实例借用宿主的</h2>
 <p>组件的 12 个组件全部用 <code>useLabel()</code>（内部就是 <code>useI18n()</code>），没有一处自建 i18n 实例。这是刻意的：</p>
 <div class="cards" data-cols="3"><div class="ccard tone-blue">
           <span class="tag tone-blue">peerDependency</span>
@@ -7075,7 +7344,7 @@ export const i18n = createI18n({
 <p><code>...combinationMessages['zh-CN']</code> 在前，宿主自己的词条在后：同名 key 时宿主覆盖组件，业务文案优先。</p>
 <p>为什么不让组件自建实例 + local scope？对照一下就清楚了：</p>
 <div class="compare-wrap"><table class="compare"><thead><tr><th>做法</th><th>会发生什么</th><th>结论</th></tr></thead><tbody><tr><th>组件自建 <code>createI18n</code>，每个组件带自己的词条</th><td data-label="会发生什么">一棵组件树里出现多份 locale 状态，宿主切语言要挨个通知；组件包还得自己装一个 vue-i18n 版本，和宿主那份不是同一个实例时会有两份运行时</td><td data-label="结论"><span class="tag tone-red">不选</span></td></tr><tr><th>组件用 <code>useScope: 'local'</code> 声明词条</th><td data-label="会发生什么">local 只覆盖声明它的那个组件一层（04 节实测），11 个子组件要各自声明一遍，47 个 key 抄 12 份</td><td data-label="结论"><span class="tag tone-red">不选</span></td></tr><tr><th>词条导出、宿主合并、组件读 global</th><td data-label="会发生什么">locale 只有一份真相，子组件天然能查到词条，组件包不锁 vue-i18n 版本</td><td data-label="结论"><span class="tag tone-green">当前做法</span></td></tr></tbody></table></div><p><mark class="mk-amber">只 <code>app.use(i18n)</code>、忘了合并 <code>combinationMessages</code>，页面上会直接显示 <code>combinerTitle</code> 这样的 key。</mark> vue-i18n 找不到 key 时返回 key 本身，不报错，也不空白。03 节的探针里 <code>onlyLocal=onlyLocal</code> 就是同一个行为。</p>
-<h2 id="数据名字那一半由服务端翻译"><span class="num">07</span>数据名字那一半：由服务端翻译</h2>
+<h2 id="数据名字那一半由服务端翻译"><span class="num">08</span>数据名字那一半：由服务端翻译</h2>
 <p>字段名、关系名、值集合的 label 不归 SDK 管。它们在 Data Admin 里配置，请求时按调用方的语言本地化成<strong>单个字符串</strong>再下发：</p>
 <div class="seqd has-grid" data-seq data-n="3"
       style="--seq-fill:url(#s-fill-1);--seq-open:url(#s-fill-1-open)">
@@ -7134,7 +7403,7 @@ function label(text: LabelText): string {
       </div>
       <div class="demo-body custom" data-mount></div>
     </div><p><mark class="mk-amber">切语言时不能只按 <code>revision</code> 判断要不要换元数据。</mark> <code>revision</code> 是投影内容哈希，它不保证随语言变化；圈选页的做法是 <code>watch(locale)</code> 时带 <code>force: true</code> 直接换一份新的，并清掉值集合缓存。</p>
-<h2 id="检查清单"><span class="num">08</span>检查清单</h2>
+<h2 id="检查清单"><span class="num">09</span>检查清单</h2>
 <ul class="check warn"><li>页面上出现了 <code>combinerTitle</code> 这样的 key：宿主只 app.use(i18n)，没合并 combinationMessages</li><li>切了语言，标题/按钮没变：组件词条没并进 global，或宿主没有响应 locale 变化</li><li>切了语言，字段名还是旧语言：元数据要重新拉一次，且不能只靠 revision 判断</li><li>英文环境下字段名仍是中文：检查下游 header 的 clientLang 有没有带下去</li><li>把 Data Admin 的 name 当 I18nText 查 locale：它是单语字符串，查了也不会变</li></ul><div class="callout tone-amber">
       <span class="ic">⏳</span>
       <div><p><strong>时效（2026-10-13）</strong>：SDK 的读模型原本按三键（<code>zhCn</code> / <code>zhHk</code> / <code>en</code>）设计，

@@ -8,13 +8,13 @@
 tone: blue
 icon: 🧭
 text: |
-  **本篇结构**：两种字（00）→ 两条链路对照（01）→ useI18n 给了什么（02）→
-  宿主装配（03）→ 组件实例与两份 composer（04）→ t() 的查表顺序（05）→
-  组件库为什么把词条交出去（06）→ 数据名字那一半（07）→ 检查清单（08）。
+  **两条线**：机制线 00–06（界面文案：谁翻译、怎么装、怎么查、切语言为什么立刻变），
+  数据线 07–08（Data Admin 的字段名，单语、要重新请求）。
 
-  卡在 `scope` 和 `t()` 就按 02 → 03 → 04 → 05 的顺序读：四个零件 → 装配 →
-  每个实例怎么拿到 composer → 拿到之后怎么查表。
-  机制结论都是实测：SSR 探针跑 vue-i18n 9.14.5 + 源码，协议取 FService 协议空间
+  **机制线的读法**：四个零件（02）→ 宿主装配（03）→ 组件实例（04）→ t() 查表（05）→
+  切语言为什么重画（06）。卡在 `scope` 和 `t()` 就从 02 顺着读。
+
+  机制结论都是实测：SSR 探针跑 vue-i18n 9.14.5 + 源码行号，协议取 FService 协议空间
   `crm-crowd-service` v1.0.3（commit `51ede78d`）。
 ```
 
@@ -100,7 +100,7 @@ const i18n = createI18n({ legacy: false, locale, fallbackLocale, messages: {...}
 app.use(i18n);                                                                        // ② 触发 vue-i18n 的 install
 ```
 
-`createI18n` 收到的 `messages` 已经是「宿主词条 + 组件词条」合并后的树；`app.use(i18n)` 调用 vue-i18n 的 `install(app)`，它做两件事：把 i18n 实例 `provide` 到 app 上（`vue-i18n.mjs:2271` 的 `app.provide(app.__VUE_I18N_SYMBOL__, i18n)`），再给 Options API 挂 `$t`。做完这两步，==全应用就有了一根注入管和一个唯一的 composer==：
+`createI18n` 收到的 `messages` 已经是「宿主词条 + 组件词条」合并后的树；`app.use(i18n)` 调用 vue-i18n 的 `install(app)`，它做两件事：把 i18n 实例 `provide` 到 app 上（`vue-i18n.mjs:2271` 的 `app.provide(app.__VUE_I18N_SYMBOL__, i18n)`），再给 Options API 挂 `$t`。做完这两步，==全应用就有了一根注入管和一份共用的 composer==：
 
 ```arch
 svg: i18n-setup
@@ -125,6 +125,17 @@ frames:
     label: Vue app 实例（createApp 产物）· provide 发生在这里
     detail: install 把 i18n 实例 provide 到 app 上。这个 symbol 之后被每一个组件 inject。
 bodies:
+  hostmsg:
+    rows:
+      - { k: 内容, v: "页面标题、按钮、提示语" }
+      - { k: 发布, v: 跟宿主一起发版 }
+      - { k: 与组件词条, v: 合并时宿主优先 }
+  combomsg:
+    rows:
+      - { k: 内容, v: "圈选条件 / 包含 / 查询…" }
+      - { k: 体量, v: "47 个 key × 3 语言" }
+      - { k: 发布, v: "@futuweb/audience-combination 发版" }
+      - { k: 谁合并, v: "宿主，见左下的 client/src/locale.ts" }
   merge:
     rows:
       - { k: 宿主词条, v: "common/i18n/*.json" }
@@ -141,6 +152,17 @@ bodies:
       - { k: messages, v: 两处词条合并后的树 }
       - { k: fallbackLocale, v: "'zh-cn'（vue-i18n 默认 en-US）" }
       - { k: fallbackRoot, v: "true（local 缺键时回落 root）" }
+  app:
+    rows:
+      - { k: 产物, v: "一个 Vue 应用实例" }
+      - { k: 它提供, v: "组件树 + 依赖注入的根" }
+      - { k: 谁在用, v: "app.use(i18n) → install" }
+  provide:
+    rows:
+      - { k: 注什么, v: "(symbol, i18n) 这一对" }
+      - { k: symbol, v: "app.__VUE_I18N_SYMBOL__" }
+      - { k: 谁取, v: "每个组件的 inject(symbol)（下一张图）" }
+      - { k: 取回后, v: "还要读 i18n.global 才是 composer" }
   install:
     rows:
       - { k: ①, v: "app.provide(symbol, i18n)", link: provide }
@@ -190,9 +212,14 @@ frames:
     boundary: 1
     parent: tree
     kind: contains
-    label: 声明 local 的实例 —— local composer 只属于它
-    detail: local composer 存在实例注册表里（Map<instance, composer>），从不 provide。子组件 inject 到的仍然是 gl。
+    label: 声明 local 的实例 · local composer 挂在这一层，不往下传
+    detail: 框里只有声明它的那一个实例。local composer 存在实例注册表里（Map<instance, composer>），从不 provide，右边的子组件虽然在组件树上属于它，inject 到的仍然是 gl。
 bodies:
+  host:
+    rows:
+      - { k: 做过什么, v: "provide(symbol, i18n)（03 节）" }
+      - { k: 现在干嘛, v: "被每个实例 inject" }
+      - { k: 它不认识, v: "任何组件里的 t()" }
   combiner:
     rows:
       - { k: setup, v: "useI18n()" }
@@ -204,12 +231,22 @@ bodies:
       - { k: setup, v: "useI18n({ useScope: 'local' })" }
       - { k: 内部, v: "createComposer({ __root: gl })", link: gl }
       - { k: 注册, v: "__setInstance(instance, composer)", link: registry }
+  child:
+    rows:
+      - { k: 体量, v: "11 个组件，逐个都调 useI18n()" }
+      - { k: scope, v: "global（不传 options）" }
+      - { k: 内部, v: "同 combiner：inject(symbol) → gl" }
+  kid:
+    rows:
+      - { k: 父组件, v: "左边那个有 local 的实例" }
+      - { k: 自己 inject, v: "只认 symbol → gl" }
+      - { k: 结果, v: "父的 local 里的 key 在这里查不到" }
   gl:
     rows:
-      - { k: locale, v: "ref('zh-cn')，响应式" }
+      - { k: locale, v: "ref('zh-cn')，响应式（06 节讲它怎么触发重渲染）" }
       - { k: messages, v: 两处词条合并后的树 }
       - { k: fallbackLocale, v: "'zh-cn'" }
-      - { k: fallbackRoot, v: "true（03 节的回落开关读它）" }
+      - { k: fallbackRoot, v: "true（05 节的回落开关读它）" }
   registry:
     rows:
       - { k: key, v: 组件实例 }
@@ -227,7 +264,7 @@ tours:
     steps:
       - { at: [parentLocal], text: "useScope: 'local' → createComposer({ messages, __root: gl })：__root 指回全局那一份。" }
       - { at: [registry], text: "__setInstance(instance, composer)，挂在实例注册表上，==只属于这个实例==。" }
-      - { at: [kid], text: "子组件 useI18n() 仍然 inject(symbol) 拿到 gl —— 父的 local 从来不在这根管里。" }
+      - { at: [kid], text: "子组件 useI18n() 仍然 inject(symbol) 拿到 gl：父的 local 从来不在这根管里。" }
 facts:
   combiner: { "composer": gl 本体, "messages": 宿主 + 组件词条, "生命周期": 跟组件实例 }
   parentLocal: { "composer": 自己建的 local, "messages": "useI18n 传入的那份", "缺键回落": "沿 __root 回 gl" }
@@ -287,7 +324,7 @@ text: |
   再走一遍 global 分支，父实例的 local 不在这根管里。
 
   顺带：local composer 身上带着 `__root = gl`（创建时塞进去的），
-  03 节「local 缺键回落 root」那条线走的就是它。
+  05 节「local 缺键回落 root」那条线走的就是它。
 ```
 ## 05 · t() 是一次查表
 
@@ -385,7 +422,123 @@ text: |
   上写，才真的不回落（拿到 key `hostOnly`）。demo 里那个开关模拟的就是 root 上这一份。
 ````
 
-## 06 · 组件库的契约：词条交出去，实例借用宿主的
+## 06 · locale 一变，为什么整片文案立刻重画
+
+前两节讲的是「谁持有哪份 composer」。这一节回答另一个问题：切语言之后，为什么界面文案**下一帧就变**，而字段名不变。
+
+秘密只有一句话：==`composer.locale` 是一个响应式 ref，而 `t()` 在渲染时读了它。==
+
+```ts
+// vue-i18n.mjs:466：composer.locale 是个 computed，背后是 _locale 这个 ref
+const locale = computed({
+  get: () => _locale.value,
+  set: (val) => { _locale.value = val; /* ... */ },
+});
+```
+
+组件渲染时调用 `t('combinerTitle')`，解析过程读了 `_locale.value`，Vue 就把「这个渲染 effect 依赖 locale」记进依赖表。之后宿主执行 `i18n.global.locale.value = 'en-us'`，Vue 把依赖它的渲染函数重新执行一遍 —— 整片文案就换了：
+
+```arch
+svg: i18n-render
+maxScale: 1.3
+caption: 一次切语言的完整链路：宿主改 locale ref → Vue 依赖表把读过它的渲染函数标为失效 → 重跑 → DOM 换文案。右下角那条虚线是对照：字段名不在这条链上，要重新请求才变。
+frames:
+  - id: trigger
+    flat: true
+    boundary: 0
+    kind: contains
+    label: 触发 · 宿主切语言
+    detail: 用户在语言选择器上点一下，或者主应用 context 的 locale 变了；applyLocale 把新值写进 composer 的 locale ref。
+  - id: reactive
+    boundary: 1
+    kind: contains
+    label: 响应式 · Vue 记得谁读过 locale，谁就得重跑
+    detail: 渲染函数执行时读过 _locale.value（t 内部读的），这个 effect 就被登记在 locale 的依赖里。locale 一变，它们全部失效。
+  - id: paint
+    boundary: 2
+    kind: contains
+    label: 渲染 · 重新执行一次
+    detail: 重新执行的是渲染函数，不是重新挂载组件，setup() 不会再跑一遍。
+  - id: contrast
+    flat: true
+    boundary: 3
+    kind: contains
+    label: 对照 · 不在这条链上的一半
+    detail: Data Admin 下发的字段名是普通数据，没有依赖 locale，服务端也不会回调浏览器，它要重新请求才会变，见 08 节。
+bodies:
+  apply:
+    rows:
+      - { k: 写什么, v: "i18n.global.locale.value = 'en-us'", link: dep }
+      - { k: 谁触发, v: "宿主 locale 变化（applyLocale）" }
+      - { k: 还会做, v: "dayjs / Element Plus 的语言也跟着切" }
+  dep:
+    rows:
+      - { k: 谁在里面, v: "渲染时调过 t() 的那些组件" }
+      - { k: 怎么登记, v: "t() 读 _locale.value，effect 被收集" }
+      - { k: 没读过的, v: "不受影响，不重跑" }
+  rerender:
+    rows:
+      - { k: 是重跑, v: 不是重新挂载 }
+      - { k: setup(), v: 不会再执行一次 }
+      - { k: 代价, v: "一次 diff，通常只有文本节点变化" }
+  render:
+    rows:
+      - { k: 这次读到, v: "locale = 'en-us'" }
+      - { k: 查表过程, v: "就是 05 节那条链", link: dom }
+  name:
+    rows:
+      - { k: 来源, v: "GET /api/crowd/metadata" }
+      - { k: 生命周期, v: "跟页面数据走，不跟 locale" }
+      - { k: 切语言, v: "重新请求才变（08 节）", link: dom }
+tours:
+  - id: switch
+    label: 切一次语言的完整路径
+    steps:
+      - { at: [switch, apply], text: "宿主切语言 → applyLocale：把 'en-us' 写进 composer 的 locale ref。" }
+      - { at: [dep], text: "Vue 的依赖表里，渲染时读过 locale 的那些 effect 全部失效。" }
+      - { at: [rerender, render], text: "它们被重新执行；这一次 t('combinerTitle') 读到的是 'en-us'。" }
+      - { at: [dom], text: "DOM 里的文案换掉。==全程没有任何网络请求。==" }
+      - { at: [name], text: "字段名在另一条链上：它是服务端下发的一份普通数据，不跟着重跑。" }
+facts:
+  dom: { 值从哪来: "i18n.global.messages", 切语言: 重跑渲染函数, 要请求吗: 不要 }
+  name: { 值从哪来: "宿主自己那份 ref", 切语言: 重新请求 Data Admin, 要请求吗: 要 }
+```
+
+实测（`watchEffect` 等价于组件渲染 effect）：
+
+```ts
+const i18n = createI18n({ legacy: false, locale: 'zh-cn', messages: {
+  'zh-cn': { title: '圈选条件' }, 'en-us': { title: 'Conditions' } } });
+
+let runs = 0;
+const stop = watchEffect(() => { runs += 1; i18n.global.t('title'); });  // 渲染时调 t()
+await nextTick();                     // runs = 1
+i18n.global.locale.value = 'en-us';   // 宿主切语言
+await nextTick();                     // runs = 2，且 t('title') === 'Conditions'
+```
+
+对照：一个什么都不读的 effect，locale 变了它不重跑（`runs` 1 → 1）。
+
+三件事从这里长出来：
+
+| 观察 | 为什么 |
+|---|---|
+| 界面文案不用重新请求 | 三语词条都在内存里，重跑渲染函数就够了 |
+| 整个子树一起变 | 读过 locale 的组件都重跑；没读过的（比如纯渲染 props 的）不动 |
+| 字段名不变 | 它是 Data Admin 下发的一份普通数据，不在这条依赖链上 |
+
+```callout
+tone: amber
+icon: ⚠
+text: |
+  ==「下一帧就变」有两个边界==，踩了会觉得响应式失灵：
+
+  - 只重跑**读过 locale 的**渲染函数；组件不会重新挂载，`setup()` 不会再执行一次。
+  - 词条如果在 `setup()` 里读出来存进普通变量（`const title = t('x')`），它不会跟着变：
+    响应式只在渲染函数、`computed`、`watch` 里生效。
+```
+
+## 07 · 组件库的契约：词条交出去，实例借用宿主的
 
 组件的 12 个组件全部用 `useLabel()`（内部就是 `useI18n()`），没有一处自建 i18n 实例。这是刻意的：
 
@@ -453,7 +606,7 @@ rows:
 
 !!只 `app.use(i18n)`、忘了合并 `combinationMessages`，页面上会直接显示 `combinerTitle` 这样的 key。!! vue-i18n 找不到 key 时返回 key 本身，不报错，也不空白。03 节的探针里 `onlyLocal=onlyLocal` 就是同一个行为。
 
-## 07 · 数据名字那一半：由服务端翻译
+## 08 · 数据名字那一半：由服务端翻译
 
 字段名、关系名、值集合的 label 不归 SDK 管。它们在 Data Admin 里配置，请求时按调用方的语言本地化成**单个字符串**再下发：
 
@@ -531,7 +684,7 @@ config:
 
 !!切语言时不能只按 `revision` 判断要不要换元数据。!! `revision` 是投影内容哈希，它不保证随语言变化；圈选页的做法是 `watch(locale)` 时带 `force: true` 直接换一份新的，并清掉值集合缓存。
 
-## 08 · 检查清单
+## 09 · 检查清单
 
 ```checklist
 tone: warn
