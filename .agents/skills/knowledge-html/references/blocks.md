@@ -1862,6 +1862,20 @@ rows:
       - ...
 ```
 
+**键要加引号时，引号后的冒号容易漏** —— 漏了就不是单键映射，而是「标量 + 嵌套序列」：
+
+```yaml
+# ❌ 报「All sequence items must start at the same column」，不会说「少了冒号」
+rows:
+  - "带 `代码` 的键"
+    - [a, b]
+
+# ✅ 引号后仍然要有冒号
+rows:
+  - "带 `代码` 的键":
+      - [a, b]
+```
+
 ````callout
 tone: amber
 icon: ⚠

@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-has-toc="1">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>组合器的两套「字」：界面文案与数据名字</title>
+<meta name="description" content="圈选界面上的每个字有两个来源：组件包与宿主自带的界面文案（三语、在本地合并进 global messages、切语言即变）和 Data Admin 下发的数据名字（单语、服务端按 clientLang 翻译、切语言要重拉）。含 vue-i18n global/local 作用域的实测结论与可切换语言的交互 demo。" />
+<link rel="stylesheet" href="../../assets/theme.css?v=b918ec5c83" />
+  <link rel="stylesheet" href="../../assets/blocks.css?v=eb96db7e32" />
+  <link rel="stylesheet" href="../../assets/archify-embed.css?v=68fec0b81b" />
+</head>
+<body>
+<div id="progress"></div>
+<div id="tocScrim"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
+    <a class="brand" href="../../index.html"><span class="dot"></span>知识笔记</a>
+    
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="toc" id="toc">
+      <p class="toc-title">目录</p>
+      <a href="../../index.html" class="sub">← 全部笔记</a>
+      <a href="#界面上同时住着两种字">界面上同时住着两种字</a>
+      <a href="#两条链路的对照">两条链路的对照</a>
+      <a href="#vue-i18n-的两个作用域">vue-i18n 的两个作用域</a>
+      <a href="#组件库的契约词条交出去实例借用宿主的">组件库的契约：词条交出去，实例借用宿主的</a>
+      <a href="#数据名字那一半由服务端翻译">数据名字那一半：由服务端翻译</a>
+      <a href="#检查清单">检查清单</a>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow">● 从零理解 · 机制</span>
+      <h1>组合器的两套「字」：界面文案与数据名字</h1>
+      <p class="lede">圈选界面上的每个字有两个来源：组件包与宿主自带的界面文案（三语、在本地合并进 global messages、切语言即变）和 Data Admin 下发的数据名字（单语、服务端按 clientLang 翻译、切语言要重拉）。含 vue-i18n global/local 作用域的实测结论与可切换语言的交互 demo。</p>
+    </div>
+
+<aside class="needs">
+      <p class="needs-title">读这篇之前，你需要先知道</p>
+      <a class="need" href="../combination-overview/">← <b>5. 组件层</b><span>受控的圈选组件包：Metadata 驱动渲染，草稿收窄成 DSL</span></a>
+    </aside>
+    <div class="provenance"><span><b>来源</b> audience_web packages/combination/src/messages.ts（zhCN / zhHK / en 三个语言桶各 47 个 key，逐桶数过）、src/label.ts（LabelText = string | I18nText，label() 两条分支）、src/index.ts（导出 combinationMessages）；12 个组件 + values.ts 调 useLabel()，无一处自建 i18n；package.json 里 vue-i18n / vue / element-plus 是 peerDependency——2026-10-13 工作区状态 · audience_web packages/dsl/src/audience.ts（读模型注释：name / label 是「当前请求语言下」的单个字符串，SDK 不再存三键、不做多语言兜底）、packages/dsl/test/audience.spec.ts · audience_web client/src/locale.ts（combinationMessages 合并进三个 locale 桶）、client/src/views/combine/index.vue（watch(locale) → loadMeta({ force: true }) 并清值集合缓存） · audience_web server/app/lib/crowd/adapt.ts（name / label 原样透传，适配层只剩 JSON 标量字符串与 status 转换）、server/node_modules/@futu/agudo/app/extend/helper.js（getSrpcHeader 把 ctx.env.lang 作为 clientLang 塞进下游 header） · FService 协议空间 crm-crowd-service v1.0.3 / commit 51ede78d（2026-10-13 14:01 生成的正式制品）：crm_crowd_metadata_service.proto 中 CrowdPortrait / CrowdRelation / ValueItem / ResolverOption 的 name / label 均为 optional string，注释写「当前请求语言下的名称」 · 实测（2026-10-13）：SSR 探针 vue 3.5.43 + vue-i18n 9.14.5 —— 父组件 useScope: 'local' 渲染出本地词条，子组件 useI18n() 命中宿主 global 的 combinerTitle，未合并的 onlyLocal 原样返回 key · crm-dsl-stru packages/dsl/src/audience.ts @ 9b269dc（对照用的旧状态：当时读模型是三键 zhCn / zhHk / en，BFF 适配层负责把单语言包装成三键）</span><span><b>生成</b> 2026-10-13</span><span><b>模型</b> pi (openai-codex)</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">vue-i18n</span> <span class="tag tone-muted">i18n</span> <span class="tag tone-muted">圈选</span> <span class="tag tone-muted">受控组件</span> <span class="tag tone-muted">客群洞察</span></span></div>
+
+<p><a href="../combination-overview/">组合器全景</a> 讲了组件包由哪些文件组成，<a href="../combination-mechanics/">组件机制</a> 讲了它怎么工作。这一篇回答一个更小的问题：</p>
+<p><strong>圈选界面上每一个字，是谁翻译出来的？</strong></p>
+<p>答案有两个。组件自带的界面文案（<code>圈选条件</code>、<code>查询</code>）和 Data Admin 配置的数据名字（<code>近30天成交笔数</code>、<code>港股</code>），走的是两条完全不同的链路：一条是本地的三语词条，切语言下一帧就变；另一条是服务端按请求语言挑好的一种名字，切语言要重新拉。混在一起想，就会问出「组件为什么不自己带一套 i18n」这种看着合理、方向错了的问题。</p>
+<div class="callout tone-blue">
+      <span class="ic">🧭</span>
+      <div><p><strong>本篇结构</strong>：两种字（00）→ 两条链路对照（01）→ vue-i18n 的两个作用域（02）→
+组件库为什么把词条交出去（03）→ 数据名字那一半（04）→ 检查清单（05）。</p>
+<p>作用域结论与数据链路都是实测：SSR 探针跑 vue-i18n 9.14.5，协议取 FService 协议空间
+<code>crm-crowd-service</code> v1.0.3（commit <code>51ede78d</code>）。</p>
+</div>
+    </div><h2 id="界面上同时住着两种字"><span class="num">00</span>界面上同时住着两种字</h2>
+<p>一个真实的圈选页上有这样两句话：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">圈选条件                              ← 组件包里写死的标题
+  近30天成交笔数 &gt;= 12                ← Data Admin 里配置的字段名
+</code></pre></div>
+<p>它们看起来一样，来源却完全不同。</p>
+<p><code>圈选条件</code> 写在 <code>packages/combination/src/messages.ts</code> 里，和代码一起发布，三个语言各一份。<code>近30天成交笔数</code> 写在 Data Admin 的元数据表里，请求时由服务端按调用方语言挑一种返回，浏览器拿到的时候已经是单语。</p>
+<p><mark class="mk-blue">界面文案是代码的一部分，数据名字是数据的一部分。</mark> 发布节奏、语言份数、刷新时机都不同，所以它们各自有一套翻译机制。</p>
+<h2 id="两条链路的对照"><span class="num">01</span>两条链路的对照</h2>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>维度</th><th>界面文案</th><th>数据名字</th></tr></thead><tbody><tr><th>例子</th><td data-label="界面文案"><code>圈选条件</code>、<code>查询</code>、<code>+ 条件</code></td><td data-label="数据名字"><code>近30天成交笔数</code>、<code>00700.HK</code>、<code>港股</code></td></tr><tr><th>谁写的</th><td data-label="界面文案">组件包和宿主各写各的</td><td data-label="数据名字">Data Admin 里配置的元数据</td></tr><tr><th>语言份数</th><td data-label="界面文案"><span class="tag tone-green">三语都在本地（47 个 key × 3）</span></td><td data-label="数据名字"><span class="tag tone-amber">一次只有一种，看请求带什么语言</span></td></tr><tr><th>谁翻译</th><td data-label="界面文案">浏览器：<code>t(key)</code> 查 global messages</td><td data-label="数据名字">Data Admin：按 <code>clientLang</code> 本地化后下发</td></tr><tr><th>切语言之后</th><td data-label="界面文案">下一帧就变</td><td data-label="数据名字">要重新请求才变</td></tr><tr><th>加一条要改哪</th><td data-label="界面文案">改组件包或宿主的词条文件</td><td data-label="数据名字">Data Admin 加一条记录，前端不动</td></tr></tbody></table></div><p>两条链路在本篇的例子里合流到同一个组件：<code>InsightCombiner</code> 用 <code>t('combinerTitle')</code> 取标题，用 <code>label(name)</code> 显示字段名。取法不同，是因为来源不同。</p>
+<div class="callout tone-amber">
+      <span class="ic">🧮</span>
+      <div><p><code>packages/combination/src/messages.ts</code> 实测：<code>zhCN</code> / <code>zhHK</code> / <code>en</code> 三个语言桶各 <strong>47 个 key</strong>，
+合计 141 行词条。三个桶共用同一个 <code>typeof zhCN</code> 约束，漏一个 key 编译不过。</p>
+</div>
+    </div><h2 id="vue-i18n-的两个作用域"><span class="num">02</span>vue-i18n 的两个作用域</h2>
+<p>vue-i18n 9 里，<code>useI18n()</code> 有<strong>两个作用域</strong>，取哪个决定了组件的 <code>t()</code> 去哪里查词条。</p>
+<div class="flowd has-grid has-groups" data-flow data-edges="[{&quot;from&quot;:&quot;host&quot;,&quot;to&quot;:&quot;msg&quot;,&quot;label&quot;:&quot;传入 messages&quot;},{&quot;from&quot;:&quot;msg&quot;,&quot;to&quot;:&quot;comb&quot;},{&quot;from&quot;:&quot;comb&quot;,&quot;to&quot;:&quot;child&quot;,&quot;label&quot;:&quot;命中 ✅&quot;},{&quot;from&quot;:&quot;parent&quot;,&quot;to&quot;:&quot;kid&quot;,&quot;dashed&quot;:true,&quot;tone&quot;:&quot;red&quot;,&quot;label&quot;:&quot;❌ 不传递&quot;}]" style="--flow-marker:url(#fa-1)">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa-1" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"><div class="fgroup tone-blue" data-group-box="g">
+          <span class="fgroup-label">global scope：全应用共用一份，子组件天然读得到</span>
+        </div><div class="fgroup tone-amber" data-group-box="l">
+          <span class="fgroup-label">local scope：只有声明它的那个实例</span>
+        </div></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-muted" data-id="host" data-group="g">
+              
+              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="3" width="11" height="8.5" rx="1.5"/><path d="M2.5 6h11"/></svg>
+              <b>宿主 main.ts</b>
+              <small>createI18n + app.use(i18n)</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-muted" data-id="msg" data-group="g">
+              
+              
+              <b>global messages</b>
+              <small>宿主词条 + combinationMessages</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-muted" data-id="comb" data-group="g">
+              
+              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="3" width="11" height="8.5" rx="1.5"/><path d="M2.5 6h11"/></svg>
+              <b>InsightCombiner</b>
+              <small>useI18n() → 默认 global</small>
+            </div><div class="fnode tone-muted" data-id="child" data-group="g">
+              
+              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="3" width="11" height="8.5" rx="1.5"/><path d="M2.5 6h11"/></svg>
+              <b>11 个子组件</b>
+              <small>useI18n() → 还是 global</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-amber" data-id="parent" data-group="l">
+              
+              
+              <b>某个组件</b>
+              <small>useI18n({ messages, useScope: 'local' })</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-amber" data-id="kid" data-group="l">
+              
+              
+              <b>它自己的子组件</b>
+              <small>读 global 那份；local 里没合并 key 就原样显示 key</small>
+            </div></div></div>
+      
+    </div><p><code>local</code> 不是「更靠里的 global」，而是一份<strong>挂在组件实例上的私有副本</strong>：只有调用 <code>useI18n({ useScope: 'local' })</code> 的那个组件自己的 <code>t()</code> 用它，子组件调用 <code>useI18n()</code> 时拿到的仍然是 global。</p>
+<p>一张 20 行的探针就能验证（<code>vue</code> + <code>vue-i18n</code> 9.14.5，SSR 渲染）：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-ts">const child = defineComponent({
+  setup() {
+    const { t } = useI18n();                                    // 不传 options = global
+    return () =&gt; h('span', `child: combinerTitle=${t('combinerTitle')} | onlyLocal=${t('onlyLocal')}`);
+  },
+});
+const parent = defineComponent({
+  setup() {
+    const { t } = useI18n({ messages: { 'zh-cn': { onlyLocal: '只写在 local 里' } }, useScope: 'local' });
+    return () =&gt; h('div', [`parent: ${t('onlyLocal')}`, h(child)]);
+  },
+});
+// 宿主只合并了组件词条里的 combinerTitle，没有 onlyLocal
+</code></pre></div>
+<p>真实输出：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">parent: 只写在 local 里
+child:  combinerTitle=圈选条件 | onlyLocal=onlyLocal
+</code></pre></div>
+<p>三件事一次说清：</p>
+<table>
+<thead>
+<tr>
+<th>观察</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>父组件 <code>onlyLocal</code> 渲染成 <code>只写在 local 里</code></td>
+<td>local scope 对<strong>自己</strong>生效</td>
+</tr>
+<tr>
+<td>子组件 <code>combinerTitle</code> 渲染成 <code>圈选条件</code></td>
+<td>子组件能从 global 拿到<strong>宿主合并进来</strong>的组件词条</td>
+</tr>
+<tr>
+<td>子组件 <code>onlyLocal</code> 渲染成 <code>onlyLocal</code></td>
+<td>子组件读不到父的 local，vue-i18n 找不到 key 就把 key 原样返回</td>
+</tr>
+</tbody>
+</table>
+<p><mark class="mk-blue">子组件永远读不到父组件的 local scope。</mark> 这不是配置问题，是 vue-i18n 的设计：local scope 只服务于声明它的那个实例，不做树形继承。</p>
+<p><mark class="mk-amber">笔记里的 <code>useScope: 'local'</code> 常被当成「给这棵子树设置语言」，实际只覆盖当前组件一层。</mark></p>
+<h2 id="组件库的契约词条交出去实例借用宿主的"><span class="num">03</span>组件库的契约：词条交出去，实例借用宿主的</h2>
+<p>组件的 12 个组件全部用 <code>useLabel()</code>（内部就是 <code>useI18n()</code>），没有一处自建 i18n 实例。这是刻意的：</p>
+<div class="cards" data-cols="3"><div class="ccard tone-blue">
+          <span class="tag tone-blue">peerDependency</span>
+          <h4>实例借宿主的</h4>
+          <p>vue-i18n 是 peerDependency，组件不自己 createI18n</p>
+          <div class="cbody"><p><code>packages/combination/package.json</code> 里 vue-i18n、vue、element-plus 都是 peerDependency：
+组件用宿主 <code>app.use(i18n)</code> 装好的那一个实例，保证 <code>locale</code> 只有一份真相。</p>
+</div>
+          
+        </div><div class="ccard tone-violet">
+          <span class="tag tone-violet">combinationMessages</span>
+          <h4>词条交出去</h4>
+          <p>导出 combinationMessages，由宿主合并进 global</p>
+          <div class="cbody"><p><code>messages.ts</code> 导出 <code>{ 'zh-CN': ..., 'zh-HK': ..., en: ... }</code> 三个语言桶共 47 个 key，
+宿主把它们并进自己的 global messages，组件再 <code>t()</code> 查。</p>
+</div>
+          
+        </div><div class="ccard tone-green">
+          <span class="tag tone-green">单一真相</span>
+          <h4>只查不装</h4>
+          <p>组件内部不建自己的 i18n，也不读本地存储</p>
+          <div class="cbody"><p>语言由宿主决定（这里来自主应用 context 的 locale）。组件跟着走，不参与语言状态管理。</p>
+</div>
+          
+        </div></div><p>宿主侧要做的事一共三步，第三句就是合并：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-ts">// client/src/locale.ts
+import { combinationMessages } from '@futuweb/audience-combination';
+
+export const i18n = createI18n({
+  locale: normalizeLocale(getHostContext()?.locale),
+  fallbackLocale: LANG.ZH_CN,
+  legacy: false,
+  messages: {
+    [LANG.ZH_CN]: { ...combinationMessages['zh-CN'], ...zhCnMessages },
+    [LANG.ZH_HK]: { ...combinationMessages['zh-HK'], ...zhHkMessages },
+    [LANG.EN_US]: { ...combinationMessages.en, ...enUsMessages },
+  },
+});
+</code></pre></div>
+<p><code>...combinationMessages['zh-CN']</code> 在前，宿主自己的词条在后：同名 key 时宿主覆盖组件，业务文案优先。</p>
+<p>为什么不让组件自建实例 + local scope？对照一下就清楚了：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>做法</th><th>会发生什么</th><th>结论</th></tr></thead><tbody><tr><th>组件自建 <code>createI18n</code>，每个组件带自己的词条</th><td data-label="会发生什么">一棵组件树里出现多份 locale 状态，宿主切语言要挨个通知；组件包还得自己装一个 vue-i18n 版本，和宿主那份不是同一个实例时会有两份运行时</td><td data-label="结论"><span class="tag tone-red">不选</span></td></tr><tr><th>组件用 <code>useScope: 'local'</code> 声明词条</th><td data-label="会发生什么">local 只覆盖声明它的那个组件一层（02 节实测），11 个子组件要各自声明一遍，47 个 key 抄 12 份</td><td data-label="结论"><span class="tag tone-red">不选</span></td></tr><tr><th>词条导出、宿主合并、组件读 global</th><td data-label="会发生什么">locale 只有一份真相，子组件天然能查到词条，组件包不锁 vue-i18n 版本</td><td data-label="结论"><span class="tag tone-green">当前做法</span></td></tr></tbody></table></div><p><mark class="mk-amber">只 <code>app.use(i18n)</code>、忘了合并 <code>combinationMessages</code>，页面上会直接显示 <code>combinerTitle</code> 这样的 key。</mark> vue-i18n 找不到 key 时返回 key 本身，不报错，也不空白。02 节的探针里 <code>onlyLocal=onlyLocal</code> 就是同一个行为。</p>
+<h2 id="数据名字那一半由服务端翻译"><span class="num">04</span>数据名字那一半：由服务端翻译</h2>
+<p>字段名、关系名、值集合的 label 不归 SDK 管。它们在 Data Admin 里配置，请求时按调用方的语言本地化成<strong>单个字符串</strong>再下发：</p>
+<div class="seqd has-grid" data-seq data-n="3"
+      style="--seq-fill:url(#s-fill-1);--seq-open:url(#s-fill-1-open)">
+      <svg class="seqd-svg" aria-hidden="true">
+        <defs>
+          <marker id="s-fill-1" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+          <marker id="s-fill-1-open" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10" fill="none" stroke="currentColor" stroke-width="1.4"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="seqd-head"><div class="scell"><div class="spart tone-muted has-icon" data-id="b">
+          <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="3" width="11" height="8.5" rx="1.5"/><path d="M2.5 6h11"/></svg><b>浏览器 · 宿主 + 组件</b><small>t(key) / label(name)</small>
+        </div></div><div class="scell"><div class="spart tone-green has-icon" data-id="n">
+          <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5L3 8l3 4.5M10 3.5L13 8l-3 4.5"/></svg><b>Node BFF</b><small>GET /api/crowd/*</small>
+        </div></div><div class="scell"><div class="spart tone-violet has-icon" data-id="d">
+          <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="8" cy="4.2" rx="5" ry="1.9"/><path d="M3 4.2v7.6c0 1.05 2.24 1.9 5 1.9s5-.85 5-1.9V4.2"/></svg><b>Data Admin</b><small>crm_crowd_service</small>
+        </div></div></div>
+      <div class="seqd-body"><div class="smsg is-self" data-from="b" data-to="b" data-kind="self" data-i="1"><span class="slabel">宿主合并词条</span></div><div class="smsg" data-from="b" data-to="n" data-kind="sync" data-i="2" data-note="1"><span class="snote">1</span><span class="slabel">拉元数据</span></div><div class="smsg" data-from="n" data-to="d" data-kind="sync" data-i="3" data-note="2"><span class="snote">2</span><span class="slabel">header 带 clientLang</span></div><div class="smsg" data-from="d" data-to="n" data-kind="reply" data-i="4" data-note="3"><span class="snote">3</span><span class="slabel">name 已是当前语言</span></div><div class="smsg" data-from="n" data-to="b" data-kind="reply" data-i="5" data-note="4"><span class="snote">4</span><span class="slabel">portraits[].name</span></div><div class="smsg is-self" data-from="b" data-to="b" data-kind="self" data-i="6"><span class="slabel">文案立刻变</span></div><div class="smsg" data-from="b" data-to="n" data-kind="sync" data-i="7" data-note="5" style="margin-top:30px"><span class="snote">5</span><span class="slabel">数据名字要再拉</span></div></div>
+    </div><p>语言参数不是前端传的 query，而是 BFF 的调用头里带下去的：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-js">// @futu/agudo 的 helper：把当前请求的语言塞进下游 header
+const { ..., lang = 0 } = this.ctx.env || {};
+return { ..., clientLang: lang };
+</code></pre></div>
+<p><code>crm_crowd_service</code> 的 proto 里，<code>name</code> / <code>label</code> 的注释写的就是「当前请求语言下的名称」，形状是一个 <code>string</code>：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-proto">message CrowdPortrait {
+  optional string key = 1;    // 特征标识 field_key
+  optional string name = 2;   // 当前请求语言下的名称
+  optional FieldTypeMeta field_type = 3;
+  ...
+}
+</code></pre></div>
+<p>所以组件的 <code>label()</code> 现在要接两种入参。这是 03 与 04 两条链路的分界线：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-ts">/** string：Data Admin 下发的名称，已本地化，直接透传；I18nText：SDK 自带的本地词条，按 locale 挑键。 */
+export type LabelText = string | I18nText | undefined;
+
+function label(text: LabelText): string {
+  if (!text) return '';
+  if (typeof text === 'string') return text;
+  const current = normalizeLabelLocale(locale.value as string);
+  return text[current] || text['zh-CN'] || text['zh-HK'] || text.en || '';
+}
+</code></pre></div>
+<p>SDK 自带的操作符表（<code>OPERATOR_DISPLAY</code> 的「等于」「最近 {0} 天」）仍然是三语的 <code>I18nText</code>，走 <code>label()</code> 的第二条分支；Data Admin 下发的名字走第一条分支，不再查 locale。</p>
+<p>下面的控件把两条链路放在同一个页面上切一次语言：左栏文案立刻换，右栏的数据名字会先标记成「过期」，等你点重新请求才更新。</p>
+<div class="demo" data-widget="i18n-lab" data-config="{&quot;langs&quot;:[{&quot;id&quot;:&quot;zh-cn&quot;,&quot;label&quot;:&quot;简体中文&quot;},{&quot;id&quot;:&quot;zh-hk&quot;,&quot;label&quot;:&quot;繁體中文&quot;},{&quot;id&quot;:&quot;en-us&quot;,&quot;label&quot;:&quot;English&quot;}],&quot;copy&quot;:{&quot;zh-cn&quot;:{&quot;title&quot;:&quot;圈选条件&quot;,&quot;include&quot;:&quot;包含(应在用户群内的用户)&quot;,&quot;query&quot;:&quot;查询&quot;},&quot;zh-hk&quot;:{&quot;title&quot;:&quot;圈選條件&quot;,&quot;include&quot;:&quot;包含(應在用戶群內的用戶)&quot;,&quot;query&quot;:&quot;查詢&quot;},&quot;en-us&quot;:{&quot;title&quot;:&quot;Conditions&quot;,&quot;include&quot;:&quot;Users who should be in the group&quot;,&quot;query&quot;:&quot;Query&quot;}},&quot;names&quot;:{&quot;zh-cn&quot;:{&quot;field&quot;:&quot;近30天成交笔数&quot;,&quot;option&quot;:&quot;港股&quot;},&quot;zh-hk&quot;:{&quot;field&quot;:&quot;近30天成交筆數&quot;,&quot;option&quot;:&quot;港股&quot;},&quot;en-us&quot;:{&quot;field&quot;:&quot;Trades in 30 days&quot;,&quot;option&quot;:&quot;HK equity&quot;}}}">
+      <div class="demo-head">
+        <span class="title">切一次语言，看两种字各自怎么变</span>
+        <span class="status" data-status></span>
+        <span class="spacer"></span>
+        
+      </div>
+      <div class="demo-body custom" data-mount></div>
+    </div><p><mark class="mk-amber">切语言时不能只按 <code>revision</code> 判断要不要换元数据。</mark> <code>revision</code> 是投影内容哈希，它不保证随语言变化；圈选页的做法是 <code>watch(locale)</code> 时带 <code>force: true</code> 直接换一份新的，并清掉值集合缓存。</p>
+<h2 id="检查清单"><span class="num">05</span>检查清单</h2>
+<ul class="check warn"><li>页面上出现了 <code>combinerTitle</code> 这样的 key：宿主只 app.use(i18n)，没合并 combinationMessages</li><li>切了语言，标题/按钮没变：组件词条没并进 global，或宿主没有响应 locale 变化</li><li>切了语言，字段名还是旧语言：元数据要重新拉一次，且不能只靠 revision 判断</li><li>英文环境下字段名仍是中文：检查下游 header 的 clientLang 有没有带下去</li><li>把 Data Admin 的 name 当 I18nText 查 locale：它是单语字符串，查了也不会变</li></ul><div class="callout tone-amber">
+      <span class="ic">⏳</span>
+      <div><p><strong>时效（2026-10-13）</strong>：SDK 的读模型原本按三键（<code>zhCn</code> / <code>zhHk</code> / <code>en</code>）设计，
+与当时的 proto 快照一致；Data Admin 确认「按 FRPC header 的语言返回单一语言」后，
+<code>packages/dsl</code> 已改成 <code>name?: string</code>，BFF 适配层只剩两件事：JSON 标量字符串解成标量、
+status 数字转 <code>ENABLED</code> / <code>DISABLED</code>。改动当时在 <code>audience_web</code> 工作区尚未提交，
+引用这段结论前先看一眼 <code>packages/dsl/src/audience.ts</code> 的注释。</p>
+</div>
+    </div><div class="quiz"><details>
+        <summary>组件里的 12 个组件都调用 useI18n()，为什么不能各自声明 useScope: 'local' 把自己的词条带进去？</summary>
+        <div class="a"><p>local scope 只对声明它的那个组件实例生效，子组件调用 useI18n() 拿到的还是 global。
+12 个组件要各自复制一份 47 个 key 的词条，仍然是各查各的；
+把词条导出、宿主合并进 global，才是一份真相喂到所有层。</p>
+</div>
+      </details><details>
+        <summary>界面文案和数据名字，切一次语言之后各自多久生效？为什么？</summary>
+        <div class="a"><p>界面文案下一帧就变，因为三语词条都在本地（组件包 + 宿主各一份，合并进 global messages）。
+数据名字要重新请求才变，因为 Data Admin 按请求头里的 clientLang 本地化后只下发一种语言，
+浏览器手里那份是上一次请求拿到的旧语言。</p>
+</div>
+      </details><details>
+        <summary>为什么 BFF 的适配层不把单语言的 name 包装成三键？</summary>
+        <div class="a"><p>包装只是过渡期的权宜。proto 的契约是单语言 name，SDK 已经按它改成 string；
+再包一层会让「谁翻译」这件事变得含糊，而且三键里另外两个键填的是同一个值，
+切语言也不会变。语言在服务端决定，前端只负责在切语言后重新拉。</p>
+</div>
+      </details></div>
+
+    <footer>
+      <span>组合器的两套「字」：界面文案与数据名字</span>
+      <span>最后更新 2026-10-13 · 单文件可离线打开</span>
+    </footer>
+  </main>
+</div>
+
+<script src="../../assets/app.js?v=5ea664acdb"></script>
+</body>
+</html>

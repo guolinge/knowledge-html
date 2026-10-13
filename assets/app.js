@@ -8845,6 +8845,113 @@ WIDGETS['mysql-2pc-crash'] = (root) => {
     resetBtn.addEventListener('click', reset);
   };
 
+  /* ============================================================
+     控件：i18n-lab —— 切一次语言，看「界面文案」和「数据名字」各自怎么变
+     ------------------------------------------------------------
+     左栏是本地三语词条（宿主 + 组件包合并进 global messages），切语言下一帧就变；
+     右栏是 Data Admin 按 clientLang 下发的一种语言，切语言后先标记成过期，
+     点「重新请求元数据」才更新。这就是两条链路的差别。
+
+     config:
+       langs:  [{ id, label }]            语言按钮
+       copy:   { <lang>: { title, include, query } }  本地词条（三语都有）
+       names:  { <lang>: { field, option } }          服务端单语名字
+  ============================================================ */
+  WIDGETS['i18n-lab'] = (root) => {
+    const cfg = cfgOf(root);
+    const langs = cfg.langs || [];
+    const copy = cfg.copy || {};
+    const names = cfg.names || {};
+    if (langs.length < 2) return;
+    const box = mountOf(root);
+    const statusEl = root.querySelector('[data-status]');
+
+    let locale = langs[0].id;    // 宿主当前的 locale
+    let fetched = langs[0].id;   // 服务端上一次返回时用的语言
+    let fetching = false;
+
+    /* —— 语言切换（相当于宿主切 locale）—— */
+    const seg = el('div', 'i18n-seg');
+    const btns = langs.map((l) => {
+      const b = el('button', 'i18n-seg-btn');
+      b.append(el('b', '', l.label));
+      b.addEventListener('click', () => pick(l.id));
+      seg.append(b);
+      return b;
+    });
+
+    /* —— 两栏：本地词条 / 服务端名字 —— */
+    const grid = el('div', 'i18n-grid');
+    const copyCard = el('div', 'i18n-card i18n-card--copy');
+    copyCard.append(el('div', 'i18n-head', '① 界面文案 · 本地三语'));
+    const copyBody = el('div', 'i18n-body');
+    copyCard.append(copyBody);
+
+    const nameCard = el('div', 'i18n-card i18n-card--name');
+    nameCard.append(el('div', 'i18n-head', '② 数据名字 · 服务端单语'));
+    const nameBody = el('div', 'i18n-body');
+    const refetch = el('button', 'i18n-refetch', '重新请求元数据');
+    refetch.addEventListener('click', doFetch);
+    nameCard.append(nameBody, refetch);
+
+    grid.append(copyCard, nameCard);
+    const hint = el('p', 'i18n-hint', cfg.hint || '');
+    box.append(seg, grid, hint);
+
+    function doFetch() {
+      if (fetching) return;
+      fetching = true;
+      refetch.disabled = true;
+      refetch.textContent = '请求中…';
+      nameBody.textContent = '';
+      nameBody.append(el('div', 'i18n-pending', '（等 Data Admin 按 clientLang 返回…）'));
+      window.setTimeout(() => {
+        fetched = locale;
+        fetching = false;
+        refetch.disabled = false;
+        refetch.textContent = '重新请求元数据';
+        render();
+      }, 320);
+    }
+
+    function render() {
+      const c = copy[locale] || {};
+      const n = names[fetched] || {};
+      const stale = fetched !== locale;
+
+      /* 左栏：词条在本地，切了就变 */
+      copyBody.textContent = '';
+      copyBody.append(
+        el('div', 'i18n-title', c.title),
+        el('div', 'i18n-sub', c.include),
+        el('div', 'i18n-btn', c.query),
+      );
+
+      /* 右栏：这份名字是服务端哪个语言下给的，标出来 */
+      nameBody.textContent = '';
+      const row = (k, v) => {
+        const r = el('div', 'i18n-row');
+        r.append(el('code', 'i18n-k', k), el('span', 'i18n-v', v));
+        return r;
+      };
+      nameBody.append(row('portrait.name', n.field), row('items[].label', n.option));
+      nameBody.append(el('div', 'i18n-from', '语言 = ' + fetched));
+
+      nameCard.classList.toggle('i18n-stale', stale);
+      refetch.classList.toggle('i18n-hot', stale);
+      if (statusEl) statusEl.textContent = stale ? '数据名字是旧语言，等重新请求' : '两种字都是当前语言';
+    }
+
+    function pick(id) {
+      locale = id;
+      btns.forEach((b, i) => b.classList.toggle('on', langs[i].id === id));
+      render();
+    }
+
+    btns.forEach((b, i) => b.addEventListener('click', () => pick(langs[i].id)));
+    pick(langs[0].id);
+  };
+
   /* ---------- 挂载 ---------- */
   document.querySelectorAll('[data-widget]').forEach((root) => {
     var name = root.getAttribute('data-widget');
