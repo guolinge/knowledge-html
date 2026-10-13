@@ -9,11 +9,12 @@ tone: blue
 icon: 🧭
 text: |
   **本篇结构**：两种字（00）→ 两条链路对照（01）→ useI18n 给了什么（02）→
-  t() 的查表顺序（03）→ 作用域 global / local（04）→ 组件库为什么把词条交出去（05）→
-  数据名字那一半（06）→ 检查清单（07）。
+  宿主装配（03）→ 组件实例与两份 composer（04）→ t() 的查表顺序（05）→
+  组件库为什么把词条交出去（06）→ 数据名字那一半（07）→ 检查清单（08）。
 
-  卡在 `scope` 和 `t()` 就先读 02 / 03，它们是后面所有结论的地基。
-  机制结论都是实测：SSR 探针跑 vue-i18n 9.14.5，协议取 FService 协议空间
+  卡在 `scope` 和 `t()` 就按 02 → 03 → 04 → 05 的顺序读：四个零件 → 装配 →
+  每个实例怎么拿到 composer → 拿到之后怎么查表。
+  机制结论都是实测：SSR 探针跑 vue-i18n 9.14.5 + 源码，协议取 FService 协议空间
   `crm-crowd-service` v1.0.3（commit `51ede78d`）。
 ```
 
@@ -89,7 +90,206 @@ text: |
   - 宿主得先 `app.use(i18n)`：没装时抛 `Need to install with app.use function`。
 ```
 
-## 03 · t() 是一次查表
+## 03 · 宿主装配：global composer 是怎么建起来的
+
+装配发生在宿主的入口文件里，一共四步：
+
+```ts
+// client/src/main.ts
+const i18n = createI18n({ legacy: false, locale, fallbackLocale, messages: {...} });  // ① 词条在这里合并
+app.use(i18n);                                                                        // ② 触发 vue-i18n 的 install
+```
+
+`createI18n` 收到的 `messages` 已经是「宿主词条 + 组件词条」合并后的树；`app.use(i18n)` 调用 vue-i18n 的 `install(app)`，它做两件事：把 i18n 实例 `provide` 到 app 上（`vue-i18n.mjs:2271` 的 `app.provide(app.__VUE_I18N_SYMBOL__, i18n)`），再给 Options API 挂 `$t`。做完这两步，==全应用就有了一根注入管和一个唯一的 composer==：
+
+```arch
+svg: i18n-setup
+maxScale: 1.3
+caption: 装配期四个零件。词条在 createI18n 之前就合并好；app.use(i18n) 之后，provide 出一根贯穿组件树的注入管。点零件看它装了什么。
+frames:
+  - id: entries
+    flat: true
+    boundary: 0
+    kind: contains
+    label: 宿主工程 · 两处词条（跟代码一起发布）
+    detail: 宿主的业务文案在 common/i18n/*.json，组件包的界面文案在 messages.ts（47 个 key × 3 语）。两处都跟各自的代码一起发布。
+  - id: vuei18n
+    boundary: 1
+    kind: contains
+    label: vue-i18n 实例（createI18n 产物）
+    detail: i18n.global 就是 04 节说的 global composer：locale、messages、fallback 规则都装在里面。
+  - id: appinst
+    flat: true
+    boundary: 2
+    kind: contains
+    label: Vue app 实例（createApp 产物）· provide 发生在这里
+    detail: install 把 i18n 实例 provide 到 app 上。这个 symbol 之后被每一个组件 inject。
+bodies:
+  merge:
+    rows:
+      - { k: 宿主词条, v: "common/i18n/*.json" }
+      - { k: 组件词条, v: "combinationMessages（47 key × 3）" }
+      - { k: 同名 key, v: 宿主覆盖组件 }
+  i18n:
+    badge: createI18n 的产物
+    rows:
+      - { k: i18n.global, v: global composer 本体, link: composer }
+      - { k: legacy, v: "false（useI18n 的前提）" }
+  composer:
+    rows:
+      - { k: locale, v: "ref('zh-cn')，响应式" }
+      - { k: messages, v: 两处词条合并后的树 }
+      - { k: fallbackLocale, v: "'zh-cn'（vue-i18n 默认 en-US）" }
+      - { k: fallbackRoot, v: "true（local 缺键时回落 root）" }
+  install:
+    rows:
+      - { k: ①, v: "app.provide(symbol, i18n)", link: provide }
+      - { k: ②, v: "injectGlobalFields：给 Options API 挂 $t" }
+      - { k: ③, v: "注册 <i18n-t> 组件与 v-t 指令" }
+tours:
+  - id: boot
+    label: 装配顺序
+    steps:
+      - { at: [hostmsg, combomsg], text: "两处词条在宿主工程里合并，==同名 key 宿主覆盖组件==。" }
+      - { at: [merge, i18n], text: "合并结果作为 messages 传给 createI18n；它返回 i18n，i18n.global 就是那个 composer。" }
+      - { at: [install, provide], text: "app.use(i18n) 触发 install：provide 出注入管，再给 Options API 挂 $t。" }
+```
+
+```callout
+tone: amber
+icon: ⚠
+text: |
+  ==两个「没装好」都发生在这一步==，报错也在控制台：
+
+  - 没 `app.use(i18n)`：组件里 `useI18n()` 抛 `Need to install with app.use function`，
+    因为 `inject` 找不到 symbol（`vue-i18n.mjs:2437`）。
+  - `createI18n({ legacy: true })`（默认）：`useI18n()` 抛 `Not available in legacy mode`。
+```
+## 04 · 组件实例：provide 一根管，inject 拿 composer
+
+挂载之后，组件树里每个实例在 `setup()` 里各自调用一次 `useI18n()`。它内部只做了三步（`vue-i18n.mjs:2339`）：
+
+```ts
+const instance = getCurrentInstance();          // ① 当前组件实例；setup 外调用直接抛错
+const i18n = inject(app.__VUE_I18N_SYMBOL__);   // ② 沿注入管拿回 i18n 实例
+const gl = i18n.global;                         // ③ scope=global 时，返回值就是 gl 本体
+```
+
+```arch
+svg: i18n-instances
+maxScale: 1.3
+caption: 左侧的 app 实例提供一根注入管；右边组件树里每个实例 inject 到的是同一个 gl。声明 local 的那个组件会自建一份 composer，挂在实例注册表上，并拿一根 __root 指针指回 gl。
+frames:
+  - id: tree
+    flat: true
+    boundary: 0
+    kind: contains
+    label: 挂载后的组件实例树（每个实例 setup 时各自 useI18n()）
+    detail: 12 个组件（组合器本体 + 11 个子组件）都调 useI18n()，没有任何一处自建 i18n 实例。
+  - id: localscope
+    boundary: 1
+    parent: tree
+    kind: contains
+    label: 声明 local 的实例 —— local composer 只属于它
+    detail: local composer 存在实例注册表里（Map<instance, composer>），从不 provide。子组件 inject 到的仍然是 gl。
+bodies:
+  combiner:
+    rows:
+      - { k: setup, v: "useI18n()" }
+      - { k: 内部, v: "getCurrentInstance → inject(symbol)", link: host }
+      - { k: scope, v: "global → 返回 gl 本体", link: gl }
+  parentLocal:
+    badge: 带 local composer
+    rows:
+      - { k: setup, v: "useI18n({ useScope: 'local' })" }
+      - { k: 内部, v: "createComposer({ __root: gl })", link: gl }
+      - { k: 注册, v: "__setInstance(instance, composer)", link: registry }
+  gl:
+    rows:
+      - { k: locale, v: "ref('zh-cn')，响应式" }
+      - { k: messages, v: 两处词条合并后的树 }
+      - { k: fallbackLocale, v: "'zh-cn'" }
+      - { k: fallbackRoot, v: "true（03 节的回落开关读它）" }
+  registry:
+    rows:
+      - { k: key, v: 组件实例 }
+      - { k: value, v: 该实例的 composer }
+      - { k: local 缺键, v: "沿 __root 回到 gl" }
+tours:
+  - id: inject
+    label: 一次 useI18n() 的诞生（global）
+    steps:
+      - { at: [host], text: "装配期 provide(symbol, i18n)，即上一张图的那根管。" }
+      - { at: [combiner], text: "setup() 里 useI18n()：getCurrentInstance() 拿到当前实例，inject(symbol) 拿回 i18n。" }
+      - { at: [gl], text: "scope=global（不传 options）→ 返回值就是 gl 本体。" }
+  - id: localbirth
+    label: 一次 local composer 的诞生
+    steps:
+      - { at: [parentLocal], text: "useScope: 'local' → createComposer({ messages, __root: gl })：__root 指回全局那一份。" }
+      - { at: [registry], text: "__setInstance(instance, composer)，挂在实例注册表上，==只属于这个实例==。" }
+      - { at: [kid], text: "子组件 useI18n() 仍然 inject(symbol) 拿到 gl —— 父的 local 从来不在这根管里。" }
+facts:
+  combiner: { "composer": gl 本体, "messages": 宿主 + 组件词条, "生命周期": 跟组件实例 }
+  parentLocal: { "composer": 自己建的 local, "messages": "useI18n 传入的那份", "缺键回落": "沿 __root 回 gl" }
+  kid: { "composer": gl 本体, "messages": 宿主 + 组件词条, "父子传递": 看不到父的 local }
+```
+
+
+一张 20 行的探针就能验证（`vue` + `vue-i18n` 9.14.5，SSR 渲染）：
+
+```ts
+const child = defineComponent({
+  setup() {
+    const { t } = useI18n();                                    // 不传 options = global
+    return () => h('span', `child: combinerTitle=${t('combinerTitle')} | onlyLocal=${t('onlyLocal')}`);
+  },
+});
+const parent = defineComponent({
+  setup() {
+    const { t } = useI18n({ messages: { 'zh-cn': { onlyLocal: '只写在 local 里' } }, useScope: 'local' });
+    return () => h('div', [`parent: ${t('onlyLocal')}`, h(child)]);
+  },
+});
+// 宿主只合并了组件词条里的 combinerTitle，没有 onlyLocal
+```
+
+真实输出：
+
+```text
+parent: 只写在 local 里
+child:  combinerTitle=圈选条件 | onlyLocal=onlyLocal
+```
+
+三件事一次说清：
+
+| 观察 | 说明 |
+|---|---|
+| 父组件 `onlyLocal` 渲染成 `只写在 local 里` | local scope 对**自己**生效 |
+| 子组件 `combinerTitle` 渲染成 `圈选条件` | 子组件能从 global 拿到**宿主合并进来**的组件词条 |
+| 子组件 `onlyLocal` 渲染成 `onlyLocal` | 子组件读不到父的 local，vue-i18n 找不到 key 就把 key 原样返回 |
+
+
+### 为什么 local 不会传给子组件
+
+
+==子组件永远读不到父组件的 local scope。== 这不是配置问题，是 vue-i18n 的设计：local scope 只服务于声明它的那个实例，不做树形继承。
+
+!!笔记里的 `useScope: 'local'` 常被当成「给这棵子树设置语言」，实际只覆盖当前组件一层。!!
+
+
+```callout
+tone: violet
+icon: 🔬
+text: |
+  源码里这条规则看得见（`vue-i18n.mjs:2378`）：local composer 通过
+  `i18nInternal.__setInstance(instance, composer)` 存进**以组件实例为键的注册表**，
+  从不 `provide`。子组件的 `useI18n()` 只会 `inject(symbol)` 拿回应用级的 i18n，
+  再走一遍 global 分支，父实例的 local 不在这根管里。
+
+  顺带：local composer 身上带着 `__root = gl`（创建时塞进去的），
+  03 节「local 缺键回落 root」那条线走的就是它。
+```
+## 05 · t() 是一次查表
 
 把 `t()` 当作「按 key 查表」的函数，后面就好读了：==t 的行为 = 查哪一份表 × 查哪个语言桶 × 没查到怎么办。==
 
@@ -185,69 +385,7 @@ text: |
   上写，才真的不回落（拿到 key `hostOnly`）。demo 里那个开关模拟的就是 root 上这一份。
 ````
 
-## 04 · 查哪一份 composer：global 与 local
-
-02 节说 `useI18n()` 会绑定一个 composer，`t()` 在它上面执行。到底绑哪一份，由 `scope` 决定：
-
-```flow
-grid: true
-groups:
-  - { id: g, label: "global scope：全应用共用一份，子组件天然读得到", tone: blue }
-  - { id: l, label: "local scope：只有声明它的那个实例", tone: amber }
-nodes:
-  - { id: host, label: "宿主 main.ts", sub: "createI18n + app.use(i18n)", row: 0, kind: frontend, group: g }
-  - { id: msg, label: "global messages", sub: "宿主词条 + combinationMessages", row: 1, group: g }
-  - { id: comb, label: "InsightCombiner", sub: "useI18n() → 默认 global", row: 2, kind: frontend, group: g }
-  - { id: child, label: "11 个子组件", sub: "useI18n() → 还是 global", row: 2, kind: frontend, group: g }
-  - { id: parent, label: "某个组件", sub: "useI18n({ messages, useScope: 'local' })", row: 3, tone: amber, group: l }
-  - { id: kid, label: "它自己的子组件", sub: "读 global 那份；local 里没合并 key 就原样显示 key", row: 4, tone: amber, group: l }
-edges:
-  - { from: host, to: msg, label: "传入 messages" }
-  - { from: msg, to: comb }
-  - { from: comb, to: child, label: "命中 ✅" }
-  - { from: parent, to: kid, dashed: true, tone: red, label: "❌ 不传递" }
-```
-
-`local` 不是「更靠里的 global」，而是一份**挂在组件实例上的私有副本**：只有调用 `useI18n({ useScope: 'local' })` 的那个组件自己的 `t()` 用它，子组件调用 `useI18n()` 时拿到的仍然是 global。
-
-一张 20 行的探针就能验证（`vue` + `vue-i18n` 9.14.5，SSR 渲染）：
-
-```ts
-const child = defineComponent({
-  setup() {
-    const { t } = useI18n();                                    // 不传 options = global
-    return () => h('span', `child: combinerTitle=${t('combinerTitle')} | onlyLocal=${t('onlyLocal')}`);
-  },
-});
-const parent = defineComponent({
-  setup() {
-    const { t } = useI18n({ messages: { 'zh-cn': { onlyLocal: '只写在 local 里' } }, useScope: 'local' });
-    return () => h('div', [`parent: ${t('onlyLocal')}`, h(child)]);
-  },
-});
-// 宿主只合并了组件词条里的 combinerTitle，没有 onlyLocal
-```
-
-真实输出：
-
-```text
-parent: 只写在 local 里
-child:  combinerTitle=圈选条件 | onlyLocal=onlyLocal
-```
-
-三件事一次说清：
-
-| 观察 | 说明 |
-|---|---|
-| 父组件 `onlyLocal` 渲染成 `只写在 local 里` | local scope 对**自己**生效 |
-| 子组件 `combinerTitle` 渲染成 `圈选条件` | 子组件能从 global 拿到**宿主合并进来**的组件词条 |
-| 子组件 `onlyLocal` 渲染成 `onlyLocal` | 子组件读不到父的 local，vue-i18n 找不到 key 就把 key 原样返回 |
-
-==子组件永远读不到父组件的 local scope。== 这不是配置问题，是 vue-i18n 的设计：local scope 只服务于声明它的那个实例，不做树形继承。
-
-!!笔记里的 `useScope: 'local'` 常被当成「给这棵子树设置语言」，实际只覆盖当前组件一层。!!
-
-## 05 · 组件库的契约：词条交出去，实例借用宿主的
+## 06 · 组件库的契约：词条交出去，实例借用宿主的
 
 组件的 12 个组件全部用 `useLabel()`（内部就是 `useI18n()`），没有一处自建 i18n 实例。这是刻意的：
 
@@ -315,7 +453,7 @@ rows:
 
 !!只 `app.use(i18n)`、忘了合并 `combinationMessages`，页面上会直接显示 `combinerTitle` 这样的 key。!! vue-i18n 找不到 key 时返回 key 本身，不报错，也不空白。03 节的探针里 `onlyLocal=onlyLocal` 就是同一个行为。
 
-## 06 · 数据名字那一半：由服务端翻译
+## 07 · 数据名字那一半：由服务端翻译
 
 字段名、关系名、值集合的 label 不归 SDK 管。它们在 Data Admin 里配置，请求时按调用方的语言本地化成**单个字符串**再下发：
 
@@ -393,7 +531,7 @@ config:
 
 !!切语言时不能只按 `revision` 判断要不要换元数据。!! `revision` 是投影内容哈希，它不保证随语言变化；圈选页的做法是 `watch(locale)` 时带 `force: true` 直接换一份新的，并清掉值集合缓存。
 
-## 07 · 检查清单
+## 08 · 检查清单
 
 ```checklist
 tone: warn
