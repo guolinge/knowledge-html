@@ -1629,6 +1629,12 @@ npm run block -- &lt;slug&gt; 3         # 只看第 3 个块：截图到 /tmp/kb
 <code>script</code> 是 raw-text 元素，没有 <code>&lt;/script&gt;</code> 时<strong>浏览器会把后面整篇文档当成脚本文本吃掉</strong>。
 表现是「那之后的图连线全空、<code>demo</code> 控件全不挂载」，<mark class="mk-blue">而构建和 check 都不报错</mark>。
 用反引号包起来就对了。</li>
+<li><strong>块名对、字段名错</strong> → <code>summary</code> 只认 <code>title</code> + <code>text: |</code>（<code>items:</code> 是 <code>cards</code> / <code>checklist</code> 的字段）。
+写成 <code>items:</code> 时整块渲染成一个<strong>空框</strong>，而 <code>check</code> / <code>build</code> / <code>visual-check</code> 全绿 ——
+2026-10-15 四篇图解同时中招，<mark class="mk-blue">是用户先看出来的</mark>。改完顺手在页面上看一眼那块有没有字。</li>
+<li><strong><code>flow</code> 的 <code>groups</code> 按「行」分带</strong> → 组框按<strong>连续行</strong>画。同一个组里的节点被别的组的节点隔开
+（行号 0 / 1 / 0 / 1 交替）时两组框必然相交，<code>visual-check</code> 报「区域框相交」；
+组标签也别写长，它会压到相邻的边标签（真报过「文字压文字：重叠 7px」）。<strong>让一组占连续的行。</strong></li>
 </ul>
 <div class="callout tone-red">
       <span class="ic">⚠</span>
@@ -3748,6 +3754,39 @@ git push
       <div><p><mark class="mk-blue">如果这样还反复被拦，说明别人正在持续编辑。</mark></p>
 <p>那就别再重试了 —— <strong>停下来问用户</strong>，等对方告一段落。
 反复 amend 只会把你的提交变成「别人半成品的快照」。</p>
+</div>
+    </div><h4>第三种拦法：别人改了共享源，而你的提交本身是干净的</h4>
+<div class="callout tone-amber">
+      <span class="ic">⚠</span>
+      <div><p><strong>症状</strong>：只碰了自己的文件、<code>git status</code> 干净，<code>push</code> 还是被拦。</p>
+<p>钩子里的 <code>npm run build:standalone</code> 重建<strong>全仓库</strong>产物，而别人的半成品样式
+（未提交的 <code>assets/blocks.css</code> / <code>assets/app.js</code>）会被重新内联进 ~170 个 <code>dist/*.html</code>，
+于是 <code>git diff --quiet -- index.html notes dist</code> 必然不为空。</p>
+<p><mark class="mk-blue">这跟你的提交无关，但钩子分辨不出来 —— 它只看「重建之后工作区有没有差异」。</mark></p>
+</div>
+    </div><p><strong>修法：在干净 worktree 里推</strong>（谁的文件都不用改）：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-bash"># ① 在已提交的 HEAD 上开一个干净 worktree —— 等价于「只有我的提交」的状态
+git worktree add ~/works/codes/&lt;repo&gt;-push -b &lt;tmp-branch&gt;
+ln -s &quot;$PWD/node_modules&quot; ~/works/codes/&lt;repo&gt;-push/node_modules   # 省一次装依赖
+
+# ② 里面重建，确认产物与提交一致
+cd ~/works/codes/&lt;repo&gt;-push &amp;&amp; npm run build:standalone
+git status --short     # 应当只列出「你曾用别人脏源构建过的那几个产物」
+
+# ③ 从干净 worktree 推，然后收掉
+git add &lt;那几个产物&gt; &amp;&amp; git commit --amend --no-edit
+git push origin &lt;tmp-branch&gt;:main
+
+# ④ 主工作区跟上去。**别用 reset --hard** —— 它会冲掉别人未提交的文件
+git update-ref refs/heads/main &lt;新 commit&gt;
+git reset -q HEAD -- &lt;你改过的路径&gt;      # 只刷自己那几个文件的索引
+</code></pre></div>
+<div class="callout tone-red">
+      <span class="ic">🩸</span>
+      <div><p><mark class="mk-blue">顺序反了会把产物提交坏。</mark></p>
+<p>先在主工作区（别人的脏源生效）里构建再提交，你的 <code>dist/&lt;slug&gt;.html</code> 里就
+<strong>内联了别人还没提交的样式</strong> —— 你机器上好看，别人拉到的产物却与源码对不上。
+干净 worktree 里重建出的那几份产物，<code>--amend</code> 进原提交即可。</p>
 </div>
     </div><h3 id="别人的文件坏了阻塞了共享构建">别人的文件坏了，阻塞了共享构建</h3>
 <div class="callout tone-amber">

@@ -1452,6 +1452,12 @@ text: |
   `script` 是 raw-text 元素，没有 `</script>` 时**浏览器会把后面整篇文档当成脚本文本吃掉**。
   表现是「那之后的图连线全空、`demo` 控件全不挂载」，==而构建和 check 都不报错==。
   用反引号包起来就对了。
+- **块名对、字段名错** → `summary` 只认 `title` + `text: |`（`items:` 是 `cards` / `checklist` 的字段）。
+  写成 `items:` 时整块渲染成一个**空框**，而 `check` / `build` / `visual-check` 全绿 ——
+  2026-10-15 四篇图解同时中招，==是用户先看出来的==。改完顺手在页面上看一眼那块有没有字。
+- **`flow` 的 `groups` 按「行」分带** → 组框按**连续行**画。同一个组里的节点被别的组的节点隔开
+  （行号 0 / 1 / 0 / 1 交替）时两组框必然相交，`visual-check` 报「区域框相交」；
+  组标签也别写长，它会压到相邻的边标签（真报过「文字压文字：重叠 7px」）。**让一组占连续的行。**
 
 ```callout
 tone: red
@@ -3474,6 +3480,52 @@ text: |
   那就别再重试了 —— **停下来问用户**，等对方告一段落。
   反复 amend 只会把你的提交变成「别人半成品的快照」。
 ```
+
+#### 第三种拦法：别人改了共享源，而你的提交本身是干净的
+
+````callout
+tone: amber
+icon: ⚠
+text: |
+  **症状**：只碰了自己的文件、`git status` 干净，`push` 还是被拦。
+
+  钩子里的 `npm run build:standalone` 重建**全仓库**产物，而别人的半成品样式
+  （未提交的 `assets/blocks.css` / `assets/app.js`）会被重新内联进 ~170 个 `dist/*.html`，
+  于是 `git diff --quiet -- index.html notes dist` 必然不为空。
+
+  ==这跟你的提交无关，但钩子分辨不出来 —— 它只看「重建之后工作区有没有差异」。==
+````
+
+**修法：在干净 worktree 里推**（谁的文件都不用改）：
+
+```bash
+# ① 在已提交的 HEAD 上开一个干净 worktree —— 等价于「只有我的提交」的状态
+git worktree add ~/works/codes/<repo>-push -b <tmp-branch>
+ln -s "$PWD/node_modules" ~/works/codes/<repo>-push/node_modules   # 省一次装依赖
+
+# ② 里面重建，确认产物与提交一致
+cd ~/works/codes/<repo>-push && npm run build:standalone
+git status --short     # 应当只列出「你曾用别人脏源构建过的那几个产物」
+
+# ③ 从干净 worktree 推，然后收掉
+git add <那几个产物> && git commit --amend --no-edit
+git push origin <tmp-branch>:main
+
+# ④ 主工作区跟上去。**别用 reset --hard** —— 它会冲掉别人未提交的文件
+git update-ref refs/heads/main <新 commit>
+git reset -q HEAD -- <你改过的路径>      # 只刷自己那几个文件的索引
+```
+
+````callout
+tone: red
+icon: 🩸
+text: |
+  ==顺序反了会把产物提交坏。==
+
+  先在主工作区（别人的脏源生效）里构建再提交，你的 `dist/<slug>.html` 里就
+  **内联了别人还没提交的样式** —— 你机器上好看，别人拉到的产物却与源码对不上。
+  干净 worktree 里重建出的那几份产物，`--amend` 进原提交即可。
+````
 
 ### 别人的文件坏了，阻塞了共享构建
 
