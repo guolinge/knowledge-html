@@ -1,0 +1,689 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-has-toc="1">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>把现网条件翻成我们的协议：对拍第 ① 步</title>
+<meta name="description" content="想拿现网当标准答案，第一步得先能读懂它：6500 条记录里有三代前端形状（现代 items / 老版 key-val-cmp / 文档简写），操作符、值的形状、相对时间口径都要逐条对着源码定。翻完立刻用 buildQuery 自查，五个坑修完翻译率 42%→52.5%、结构校验 100%。顺带一张四步全景图说明整条对拍链。" />
+<link rel="stylesheet" href="../../assets/theme.css?v=b918ec5c83" />
+  <link rel="stylesheet" href="../../assets/blocks.css?v=cad5b999c1" />
+  <link rel="stylesheet" href="../../assets/archify-embed.css?v=68fec0b81b" />
+</head>
+<body>
+<div id="progress"></div>
+<div id="tocScrim"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
+    <a class="brand" href="../../index.html"><span class="dot"></span>知识笔记</a>
+    
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="toc" id="toc">
+      <p class="toc-title">目录</p>
+      <a href="../../index.html" class="sub">← 全部笔记</a>
+      <a href="#先把四个词说清楚都从上面那份记录里认">先把四个词说清楚（都从上面那份记录里认）</a>
+      <a href="#四步全景">四步全景</a>
+      <a href="#为什么要翻译而不是直接比两条-sql">为什么要翻译，而不是直接比两条 SQL</a>
+      <a href="#现网条件的三种形状都是真实记录">现网条件的三种形状（都是真实记录）</a>
+      <a href="#映射把现网的写法翻成我们的写法">映射：把现网的写法翻成我们的写法</a>
+      <a href="#五个坑每个都是真实记录">五个坑（每个都是真实记录）</a>
+      <a href="#两个被追问的概念本地种子-镜像表">两个被追问的概念：本地种子 / 镜像表</a>
+      <a href="#输入输出与命令">输入输出与命令</a>
+      <a href="#数字与结论">数字与结论</a>
+      <a href="#第-①-步的结论" class="sub">第 ① 步的结论</a>
+      <a href="#自测">自测</a>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow">● 从零理解 · 对拍 harness ①</span>
+      <h1>把现网条件翻成我们的协议：对拍第 ① 步</h1>
+      <p class="lede">想拿现网当标准答案，第一步得先能读懂它：6500 条记录里有三代前端形状（现代 items / 老版 key-val-cmp / 文档简写），操作符、值的形状、相对时间口径都要逐条对着源码定。翻完立刻用 buildQuery 自查，五个坑修完翻译率 42%→52.5%、结构校验 100%。顺带一张四步全景图说明整条对拍链。</p>
+    </div>
+
+
+    <div class="provenance"><span><b>来源</b> audience_web/scripts/udp-parity/udp-to-dsl.mjs（翻译器，本次工作区）：OP_MAP、detect/toLegacyTree、normalizeScalarOp、pickLeaf 认 relationName · audience_web/scripts/udp-parity/translate-report.mjs / translate-samples.mjs：覆盖率与失败样本 · crm-dsl-stru/doris/dump-corpus.mjs：语料抽样（crowdFilter 1944 / tag 2000 / crowd 2000 / segment 500） · UDP 组件文档 §2.3（操作符表 Step2）与 §5.3（tag/crowd 相对时间口径）；sql_builder_v2 packages/core/src/utils.ts 的 isLatestDays/isPrevDays 归一 · 现网记录实测：node dump-corpus.mjs 后 node translate-report.mjs 的输出（52.5% / buildQuery 100%）</span><span><b>生成</b> 2026-10-15</span><span><b>模型</b> pi (claude-opus-4-5)</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">对拍</span> <span class="tag tone-muted">UDP 对照</span> <span class="tag tone-muted">协议</span> <span class="tag tone-muted">翻译器</span> <span class="tag tone-muted">客群洞察</span></span></div>
+
+<p><strong>这一篇要解决的事</strong>：手上有一份现网的「条件 JSON → SQL」记录（124 万行），想拿它当标准答案来验我自己的编译器。可是两边协议不是一套，得先写翻译器把现网条件翻成我的草稿。</p>
+<p>在讲怎么做之前，先把<strong>原料</strong>摊开 —— 后面每一节都会回到同一份记录上。下面这条来自现网记录 <code>crowdFilter 1241598</code>，就是最小的一个例子：<strong>一个字段、一个等于、翻出一条 SQL。</strong></p>
+<div class="callout tone-blue">
+      <span class="ic">📦</span>
+      <div><p><strong>现网记录里那一行，长这样（原文，只截了关键部分）：</strong></p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-json">{&quot;main&quot;:{&quot;logic&quot;:&quot;AND&quot;,&quot;conditions&quot;:[
+  {&quot;logic&quot;:&quot;OR&quot;,&quot;conditions&quot;:[
+    {&quot;type&quot;:&quot;portrait&quot;,
+     &quot;condition&quot;:{&quot;op&quot;:&quot;=&quot;,&quot;name&quot;:&quot;futu_hk_account_basic_customer_type&quot;,&quot;value&quot;:&quot;Organization&quot;}}
+  ]}]},&quot;include&quot;:[],&quot;exclude&quot;:[]}
+</code></pre></div>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-sql">select count(1) as `count` from `user_portrait`
+ where (`futu_hk_account_basic_customer_type` = 'Organization')
+</code></pre></div>
+<p><mark class="mk-blue">左边是用户在界面上配的东西，右边是平台把它编译出来的 SQL。</mark> 我的任务是：让<strong>我的</strong>编译器对同一份左边，写出<strong>同样语义</strong>的右边。</p>
+</div>
+    </div><h2 id="先把四个词说清楚都从上面那份记录里认"><span class="num">01</span>先把四个词说清楚（都从上面那份记录里认）</h2>
+<div class="cards" data-cols="2"><div class="ccard tone-violet">
+          <span class="tag tone-violet">就是「一个字段 + 怎么比 + 比什么」</span>
+          <h4>叶子（leaf）</h4>
+          
+          <div class="cbody"><p>上面 JSON 里那个 <code>{&quot;type&quot;:&quot;portrait&quot;,&quot;condition&quot;:{…}}</code> 就是一片<strong>叶子</strong>。</p>
+<p>一个条件里可以有多片叶子，用 <code>{&quot;logic&quot;:&quot;AND&quot;,&quot;conditions&quot;:[…]}</code> 这样的<strong>树枝</strong>串起来。
+叶子是「叶子」，因为它下面没有别的东西了 —— 它就是一个具体的判断。</p>
+<p>真实的多叶子例子（现网 <code>tag 1235865</code>，两片叶子用 AND 串）：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-json">{&quot;conditions&quot;:[
+  {&quot;condition&quot;:{&quot;items&quot;:[{&quot;name&quot;:&quot;alex_ftest_character_1778315960&quot;,&quot;op&quot;:&quot;&lt;=&quot;,&quot;value&quot;:99,
+                          &quot;dateType&quot;:&quot;relative&quot;,&quot;dateUnit&quot;:&quot;day&quot;}]},&quot;type&quot;:&quot;portrait&quot;},
+  {&quot;condition&quot;:{&quot;items&quot;:[{&quot;relationName&quot;:&quot;alex_ftest_relation_1778490595&quot;,&quot;op&quot;:&quot;NOT IN&quot;,
+                          &quot;value&quot;:[&quot;k1&quot;],&quot;formulaType&quot;:1}]},&quot;type&quot;:&quot;relation&quot;}]}
+</code></pre></div>
+</div>
+          
+        </div><div class="ccard tone-green">
+          <span class="tag tone-green">SQL 里 WHERE 后面的那个判断</span>
+          <h4>谓词（predicate）</h4>
+          
+          <div class="cbody"><p>「谓词」不是新东西，就是 SQL 里 <code>WHERE</code> 后面<strong>一个具体的判断</strong>：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-sql">WHERE `futu_hk_account_basic_customer_type` = 'Organization'
+      └────────────── 这一整段就是一个谓词 ──────────────┘
+</code></pre></div>
+<p>「<strong>把条件编译成谓词</strong>」= 把界面上那句「客户类型 = 机构」，落成上面这串列名+比较符+值。</p>
+<p>对照之下，现网在<strong>别的地方</strong>是「<strong>编译成一个 uid 集合</strong>」—— 不是一段判断，而是一条自己去查人的子查询：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-sql">-- 现网对关系条件的写法（一条完整子查询，结果是一批 uid）
+select uid from niuniu_user_security_special_watchlist
+ where object_id in ('75900664355662') group by uid
+</code></pre></div>
+<p><mark class="mk-blue">这两种写法的区别，就是后面所有「比不了」的根源。</mark></p>
+</div>
+          
+        </div><div class="ccard tone-blue">
+          <span class="tag tone-blue">我这一步只比这个</span>
+          <h4>单叶子（single leaf）</h4>
+          
+          <div class="cbody"><p>一条记录里<strong>只有一片叶子</strong>，没有 AND / OR 树枝。</p>
+<p>为什么只比它：多叶子时现网会用 <code>union all</code> + <code>having count = N</code> 表达 AND / OR，
+而我写的是单条 WHERE 里的 <code>(... OR ...)</code> —— 形状不同，逐字比永远不相等。</p>
+<p>真实对照（同一份 OR 条件，现网 case <code>1191481</code>）：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-sql">-- 现网：两个叶子 → union all + group by
+select uid from (select uid from 关系表A where … group by uid
+                 union all
+                 select uid from 关系表B where … group by uid) ct1 group by uid
+
+-- 我们：同一条 WHERE 里写 OR
+WHERE (uid IN (SELECT …关系表A…) OR uid IN (SELECT …关系表B…))
+</code></pre></div>
+<p>语义相同、文本不同 —— 这类只能靠<strong>跑数比结果</strong>（第三篇），不能比文本。</p>
+</div>
+          
+        </div><div class="ccard tone-amber">
+          <span class="tag tone-amber">这条记录我们全翻得出来</span>
+          <h4>无跳过叶子</h4>
+          
+          <div class="cbody"><p>现网的叶子有六类：特征 / 关系 / 实时用户群 / 离线用户群 / 事件 / 原始 SQL。
+<strong>我只支持前三类</strong>（特征、关系、UID），其余会被「跳过」。</p>
+<p>「无跳过叶子」= 这条记录里的所有叶子我都翻出来了。
+如果有一条被跳过，那条记录的对账就没有意义 —— 因为现网的 SQL 里还带着我没翻的那个条件：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-sql">-- 现网 tag 846335 的 SQL：除了特征，还混着一个「离线用户群」条件
+select uid from user_portrait where (特征条件)
+union all select uid from user_portrait where uid in (
+  select uid from crowds where (crowd_id = '29178d-20260630095237-crowd' …))
+--                                 └── 这个条件我没翻，比出来的差异全是它造成的 ──┘
+</code></pre></div>
+</div>
+          
+        </div></div><h2 id="四步全景"><span class="num">02</span>四步全景</h2>
+<figure class="archfig" data-arch style="--arch-max-width:1310px" data-boundaries="nested" data-pano data-frames='[{"id":"corpus","boundary":0,"kind":"classification","flat":true,"label":"现网记录 · 只读，不能改也不能重跑","detail":"唯一的标准答案来源。124 万行里每行是「用户配的条件 JSON」+「平台编译出的 SQL」。只能读 —— 这是整个 harness 的前提。","members":["corpus"],"depth":1},{"id":"proto","boundary":1,"kind":"contains","flat":true,"label":"① 翻译 + ② 文本对拍 · 不跑数就能出结论","detail":"只碰协议文本：把现网条件翻成我们的草稿，再把两侧 SQL 的谓词片段归一化后逐字比。快、便宜，先在这里把「写法错」清掉。","members":["translate","report","leafdiff"],"depth":1},{"id":"mirror","boundary":2,"kind":"contains","label":"④ 镜像词表到本地 · 让语料的字段真的能跑起来","detail":"语料里的字段九成以上不在我们元数据里。这一步把它们的词表（字段名/关系名/类型/取值）镜像到本地建表灌数，是 ③ 能跑起来的前置。","members":["vocab","mirror","seed10w"],"depth":1},{"id":"result","boundary":3,"kind":"contains","label":"③ 结果级对拍 · 同一份数据上比 uid 集合","detail":"只有跑数才能验 OR / 否定 / 计数这些「写法不同但语义可能相同」的地方。两侧 SQL 拔掉 UDF 后在同一个 Doris 上跑，比 uid 集合。","members":["cases","runner","doris"],"depth":1}]'>
+      <div class="arch-boundary-ui">
+          <div class="arch-boundary-toolbar"><span class="arch-boundary-label">边界</span>
+            <button type="button" data-boundary-mode="nested" aria-pressed="true">多层归属框</button>
+            <button type="button" data-boundary-mode="flat" aria-pressed="false">只留一层分区</button>
+            <button type="button" data-arch-reset>恢复全图</button>
+          </div>
+          <div class="arch-address-box" aria-live="polite"><div data-arch-address>点一个零件，看完整归属路径；点一个区域标题，看这一层的含义。</div>
+            <div data-arch-frame-detail>最外框表示逻辑资源域，不表示所有对象在一块内存里。每层边界的标题说明分组依据。</div></div>
+        </div>
+      <div class="arch-canvas"><svg viewBox="0 0 1310 992" role="img" aria-labelledby="udp-parity-harness-archify-diagram-title udp-parity-harness-archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
+        <title id="udp-parity-harness-archify-diagram-title">UDP 对拍 harness · 四步全景</title>
+        <desc id="udp-parity-harness-archify-diagram-description">语料只读 → ① 翻译 → ② 文本对拍 → ④ 镜像 → ③ 结果级对拍</desc>
+        <!-- Definitions -->
+        <defs>
+          <marker id="udp-parity-harness-arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-default" />
+          </marker>
+          <marker id="udp-parity-harness-arrowhead-emphasis" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-emphasis" />
+          </marker>
+          <marker id="udp-parity-harness-arrowhead-security" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-security" />
+          </marker>
+          <marker id="udp-parity-harness-arrowhead-dashed" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-dashed" />
+          </marker>
+          <pattern id="udp-parity-harness-grid" width="40" height="40" patternUnits="userSpaceOnUse">
+            <path d="M 40 0 L 0 0 0 40" class="c-grid" stroke-width="0.5"/>
+          </pattern>
+        </defs>
+
+        <!-- Background Grid -->
+        <rect width="100%" height="100%" fill="url(#udp-parity-harness-grid)" />
+
+        <!-- Boundaries (behind everything) -->
+        <g class="arch-frame" data-frame="corpus" data-depth="1" data-frame-flat="true" data-frame-kind="classification" role="button" tabindex="0" aria-pressed="false" aria-label="现网记录 · 只读，不能改也不能重跑"><title>唯一的标准答案来源。124 万行里每行是「用户配的条件 JSON」+「平台编译出的 SQL」。只能读 —— 这是整个 harness 的前提。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="0" data-frame-members="corpus" x="30" y="66" width="400" height="200" rx="12" class="c-region" stroke-width="1"/>
+        <text x="38" y="84" class="t-cloud" font-size="9" font-weight="600">现网记录 · 只读，不能改也不能重跑</text></g>
+
+        <g class="arch-frame" data-frame="proto" data-depth="1" data-frame-flat="true" data-frame-kind="contains" role="button" tabindex="0" aria-pressed="false" aria-label="① 翻译 + ② 文本对拍 · 不跑数就能出结论"><title>只碰协议文本：把现网条件翻成我们的草稿，再把两侧 SQL 的谓词片段归一化后逐字比。快、便宜，先在这里把「写法错」清掉。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="1" data-frame-members="translate report leafdiff" x="450" y="66" width="820" height="404" rx="12" class="c-region" stroke-width="1"/>
+        <text x="458" y="84" class="t-cloud" font-size="9" font-weight="600">① 翻译 + ② 文本对拍 · 不跑数就能出结论</text></g>
+
+        <g class="arch-frame" data-frame="mirror" data-depth="1" data-frame-flat="false" data-frame-kind="contains" role="button" tabindex="0" aria-pressed="false" aria-label="④ 镜像词表到本地 · 让语料的字段真的能跑起来"><title>语料里的字段九成以上不在我们元数据里。这一步把它们的词表（字段名/关系名/类型/取值）镜像到本地建表灌数，是 ③ 能跑起来的前置。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="2" data-frame-members="vocab mirror seed10w" x="30" y="494" width="1240" height="200" rx="12" class="c-region" stroke-width="1"/>
+        <text x="38" y="512" class="t-cloud" font-size="9" font-weight="600">④ 镜像词表到本地 · 让语料的字段真的能跑起来</text></g>
+
+        <g class="arch-frame" data-frame="result" data-depth="1" data-frame-flat="false" data-frame-kind="contains" role="button" tabindex="0" aria-pressed="false" aria-label="③ 结果级对拍 · 同一份数据上比 uid 集合"><title>只有跑数才能验 OR / 否定 / 计数这些「写法不同但语义可能相同」的地方。两侧 SQL 拔掉 UDF 后在同一个 Doris 上跑，比 uid 集合。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="3" data-frame-members="cases runner doris" x="30" y="734" width="1240" height="200" rx="12" class="c-region" stroke-width="1"/>
+        <text x="38" y="752" class="t-cloud" font-size="9" font-weight="600">③ 结果级对拍 · 同一份数据上比 uid 集合</text></g>
+
+        <!-- Connection paths (before components for correct z-order) -->
+        <path data-edge-from="corpus" data-edge-to="translate" data-edge-key="0" data-edge-id="corpus-translate" data-composition-points="400,166;480,166" d="M 400 166 L 480 166" class="a-default" stroke-width="1.5" marker-end="url(#udp-parity-harness-arrowhead)"/>
+        <path data-edge-from="translate" data-edge-to="report" data-edge-key="1" data-edge-id="translate-report" data-composition-points="820,166;900,166" d="M 820 166 L 900 166" class="a-default" stroke-width="1.5" marker-end="url(#udp-parity-harness-arrowhead)"/>
+        <path data-edge-from="translate" data-edge-to="leafdiff" data-edge-key="2" data-edge-id="translate-leafdiff" data-composition-points="650,236;650,300" d="M 650 236 L 650 300" class="a-default" stroke-width="1.5" marker-end="url(#udp-parity-harness-arrowhead)"/>
+        <path data-edge-from="vocab" data-edge-to="mirror" data-edge-key="3" data-edge-id="vocab-mirror" data-composition-points="400,594;480,594" d="M 400 594 L 480 594" class="a-default" stroke-width="1.5" marker-end="url(#udp-parity-harness-arrowhead)"/>
+        <path data-edge-from="mirror" data-edge-to="seed10w" data-edge-key="4" data-edge-id="mirror-seed" data-composition-points="820,594;900,594" d="M 820 594 L 900 594" class="a-default" stroke-width="1.5" marker-end="url(#udp-parity-harness-arrowhead)"/>
+        <path data-edge-from="seed10w" data-edge-to="doris" data-edge-key="5" data-edge-id="seed-doris" data-composition-points="1070,664;1070,764" d="M 1070 664 L 1070 764" class="a-default" stroke-width="1.5" marker-end="url(#udp-parity-harness-arrowhead)"/>
+        <path data-edge-from="cases" data-edge-to="runner" data-edge-key="6" data-edge-id="cases-runner" data-composition-points="400,834;480,834" d="M 400 834 L 480 834" class="a-default" stroke-width="1.5" marker-end="url(#udp-parity-harness-arrowhead)"/>
+        <path data-edge-from="runner" data-edge-to="doris" data-edge-key="7" data-edge-id="runner-doris" data-composition-points="820,834;900,834" d="M 820 834 L 900 834" class="a-default" stroke-width="1.5" marker-end="url(#udp-parity-harness-arrowhead)"/>
+
+        <!-- Components -->
+        <g id="udp-parity-harness-node-corpus" data-nb="1" data-node-id="corpus" data-node-label="现网语料" tabindex="0" role="button" aria-label="Focus 现网语料, sql_gen_record · 124 万行 · 只读, 现网记录 · 只读，不能改也不能重跑" aria-pressed="false" data-node-kind="external" data-node-sublabel="sql_gen_record · 124 万行 · 只读" data-node-tag="只读" data-node-context="现网记录 · 只读，不能改也不能重跑">
+          <title>现网语料 · sql_gen_record · 124 万行 · 只读 · 现网记录 · 只读，不能改也不能重跑 · 只读</title>
+          <rect x="60" y="96" width="340" height="140" rx="6" class="c-mask"/>
+          <rect x="60" y="96" width="340" height="140" rx="6" class="c-external" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="external" class="semantic-sigil s-external" transform="translate(66 102) scale(0.6875)">
+            <rect x="2.5" y="5" width="8.5" height="8" rx="1.5"/>
+            <path d="M8 2.5h5.5V8M13.5 2.5 7.5 8.5"/>
+          </g>
+          <rect class="nb-badge" x="318.4" y="104" width="69.6" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="353.2" y="115" font-size="8" text-anchor="middle">1,242,215 行</text>
+          <text class="nb-title" x="94" y="117" font-size="10.5" font-weight="600">现网语料</text>
+          <line class="nb-hr" x1="68" y1="124" x2="392" y2="124"/>
+          <text class="nb-k" x="72" y="152.5" font-size="9">表</text><text class="nb-v" x="113.4" y="152.5" font-size="9">sql_gen_record</text>
+          <text class="nb-k" x="72" y="166.5" font-size="9">我抽样</text><text class="nb-v" x="113.4" y="166.5" font-size="9">6500 条（4 个类别）</text>
+          <text class="nb-k" x="72" y="180.5" font-size="9">每行给</text><text class="nb-v" x="113.4" y="180.5" font-size="9">input 条件 JSON + output SQL</text>
+          <text class="nb-code" x="72" y="199.5" font-size="7.5">crowdFilter 1944 / tag 2000 / crowd 2000 / segment 500</text>
+          <text class="nb-note" x="72" y="228" font-size="8">四个类别：圈选页预览 22.9 万 · 标签计算 6 万 · 人群产出 2.1 万 · 分群 746</text>
+        </g>
+
+        <g id="udp-parity-harness-node-translate" data-nb="1" data-node-id="translate" data-node-label="① 翻译器" tabindex="0" role="button" aria-label="Focus ① 翻译器, udp-to-dsl · 现网条件 → 我们的草稿, ① 翻译 + ② 文本对拍 · 不跑数就能出结论" aria-pressed="false" data-node-kind="backend" data-node-sublabel="udp-to-dsl · 现网条件 → 我们的草稿" data-node-tag="翻译器" data-node-context="① 翻译 + ② 文本对拍 · 不跑数就能出结论">
+          <title>① 翻译器 · udp-to-dsl · 现网条件 → 我们的草稿 · ① 翻译 + ② 文本对拍 · 不跑数就能出结论 · 翻译器</title>
+          <rect x="480" y="96" width="340" height="140" rx="6" class="c-mask"/>
+          <rect x="480" y="96" width="340" height="140" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(486 102) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <rect class="nb-badge" x="762.4" y="104" width="45.6" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="785.2" y="115" font-size="8" text-anchor="middle">第 ① 步</text>
+          <text class="nb-title" x="514" y="117" font-size="10.5" font-weight="600">① 翻译器</text>
+          <line class="nb-hr" x1="488" y1="124" x2="812" y2="124"/>
+          <text class="nb-k" x="492" y="152.5" font-size="9">输入</text><text class="nb-v" x="533.4" y="152.5" font-size="9">上面那种条件 JSON</text>
+          <text class="nb-k" x="492" y="166.5" font-size="9">输出</text><text class="nb-v" x="533.4" y="166.5" font-size="9">我们的 DraftQuery 草稿</text>
+          <text class="nb-k" x="492" y="180.5" font-size="9">翻得出</text><text class="nb-v" x="533.4" y="180.5" font-size="9">3415 / 6500（52.5%）</text>
+          <text class="nb-code" x="492" y="199.5" font-size="7.5">new Translator().translateQuery(input)</text>
+          <text class="nb-note" x="492" y="228" font-size="8">翻完立刻用 buildQuery() 过一遍，100% 通过才算映射写对</text>
+        </g>
+
+        <g id="udp-parity-harness-node-report" data-nb="1" data-node-id="report" data-node-label="① 覆盖率报告" tabindex="0" role="button" aria-label="Focus ① 覆盖率报告, translate-report · 叶子分布 / 跳过原因, ① 翻译 + ② 文本对拍 · 不跑数就能出结论" aria-pressed="false" data-node-kind="backend" data-node-sublabel="translate-report · 叶子分布 / 跳过原因" data-node-tag="先量再对" data-node-context="① 翻译 + ② 文本对拍 · 不跑数就能出结论">
+          <title>① 覆盖率报告 · translate-report · 叶子分布 / 跳过原因 · ① 翻译 + ② 文本对拍 · 不跑数就能出结论 · 先量再对</title>
+          <rect x="900" y="96" width="340" height="140" rx="6" class="c-mask"/>
+          <rect x="900" y="96" width="340" height="140" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(906 102) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <rect class="nb-badge" x="1177.6" y="104" width="50.4" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="1202.8" y="115" font-size="8" text-anchor="middle">先量再对</text>
+          <text class="nb-title" x="934" y="117" font-size="10.5" font-weight="600">① 覆盖率报告</text>
+          <line class="nb-hr" x1="908" y1="124" x2="1232" y2="124"/>
+          <text class="nb-k" x="912" y="162" font-size="9">翻译率</text><text class="nb-v" x="964.2" y="162" font-size="9">crowdFilter 73.6% · crowd 67.8% · tag 31.5%</text>
+          <text class="nb-k" x="912" y="176" font-size="9">叶子分布</text><text class="nb-v" x="964.2" y="176" font-size="9">portrait 3806 · uid 1061 · 关系明细 914</text>
+          <text class="nb-k" x="912" y="190" font-size="9">跳过原因</text><text class="nb-v" x="964.2" y="190" font-size="9">不支持叶子 6857 · 老形状 1527</text>
+          <text class="nb-note" x="912" y="228" font-size="8">没有这张报告，后面「405 条可比」就没有出处</text>
+        </g>
+
+        <g id="udp-parity-harness-node-leafdiff" data-nb="1" data-node-id="leafdiff" data-node-label="② 文本对拍" tabindex="0" role="button" aria-label="Focus ② 文本对拍, compare-leaves · 单叶子谓词级, ① 翻译 + ② 文本对拍 · 不跑数就能出结论" aria-pressed="false" data-node-kind="backend" data-node-sublabel="compare-leaves · 单叶子谓词级" data-node-tag="405 / 405" data-node-context="① 翻译 + ② 文本对拍 · 不跑数就能出结论">
+          <title>② 文本对拍 · compare-leaves · 单叶子谓词级 · ① 翻译 + ② 文本对拍 · 不跑数就能出结论 · 405 / 405</title>
+          <rect x="480" y="300" width="340" height="140" rx="6" class="c-mask"/>
+          <rect x="480" y="300" width="340" height="140" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(486 306) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <rect class="nb-badge" x="752.8" y="308" width="55.2" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="780.4" y="319" font-size="8" text-anchor="middle">405 / 405</text>
+          <text class="nb-title" x="514" y="321" font-size="10.5" font-weight="600">② 文本对拍</text>
+          <line class="nb-hr" x1="488" y1="328" x2="812" y2="328"/>
+          <text class="nb-k" x="492" y="366" font-size="9">从 6500 收敛到</text><text class="nb-v" x="576.6" y="366" font-size="9">405 条真的能逐字比的</text>
+          <text class="nb-k" x="492" y="380" font-size="9">判据</text><text class="nb-v" x="576.6" y="380" font-size="9">单叶子 + 画像 + 无跳过叶子</text>
+          <text class="nb-k" x="492" y="394" font-size="9">结论</text><text class="nb-v" x="576.6" y="394" font-size="9">谓词级逐字一致</text>
+          <text class="nb-note" x="492" y="432" font-size="8">四类「假差异」被显式排除并计数，见第二篇</text>
+        </g>
+
+        <g id="udp-parity-harness-node-vocab" data-nb="1" data-node-id="vocab" data-node-label="④ 词表镜像" tabindex="0" role="button" aria-label="Focus ④ 词表镜像, build-parity-vocab · 98 字段 28 关系, ④ 镜像词表到本地 · 让语料的字段真的能跑起来" aria-pressed="false" data-node-kind="backend" data-node-sublabel="build-parity-vocab · 98 字段 28 关系" data-node-tag="98 字段 28 关系" data-node-context="④ 镜像词表到本地 · 让语料的字段真的能跑起来">
+          <title>④ 词表镜像 · build-parity-vocab · 98 字段 28 关系 · ④ 镜像词表到本地 · 让语料的字段真的能跑起来 · 98 字段 28 关系</title>
+          <rect x="60" y="524" width="340" height="140" rx="6" class="c-mask"/>
+          <rect x="60" y="524" width="340" height="140" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(66 530) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <rect class="nb-badge" x="294.4" y="532" width="93.6" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="341.2" y="543" font-size="8" text-anchor="middle">98 字段 · 28 关系</text>
+          <text class="nb-title" x="94" y="545" font-size="10.5" font-weight="600">④ 词表镜像</text>
+          <line class="nb-hr" x1="68" y1="552" x2="392" y2="552"/>
+          <text class="nb-k" x="72" y="580.5" font-size="9">抽什么</text><text class="nb-v" x="113.4" y="580.5" font-size="9">语料里出现过的字段/关系/取值</text>
+          <text class="nb-k" x="72" y="594.5" font-size="9">为什么</text><text class="nb-v" x="113.4" y="594.5" font-size="9">建表用它的形状、灌数用它的取值</text>
+          <text class="nb-k" x="72" y="608.5" font-size="9">产物</text><text class="nb-v" x="113.4" y="608.5" font-size="9">词表 JSON + 合成 Catalog</text>
+          <text class="nb-code" x="72" y="627.5" font-size="7.5">node build-parity-vocab.mjs --input corpus.sample.json</text>
+          <text class="nb-note" x="72" y="656" font-size="8">取值必须抄现网真出现过的，否则条件命中不到行</text>
+        </g>
+
+        <g id="udp-parity-harness-node-mirror" data-nb="1" data-node-id="mirror" data-node-label="④ 灌数" tabindex="0" role="button" aria-label="Focus ④ 灌数, seed-parity · 10k × 92 列 + 28 张关系表, ④ 镜像词表到本地 · 让语料的字段真的能跑起来" aria-pressed="false" data-node-kind="database" data-node-sublabel="seed-parity · 10k × 92 列 + 28 张关系表" data-node-tag="10k × 92 列" data-node-context="④ 镜像词表到本地 · 让语料的字段真的能跑起来">
+          <title>④ 灌数 · seed-parity · 10k × 92 列 + 28 张关系表 · ④ 镜像词表到本地 · 让语料的字段真的能跑起来 · 10k × 92 列</title>
+          <rect x="480" y="524" width="340" height="140" rx="6" class="c-mask"/>
+          <rect x="480" y="524" width="340" height="140" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(486 530) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <rect class="nb-badge" x="743.2" y="532" width="64.8" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="775.6" y="543" font-size="8" text-anchor="middle">10k × 92 列</text>
+          <text class="nb-title" x="514" y="545" font-size="10.5" font-weight="600">④ 灌数</text>
+          <line class="nb-hr" x1="488" y1="552" x2="812" y2="552"/>
+          <text class="nb-k" x="492" y="590" font-size="9">建表</text><text class="nb-v" x="533.4" y="590" font-size="9">user_portrait + 28 张关系表</text>
+          <text class="nb-k" x="492" y="604" font-size="9">灌数</text><text class="nb-v" x="533.4" y="604" font-size="9">10</text>
+          <text class="nb-k" x="492" y="618" font-size="9">关系行</text><text class="nb-v" x="533.4" y="618" font-size="9">194</text>
+          <text class="nb-note" x="492" y="656" font-size="8">表名跟现网一样（user_portrait），现网 SQL 不改表名就能跑</text>
+        </g>
+
+        <g id="udp-parity-harness-node-seed10w" data-nb="1" data-node-id="seed10w" data-node-label="本地种子" tabindex="0" role="button" aria-label="Focus 本地种子, seed-realtime · 真实 18 字段 10 万行, ④ 镜像词表到本地 · 让语料的字段真的能跑起来" aria-pressed="false" data-node-kind="database" data-node-sublabel="seed-realtime · 真实 18 字段 10 万行" data-node-tag="先跑通流程" data-node-context="④ 镜像词表到本地 · 让语料的字段真的能跑起来">
+          <title>本地种子 · seed-realtime · 真实 18 字段 10 万行 · ④ 镜像词表到本地 · 让语料的字段真的能跑起来 · 先跑通流程</title>
+          <rect x="900" y="524" width="340" height="140" rx="6" class="c-mask"/>
+          <rect x="900" y="524" width="340" height="140" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(906 530) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <rect class="nb-badge" x="1168.0" y="532" width="60.0" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="1198.0" y="543" font-size="8" text-anchor="middle">先跑通流程</text>
+          <text class="nb-title" x="934" y="545" font-size="10.5" font-weight="600">本地种子</text>
+          <line class="nb-hr" x1="908" y1="552" x2="1232" y2="552"/>
+          <text class="nb-k" x="912" y="590" font-size="9">做法</text><text class="nb-v" x="964.2" y="590" font-size="9">从真实 Catalog 生成 DDL 再灌数</text>
+          <text class="nb-k" x="912" y="604" font-size="9">规模</text><text class="nb-v" x="964.2" y="604" font-size="9">10 万用户 · 86.5 万关系行</text>
+          <text class="nb-k" x="912" y="618" font-size="9">数据权限</text><text class="nb-v" x="964.2" y="618" font-size="9">3 组 4 个客户经理</text>
+          <text class="nb-note" x="912" y="656" font-size="8">验我们自己的 18 个字段；也是 ③ 的第一批靶子</text>
+        </g>
+
+        <g id="udp-parity-harness-node-cases" data-nb="1" data-node-id="cases" data-node-label="③ 生成 case" tabindex="0" role="button" aria-label="Focus ③ 生成 case, build-cases · 语料 → 一对可跑的 SQL, ③ 结果级对拍 · 同一份数据上比 uid 集合" aria-pressed="false" data-node-kind="backend" data-node-sublabel="build-cases · 语料 → 一对可跑的 SQL" data-node-tag="1417 对" data-node-context="③ 结果级对拍 · 同一份数据上比 uid 集合">
+          <title>③ 生成 case · build-cases · 语料 → 一对可跑的 SQL · ③ 结果级对拍 · 同一份数据上比 uid 集合 · 1417 对</title>
+          <rect x="60" y="764" width="340" height="140" rx="6" class="c-mask"/>
+          <rect x="60" y="764" width="340" height="140" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(66 770) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <rect class="nb-badge" x="342.4" y="772" width="45.6" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="365.2" y="783" font-size="8" text-anchor="middle">1417 对</text>
+          <text class="nb-title" x="94" y="785" font-size="10.5" font-weight="600">③ 生成 case</text>
+          <line class="nb-hr" x1="68" y1="792" x2="392" y2="792"/>
+          <text class="nb-k" x="72" y="820.5" font-size="9">输入</text><text class="nb-v" x="113.4" y="820.5" font-size="9">翻译后的草稿 + Catalog</text>
+          <text class="nb-k" x="72" y="834.5" font-size="9">输出</text><text class="nb-v" x="113.4" y="834.5" font-size="9">一对可跑的 SQL（写盘）</text>
+          <text class="nb-k" x="72" y="848.5" font-size="9">我们侧</text><text class="nb-v" x="113.4" y="848.5" font-size="9">compile() 的 uidsSql</text>
+          <text class="nb-code" x="72" y="867.5" font-size="7.5">ourSql / udpSql 两个字段</text>
+          <text class="nb-note" x="72" y="896" font-size="8">两侧都要先拔 UDF、对齐时间基准，否则没法在一个库上跑</text>
+        </g>
+
+        <g id="udp-parity-harness-node-runner" data-nb="1" data-node-id="runner" data-node-label="③ 对拍" tabindex="0" role="button" aria-label="Focus ③ 对拍, run-parity · 两侧都跑 · 比 uid 集合, ③ 结果级对拍 · 同一份数据上比 uid 集合" aria-pressed="false" data-node-kind="backend" data-node-sublabel="run-parity · 两侧都跑 · 比 uid 集合" data-node-tag="1209 一致" data-node-context="③ 结果级对拍 · 同一份数据上比 uid 集合">
+          <title>③ 对拍 · run-parity · 两侧都跑 · 比 uid 集合 · ③ 结果级对拍 · 同一份数据上比 uid 集合 · 1209 一致</title>
+          <rect x="480" y="764" width="340" height="140" rx="6" class="c-mask"/>
+          <rect x="480" y="764" width="340" height="140" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(486 770) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <rect class="nb-badge" x="752.8" y="772" width="55.2" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="780.4" y="783" font-size="8" text-anchor="middle">1209 一致</text>
+          <text class="nb-title" x="514" y="785" font-size="10.5" font-weight="600">③ 对拍</text>
+          <line class="nb-hr" x1="488" y1="792" x2="812" y2="792"/>
+          <text class="nb-k" x="492" y="830" font-size="9">做法</text><text class="nb-v" x="533.4" y="830" font-size="9">两侧都跑 · 比 uid 集合</text>
+          <text class="nb-k" x="492" y="844" font-size="9">结果</text><text class="nb-v" x="533.4" y="844" font-size="9">85.3% 一致 · 191 待分诊 · 17 报错</text>
+          <text class="nb-k" x="492" y="858" font-size="9">集中区</text><text class="nb-v" x="533.4" y="858" font-size="9">关系明细 138 · 关系计数 45</text>
+          <text class="nb-note" x="492" y="896" font-size="8">17 条报错暴露了一个真问题：array 字段该用 find_in_set</text>
+        </g>
+
+        <g id="udp-parity-harness-node-doris" data-nb="1" data-node-id="doris" data-node-label="本地 Doris" tabindex="0" role="button" aria-label="Focus 本地 Doris, crm_insight · 镜像与种子同住, ③ 结果级对拍 · 同一份数据上比 uid 集合" aria-pressed="false" data-node-kind="database" data-node-sublabel="crm_insight · 镜像与种子同住" data-node-tag="FE 9030" data-node-context="③ 结果级对拍 · 同一份数据上比 uid 集合">
+          <title>本地 Doris · crm_insight · 镜像与种子同住 · ③ 结果级对拍 · 同一份数据上比 uid 集合 · FE 9030</title>
+          <rect x="900" y="764" width="340" height="140" rx="6" class="c-mask"/>
+          <rect x="900" y="764" width="340" height="140" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(906 770) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <rect class="nb-badge" x="1182.4" y="772" width="45.6" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="1205.2" y="783" font-size="8" text-anchor="middle">FE 9030</text>
+          <text class="nb-title" x="934" y="785" font-size="10.5" font-weight="600">本地 Doris</text>
+          <line class="nb-hr" x1="908" y1="792" x2="1232" y2="792"/>
+          <text class="nb-k" x="912" y="830" font-size="9">库</text><text class="nb-v" x="975.0" y="830" font-size="9">crm_insight</text>
+          <text class="nb-k" x="912" y="844" font-size="9">住着</text><text class="nb-v" x="975.0" y="844" font-size="9">镜像表 + 真实字段种子</text>
+          <text class="nb-k" x="912" y="858" font-size="9">为什么本地</text><text class="nb-v" x="975.0" y="858" font-size="9">想怎么灌就怎么灌</text>
+          <text class="nb-note" x="912" y="896" font-size="8">共享测试库只能读，跑对拍会互相干扰</text>
+        </g>
+
+        <!-- Connection labels -->
+
+
+
+
+
+
+
+
+
+        <!-- Legend -->
+        <g data-legend data-legend-bridge>
+          <text x="40" y="956" class="t-primary" font-size="12" font-weight="650">Legend</text>
+          <g data-legend-semantic-kind="backend" data-legend-kind="backend" data-legend-label="Backend" data-legend-x="40" data-legend-baseline="976" data-legend-width="78">
+            <rect x="40" y="967" width="16" height="10" rx="2.5" class="c-backend" stroke-width="1"/>
+            <text x="62" y="976" class="t-muted" font-size="10" font-weight="500">Backend</text>
+          </g>
+          <g data-legend-semantic-kind="database" data-legend-kind="database" data-legend-label="Database" data-legend-x="140" data-legend-baseline="976" data-legend-width="83">
+            <rect x="140" y="967" width="16" height="10" rx="2.5" class="c-database" stroke-width="1"/>
+            <text x="162" y="976" class="t-muted" font-size="10" font-weight="500">Database</text>
+          </g>
+          <g data-legend-semantic-kind="external" data-legend-kind="external" data-legend-label="External" data-legend-x="245" data-legend-baseline="976" data-legend-width="83">
+            <rect x="245" y="967" width="16" height="10" rx="2.5" class="c-external" stroke-width="1"/>
+            <text x="267" y="976" class="t-muted" font-size="10" font-weight="500">External</text>
+          </g>
+        </g>
+      </svg></div>
+      <figcaption><mark class="mk-blue">四步是「先量 → 再判 → 最后跑」三件事</mark>。上面一行是 ①② 只碰协议文本，下面一行是 ④③ 要真的建表跑数。点零件看它的输入输出与数字。</figcaption>
+      <div class="pano-ui"></div>
+      <p class="arch-hint"><span class="idle">点头上的任意一个框看它的关系，点区域标题看分组含义，点零件看完整归属路径</span><span class="focused">再点一次空白处取消</span></p>
+    </figure><p>图上没有、但一直在场的四个东西（第一篇后面会逐个用到）：</p>
+<table>
+<thead>
+<tr>
+<th>在场者</th>
+<th>它是什么</th>
+<th>真实长相</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>协议包</td>
+<td>我们自己的 <code>@audience-dsl</code> 包 —— 定义「条件怎么写、操作符有哪些」</td>
+<td>翻译器从它取 <code>Ops</code> 表</td>
+</tr>
+<tr>
+<td>编译器</td>
+<td><code>@audience-sql-builder</code>：把草稿编译成 SQL</td>
+<td><code>compile(query, {actor, catalog, today, now})</code></td>
+</tr>
+<tr>
+<td>真实 Catalog</td>
+<td>BFF 的 <code>GET /api/crowd/catalog</code>：字段 → 物理表名列名的映射</td>
+<td><code>universeTable = crm_portrait_realtime</code> · 18 特征在 <code>user_portrait_wide</code></td>
+</tr>
+<tr>
+<td>本地种子</td>
+<td>我自己造的 10 万行测试数据（见 07 节）</td>
+<td><code>user_portrait_wide</code> 10 万行 + 8 张关系表</td>
+</tr>
+</tbody>
+</table>
+<h2 id="为什么要翻译而不是直接比两条-sql"><span class="num">03</span>为什么要翻译，而不是直接比两条 SQL</h2>
+<p>现网记录里已经有它自己的 SQL，我也有自己的输出。最直觉的做法是抓两条直接 diff —— 但那样<strong>永远不相等</strong>，因为两边把条件变成 SQL 的思路根本不同：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>层面</th><th>现网：条件 → uid 集合</th><th>我们：条件 → 谓词</th></tr></thead><tbody><tr><th>一片叶子</th><td data-label="现网：条件 → uid 集合"><code>select uid from 表 where (条件)</code> —— 结果是一批人</td><td data-label="我们：条件 → 谓词"><code>列 比较符 值</code> —— 结果是一个判断</td></tr><tr><th>AND</th><td data-label="现网：条件 → uid 集合">嵌套 <code>group by uid having count = N</code></td><td data-label="我们：条件 → 谓词">直接 <code>AND</code></td></tr><tr><th>OR</th><td data-label="现网：条件 → uid 集合"><code>union all</code> + <code>having count = N</code></td><td data-label="我们：条件 → 谓词"><code>(… OR …)</code></td></tr><tr><th>否定</th><td data-label="现网：条件 → uid 集合"><code>uid not in (select uid …)</code></td><td data-label="我们：条件 → 谓词"><code>NOT EXISTS</code> 相关子查询</td></tr></tbody></table></div><p>真实的两条 SQL 摆在一起看（同一条 OR 条件，现网 <code>1191481</code>）：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-sql">-- 现网：每个条件是「一批人」，于是 OR 就是两批人并起来
+select uid from (
+  select uid from niuniu_user_security_special_watchlist where object_id in (…) group by uid
+  union all
+  select uid from futu_hk_user_security_position        where object_id in (…) group by uid
+) ct1 group by uid
+
+-- 我们：每个条件是「一个判断」，于是 OR 就是同一段 WHERE 里的 OR
+SELECT u.uid FROM user_portrait u WHERE (
+  u.uid IN (SELECT uid FROM 关系表A WHERE object_id IN (…))
+  OR u.uid IN (SELECT uid FROM 关系表B WHERE object_id IN (…)))
+</code></pre></div>
+<p><mark class="mk-blue">所以「直接 diff」只有两种结局：全红，或者一条条手工认定「等价」—— 后者等于用眼睛当编译器。</mark></p>
+<p>分成两层之后就好办了：</p>
+<table>
+<thead>
+<tr>
+<th>层</th>
+<th>比什么</th>
+<th>能证明什么</th>
+<th>在哪篇</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>谓词级</td>
+<td><strong>单叶子</strong>的 WHERE 片段，归一化后逐字比</td>
+<td>「字段 + 操作符 + 值」这层编译对不对</td>
+<td>第二篇</td>
+</tr>
+<tr>
+<td>结果级</td>
+<td>两侧 SQL 在同一份数据上跑出来的 <strong>uid 集合</strong></td>
+<td>OR / 否定 / 计数 这层语义对不对</td>
+<td>第三篇</td>
+</tr>
+</tbody>
+</table>
+<p>两层都要求<strong>先把现网条件翻成我的草稿</strong> —— 因为「我的 SQL」只能从我的草稿编译出来。这就是 ① 存在的理由。</p>
+<h2 id="现网条件的三种形状都是真实记录"><span class="num">04</span>现网条件的三种形状（都是真实记录）</h2>
+<div class="cards" data-cols="1"><div class="ccard tone-green">
+          <span class="tag tone-green">crowdFilter · crowd</span>
+          <h4>现代形状（主流）</h4>
+          
+          <div class="cbody"><div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-json">{&quot;main&quot;:{&quot;logic&quot;:&quot;AND&quot;,&quot;conditions&quot;:[
+  {&quot;type&quot;:&quot;portrait&quot;,
+   &quot;condition&quot;:{&quot;op&quot;:&quot;=&quot;,&quot;name&quot;:&quot;futu_hk_account_basic_customer_type&quot;,&quot;value&quot;:&quot;Organization&quot;}}]}}
+</code></pre></div>
+<p><code>type</code> 在外、真正的条件行在 <code>condition.items</code> 里。这是我遇到最多的一种。</p>
+</div>
+          
+        </div><div class="ccard tone-amber">
+          <span class="tag tone-amber">1527 处</span>
+          <h4>老一版形状</h4>
+          
+          <div class="cbody"><div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-json">{&quot;key&quot;:&quot;futu_hk_account_status&quot;,&quot;val&quot;:[&quot;1&quot;],&quot;cmp&quot;:&quot;=&quot;,&quot;op&quot;:&quot;AND&quot;,
+ &quot;condition&quot;:[...],&quot;type&quot;:&quot;&quot;,&quot;filter_type&quot;:2}
+</code></pre></div>
+<p>字段名是 <code>key</code> / <code>val</code> / <code>cmp</code>；分组看 <code>op</code> + <code>condition</code>，叶子看 <code>cmp</code> + <code>val</code>，<code>type</code> 还会写成大写 <code>Portrait</code>。</p>
+</div>
+          
+        </div><div class="ccard tone-muted">
+          <span class="tag tone-muted">很少</span>
+          <h4>文档里的简写</h4>
+          
+          <div class="cbody"><div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-json">{&quot;type&quot;:&quot;portrait&quot;,&quot;condition&quot;:{&quot;op&quot;:&quot;IN&quot;,&quot;name&quot;:&quot;niuniu_register_platform&quot;,&quot;value&quot;:[0]}}
+</code></pre></div>
+<p>没有 <code>items</code> 这一层 —— 文档示例用它，但现网记录里极少见。</p>
+</div>
+          
+        </div></div><p>同一张表里混着三代前端的记录，所以翻译器要先 <code>detect()</code> 判方言再走两条路径。</p>
+<h2 id="映射把现网的写法翻成我们的写法"><span class="num">05</span>映射：把现网的写法翻成我们的写法</h2>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>维度</th><th>现网怎么写</th><th>我们怎么写</th><th>依据</th></tr></thead><tbody><tr><th>等值</th><td data-label="现网怎么写"><code>&quot;op&quot;:&quot;=&quot;</code></td><td data-label="我们怎么写"><code>eq</code></td><td data-label="依据">文档操作符表</td></tr><tr><th>多值</th><td data-label="现网怎么写"><code>&quot;op&quot;:&quot;IN&quot;</code> / <code>&quot;NOT IN&quot;</code></td><td data-label="我们怎么写"><code>in</code> / <code>not_in</code></td><td data-label="依据">同上</td></tr><tr><th>相对时间</th><td data-label="现网怎么写"><code>dateType:'relative'</code> + <code>op:'&gt;='</code> + <code>dateUnit:'day'</code></td><td data-label="我们怎么写"><code>dateType:'relative'</code> + <code>op:'gte'</code> + <code>dateUnit:'day'</code></td><td data-label="依据">它源码里 <code>&gt;=</code>/<code>&gt;</code> 都归一成「最近 N」</td></tr><tr><th>含不含当天</th><td data-label="现网怎么写"><code>latestIncludeToday: 1</code> 才算含当天</td><td data-label="我们怎么写"><code>includeToday: true</code> 才是滚动窗口</td><td data-label="依据">源码只看真值</td></tr><tr><th>计数的客体</th><td data-label="现网怎么写">「次数」没有客体</td><td data-label="我们怎么写">times 不带 objects</td><td data-label="依据">源码注释 + 语料 0 条</td></tr></tbody></table></div><p>一个真实的翻译对照（record <code>1235865</code> 的第二片叶子）：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">现网： {&quot;relationName&quot;:&quot;alex_ftest_relation_1778490595&quot;,&quot;op&quot;:&quot;NOT IN&quot;,&quot;value&quot;:[&quot;k1&quot;],&quot;formulaType&quot;:1}
+            ↓ 翻译
+我们： {&quot;type&quot;:&quot;relation&quot;,&quot;relation&quot;:&quot;alex_ftest_relation_1778490595&quot;,
+        &quot;formula&quot;:&quot;detail&quot;,&quot;op&quot;:&quot;not_in&quot;,&quot;objects&quot;:[&quot;k1&quot;]}
+</code></pre></div>
+<p>翻完立刻用我们自己的 <code>buildQuery()</code> 过一遍 —— 这一步是免费的自动化检查：<strong>翻出来的草稿连结构校验都过不了，就说明映射写错了</strong>。第一版有 15 条过不了，全是映射 bug。</p>
+<h2 id="五个坑每个都是真实记录"><span class="num">06</span>五个坑（每个都是真实记录）</h2>
+<div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-red">坑 ①</span>
+            <span class="name">值也是数组</span>
+            <span class="spacer"></span>
+            <span class="tag tone-red">1074 处</span>
+          </div>
+          
+          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>{&quot;op&quot;: &quot;gte&quot;, &quot;value&quot;: [&quot;1&quot;]}
+{&quot;op&quot;: &quot;!=&quot;, &quot;value&quot;: [1]}
+</pre></div>
+          <p class="jnote bad">现网把<strong>比较符</strong>的值也落成数组 —— <code>gte</code> 带 <code>[&quot;1&quot;]</code>。而我们的 DSL 是强类型：<code>gte</code> 要标量、<code>in</code> 要数组。</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">比较符取第一个元素；<code>=</code>/<code>!=</code> 配多值时翻成 in / not_in</span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-amber">坑 ②</span>
+            <span class="name">EXIST 必须带值</span>
+            <span class="spacer"></span>
+            <span class="tag tone-amber">2 处</span>
+          </div>
+          
+          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>{&quot;op&quot;: &quot;EXIST&quot;, &quot;name&quot;: &quot;plan_external_id&quot;,
+ &quot;value&quot;: [&quot;1000450&quot;, &quot;1000449&quot;, &quot;1000451&quot;]}
+</pre></div>
+          <p class="jnote bad">我按「无值操作符」把 value 丢了，结果我们的 exist 要一个数组（主键属性要命中的值）→ 结构校验直接拒。</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">只有 eq_default / neq_default 无值；exist / not_exist 要带</span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-red">坑 ③</span>
+            <span class="name">关系叶子用 relationName</span>
+            <span class="spacer"></span>
+            <span class="tag tone-red">228 处</span>
+          </div>
+          
+          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>{&quot;type&quot;:&quot;relation&quot;,&quot;condition&quot;:{&quot;relationName&quot;:&quot;…&quot;,&quot;op&quot;:&quot;IN&quot;}}
+</pre></div>
+          <p class="jnote bad">我的「挑条件行」函数只认 name，而关系叶子用的是 relationName → 228 条关系条件全被判成「形状不认识」，关系明细叶子从 686 掉到 914 才补回来。</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">同时认 name 与 relationName</span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-violet">坑 ④</span>
+            <span class="name">老一版前端</span>
+            <span class="spacer"></span>
+            <span class="tag tone-violet">1527 处</span>
+          </div>
+          
+          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>{&quot;key&quot;:&quot;futu_hk_account_status&quot;,&quot;val&quot;:[&quot;1&quot;],&quot;cmp&quot;:&quot;=&quot;,&quot;type&quot;:&quot;Portrait&quot;}
+</pre></div>
+          <p class="jnote bad">不认它就等于把 1527 处语料当不存在 —— 翻译率卡在 42% 上不去。</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">加 legacy 路径并在报告里单独标方言</span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-green">坑 ⑤</span>
+            <span class="name">英文与中文混排的 operator</span>
+            <span class="spacer"></span>
+            <span class="tag tone-green">收尾</span>
+          </div>
+          
+          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>{&quot;op&quot;:&quot;EXISTENCE&quot;}  vs  {&quot;op&quot;:&quot;EXIST&quot;}
+</pre></div>
+          <p class="jnote">现网在不同记录里混用 EXIST / EXISTENCE，映射表要两种都认。</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">映射表里补齐同义词</span>
+      <span class="stem"></span><span class="head"></span>
+    </div><p>修完这五个，翻译率 <strong>42.4% → 52.5%</strong>，<code>buildQuery</code> 通过率 <strong>98.9% → 100%</strong>。</p>
+<h2 id="两个被追问的概念本地种子-镜像表"><span class="num">07</span>两个被追问的概念：本地种子 / 镜像表</h2>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>概念</th><th>它是什么</th><th>怎么造出来的</th><th>多少量</th></tr></thead><tbody><tr><th>本地种子（seed-realtime）</th><td data-label="它是什么">我按<strong>真实 Catalog</strong> 建表灌的一批测试数据 —— 用我们自己那 18 个特征和 8 条关系</td><td data-label="怎么造出来的">① 从 Catalog 生成 DDL（14 个特征列 + 8 张关系表）→ ② 按字段形状生成值 → ③ 批量 INSERT</td><td data-label="多少量">10 万用户 · 86.5 万关系行 · 7 分钟</td></tr><tr><th>镜像表（seed-parity）</th><td data-label="它是什么">我按<strong>现网语料的词表</strong>建的另一批 —— 语料里出现过什么字段，就建什么列、灌什么值</td><td data-label="怎么造出来的">① 从语料抽词表（98 字段 / 28 关系 / 真实取值）→ ② 生成合成 Catalog → ③ 建表灌数</td><td data-label="多少量">10,000 uid × 92 列 · 28 张关系表 · 19.4 万行</td></tr></tbody></table></div><p>两张表的差别就是「按谁的词表」：</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>本地种子</th>
+<th>镜像表</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>词表来源</td>
+<td>我们真实的 Catalog（18 字段）</td>
+<td>现网语料里出现过的字段（98 个）</td>
+</tr>
+<tr>
+<td>表名</td>
+<td><code>crm_portrait_realtime</code> + <code>user_portrait_wide</code></td>
+<td><code>user_portrait</code>（跟现网同名）</td>
+</tr>
+<tr>
+<td>用来干什么</td>
+<td>验<strong>我们自己的字段</strong>（第一期上线的那些）</td>
+<td>验<strong>编译器语义</strong>（关系 / OR / 否定 / 计数）</td>
+</tr>
+<tr>
+<td>一句话</td>
+<td>「我们的数据长这样」</td>
+<td>「现网的条件能在本地跑起来」</td>
+</tr>
+</tbody>
+</table>
+<p><strong>值是怎么造的</strong>（三条规则，都是为了让边界被测到）：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">时间戳列：0（从未发生，20%）· NULL（10%）· 最近 30 天（30%）· 30~365 天（25%）· 一年以上（15%）
+数值列：  0（兜底，15%）· NULL（10%）· 小值 · 大值 · 边界值
+枚举列：  从真实值集合里取（如 day_count 的 1/7/30/90/180/365/当季/历史至今）
+镜像表额外：**必须包含语料里真实出现过的取值**（否则条件命中不到行）
+</code></pre></div>
+<h2 id="输入输出与命令"><span class="num">08</span>输入输出与命令</h2>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>环节</th><th>输入</th><th>输出</th></tr></thead><tbody><tr><th>取语料</th><td data-label="输入">现网 MySQL 的 sql_gen_record</td><td data-label="输出">corpus.sample.json（6500 条）</td></tr><tr><th>翻译</th><td data-label="输入">语料 + @audience-dsl</td><td data-label="输出">每条记录的草稿 + notes（跳过/降级原因）</td></tr><tr><th>报告</th><td data-label="输入">同上</td><td data-label="输出">翻译率 / 叶子分布 / 跳过原因 / buildQuery 失败原因</td></tr><tr><th>看样本</th><td data-label="输入">某个失败原因</td><td data-label="输出">该原因下的原始条件 JSON 片段</td></tr></tbody></table></div><div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-bash">node dump-corpus.mjs 2000                                                  # 抽语料（在数据侧那个仓）
+node scripts/udp-parity/translate-report.mjs --input corpus.sample.json     # 覆盖率报告
+node scripts/udp-parity/translate-samples.mjs --input corpus.sample.json --reason relation-malformed
+</code></pre></div>
+<p><code>Translator</code> 是纯函数式的类：<code>translateQuery(input)</code> 返回草稿，<code>notes</code> 数组记录每个跳过/降级点。<strong>把翻译和判定分开</strong>，②③ 才能复用同一份翻译结果。</p>
+<h2 id="数字与结论"><span class="num">09</span>数字与结论</h2>
+<div class="summary">
+      <h3 id="第-①-步的结论">第 ① 步的结论</h3>
+      <ul>
+<li>语料 <strong>6500 条 → 翻译出条件树 3415 条（52.5%）</strong>，其中 <code>buildQuery</code> 通过 <strong>100%</strong></li>
+<li>按类别：crowdFilter <strong>73.6%</strong> · crowd <strong>67.8%</strong> · tag <strong>31.5%</strong> · segment <strong>0%</strong></li>
+<li>叶子：portrait <strong>3806</strong> · uid <strong>1061</strong> · 关系明细 <strong>914</strong> · 相对时间 <strong>522</strong> · 关系计数 <strong>127</strong></li>
+<li>翻不过去的主因是「我们不支持的叶子」（tag / crowd / event / rawSql 共 <strong>6857</strong> 处），不是翻译器不够用</li>
+<li>segment 整个类别 0%：它是标签分桶的形状，不属于圈选，整体排除</li>
+</ul>
+
+    </div><p>下一步是第二篇：只取「<strong>单叶子 + 画像 + 无跳过叶子</strong>」的 405 条，把两侧谓词归一化后逐字比 —— 第一次拿现网当标准答案。</p>
+<h2 id="自测"><span class="num">10</span>自测</h2>
+<div class="quiz"><details>
+        <summary>「谓词」和「uid 集合」这两种编译方式，差别到底在哪？</summary>
+        <div class="a"><p>谓词是 SQL 里 WHERE 后面的一个判断（<code>列 比较符 值</code>），它本身不产出人；
+uid 集合是一条完整的子查询（<code>select uid from 表 where …</code>），它产出一批人。
+现网走的是后者，我走的是前者 —— 所以 OR 在现网是「两批人并起来」（<code>union all</code>），
+在我这里就是同一段 WHERE 里的 <code>... OR ...</code>。语义可以相同，文本必然不同。</p>
+</div>
+      </details><details>
+        <summary>为什么这一步只比「单叶子 + 画像 + 无跳过叶子」的记录？</summary>
+        <div class="a"><p>① 单叶子：多叶子时现网用 <code>union all</code> + <code>having count = N</code> 表达 AND/OR，我是单条 WHERE，文本没法对应；
+② 画像：关系条件现网写成 <code>uid in (select uid from 关系表 …)</code>，我是 <code>NOT EXISTS</code> 子查询，形状不同；
+③ 无跳过叶子：如果记录里有我没翻的叶子（tag / crowd / event / rawSql），现网的 SQL 里还带着它，
+比出来的差异全是它造成的。三条都满足的谓词，两边应当是同一件事。</p>
+</div>
+      </details><details>
+        <summary>本地种子和镜像表，为什么要造两张不同的表？</summary>
+        <div class="a"><p>因为要验的东西不同。<strong>本地种子</strong>按我们真实的 Catalog 造（18 个特征），用来验我们自己的字段口径；
+<strong>镜像表</strong>按现网语料的词表造（98 个字段、28 张关系表），让语料里的条件能在本地真的跑起来 ——
+后者才是验 OR / 否定 / 计数这些语义的前提。两张表名字与列都不同，互不干扰。</p>
+</div>
+      </details></div>
+
+    <footer>
+      <span>把现网条件翻成我们的协议：对拍第 ① 步</span>
+      <span>最后更新 2026-10-15 · 单文件可离线打开</span>
+    </footer>
+  </main>
+</div>
+
+<script src="../../assets/app.js?v=c02d3f4a26"></script>
+</body>
+</html>

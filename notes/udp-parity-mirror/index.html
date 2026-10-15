@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-has-toc="1">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>把 UDP 的词表镜像到本地：让语料真的跑起来</title>
+<meta name="description" content="上一轮对拍跑通了却没测到东西：语料里九成字段不在我们的 18 个特征里。这篇讲怎么从语料里抽出词表（98 字段 / 28 关系 / 真实取值），据此生成合成 Catalog 并在本地建表灌数，把可跑 case 从 86 对提到 1417 对、一致率 85.3%，并且第一次用数据抓出编译器的一条真实差异（array 字段的 find_in_set vs array_contains）。" />
+<link rel="stylesheet" href="../../assets/theme.css?v=b918ec5c83" />
+  <link rel="stylesheet" href="../../assets/blocks.css?v=cad5b999c1" />
+  <link rel="stylesheet" href="../../assets/archify-embed.css?v=68fec0b81b" />
+</head>
+<body>
+<div id="progress"></div>
+<div id="tocScrim"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
+    <a class="brand" href="../../index.html"><span class="dot"></span>知识笔记</a>
+    
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="toc" id="toc">
+      <p class="toc-title">目录</p>
+      <a href="../../index.html" class="sub">← 全部笔记</a>
+      <a href="#缺口有多大数字">缺口有多大（数字）</a>
+      <a href="#三步抽词表-建表灌数-重新生成-case">三步：抽词表 → 建表灌数 → 重新生成 case</a>
+      <a href="#建出来什么灌了多少">建出来什么、灌了多少</a>
+      <a href="#三个坑">三个坑</a>
+      <a href="#结果以及一个真问题的浮现">结果，以及一个真问题的浮现</a>
+      <a href="#第-④-步的结果" class="sub">第 ④ 步的结果</a>
+      <a href="#边界与代价">边界与代价</a>
+      <a href="#自测">自测</a>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow">● 从零理解 · 对拍 harness ④</span>
+      <h1>把 UDP 的词表镜像到本地：让语料真的跑起来</h1>
+      <p class="lede">上一轮对拍跑通了却没测到东西：语料里九成字段不在我们的 18 个特征里。这篇讲怎么从语料里抽出词表（98 字段 / 28 关系 / 真实取值），据此生成合成 Catalog 并在本地建表灌数，把可跑 case 从 86 对提到 1417 对、一致率 85.3%，并且第一次用数据抓出编译器的一条真实差异（array 字段的 find_in_set vs array_contains）。</p>
+    </div>
+
+
+    <div class="provenance"><span><b>来源</b> audience_web/scripts/udp-parity/build-parity-vocab.mjs（词表 + 合成 Catalog，本次工作区） · audience_web/scripts/udp-parity/build-cases.mjs 的 repairCase()：按叶子修形状并同步转值类型 · crm-dsl-stru/doris/seed-parity.mjs：建表 + 灌种子（取值含语料真实值、uid 字面量进种子） · crm-dsl-stru/doris/run-parity.mjs 的形态归类统计 · 实测输出：case 86 → 1417；一致 1209（85.3%）· 不一致 191（关系明细 138 / 关系计数 45 / 画像 8）· 报错 17（array_contains 函数签名） · 边界与待办：docs/udp-sql-diff.md §8.2-A（array 存储形态）</span><span><b>生成</b> 2026-10-15</span><span><b>模型</b> pi (claude-opus-4-5)</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">对拍</span> <span class="tag tone-muted">UDP 对照</span> <span class="tag tone-muted">镜像库</span> <span class="tag tone-muted">合成 Catalog</span> <span class="tag tone-muted">客群洞察</span></span></div>
+
+<p>第三篇跑完第一轮，结论是：<strong>对拍跑通了，但只测到 7 条真东西。</strong> 根因很直接 —— 语料用的字段九成以上不在我们的 18 个特征里。这一篇讲怎么把这个限制拆掉。</p>
+<p>要看清楚缺什么，最直接的办法是看一条<strong>跑不起来</strong>的真实记录（现网 <code>tag 1235865</code> 的那条关系条件）：</p>
+<div class="callout tone-blue">
+      <span class="ic">📦</span>
+      <div><p><strong>现网记录里引用了一个字段/关系，我的库里没有：</strong></p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-json">{&quot;relationName&quot;:&quot;niuniu_user_security_special_watchlist&quot;,&quot;op&quot;:&quot;IN&quot;,&quot;value&quot;:[&quot;75900664355662&quot;]}
+</code></pre></div>
+<p>翻译没问题（我能翻成 <code>{relation:&quot;niuniu_user_security_special_watchlist&quot;, formula:&quot;detail&quot;, op:&quot;in&quot;}</code>），
+但一编译就报 <code>UNKNOWN_RELATION</code>，就算硬编出 SQL 来，跑的时候也会报：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">Unknown column 'futu_hk_account_basic_customer_type' in 'table list'
+</code></pre></div>
+<p><mark class="mk-blue">因为本地库里根本没有这些字段和关系表。</mark> 这一篇要做的，就是<strong>把现网用到的词表搬一份到本地</strong>：
+语料里出现过什么字段、什么关系、什么取值，我就在本地建出对应的表和数。</p>
+</div>
+    </div><h2 id="缺口有多大数字"><span class="num">01</span>缺口有多大（数字）</h2>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>事实</th><th>数字</th><th>后果</th></tr></thead><tbody><tr><th>语料里的画像字段</th><td data-label="数字">几百个（我抽到的词表里 98 个）</td><td data-label="后果">我的 Catalog 只有 18 个 → 大部分记录编译就过不了</td></tr><tr><th>语料里的关系</th><td data-label="数字">28 张</td><td data-label="后果">我只有 8 张，而且现网记录里这 8 张几乎没被用过</td></tr><tr><th>本地已有的种子表</th><td data-label="数字">只建了真实词表的表（10 万行）</td><td data-label="后果">现网 SQL 引用的列在本地不存在，跑起来直接报「未知列」</td></tr></tbody></table></div><div class="callout tone-red">
+      <span class="ic">🩸</span>
+      <div><p><strong>这个缺口是可量化的</strong>：<code>字段不在我们的 Catalog</code> 一条筛选，就刷掉了 <strong>2727 / 6500</strong> 条语料。</p>
+<p>而被刷掉的恰恰是<strong>最有价值的那批</strong>：关系、OR / 否定 / 计数、多叶组合 ——
+那些只有跑数才能验的语义，全藏在这些记录里。</p>
+</div>
+    </div><h2 id="三步抽词表-建表灌数-重新生成-case"><span class="num">02</span>三步：抽词表 → 建表灌数 → 重新生成 case</h2>
+<div class="flowd has-groups" data-flow data-edges="[{&quot;from&quot;:&quot;vocab&quot;,&quot;to&quot;:&quot;cat&quot;,&quot;tone&quot;:&quot;amber&quot;},{&quot;from&quot;:&quot;cat&quot;,&quot;to&quot;:&quot;seed&quot;,&quot;label&quot;:&quot;决定表结构&quot;,&quot;tone&quot;:&quot;green&quot;},{&quot;from&quot;:&quot;seed&quot;,&quot;to&quot;:&quot;cases&quot;,&quot;label&quot;:&quot;表和数据就位&quot;},{&quot;from&quot;:&quot;cases&quot;,&quot;to&quot;:&quot;run&quot;,&quot;label&quot;:&quot;两侧 SQL → Doris&quot;}]" style="--flow-marker:url(#fa-1)">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa-1" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"><div class="fgroup tone-amber" data-group-box="crm">
+          <span class="fgroup-label">从语料里抽</span>
+        </div><div class="fgroup tone-green" data-group-box="local">
+          <span class="fgroup-label">本地建</span>
+        </div></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-green" data-id="vocab" data-group="crm">
+              
+              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5L3 8l3 4.5M10 3.5L13 8l-3 4.5"/></svg>
+              <b>① 抽词表</b>
+              <small>98 字段 / 28 关系 / 真实取值</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-red" data-id="cat" data-group="local">
+              
+              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2.2l4.8 1.9v4c0 2.9-2.1 4.8-4.8 5.7-2.7-.9-4.8-2.8-4.8-5.7v-4z"/></svg>
+              <b>合成 Catalog</b>
+              <small>表名按现网的说法</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="seed" data-group="local">
+              
+              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="8" cy="4.2" rx="5" ry="1.9"/><path d="M3 4.2v7.6c0 1.05 2.24 1.9 5 1.9s5-.85 5-1.9V4.2"/></svg>
+              <b>② 建表 + 灌数</b>
+              <small>10k × 92 列 + 28 张关系表</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="cases" data-group="local">
+              
+              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5L3 8l3 4.5M10 3.5L13 8l-3 4.5"/></svg>
+              <b>③ 重新生成 case</b>
+              <small>可跑 1417 对</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="run" data-group="local">
+              
+              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5L3 8l3 4.5M10 3.5L13 8l-3 4.5"/></svg>
+              <b>跑 + 比 uid 集合</b>
+              <small>一致 1209</small>
+            </div></div></div>
+      <div class="flegend"><span class="fleg-item tone-green">
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"
+                     stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5L3 8l3 4.5M10 3.5L13 8l-3 4.5"/></svg>
+                backend <em>3</em></span><span class="fleg-item tone-red">
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"
+                     stroke-linecap="round" stroke-linejoin="round"><path d="M8 2.2l4.8 1.9v4c0 2.9-2.1 4.8-4.8 5.7-2.7-.9-4.8-2.8-4.8-5.7v-4z"/></svg>
+                security <em>1</em></span><span class="fleg-item tone-violet">
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"
+                     stroke-linecap="round" stroke-linejoin="round"><ellipse cx="8" cy="4.2" rx="5" ry="1.9"/><path d="M3 4.2v7.6c0 1.05 2.24 1.9 5 1.9s5-.85 5-1.9V4.2"/></svg>
+                database <em>1</em></span></div>
+    </div><p>词表抽出来真实长这样（<code>parity-vocab.json</code> 里的三条）：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-json">{&quot;key&quot;:&quot;futu_hk_asset_basic_total_assets&quot;,
+ &quot;variableType&quot;:&quot;range&quot;,&quot;dataType&quot;:&quot;long&quot;,&quot;contentType&quot;:3,
+ &quot;ops&quot;:[&quot;=&quot;,&quot;&gt;&quot;,&quot;&lt;&quot;], &quot;values&quot;:[&quot;0&quot;,&quot;200&quot;,&quot;1000&quot;]}
+
+{&quot;key&quot;:&quot;niuniu_login_client_device_type&quot;,
+ &quot;variableType&quot;:&quot;enum&quot;,&quot;dataType&quot;:&quot;long&quot;,&quot;contentType&quot;:0,
+ &quot;ops&quot;:[&quot;IN&quot;,&quot;=&quot;], &quot;values&quot;:[&quot;11&quot;,&quot;12&quot;,&quot;23&quot;]}
+
+{&quot;key&quot;:&quot;alex_ftest_relation_1779177182&quot;, &quot;objects&quot;:[&quot;1&quot;], &quot;props&quot;:[
+   {&quot;key&quot;:&quot;attrr1&quot;,&quot;variableType&quot;:&quot;range&quot;,&quot;dataType&quot;:&quot;string&quot;,&quot;primary&quot;:false,&quot;values&quot;:[&quot;a&quot;,&quot;b&quot;]},
+   {&quot;key&quot;:&quot;attrr2&quot;,&quot;variableType&quot;:&quot;enum&quot;,&quot;dataType&quot;:&quot;string&quot;,&quot;primary&quot;:true,&quot;values&quot;:[&quot;x&quot;,&quot;y&quot;]}]}
+</code></pre></div>
+<p>三个设计决定（都是被坑出来的，见 04 节）：</p>
+<table>
+<thead>
+<tr>
+<th>决定</th>
+<th>为什么</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>表名跟现网一致（<code>user_portrait</code> + 关系名即表名）</td>
+<td>现网 SQL 不改表名就能直接跑，少一层映射就少一个出错点</td>
+</tr>
+<tr>
+<td>取值必须<strong>包含语料里真实出现过的值</strong></td>
+<td>否则 <code>object_id in ('00')</code>、<code>uid in (242077285)</code> 这类条件两边都命中不到行 → 都是空集 → 假一致</td>
+</tr>
+<tr>
+<td>行数只取 1 万（不是 10 万）</td>
+<td>字段多了 5 倍、关系多了 3 倍，先把流程跑通，需要更大样本再放大</td>
+</tr>
+</tbody>
+</table>
+<h2 id="建出来什么灌了多少"><span class="num">03</span>建出来什么、灌了多少</h2>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">== 建表（库 crm_insight）==
+  user_portrait（92 列）+ 28 张关系表
+
+== 灌种子（10000 个 uid，其中语料 uid 60 个）==
+  user_portrait: 10000 行
+  关系表合计: 194547 行
+
+完成。跳过 ct1（YYYYMMDD 日期列）字段 6 个：alex_ftest_character_1778315960, princetest2, …
+</code></pre></div>
+<p>建表 DDL 的头几行长这样（列名直接来自词表）：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-sql">CREATE TABLE crm_insight.user_portrait (
+  uid BIGINT NOT NULL,
+  futu_hk_account_status BIGINT NULL,
+  futu_hk_asset_basic_total_assets BIGINT NULL,
+  niuniu_login_client_device_type VARCHAR(128) NULL,
+  … 共 92 列 …
+) UNIQUE KEY(uid) DISTRIBUTED BY HASH(uid) BUCKETS 16
+</code></pre></div>
+<p>值也不是乱造的 —— 三条规则，目的是让<strong>边界真的被测到</strong>：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">时间戳列：0（从未发生，20%）· NULL（10%）· 最近 30 天（30%）· 30~365 天（25%）· 一年以上（15%）
+数值列：  0（兜底，15%）· NULL（10%）· 小值 · 大值 · 边界值
+枚举列：  从语料里观察到的取值里取（如 day_count 的 1/7/30/90/180/365/当季/历史至今）
+</code></pre></div>
+<h2 id="三个坑"><span class="num">04</span>三个坑</h2>
+<div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-red">坑 ①</span>
+            <span class="name">一个字段被两种操作符用</span>
+            <span class="spacer"></span>
+            <span class="tag tone-red">656 → 11</span>
+          </div>
+          
+          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>同一个字段：{&quot;op&quot;:&quot;IN&quot;,&quot;value&quot;:[&quot;0&quot;,&quot;1&quot;]}   ← 按这个推成 enum
+同一个字段：{&quot;op&quot;:&quot;&gt;=&quot;,&quot;value&quot;:[&quot;1&quot;]}        ← enum 不允许比较符 → 编译报错
+</pre></div>
+          <p class="jnote bad">形状是按<strong>整份语料</strong>推的（一个字段一个形状），但同一个字段在不同记录里可能被不同操作符用。形状决定「操作符允许不允许」，于是必然打架。</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">改成按<strong>叶子</strong>推形状：一个字段在不同 case 里可以有不同形状候选</span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-amber">坑 ②</span>
+            <span class="name">弱类型 vs 强类型</span>
+            <span class="spacer"></span>
+            <span class="tag tone-amber">637 条</span>
+          </div>
+          
+          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>现网: {&quot;op&quot;:&quot;gte&quot;,&quot;value&quot;:[&quot;1&quot;]}    ← 数值也落成字符串
+我们: gte 要求 long 类型的标量
+</pre></div>
+          <p class="jnote bad">我们的 DSL 是强类型的，现网是弱类型（靠 SQL 隐式转换）。所以「修形状」的同时必须<strong>把值也转成对应类型</strong> —— 只改形状、值还是字符串，校验照样拒。</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">repairCase()：按叶子定形状，并把值与操作符一起修好（枚举多值时把 <code>=</code> 翻成 in）</span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-violet">坑 ③</span>
+            <span class="name">日期列必须排除</span>
+            <span class="spacer"></span>
+            <span class="tag tone-violet">6 个字段</span>
+          </div>
+          
+          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>现网日期列: 20261015        ← YYYYMMDD 整数
+我们时间戳: 1791552000      ← 秒级
+</pre></div>
+          <p class="jnote">两侧数值口径不同，同一列比出来的结果没有意义；而我们真实 Catalog 里也没有日期类字段（contentType=1）可以先对齐。</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">从合成 Catalog 与镜像表里一起去掉，让「字段不在 Catalog」这条筛选自然过滤掉相关记录</span>
+      <span class="stem"></span><span class="head"></span>
+    </div><h2 id="结果以及一个真问题的浮现"><span class="num">05</span>结果，以及一个真问题的浮现</h2>
+<div class="summary">
+      <h3 id="第-④-步的结果">第 ④ 步的结果</h3>
+      <ul>
+<li>可跑 case 从 <strong>86 对涨到 1417 对</strong>（16 倍）</li>
+<li><strong>一致 1209 / 1417（85.3%）</strong>；不一致 191；执行报错 17</li>
+<li>不一致集中：<strong>关系明细 138 · 关系计数 45 · 画像 8</strong></li>
+<li>17 条报错全是同一个原因：我们给 array 字段编译出 <code>array_contains</code>，而现网这类列是逗号分隔串</li>
+</ul>
+
+    </div><div class="callout tone-green">
+      <span class="ic">✅</span>
+      <div><p><strong>那 17 条报错是本轮最有价值的产出。</strong></p>
+<p>它不是「跑不起来」，而是<strong>编译器的一条真实差异被数据抓出来了</strong>：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">Can not find the compatibility function signature: array_contains(VARCHAR(1024), VARCHAR(1))
+</code></pre></div>
+<p>现网的数组列是<strong>逗号分隔字符串</strong>（该用 <code>find_in_set</code>），我们按真正的 <code>ARRAY</code> 列写（<code>array_contains</code>）。
+在这之前这条差异只是「我怀疑」，现在是<strong>本地可复现</strong>。</p>
+<p><mark class="mk-blue">这正是结果级对拍的价值：文本层面看不出来的东西，数据会把它顶出来。</mark></p>
+</div>
+    </div><p>191 条不一致里的一条真实样本（现网 case <code>1191481</code>，关系明细）：</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>SQL（节选）</th>
+<th>人数</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>我们</td>
+<td><code>WHERE ((u.uid IN (SELECT uid FROM 关系表A WHERE object_id IN (…)) OR u.uid IN (SELECT uid FROM 关系表B …)))</code></td>
+<td>待分诊</td>
+</tr>
+<tr>
+<td>现网</td>
+<td><code>select uid from (select uid from 关系表A where object_id in (…) group by uid union all select uid from 关系表B …) ct1 group by uid</code></td>
+<td>待分诊</td>
+</tr>
+</tbody>
+</table>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>剩下的 191 条</th><th>现在的判断</th><th>下一步</th></tr></thead><tbody><tr><th>关系明细 138 · 关系计数 45</th><td data-label="现在的判断">最值得查的一批：关系路径在第二篇里一条都没被验过（现网记录里我们那 8 条关系几乎没被用过）</td><td data-label="下一步">按「两侧 SQL 的结构差异」自动归类，再逐类分诊</td></tr><tr><th>画像 8 条</th><td data-label="现在的判断">大概率是形状推断的边缘情况</td><td data-label="下一步">单独看样本</td></tr><tr><th>array 报错 17 条</th><td data-label="现在的判断">确认的真差异（差异文档 §8.2-A）</td><td data-label="下一步">拍板：改 <code>find_in_set</code>，还是给 Catalog 加数组形态开关</td></tr></tbody></table></div><h2 id="边界与代价"><span class="num">06</span>边界与代价</h2>
+<ul class="check"></ul><p>代价也说清楚：本地多了 29 张表（1 张 92 列的宽表 + 28 张关系表）、19.4 万行关系数据，生成一次约 1.5 分钟。合算的原因是<strong>它可重复</strong>：语料抽样、词表、合成 Catalog、镜像表、case 文件全部落盘，谁都能重跑一遍拿到同一批数字。</p>
+<h2 id="自测"><span class="num">07</span>自测</h2>
+<div class="quiz"><details>
+        <summary>为什么必须把语料里出现过的「取值」也一起镜像，而不是只建表结构？</summary>
+        <div class="a"><p>因为现网记录里的条件是<strong>带值的</strong>：<code>object_id in ('00')</code>、<code>uid in (242077285)</code>。
+如果本地数据里没有这些值，条件在两边都命中 0 行 —— uid 集合都是空集，
+会判成「一致」但没有任何信息量。所以种子必须包含语料里真实出现过的取值。</p>
+</div>
+      </details><details>
+        <summary>为什么形状要「按叶子推」而不是「按字段推」？</summary>
+        <div class="a"><p>因为同一个字段在不同记录里可能被不同操作符使用：枚举既用 <code>IN</code> 也用 <code>=</code>；数值既用 <code>&gt;=</code> 也用 <code>IN</code>。
+而形状决定「操作符允许不允许」（applicableOps），一个字段一个形状就必然打架（656 条报错就是它）。
+按叶子推等于每个 case 用自己那份形状 —— 形状只影响「能不能编译」，不影响谓词文本，不污染比对结果。</p>
+</div>
+      </details><details>
+        <summary>这一轮 17 条执行报错说明了什么？</summary>
+        <div class="a"><p>它不是环境问题，而是<strong>编译器的一条真实差异</strong>：现网的数组字段是逗号分隔字符串（该用 <code>find_in_set</code>），
+我们按真正的 ARRAY 列写了 <code>array_contains</code>，Doris 直接报函数签名不存在。
+文本级的对拍看不出来（两边都「有一种写法」），只有真跑起来才会炸 —— 这就是结果级对拍的价值。</p>
+</div>
+      </details></div>
+
+    <footer>
+      <span>把 UDP 的词表镜像到本地：让语料真的跑起来</span>
+      <span>最后更新 2026-10-15 · 单文件可离线打开</span>
+    </footer>
+  </main>
+</div>
+
+<script src="../../assets/app.js?v=c02d3f4a26"></script>
+</body>
+</html>
