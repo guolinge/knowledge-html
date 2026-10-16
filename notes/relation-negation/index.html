@@ -1,0 +1,519 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-has-toc="1">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>关系属性的「不存在」：行级、人群级，以及为什么要拆</title>
+<meta name="description" content="一个人多行的关系表里，「最近一天 + 排除获得 A 券的人」有三种写法，只有一种对：小张·小陈败在「行级不等于」，小李败在「人群减法忘了带前置过滤」。07 起用两个可点控件把「一条 SQL 够用 / 硬塞会怎样 / 混写会怎样 / 拆开再交并」四种做法的形状和结果摆在同一批人上；真实 SQL 只留骨架。" />
+<link rel="stylesheet" href="../../assets/theme.css?v=b918ec5c83" />
+  <link rel="stylesheet" href="../../assets/blocks.css?v=f1eceacc25" />
+  <link rel="stylesheet" href="../../assets/archify-embed.css?v=68fec0b81b" />
+</head>
+<body>
+<div id="progress"></div>
+<div id="tocScrim"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
+    <a class="brand" href="../../index.html"><span class="dot"></span>知识笔记</a>
+    
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="toc" id="toc">
+      <p class="toc-title">目录</p>
+      <a href="../../index.html" class="sub">← 全部笔记</a>
+      <a href="#先看数据一个人可以有多行">先看数据：一个人可以有多行</a>
+      <a href="#两个词主键属性-常规属性">两个词：主键属性 / 常规属性</a>
+      <a href="#要表达的条件">要表达的条件</a>
+      <a href="#三种写法逐个用户算一遍">三种写法，逐个用户算一遍</a>
+      <a href="#错法一把不等于写进同一行">错法一：把「不等于」写进同一行</a>
+      <a href="#错法二人群减法忘了带前置过滤">错法二：人群减法忘了带「前置过滤」</a>
+      <a href="#一条-sql-够用吗四个状态切着看">一条 SQL 够用吗？四个状态切着看</a>
+      <a href="#硬来会怎样两种错法各自错在哪">硬来会怎样：两种错法各自错在哪</a>
+      <a href="#拆的规则一棵树看完">拆的规则：一棵树看完</a>
+      <a href="#一句话记住">一句话记住</a>
+      <a href="#一句话总结" class="sub">一句话总结</a>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow">● 从零理解 · 关系属性</span>
+      <h1>关系属性的「不存在」：行级、人群级，以及为什么要拆</h1>
+      <p class="lede">一个人多行的关系表里，「最近一天 + 排除获得 A 券的人」有三种写法，只有一种对：小张·小陈败在「行级不等于」，小李败在「人群减法忘了带前置过滤」。07 起用两个可点控件把「一条 SQL 够用 / 硬塞会怎样 / 混写会怎样 / 拆开再交并」四种做法的形状和结果摆在同一批人上；真实 SQL 只留骨架。</p>
+    </div>
+
+<aside class="needs">
+      <p class="needs-title">读这篇之前，你需要先知道</p>
+      <a class="need" href="../data-admin-relation/">← <b>4. 关系与属性</b><span>一行关系带客体、属性行靠 relation_id 认亲，怎么决定界面上的三块和那个「+ 添加属性」</span></a>
+    </aside>
+    <div class="provenance"><span><b>来源</b> sql_builder_v2 @ 2c500b28 packages/crowd/src/entrepots/relation.ts：checkIsPrimaryProp / checkPropsHasNotExistOp / partitionRelationTree / buildDetailSql / getPropRules（ExistenceOp.Exist → ScopeOp.In） · sql_builder_v2 @ 2c500b28 packages/core/src/db.ts：Op / ScopeOp / ContainOp / ExistenceOp / NullOp 枚举 · sql_builder_v2 @ 2c500b28 packages/core/src/utils.ts：isLatestDays(&gt;/&gt;=) / isPrevDays(&lt;/&lt;=) / addHackRules（&lt; 和 &lt;= 补 col &gt; 0） · sql_builder_v2 packages/crowd/test/entrepots/relation/data.ts：c8b（NotExist + 常规属性一条 SQL）、c8c（多个 NotExist）、c8d→c8e（AND 拆成两支求交）、c9a→c9b（OR 拆成多支求并） · sql_builder_v2 packages/crowd/test/entrepots/relation/doris/relation.spec.ts：上述用例的真实生成 SQL（已逐条读过原文） · audience_web packages/sql-builder/src/partition.ts（2026-10-14 工作区）：四条拆分判定与 UDP 的对照实现；packages/dsl/src/schema.ts 的 exist / not_exist 操作符 · 两个控件的判定用 node 实跑核对过（5 人 × 4 种做法 / 3 种写法）：inline 全对、rowonly 多留小陈、mixed 空集、splitAND 小李、splitOR 小李+小赵+小陈</span><span><b>生成</b> 2026-10-14</span><span><b>模型</b> pi (claude-sonnet-4-5)</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">关系属性</span> <span class="tag tone-muted">主键属性</span> <span class="tag tone-muted">集合代数</span> <span class="tag tone-muted">圈选</span> <span class="tag tone-muted">UDP 对照</span></span></div>
+
+<p>上一篇<a href="../data-admin-relation/">关系与属性</a>讲了关系表长什么样：一行关系带一个客体，属性行靠 <code>relation_id</code> 认亲。这一篇往下钻一层：<strong>当你要在属性上写&quot;排除&quot;的时候，到底在排除什么。</strong></p>
+<p>这篇只解决一个卡点 —— 关系属性上的「不存在」，为什么不是把 <code>≠</code> 写上去那么简单；以及「拆分」在拆什么。</p>
+<div class="callout tone-blue">
+      <span class="ic">🧭</span>
+      <div><p><strong>本篇结构</strong>：先看数据（01）→ 两个词（02）→ 条件与期望（03）→ 三种写法逐个用户算（04）→
+两种错法各自错在哪（05 / 06）→ 一条 SQL 够用的范围（07）→ 必须拆的两种混写（08）→
+四条判定（09）。第 04 节是可点的，先把三个人点一遍再看后面。</p>
+</div>
+    </div><h2 id="先看数据一个人可以有多行"><span class="num">01</span>先看数据：一个人可以有多行</h2>
+<p>关系表的形状是「一个人多行」。拿 UDP 测试用例里那个真实关系做例子（<code>niuniu_user_coupon_receive_last</code>，用户领券记录），只留三列：</p>
+<table>
+<thead>
+<tr>
+<th>列</th>
+<th>角色</th>
+<th>含义</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>uid</code></td>
+<td>主体</td>
+<td>谁</td>
+</tr>
+<tr>
+<td><code>object_id</code></td>
+<td><strong>主键属性</strong></td>
+<td>领的是哪张券 —— 同一张券，一个人只有一行</td>
+</tr>
+<tr>
+<td><code>last_created_at</code></td>
+<td><strong>常规属性</strong></td>
+<td>这条记录发生的时间</td>
+</tr>
+</tbody>
+</table>
+<p>数据（5 个人，编的，形状和真实用例一致）：</p>
+<table>
+<thead>
+<tr>
+<th>uid</th>
+<th>object_id</th>
+<th>last_created_at</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>小王</td>
+<td>A</td>
+<td>昨天</td>
+</tr>
+<tr>
+<td>小王</td>
+<td>B</td>
+<td>半年前</td>
+</tr>
+<tr>
+<td>小李</td>
+<td>A</td>
+<td>半年前</td>
+</tr>
+<tr>
+<td>小李</td>
+<td>C</td>
+<td>昨天</td>
+</tr>
+<tr>
+<td>小张</td>
+<td>A</td>
+<td>昨天</td>
+</tr>
+<tr>
+<td>小张</td>
+<td>B</td>
+<td>昨天</td>
+</tr>
+<tr>
+<td>小赵</td>
+<td>C</td>
+<td>三天前</td>
+</tr>
+<tr>
+<td>小陈</td>
+<td>A</td>
+<td>昨天</td>
+</tr>
+<tr>
+<td>小陈</td>
+<td>C</td>
+<td>昨天</td>
+</tr>
+</tbody>
+</table>
+<p><mark class="mk-blue">一行 = 一次「某个人领某张券」的记录；一个人领了几张券就有几行。</mark> 这就是&quot;关系表是一人多行&quot;的样子。</p>
+<h2 id="两个词主键属性-常规属性"><span class="num">02</span>两个词：主键属性 / 常规属性</h2>
+<div class="cards" data-cols="3"><div class="ccard tone-muted">
+          
+          <h4>主键属性</h4>
+          <p>object_id（券）。它决定「有没有这一行」—— 一个人有多行，每行一个券种。业务上问「他有没有 A 券」问的就是它。</p>
+          
+          
+        </div><div class="ccard tone-muted">
+          
+          <h4>常规属性</h4>
+          <p>last_created_at（时间）。它是「这一行里的一个值」，用来过滤哪些行算数。</p>
+          
+          
+        </div><div class="ccard tone-muted">
+          
+          <h4>两者的关系</h4>
+          <p>「有没有这一行」是人的属性；「这一行的值是多少」是行的属性。否定落在这两者上，结果完全不同。</p>
+          
+          
+        </div></div><div class="callout tone-amber">
+      <span class="ic">⚠</span>
+      <div><p><mark class="mk-blue">这个区分是整篇的地基。</mark></p>
+<p>主键属性和常规属性<strong>在同一条 WHERE 里长得一样</strong>（都是 <code>列 运算符 值</code>），
+但它们的否定语义不一样：主键属性的&quot;没有&quot;是&quot;这个人没有这种记录&quot;（人群级），
+常规属性的&quot;没有&quot;只是&quot;这行不满足&quot;（行级）。</p>
+</div>
+    </div><h2 id="要表达的条件"><span class="num">03</span>要表达的条件</h2>
+<p>产品原话（UDP 代码注释里的例子）：</p>
+<blockquote>
+<p>最近一天（常规属性），排除获得奖品 A（主键属性）的用户</p>
+</blockquote>
+<p>翻成人话：</p>
+<blockquote>
+<p><strong>最近一天有领券记录、并且这一天领的券里没有 A 的人。</strong></p>
+</blockquote>
+<p>按上面那张表，正确答案是：</p>
+<table>
+<thead>
+<tr>
+<th>人</th>
+<th>期望</th>
+<th>为什么</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>小王</td>
+<td>排除</td>
+<td>昨天领的就是 A</td>
+</tr>
+<tr>
+<td>小李</td>
+<td><strong>保留</strong></td>
+<td>昨天领的是 C；A 是半年前领的，不算</td>
+</tr>
+<tr>
+<td>小张</td>
+<td>排除</td>
+<td>昨天领了 A（虽然也领了 B）</td>
+</tr>
+<tr>
+<td>小赵</td>
+<td>排除</td>
+<td>最近一天根本没有领券记录</td>
+</tr>
+<tr>
+<td>小陈</td>
+<td>排除</td>
+<td>昨天领了 A（同时也领了 C）</td>
+</tr>
+</tbody>
+</table>
+<p><mark class="mk-blue">小李和小张是这道题的两个人肉陷阱。</mark> 后面每种错法都会栽在他们其中一个身上。</p>
+<h2 id="三种写法逐个用户算一遍"><span class="num">04</span>三种写法，逐个用户算一遍</h2>
+<p>下面这个控件把三种写法都算一遍。点上面的按钮切换写法，看每个人命中还是落空；错误的格子会标红。</p>
+<div class="demo" data-widget="relation-negation-lab" data-config="{&quot;mode&quot;:&quot;semantics&quot;,&quot;method&quot;:&quot;exists&quot;}">
+      <div class="demo-head">
+        <span class="title">最近一天 + 排除 A —— 三种写法各留下谁</span>
+        <span class="status" data-status></span>
+        <span class="spacer"></span>
+        
+      </div>
+      <div class="demo-body custom" data-mount></div>
+    </div><p>三种写法的名字和它们的 SQL 形状：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>写法</th><th>它在 SQL 里长什么样</th><th>它否定的是什么</th></tr></thead><tbody><tr><th>行级不等于</th><td data-label="它在 SQL 里长什么样"><code>object_id != 'A'</code> 和 <code>最近一天</code> 放在同一个 WHERE 里</td><td data-label="它否定的是什么">某一行</td></tr><tr><th>行级否定</th><td data-label="它在 SQL 里长什么样"><code>NOT EXISTS (select 1 … where 最近一天 and object_id = 'A')</code></td><td data-label="它否定的是什么">一批行</td></tr><tr><th>人群减法</th><td data-label="它在 SQL 里长什么样"><code>uid NOT IN (select uid … where object_id = 'A')</code></td><td data-label="它否定的是什么">一个人</td></tr></tbody></table></div><p>结论（点上面控件可以复现）：</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>小王</th>
+<th>小李</th>
+<th>小张</th>
+<th>小赵</th>
+<th>小陈</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>行级不等于</td>
+<td>排除 ✓</td>
+<td>保留 ✓</td>
+<td><mark class="mk-blue">保留 ✗</mark></td>
+<td>排除 ✓</td>
+<td><mark class="mk-blue">保留 ✗</mark></td>
+</tr>
+<tr>
+<td>行级否定（带前置过滤）</td>
+<td>排除 ✓</td>
+<td>保留 ✓</td>
+<td>排除 ✓</td>
+<td>排除 ✓</td>
+<td>排除 ✓</td>
+</tr>
+<tr>
+<td>人群减法（不带前置过滤）</td>
+<td>排除 ✓</td>
+<td><mark class="mk-blue">排除 ✗</mark></td>
+<td>排除 ✓</td>
+<td>排除 ✓</td>
+<td>排除 ✓</td>
+</tr>
+</tbody>
+</table>
+<p><mark class="mk-blue">只有一个写法全对；两个错法各栽在不同的人身上。</mark></p>
+<h2 id="错法一把不等于写进同一行"><span class="num">05</span>错法一：把「不等于」写进同一行</h2>
+<p><code>object_id != 'A'</code> 配 <code>最近一天</code>，落在同一行上，得到的条件是：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">存在一行（last_created_at = 昨天  且  object_id != 'A'）
+</code></pre></div>
+<p>看小张的两行：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">小张：(A, 昨天)   →  object_id != 'A' 不成立
+      (B, 昨天)   →  object_id != 'A' 成立，时间也对  →  命中！
+</code></pre></div>
+<p><mark class="mk-blue">他只要领过<strong>任意一张</strong>不是 A 的券，这个人就被留下。</mark> 小陈同理（有 C 那行）。</p>
+<p><mark class="mk-amber"><code>!=</code> 只能否定「这一行」，否定不了「这个人」。</mark> 一个人有 3 行，<code>!=</code> 几乎必然在某一行上成立 —— 行级的不等于，落地成&quot;这个人有没有别的券&quot;，而不是&quot;这个人没有 A 券&quot;。</p>
+<h2 id="错法二人群减法忘了带前置过滤"><span class="num">06</span>错法二：人群减法忘了带「前置过滤」</h2>
+<p><code>uid NOT IN (select uid … where object_id = 'A')</code> 是<strong>人群级</strong>的否定：先算出&quot;有 A 券的人&quot;，再把这些人从结果里减掉。这方向是对的，问题在<strong>减法集合是怎么算出来的</strong>。</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">不带前置过滤：有 A 券的人 = {小王, 小李, 小张, 小陈}   ← 全表看，不看时间
+              结果里小李被减掉 ✗（他半年前领过 A）
+</code></pre></div>
+<p>产品要的是&quot;<strong>最近一天</strong>没有领 A&quot;，所以减法集合里必须带上时间：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">带前置过滤：有 A 券的人（限最近一天）= {小王, 小张, 小陈}
+            小李保留 ✓
+</code></pre></div>
+<p>UDP 生成的真实 SQL 就是这个形状（测试用例 c8b，已截断）：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-sql">select UID_DECODE(`uid`) as `uid`
+from `niuniu_user_coupon_receive_last`
+where `object_id` in ('coupon001')
+  and (
+        `_version` &gt;= 5
+    and (`last_created_at` &gt;= UNIX_TIMESTAMP(DS_DATETIME_ADD('day', -3, NOW()))
+         and `last_created_at` &lt;= UNIX_TIMESTAMP())
+    and `uid` not in (
+          select `uid` from `niuniu_user_coupon_receive_last`
+          where `object_id` in ('coupon001')
+            and (
+                  `_version` &gt;= 5
+              and (`last_created_at` &gt;= … and `last_created_at` &lt;= …)   -- ← 常规属性又写了一遍
+              and (`object_id` in (1, 2))
+            )
+          group by `uid`
+        )
+  )
+group by `uid`
+</code></pre></div>
+<p><mark class="mk-blue">注意子查询里把常规属性（<code>_version</code>、时间）原样复制了一遍。</mark> 这不是啰嗦，这正是&quot;只排除最近一天领过 A 的人&quot;的实现方式 —— 也是后面&quot;拆分&quot;要保护的东西。</p>
+<h2 id="一条-sql-够用吗四个状态切着看"><span class="num">07</span>一条 SQL 够用吗？四个状态切着看</h2>
+<p>判断只有一句话：<mark class="mk-blue">属性里只有「一类语义」，一条 SQL 就够；混了两类，就必须拆。</mark></p>
+<div class="callout tone-amber">
+      <span class="ic">⚠</span>
+      <div><p><strong>先交代一下「C」是哪来的。</strong> 只有「不存在 A」一个主键条件时<strong>不需要拆</strong>（就是下面第一个状态）。
+要看到「必须拆」，条件里得同时出现<strong>正向主键条件</strong>和「不存在」—— 我拿「存在 C」当这个正向条件。
+C 和 A 一样只是 <code>object_id</code> 的一个取值，<mark class="mk-blue">纯粹为了举例编的</mark>；UDP 的测试用例里这个位置用的是「存在 AU」。</p>
+</div>
+    </div><p>下面这个台子把四种做法摆在同一批人上。切着看两件事：<strong>编译出来的形状</strong>，和<strong>5 个人的结果</strong>（绿色是命中、红色 ✗ 是错）。</p>
+<div class="demo" data-widget="rn-compile-lab" data-config="{&quot;mode&quot;:&quot;inline&quot;}">
+      <div class="demo-head">
+        <span class="title">同一批 5 个人，四种做法</span>
+        <span class="status" data-status></span>
+        <span class="spacer"></span>
+        
+      </div>
+      <div class="demo-body custom" data-mount></div>
+    </div><p>每个状态下面都会列出<strong>它编译出来的 SQL</strong>（表名简化成 <code>coupon_record</code>，<code>昨天</code> = 最近一天；红边那句就是这个做法错的地方）：</p>
+<p>四个状态一句话版：</p>
+<table>
+<thead>
+<tr>
+<th>状态</th>
+<th>形状</th>
+<th>结果</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>不拆（只有一个「不存在」）</td>
+<td>外层正向 + <code>uid not in (子查询)</code>，子查询里<strong>复制一份常规属性</strong></td>
+<td>5 个人全对</td>
+</tr>
+<tr>
+<td>硬塞进同一行</td>
+<td>两个主键条件写在一行的 WHERE 里</td>
+<td>小陈被多留</td>
+</tr>
+<tr>
+<td>混写：正向行级 + 全表减法</td>
+<td>减法集合里<strong>漏了常规属性</strong></td>
+<td>空集，小李被误杀</td>
+</tr>
+<tr>
+<td>拆开再交 / 并</td>
+<td>支1 只放行级、支2 带常规属性做减法，各自算 uid</td>
+<td>全对</td>
+</tr>
+</tbody>
+</table>
+<p><code>inline</code> 状态里那句「最近一天（复制一份）」是这一节的唯一重点：<mark class="mk-blue">它不是啰嗦，是把减法限制在「同一批记录」里。</mark></p>
+<p>顺带一条：<strong>多个「不存在」可以合进同一个子查询</strong>（AND 关系）。形状从 <code>object_id 不存在 1 或 2</code> 变成子查询里一句 <code>object_id in (1,2) or object_id in (100)</code> —— 还是<strong>一条</strong> SQL，不用拆。</p>
+<h2 id="硬来会怎样两种错法各自错在哪"><span class="num">08</span>硬来会怎样：两种错法各自错在哪</h2>
+<p>把控件切到「硬塞进同一行」和「混写」两个状态，盯住小陈和小李：</p>
+<table>
+<thead>
+<tr>
+<th>做法</th>
+<th>谁留下</th>
+<th>错在哪</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>硬塞进同一行：<code>object_id 存在 C</code> + <code>object_id 不存在 A</code></td>
+<td>小李、<mark class="mk-blue">小陈</mark></td>
+<td>一行是 C 就必然「不是 A」，后一条自动成立 —— <strong>「不存在 A」被吞掉</strong></td>
+</tr>
+<tr>
+<td>混写：正向行级 + <code>uid not in (全表有 A 的人)</code></td>
+<td><mark class="mk-blue">空集</mark></td>
+<td>减法集合漏了「最近一天」，小李（半年前领过 A）被误杀</td>
+</tr>
+<tr>
+<td>拆开：支1 ∩ 支2</td>
+<td>小李</td>
+<td>正确</td>
+</tr>
+</tbody>
+</table>
+<div class="callout tone-amber">
+      <span class="ic">⚠</span>
+      <div><p><strong>为什么一条 WHERE 说不清</strong>：正向条件要求「同一行满足」，「不存在」要求「这个人不满足」。
+写进同一个 WHERE 时，SQL 只会按行级解释 —— 要么把「不存在」吞掉（第一行），
+要么把它当成一个不新的子查询（第二行）。<mark class="mk-blue">两种解释都不是你要的语义。</mark></p>
+</div>
+    </div><p>拆完以后，UDP 生成的真实 SQL 骨架长这样（c8e，只留结构）：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-sql">from (
+    select `uid` … where `最近一天` and (存在 C 的行级条件)        -- 支1：行级
+  union all
+    select `uid` … where `最近一天`
+                   and `uid` not in (… `最近一天` and (不存在 A) …)   -- 支2：人群级
+) rt1
+group by `uid`
+having count(`uid`) = 2      -- ← 出现在两支里才留下 = 交集
+</code></pre></div>
+<h2 id="拆的规则一棵树看完"><span class="num">09</span>拆的规则：一棵树看完</h2>
+<div class="tree" data-tree><ul class="tlist"><li class="has-kids">
+            <div class="tnode tone-violet" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>属性里有「不存在」吗？</b>
+              
+              <span class="tnote">没有的话这一页用不上 —— 普通 WHERE 就行</span>
+            </div>
+            <ul class="tlist"><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>有，而且只有它一个</b>
+              
+              <span class="tnote">不拆。一条 SQL：外层正向条件 + uid not in (子查询里复制一份常规属性)</span>
+            </div>
+            
+          </li><li class="has-kids">
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>有，并且还有别的属性条件</b>
+              
+              
+            </div>
+            <ul class="tlist"><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>逻辑是 OR</b>
+              
+              <span class="tnote">拆 N+1 支 → union all 去重 = 并集；「不存在」那一支不带常规属性</span>
+            </div>
+            
+          </li><li class="has-kids">
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>逻辑是 AND</b>
+              
+              
+            </div>
+            <ul class="tlist"><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>还有正向的主键条件</b>
+              
+              <span class="tnote">拆 2 支 → 支1 = 常规+正向、支2 = 常规+不存在 → union all + having count = 2 = 交集</span>
+            </div>
+            
+          </li><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>没有正向主键条件</b>
+              
+              <span class="tnote">不拆。多个「不存在」合并进同一个子查询（AND 关系）</span>
+            </div>
+            
+          </li></ul>
+          </li></ul>
+          </li></ul>
+          </li></ul></div><p>对应到协议：关系主键属性上的两个操作符就是 <code>存在</code>（<code>exist</code>，底层 <code>IN</code>）和 <code>不存在</code>（<code>not_exist</code>，人群级减法）。非主键属性不给这两个 —— 它们是&quot;行里的值&quot;，问&quot;有没有这一行&quot;没有意义。</p>
+<div class="callout tone-violet">
+      <span class="ic">💡</span>
+      <div><p><code>exist</code> 和 <code>in</code>（属于）编译出来是一回事（都是 <code>列 in (...)</code>），区别在适用对象和文案：
+<code>exist</code> 只给主键属性、说的是&quot;有没有这种记录&quot;；<code>in</code> 给枚举字段、说的是&quot;取值属不属于这个集合&quot;。</p>
+</div>
+    </div><h2 id="一句话记住"><span class="num">10</span>一句话记住</h2>
+<div class="summary">
+      <h3 id="一句话总结">一句话总结</h3>
+      <p>关系属性上的「排除」有三种写法：把 <code>!=</code> 写进同一行（否定了一行、否定不了人）、
+人群减法忘了带前置过滤（把<strong>历史上</strong>有过的人一起杀了）、
+以及正确的那种 —— 否定作用在「人」身上、并且<strong>把常规属性复制进减法集合</strong>。
+条件里只有一类语义时，一条 SQL 就够；一旦正向主键条件和「不存在」混写、或者逻辑是 OR，
+就按语义拆成多支、各自算成 uid 集合，再用交（AND）/ 并（OR）合并。</p>
+
+    </div><div class="quiz"><details>
+        <summary>「最近一天 + 排除 A」里，为什么 <code>object_id != 'A'</code> 不对？</summary>
+        <div class="a"><p>它是<strong>行级</strong>条件，只能保证&quot;这一行不是 A&quot;。一个人只要有任何一行不是 A
+（小张有 B 那行、小陈有 C 那行），就会被留下 —— 而产品要的是&quot;这个人最近一天没有 A&quot;。</p>
+</div>
+      </details><details>
+        <summary>人群减法里为什么要把常规属性在子查询里再写一遍？</summary>
+        <div class="a"><p>因为要知道&quot;哪些人<strong>在最近一天的记录里</strong>有 A&quot;。不带时间，减掉的就是&quot;历史上任何时间有过 A 的人&quot;，
+小李（半年前领过 A）会被误杀。</p>
+</div>
+      </details><details>
+        <summary>AND 拆分用 <code>having count = 2</code>，OR 拆分只 <code>group by uid</code>，差在哪？</summary>
+        <div class="a"><p><code>union all</code> 之后 <code>having count = 2</code> 表示&quot;两支都命中&quot;= 交集；只 <code>group by uid</code> 是去重 = 并集。</p>
+</div>
+      </details><details>
+        <summary>单个「不存在」为什么不需要拆？</summary>
+        <div class="a"><p>只有一个语义方向时，一条 SQL 就能表达：外层写正向条件，<code>uid not in (子查询)</code> 里
+把常规属性和被否定的主键条件一起写。拆是为了让&quot;行级&quot;和&quot;人群级&quot;各自独立编译成 uid 集合。</p>
+</div>
+      </details><details>
+        <summary>「硬塞进同一行」为什么会把「不存在 A」吃掉？</summary>
+        <div class="a"><p>因为 <code>object_id</code> 一列只有一个取值。同一行同时要求「是 C」和「不是 A」，
+只要 C ≠ A 就永远成立 —— 条件不再排除任何人。</p>
+</div>
+      </details></div>
+
+    <footer>
+      <span>关系属性的「不存在」：行级、人群级，以及为什么要拆</span>
+      <span>最后更新 2026-10-14 · 单文件可离线打开</span>
+    </footer>
+  </main>
+</div>
+
+<script src="../../assets/app.js?v=eec8435dc5"></script>
+</body>
+</html>

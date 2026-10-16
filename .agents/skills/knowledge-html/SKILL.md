@@ -1338,6 +1338,35 @@ text: |
 > 如果只是**顺序**，别做交互，画 `lane-stack` 就够。
 > 交互有成本，只在「静态图讲不清」时才用。
 
+#### 多状态控件：交付前把每个状态点一遍
+
+`npm run visual-check` 只量**当前 DOM** 有没有溢出 —— 某个状态被 JS 异常清空时，
+它的形状区是空的、什么都不溢出，==检查照样打 ✓==。
+（真实踩过：把 `const kind = …` 提到 `forEach` 外面，循环变量 `c` 未定义，
+两个状态整块消失，而 `check` / `visual-check` 全绿 —— 用户先看出来的。）
+
+有 2 个以上状态按钮的控件，交付前跑一遍这个探针（与 visual-check 同一套做法：
+把探针注入 `dist/<slug>.html`，用无头 Chrome 跑，从 `<pre id="dbg">` 读结果）：
+
+```js
+window.__errs = [];
+window.addEventListener('error', function (e) { window.__errs.push(String(e.message)); });
+setTimeout(function () {
+  var box = document.querySelectorAll('.demo')[0];   // 第几个控件
+  var btns = [].slice.call(box.querySelectorAll('button'));
+  var out = [];
+  ['状态A', '状态B'].forEach(function (key) {          // 换成本控件的按钮文案
+    btns.filter(function (x) { return x.textContent.indexOf(key) >= 0; })[0].click();
+    out.push(key + ' 子块=' + box.querySelector('.rc-shape').children.length);
+  });
+  out.push('errors=' + JSON.stringify(window.__errs));
+  var p = document.createElement('pre'); p.id = 'dbg';
+  p.textContent = out.join('\n'); document.body.appendChild(p);
+}, 1500);
+```
+
+排查口诀：==「某一块只有部分状态有内容」→ 先看那个状态的代码有没有引用循环外/未定义的变量==。
+
 ### 第 6 步 · 写 note.md
 
 ```bash
@@ -2197,7 +2226,7 @@ text: |
 | `summary` | 小结 |
 | `raw` | 直接写 HTML |
 
-**交互控件 59 个**（在 `assets/app.js` 的 `WIDGETS` 里，供 `demo` 积木引用）：
+**交互控件 63 个**（在 `assets/app.js` 的 `WIDGETS` 里，供 `demo` 积木引用）：
 `polling-vs-cdc` `combination-count` `join-lab` `on-vs-where` `knex-chain`
 `stepper` `tuner` `diff` `stream-modes` `operator-lab` `hashring` `partition-prune`
 `dsl-lab` `null-lab` `config-to-ui` `field-lineage` `count-dedup-lab`
@@ -2210,6 +2239,8 @@ text: |
 `ls-cost-lab` `atomic-lab` `rtt-lab`
 `combination-control-lab` `combination-values-lab` `combination-build-lab` `cand-pipe-lab`
 `s3-list-lab` `ec-lab` `mysql-2pc-crash` `join-driver-lab` `i18n-lab` `i18n-lookup`
+`relation-negation-lab` `rn-compile-lab`
+`notin-lab` `times-readings-lab`
 
 **已知缺口**（按优先级）：
 

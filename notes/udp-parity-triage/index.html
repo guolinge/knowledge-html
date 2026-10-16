@@ -1,0 +1,394 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-has-toc="1">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>分诊 191 条不一致：一条被数据抓住的语义误读</title>
+<meta name="description" content="上一轮 85.3% 一致、191 条不一致里混着三类问题：翻译器把多叶子截断（129 条）、array 用错函数（17 条报错）、以及一条我自己读错的语义（45 条）——「计数 + 属性过滤」现网要的是「至少一行满足」，我实现成了「每一行都满足」。这篇讲怎么自动分诊、怎么用两个控件把那个双重否定拆开看、以及修完之后一致率怎么从 85.3% 走到 98.8%。" />
+<link rel="stylesheet" href="../../assets/theme.css?v=b918ec5c83" />
+  <link rel="stylesheet" href="../../assets/blocks.css?v=f1eceacc25" />
+  <link rel="stylesheet" href="../../assets/archify-embed.css?v=68fec0b81b" />
+</head>
+<body>
+<div id="progress"></div>
+<div id="tocScrim"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
+    <a class="brand" href="../../index.html"><span class="dot"></span>知识笔记</a>
+    
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="toc" id="toc">
+      <p class="toc-title">目录</p>
+      <a href="../../index.html" class="sub">← 全部笔记</a>
+      <a href="#先分类再逐条看不要人肉看-191-条">先分类，再逐条看（不要人肉看 191 条）</a>
+      <a href="#三条真问题">三条真问题</a>
+      <a href="#array-的定案回去数语料">array 的定案：回去数语料</a>
+      <a href="#主角一条被数据抓住的语义误读">主角：一条被数据抓住的语义误读</a>
+      <a href="#41-那句话长什么样" class="sub">4.1 那句话长什么样</a>
+      <a href="#42-三种读法差在哪" class="sub">4.2 三种读法，差在哪</a>
+      <a href="#43-为什么两层层套看起来像-a其实是-b" class="sub">4.3 为什么&quot;两层层套&quot;看起来像 A、其实是 B</a>
+      <a href="#44-实测把它钉死" class="sub">4.4 实测把它钉死</a>
+      <a href="#45-改了什么" class="sub">4.5 改了什么</a>
+      <a href="#重跑853-988">重跑：85.3% → 98.8%</a>
+      <a href="#第-④-步第二轮" class="sub">第 ④ 步第二轮</a>
+      <a href="#你问过的几个问题">你问过的几个问题</a>
+      <a href="#收尾提交以及一次撞车">收尾：提交，以及一次&quot;撞车&quot;</a>
+      <a href="#这次验证了什么没验证什么">这次验证了什么、没验证什么</a>
+      <a href="#自测">自测</a>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow">● 从零理解 · 对拍 harness ⑤</span>
+      <h1>分诊 191 条不一致：一条被数据抓住的语义误读</h1>
+      <p class="lede">上一轮 85.3% 一致、191 条不一致里混着三类问题：翻译器把多叶子截断（129 条）、array 用错函数（17 条报错）、以及一条我自己读错的语义（45 条）——「计数 + 属性过滤」现网要的是「至少一行满足」，我实现成了「每一行都满足」。这篇讲怎么自动分诊、怎么用两个控件把那个双重否定拆开看、以及修完之后一致率怎么从 85.3% 走到 98.8%。</p>
+    </div>
+
+
+    <div class="provenance"><span><b>来源</b> audience_web/packages/sql-builder/src/compile.ts：times 路② 改成 (NOT EXISTS 任意行) OR EXISTS(满足行)；array 改成 find_in_set · audience_web/scripts/udp-parity/udp-to-dsl.mjs：toLeaf 改为摊平 condition.items 里的所有叶子 · crm-dsl-stru/doris/run-parity.mjs：结构差异分诊（客体在不在 / 哪边多列 / 分支数 / 计数口径） · 实测数字（本地 crm_insight）：总行数&gt;0 = 4021 · 存在满足行 = 0（= 现网记录 SQL 结果） · 每一行都满足 = 117 · 语料统计：find_in_set 30 条（关系属性，逗号串）· array_contains 26 条（事件 JSON 数组） · 重跑：1209 → 1400 / 1417（98.8%），执行报错 17 → 0；剩余 17 条为 uid 字面量构造 vs 表内过滤 · audience_web/docs/udp-parity-report.md（四步总结）、docs/udp-sql-diff.md §8.4 纠正与 §8.6 array 定案</span><span><b>生成</b> 2026-10-15</span><span><b>模型</b> pi (claude-opus-4-5)</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">对拍</span> <span class="tag tone-muted">UDP 对照</span> <span class="tag tone-muted">结果集</span> <span class="tag tone-muted">语义误读</span> <span class="tag tone-muted">客群洞察</span></span></div>
+
+<p>上一篇最后停在三个数字上：<strong>可跑 case 86 → 1417 对，一致 85.3%，17 条执行报错。</strong> 那 191 条不一致里藏着什么、报错到底是环境问题还是真问题 —— 这一篇就是把它拆开。</p>
+<p>拆完的结果：<strong>一致率 85.3% → 98.8%，执行报错清零</strong>，而过程中最值钱的产出不是这两个数字，是<strong>抓出并修掉了一条我自己读错的语义</strong>。</p>
+<h2 id="先分类再逐条看不要人肉看-191-条"><span class="num">01</span>先分类，再逐条看（不要人肉看 191 条）</h2>
+<p>191 条样本肉眼扫是扫不完的，所以先写了个<strong>分诊器</strong>：把两侧 SQL 都归一化（去掉表限定名、UDF、反引号），然后按结构特征给每条打标签。</p>
+<div class="flowd has-groups" data-flow data-edges="[{&quot;from&quot;:&quot;t1&quot;,&quot;to&quot;:&quot;t2&quot;},{&quot;from&quot;:&quot;t2&quot;,&quot;to&quot;:&quot;t3&quot;},{&quot;from&quot;:&quot;t3&quot;,&quot;to&quot;:&quot;look&quot;,&quot;tone&quot;:&quot;green&quot;}]" style="--flow-marker:url(#fa-1)">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa-1" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"><div class="fgroup tone-amber" data-group-box="a">
+          <span class="fgroup-label">先分类</span>
+        </div><div class="fgroup tone-green" data-group-box="b">
+          <span class="fgroup-label">再定性</span>
+        </div></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-green" data-id="t1" data-group="a">
+              
+              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5L3 8l3 4.5M10 3.5L13 8l-3 4.5"/></svg>
+              <b>客体过滤在不在</b>
+              <small>object_id in (…) 只有一侧有？</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="t2" data-group="a">
+              
+              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5L3 8l3 4.5M10 3.5L13 8l-3 4.5"/></svg>
+              <b>哪边多了列/谓词</b>
+              <small>标识符集合做差</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="t3" data-group="a">
+              
+              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5L3 8l3 4.5M10 3.5L13 8l-3 4.5"/></svg>
+              <b>分支数 / 计数口径</b>
+              <small>union all 段数、having count</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-red" data-id="look" data-group="b">
+              
+              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2.2l4.8 1.9v4c0 2.9-2.1 4.8-4.8 5.7-2.7-.9-4.8-2.8-4.8-5.7v-4z"/></svg>
+              <b>看完整 SQL 定性</b>
+              <small>每类抽头两条人工看</small>
+            </div></div></div>
+      <div class="flegend"><span class="fleg-item tone-green">
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"
+                     stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5L3 8l3 4.5M10 3.5L13 8l-3 4.5"/></svg>
+                backend <em>3</em></span><span class="fleg-item tone-red">
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"
+                     stroke-linecap="round" stroke-linejoin="round"><path d="M8 2.2l4.8 1.9v4c0 2.9-2.1 4.8-4.8 5.7-2.7-.9-4.8-2.8-4.8-5.7v-4z"/></svg>
+                security <em>1</em></span></div>
+    </div><p>第一次跑出来的分诊表：</p>
+<table>
+<thead>
+<tr>
+<th>归类</th>
+<th>条数</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>UDP 多出的列/谓词: futu_hk_trade_security_on_exchange_count, ct1</code></td>
+<td>129</td>
+</tr>
+<tr>
+<td><code>UDP 多出的列/谓词: t1, cnt</code></td>
+<td>45</td>
+</tr>
+<tr>
+<td><code>UDP 多出的列/谓词: uidt, ct1</code></td>
+<td>8</td>
+</tr>
+<tr>
+<td><code>UDP 多出的列/谓词: ct2, uidt</code></td>
+<td>8</td>
+</tr>
+<tr>
+<td><code>UDP 多出的列/谓词: ct1</code></td>
+<td>1</td>
+</tr>
+</tbody>
+</table>
+<div class="callout tone-amber">
+      <span class="ic">⚠</span>
+      <div><p><strong>分诊器给我自己挖过一个坑。</strong> 报告里为了排版把 SQL 截断到 240 字符，
+于是「哪边多了列」这类判断在截断后的文本上做 —— 结果 129 条被归成
+「UDP 多出一个画像谓词」，看着像<strong>它们的 SQL 有、我们的没有</strong>。</p>
+<p>把完整 SQL 打出来才发现：那个谓词两边都有，<mark class="mk-blue">真实差异是&quot;我们少了一整个叶子&quot;</mark>。
+<strong>分诊只用来把 191 条变成 3 类，定性一定要看完整 SQL。</strong></p>
+</div>
+    </div><h2 id="三条真问题"><span class="num">02</span>三条真问题</h2>
+<div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-red">问题 ①</span>
+            <span class="name">一个条件节点里的多个叶子，我只取了第一个</span>
+            <span class="spacer"></span>
+            <span class="tag tone-red">129 条</span>
+          </div>
+          
+          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>&quot;condition&quot;: { &quot;items&quot;: [ {&quot;name&quot;:&quot;A&quot;,&quot;op&quot;:&quot;&gt;&quot;}, {&quot;name&quot;:&quot;B&quot;,&quot;op&quot;:&quot;&gt;&quot;} ] }
+→ 我只翻出了 A
+</pre></div>
+          <p class="jnote bad">现网的条件节点 <code>condition.items</code> 是一个<strong>叶子列表</strong>（按 <code>condition.logic</code> 组合）。我的翻译器早期版本把它当单叶处理，只取第一个 —— 于是我们的条件树少了一个叶子，UDP 的 SQL 里却有两个，结果集自然对不上。</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">改成摊平 items 里的所有叶子：多个时包成一个 group；另外按行自身形状分派（relationName 走关系、否则走画像）</span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-violet">问题 ②</span>
+            <span class="name">array 字段用错了函数</span>
+            <span class="spacer"></span>
+            <span class="tag tone-violet">17 条报错</span>
+          </div>
+          
+          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>Can not find the compatibility function signature:
+array_contains(VARCHAR(1024), VARCHAR(1))
+</pre></div>
+          <p class="jnote bad">我们按 Doris 的<strong>真 ARRAY 列</strong>写 <code>array_contains</code>，而现网这类列是<strong>逗号分隔字符串</strong>。这不是环境问题，是编译器的一条真实差异被数据顶出来了（上一篇结尾就发现了，这一篇定案）。</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">数语料确认该用哪个函数 → 改用 find_in_set</span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-red">问题 ③</span>
+            <span class="name">TIMES + 属性过滤，我把语义读反了</span>
+            <span class="spacer"></span>
+            <span class="tag tone-red">45 条</span>
+          </div>
+          
+          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>我以为是「每一行都满足属性」
+实际是「没有行，或存在一行满足属性」
+</pre></div>
+          <p class="jnote bad">这是本轮最有价值的一条：它不是&quot;写错代码&quot;，是<strong>我从源码里读出来的结论本身就错了</strong>，而且我还把它当成&quot;已对齐&quot;写进了文档。是结果级对拍用三个数字把它钉死的。</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">见 04 节：两个交互控件把这三层拆开看，再改编译器</span>
+      <span class="stem"></span><span class="head"></span>
+    </div><h2 id="array-的定案回去数语料"><span class="num">03</span>array 的定案：回去数语料</h2>
+<p>解决方式不是拍脑袋，是回去数 6500 条语料里两种函数各出现在什么语境：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>函数</th><th>出现条数</th><th>长什么样</th></tr></thead><tbody><tr><th><code>find_in_set</code></th><td data-label="出现条数">30 条</td><td data-label="长什么样"><code>and (((find_in_set('11', attr_array)) or (find_in_set('32', attr_array))))</code> —— <strong>关系属性</strong>，逗号串</td></tr><tr><th><code>array_contains</code></th><td data-label="出现条数">26 条</td><td data-label="长什么样"><code>ARRAY_CONTAINS(CAST(IFNULL(ELEMENT_AT(properties, 'option_ids'), '[]') AS ARRAY&lt;VARCHAR&gt;), '1')</code> —— <strong>事件属性</strong>，JSON 数组</td></tr></tbody></table></div><p>结论很干净：<strong>圈选路径（画像 / 关系属性）的数组列是逗号串</strong>，<code>array_contains</code> 属于事件 JSON 数组那条链路。于是编译器改掉：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-sql">-- 改前（错）：array_contains(`u`.`tags`, 'CN')
+-- 改后（对齐现网）：(find_in_set('CN', `u`.`tags`))
+-- 多值语义：has = 任一项命中（OR）；not_has = 每一项都不包含（AND）
+</code></pre></div>
+<p>这一改，<strong>17 条执行报错直接清零</strong>。</p>
+<h2 id="主角一条被数据抓住的语义误读"><span class="num">04</span>主角：一条被数据抓住的语义误读</h2>
+<h3 id="41-那句话长什么样">4.1 那句话长什么样</h3>
+<p>现网对「关系 + 计数 + 属性过滤」编译成这样（两次&quot;不在&quot;套在一起）：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-sql">uid 不在 ( 从关系表里查： uid 不在 ( 从关系表里查： 满足属性 ) )
+</code></pre></div>
+<p><strong>我当时把它读成了「每一行都得满足属性」。</strong> 理由听起来很顺：两层否定叠起来，不就是&quot;不存在不满足的行&quot;吗？</p>
+<p>不是。下面两个控件把这三层拆开看 —— 先别看结论，<strong>自己点一遍</strong>。</p>
+<div class="demo" data-widget="notin-lab" data-config="{}">
+      <div class="demo-head">
+        <span class="title">三层拆开看：哪一层筛的是&quot;人&quot;，哪一层筛的是&quot;行&quot;</span>
+        <span class="status" data-status>点上面的按钮，一层一层看</span>
+        <span class="spacer"></span>
+        
+      </div>
+      <div class="demo-body custom" data-mount></div>
+    </div><h3 id="42-三种读法差在哪">4.2 三种读法，差在哪</h3>
+<p>同一个数据集，把三种可能的语义摆在一起（这就是我当时脑子里的三种候选）：</p>
+<div class="demo" data-widget="times-readings-lab" data-config="{}">
+      <div class="demo-head">
+        <span class="title">「计数 ≥ N 且属性 ≥ 10」的三种读法</span>
+        <span class="status" data-status>三种读法各切一次，看&quot;小美&quot;和&quot;小明&quot;的结果怎么变</span>
+        <span class="spacer"></span>
+        
+      </div>
+      <div class="demo-body custom" data-mount></div>
+    </div><div class="callout tone-green">
+      <span class="ic">🎯</span>
+      <div><p><strong>现网是 B。</strong> 一句话记住它：</p>
+<p><mark class="mk-blue">先按&quot;总行数&quot;筛一遍人数，再要求&quot;<strong>至少有一行</strong>合格&quot; —— 不是&quot;每一行都合格&quot;。</mark></p>
+<p>而且&quot;计数&quot;数的是<strong>总行数</strong>，不是&quot;合格的行数&quot; —— 这两件事加起来，就是它的完整口径。</p>
+</div>
+    </div><h3 id="43-为什么两层层套看起来像-a其实是-b">4.3 为什么&quot;两层层套&quot;看起来像 A、其实是 B</h3>
+<p>关键在第 ② 层判断的对象：</p>
+<table>
+<thead>
+<tr>
+<th>层</th>
+<th>SQL 在做什么</th>
+<th>判断的是</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>①</td>
+<td>从关系表里查「满足属性」的行</td>
+<td><strong>行</strong> → 得到&quot;至少一行合格&quot;的人</td>
+</tr>
+<tr>
+<td>②</td>
+<td>从关系表里查「主人的 uid 不在①的名单里」的行</td>
+<td><strong>人</strong>（这行的主人有没有合格过）→ 得到&quot;有记录、但一次都没合格过&quot;的人</td>
+</tr>
+<tr>
+<td>③</td>
+<td>从全体人里去掉②</td>
+<td><strong>人</strong> → 剩下&quot;从没记录的人&quot; + &quot;至少合格过一次的人&quot;</td>
+</tr>
+</tbody>
+</table>
+<p>第 ② 层只会收<strong>一次都没合格过</strong>的人。一个人哪怕有 10 行不合格，<strong>只要有一行合格，他就不会进第 ② 层</strong>，也就不会被第 ③ 层踢掉。</p>
+<blockquote>
+<p>否定的是&quot;<strong>合格的</strong>行&quot; → 问的是&quot;<strong>有没有</strong>合格的&quot;；
+想表达&quot;<strong>每一行都</strong>合格&quot;，得拿&quot;<strong>不合格的</strong>行&quot;去做否定 —— 那是另一个写法（我们原来那句 <code>不存在(有不合格的行)</code>）。</p>
+</blockquote>
+<p>一个字的差别，值 <strong>117 个人</strong>。</p>
+<h3 id="44-实测把它钉死">4.4 实测把它钉死</h3>
+<p>在本地种子库上，三种语义各跑一遍（case <code>937061</code>）：</p>
+<table>
+<thead>
+<tr>
+<th>语义</th>
+<th>人数</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>总行数 &gt; 0</td>
+<td>4021</td>
+</tr>
+<tr>
+<td><strong>B：存在一行满足</strong>（现网语义，= UDP 记录 SQL 的结果）</td>
+<td><strong>0</strong> ✓</td>
+</tr>
+<tr>
+<td>A：每一行都满足（我原来的实现）</td>
+<td>117 ✗</td>
+</tr>
+</tbody>
+</table>
+<p>UDP 的记录 SQL 返回 <strong>0</strong>，和我实现的 117 对不上 —— 数字不会骗人。这比&quot;再读一遍源码&quot;有用得多。</p>
+<h3 id="45-改了什么">4.5 改了什么</h3>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-sql">-- 改前（A：要求每一行都满足）
+AND NOT EXISTS (SELECT 1 FROM 关系表 r WHERE r.uid = u.uid AND NOT (props))
+
+-- 改后（B：没有行，或存在一行满足）
+AND (NOT EXISTS (SELECT 1 FROM 关系表 r WHERE r.uid = u.uid)
+     OR EXISTS   (SELECT 1 FROM 关系表 r WHERE r.uid = u.uid AND (props)))
+</code></pre></div>
+<p>同时把<strong>文档里那条写错的结论</strong>改正，并把三个实测数字留在原地 —— 免得以后又有人（包括我）把它读回去。</p>
+<h2 id="重跑853-988"><span class="num">05</span>重跑：85.3% → 98.8%</h2>
+<div class="summary">
+      <h3 id="第-④-步第二轮">第 ④ 步第二轮</h3>
+      <ul>
+<li>一致率 <strong>85.3% → 98.8%</strong>（1209 → <strong>1400 / 1417</strong>）</li>
+<li>执行报错 <strong>17 → 0</strong></li>
+<li>剩下的 17 条：全部是同一类结构差异，见下</li>
+</ul>
+
+    </div><p>剩下的 17 条长这样（case <code>1094803</code>）：</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>SQL（节选）</th>
+<th>人数</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>我们</td>
+<td><code>… OR u.uid IN (231368439, 231436539, …)</code></td>
+<td>384</td>
+</tr>
+<tr>
+<td>现网</td>
+<td><code>… union all select uid from (SELECT 231368439 AS uid UNION ALL SELECT 231436539 AS uid UNION ALL …) uidt</code></td>
+<td>403</td>
+</tr>
+</tbody>
+</table>
+<p>现网是<strong>用字面量凭空构造 uid</strong>（表里没有的 uid 也会出现），我们是 <code>uid IN (…)</code> 过滤主表（表里没有就不出现）。只影响&quot;不在表里的 uid&quot;，属于<strong>已登记的结构差异</strong>，不是编译器 bug。</p>
+<div class="callout tone-blue">
+      <span class="ic">📌</span>
+      <div><p>这也解释了这类 case 为什么<strong>在本地种子上不可能对上</strong>：本地表只有 1 万个 uid，
+现网那句话里点名的人大多不在里面。<mark class="mk-blue">这类差异只能定性、不能定量。</mark></p>
+</div>
+    </div><h2 id="你问过的几个问题"><span class="num">06</span>你问过的几个问题</h2>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>你的问题</th><th>回答的要点</th><th>在哪</th></tr></thead><tbody><tr><th>「客体是什么？计数能不能选客体？」</th><td data-label="回答的要点">客体 = 关系表里「跟谁发生关系」的那一列（股票代码 / 天数 / 渠道），也就是「一对多」里的那个「多」。计数选客体 = 只数某个对象的记录 —— 现网<strong>不支持</strong>，我们已按它的现状去掉（更早一轮的事）</td><td data-label="在哪">系列第 ③ 篇 + <code>docs/udp-sql-diff.md</code> §8.5</td></tr><tr><th>「8.4 能说人话吗？发生了什么」</th><td data-label="回答的要点">就是我们按「每一行都满足」实现，而现网是「至少一行满足」；我读源码读错了，是数据把它抓出来的</td><td data-label="在哪">本篇 04 节</td></tr><tr><th>「这里我开始不理解了（两层层套）」</th><td data-label="回答的要点">第 ② 层筛的是「人」不是「行」：只看这个人「有没有合格过」，不看「某一行为什么不合格」</td><td data-label="在哪">本篇 4.3 + 第一个控件</td></tr><tr><th>「为什么需要我拍板？」</th><td data-label="回答的要点">因为有些取舍不是对错问题，而是「跟现网对齐，还是保留自己的能力」。有证据的直接改（如数组函数），要产品定的才请拍板</td><td data-label="在哪">系列第 ④ 篇 06 节</td></tr></tbody></table></div><h2 id="收尾提交以及一次撞车"><span class="num">07</span>收尾：提交，以及一次&quot;撞车&quot;</h2>
+<div class="timeline"><div class="titem tone-blue">
+          <span class="when">提交一</span>
+          <h4>两个修正</h4>
+          <p><code>fix(sql-builder): 按现网实测修正 TIMES 属性语义与 array 函数</code> —— 编译器 + 测试 + fixture + 文档纠正（含「我之前写错了」这句）</p>
+        </div><div class="titem tone-blue">
+          <span class="when">提交二</span>
+          <h4>harness 与报告</h4>
+          <p><code>feat(scripts): 加上 UDP 对拍 harness 与第 ①–④ 步报告</code> —— 7 个脚本 + 一份总结文档</p>
+        </div><div class="titem tone-amber">
+          <span class="when">推送被拒</span>
+          <h4>撞上别人的提交</h4>
+          <p>远端多了一个提交：<code>圈选预览、导出和创建人群包按数据权限校验客户范围</code>（45 文件、lockfile +1155 行）</p>
+        </div><div class="titem tone-green">
+          <span class="when">处理</span>
+          <h4>rebase 后重跑验证</h4>
+          <p>检查文件重叠（<strong>零重叠</strong>）→ <code>git rebase</code> → <code>pnpm install</code> → 重跑三条验证 → 推送成功</p>
+        </div><div class="titem tone-green">
+          <span class="when">结果</span>
+          <h4>三条验证全绿</h4>
+          <p>typecheck 通过 · <code>pnpm test</code> <strong>415 passed</strong>（比之前多 19 个，是他们新加的测试）· validate:mfe 0 error 1 warn</p>
+        </div></div><div class="callout tone-amber">
+      <span class="ic">🚧</span>
+      <div><p><strong>这个图解仓库里也有另一个会话在同时改</strong>（<code>assets/app.js</code> 里有一份未提交的
+<code>relation-negation-lab</code> 控件）。所以本篇的提交只点名自己的文件 ——
+<mark class="mk-blue">不碰别人的未提交改动，也不替别人收尾。</mark></p>
+</div>
+    </div><h2 id="这次验证了什么没验证什么"><span class="num">08</span>这次验证了什么、没验证什么</h2>
+<ul class="check"></ul><h2 id="自测"><span class="num">09</span>自测</h2>
+<div class="quiz"><details>
+        <summary>翻译器&quot;一个条件节点里的多个叶子只取第一个&quot;这个 bug，为什么在结果级对拍里一下就能看见？</summary>
+        <div class="a"><p>因为结果级比的是<strong>人的集合</strong>。少一个叶子 = 条件变宽 = 圈出来的人变多，
+人数立刻和现网不一样；而文本级对拍如果只挑了&quot;第一个叶子&quot;去比，
+两边可能都对得上 —— <strong>少的那部分根本不在比较范围里</strong>。</p>
+</div>
+      </details><details>
+        <summary>「计数 ≥ 3 且属性 ≥ 10」里，现网对属性的要求是下列哪一个？ ① 每一行都满足属性 ② 至少有一行满足属性 ③ 满足属性的行数 ≥ 3</summary>
+        <div class="a"><p>②。「计数」数的是<strong>总行数</strong>（不是合格行数），属性能是个&quot;存在性&quot;要求，两者取交集。
+实测：本地种子上 ② = 0 人，与现网记录 SQL 一致；① 会得到 117 人。</p>
+</div>
+      </details><details>
+        <summary>为什么第 ② 层（中间的&quot;不在&quot;）只会收&quot;一次都没合格过&quot;的人？</summary>
+        <div class="a"><p>因为它的判断条件是&quot;这行的主人 uid 在不在第 ① 层名单里&quot; —— 判断对象是<strong>人</strong>，不是这一行。
+主人合格过一次，他的<strong>每一行</strong>都不满足这个条件，于是这个人根本不会进第 ② 层。
+想把&quot;有某些行不合格&quot;表达出来，得换成对&quot;不合格的行&quot;做否定。</p>
+</div>
+      </details></div>
+
+    <footer>
+      <span>分诊 191 条不一致：一条被数据抓住的语义误读</span>
+      <span>最后更新 2026-10-15 · 单文件可离线打开</span>
+    </footer>
+  </main>
+</div>
+
+<script src="../../assets/app.js?v=eec8435dc5"></script>
+</body>
+</html>
