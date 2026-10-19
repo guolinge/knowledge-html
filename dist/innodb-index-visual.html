@@ -6317,6 +6317,29 @@ html[data-theme="dark"] .rb-lab { --rb-dark: #55647d; --rb-dark-line: #93a3bd; -
 .rb-234key.is-hl { fill: var(--amber-soft); stroke: var(--amber); stroke-width: 1.8; }
 .rb-234txt { fill: var(--text); }
 .rb-234label { font: 600 10.5px var(--sans); fill: var(--violet); }
+.rb-edge.is-path { stroke: var(--blue); stroke-width: 3; }
+.rb-count { font: 700 10px var(--mono); fill: var(--violet); }
+.rb-legend-path { color: var(--blue); }
+.rb-legend-count { color: var(--violet); }
+.rb-counter { font: 500 12px/1.4 var(--mono); color: var(--muted); align-self: center; }
+.rb-234label.is-over { fill: var(--red); }
+.rb-234box.is-over { stroke: var(--red); stroke-width: 2.4; }
+/* 认树练习 */
+.rq-wrap { display: grid; gap: 13px; min-width: 0; }
+.rq-q { display: grid; gap: 7px; }
+.rq-row { display: grid; grid-template-columns: 1fr auto auto minmax(0, 15em); gap: 8px; align-items: center; }
+.rq-lab { font: 400 13px/1.6 var(--sans); color: var(--text-2); }
+.rq-btn { font: 500 12px/1.4 var(--sans); color: var(--text); background: var(--surface); border: 1px solid var(--border-strong); border-radius: 7px; padding: 6px 13px; cursor: pointer; }
+.rq-btn:hover { border-color: var(--blue); }
+.rq-btn.is-on { border-color: var(--blue); background: var(--blue-soft); color: var(--blue); font-weight: 650; }
+.rq-mark { font: 500 12px/1.55 var(--sans); color: var(--muted); }
+.rq-mark.is-ok { color: var(--green); }
+.rq-mark.is-bad { color: var(--red); }
+.rq-verdict { font: 400 12.5px/1.8 var(--sans); color: var(--text-2); padding: 10px 12px; border-radius: 9px; background: var(--surface-2); }
+.rq-verdict.is-ok { background: var(--green-soft); }
+.rq-verdict.is-bad { background: var(--amber-soft); }
+.rq-stats { margin-top: 6px; font-size: 12px; color: var(--muted); }
+@media (max-width: 760px) { .rq-row { grid-template-columns: 1fr auto auto; } .rq-mark { grid-column: 1 / -1; } }
 
 </style>
   <style>
@@ -17939,7 +17962,7 @@ WIDGETS['mysql-2pc-crash'] = (root) => {
     nodes.forEach((n) => {
       svg.append(rbEl('rect', {
         x: n.left, y: n.top, width: n.right - n.left, height: CH, rx: 9,
-        class: 'rb-234box' + (n.keys.length === 1 ? '' : ' is-multi'),
+        class: 'rb-234box' + (n.keys.length === 1 ? '' : ' is-multi') + (n.keys.length > 3 ? ' is-over' : ''),
       }));
       n.keys.forEach((k, j) => {
         const cx = xAt(n.slots[j]);
@@ -17951,9 +17974,13 @@ WIDGETS['mysql-2pc-crash'] = (root) => {
           x: cx, y: n.top + CH / 2 + 5, class: 'rb-key rb-234txt', 'text-anchor': 'middle',
         }, k));
       });
+      /* 超过 3 个键 = 超载，不存在的节点 —— 这一步要标出来，不然读者以为 5-节点是合法的 */
+      const kk = n.keys.length + 1;
+      const over = kk > 4;
       svg.append(rbEl('text', {
-        x: n.cx, y: n.top - 8, class: 'rb-234label', 'text-anchor': 'middle',
-      }, n.keys.length + 1 + '-节点'));
+        x: n.cx, y: n.top - 8, 'text-anchor': 'middle',
+        class: 'rb-234label' + (over ? ' is-over' : ''),
+      }, over ? kk + ' 个键 · 装不下了（要分裂）' : kk + '-节点'));
     });
     host.append(svg);
     /* 并排对比时每格都挂一条图例太吵 —— 由调用方决定，正文里说明一次就够 */
@@ -17962,12 +17989,95 @@ WIDGETS['mysql-2pc-crash'] = (root) => {
     }
   }
 
+  /* ---------- 2-3-4 树的插入：一步步分裂，供静态演示用 ----------
+     为什么在页面里自己实现一遍：讲「分裂上推」最好就是把每一步的树画出来，
+     而「上一步 / 下一步」比一张表更能让人看清中间发生了什么。
+     算法是自底向上（插到底，装不下就往上传），和红黑树插入修复的顺序一致。 */
+  function rb234Insert(rootSpec, key) {
+    const mk = (keys, children) => ({ keys: keys, children: children || [] });
+    /* rbParse234 会把缺失的孩子补成 null 占位，所以「有没有孩子」要过滤一遍 */
+    const kids = (n) => (n.children || []).filter(Boolean);
+    const snap = (label, tone, note) => ({ spec: rb234Spec(root), label: label, tone: tone, note: note });
+    const steps = [];
+    const path = [];
+
+    const spec = String(rootSpec || '').trim();
+    let root;
+    if (!spec) {
+      /* 空树：这个键直接当根 */
+      root = mk([key], []);
+      steps.push(snap('第 1 步 · 空树，这个键成为根', 'blue', '第一个键：它自己就是整棵树。'));
+      return { steps: steps, dup: false };
+    }
+    root = rbParse234(spec);
+
+    /* 找到该下钻的叶节点，一路记下经过的节点 */
+    let n = root;
+    for (;;) {
+      path.push(n);
+      if (!kids(n).length) break;
+      let i = 0;
+      while (i < n.keys.length && key > n.keys[i]) i++;
+      if (n.keys[i] === key) return { steps: [], dup: true };
+      n = kids(n)[i];
+    }
+    if (n.keys.indexOf(key) >= 0) return { steps: [], dup: true };
+
+    n.keys.push(key);
+    n.keys.sort((a, b) => a - b);
+    steps.push(snap('第 1 步 · 放进最底下的节点', 'blue',
+      '键 ' + key + ' 顺着比较一路走到底，塞进这个节点。装得下（不超过 3 个键）就到此为止 —— '
+      + '这正是 2-3-4 树的富余：小插入根本惊动不了上层。'));
+
+    /* 装不下就分裂，一路往上 */
+    let cur = n;
+    let level = 0;
+    while (cur.keys.length > 3) {
+      level++;
+      const parent = path[path.length - 1 - level];
+      const k = cur.keys.slice();
+      const mid = k[1];
+      const hasKids = kids(cur).length > 0;
+      const left = mk([k[0]], hasKids ? cur.children.slice(0, 2) : []);
+      const right = mk(k.slice(2), hasKids ? cur.children.slice(2) : []);
+      if (!parent) {
+        root = mk([mid], [left, right]);
+        cur = root;
+        steps.push(snap('第 ' + (level + 1) + ' 步 · 根分裂 → 树长高一层', 'violet',
+          '装不下的是根：中间的 ' + mid + ' 成为新的根，剩下的键拆成两个节点挂在它下面。'
+          + '==这是 2-3-4 树唯一长高的方式== —— 从根往上长，所以所有叶子一起下沉一层，永远同深。'));
+        break;
+      }
+      const at = (parent.children || []).indexOf(cur);
+      parent.keys.push(mid);
+      parent.keys.sort((a, b) => a - b);
+      parent.children.splice(at, 1, left, right);
+      steps.push(snap('第 ' + (level + 1) + ' 步 · 分裂，中间的 ' + mid + ' 推上去', 'amber',
+        hasKids
+          ? '装不下的节点把中间的 ' + mid + ' 推给父节点，左右两半连同各自的孩子分成两个节点。'
+          : '叶子装了 4 个键，超出 4-节点的容量。中间的 ' + mid + ' 被推到父节点，左右两半各自成为独立节点。'));
+      cur = parent;
+    }
+    steps.push(snap('完成', 'green',
+      '所有叶子仍在同一层、每个节点最多 3 个键、中序有序。插入只动了这几个节点，别处一点没碰。'));
+    return { steps: steps, dup: false };
+  }
+
+  /* 把 2-3-4 树序列化回紧凑写法，交给同一个渲染器画 */
+  function rb234Spec(n) {
+    if (!n) return '_';
+    const keys = n.keys.join('|');
+    const kids = (n.children || []).filter(Boolean);
+    if (!kids.length) return keys;
+    return keys + ':(' + kids.map(rb234Spec).join(',') + ')';
+  }
+
   WIDGETS['rbtree-lab'] = (root) => {
     const cfg = cfgOf(root);
     const box = mountOf(root);
     /* YAML 里 mode: 234 会被当成数字，统一转成字符串再比 */
     const modeRaw = String(cfg.mode === undefined ? 'insert' : cfg.mode);
-    const mode = ['delete', 'explore', 'show', '234'].indexOf(modeRaw) >= 0 ? modeRaw : 'insert';
+    const mode = ['delete', 'explore', 'show', '234', 'walk', 'quiz'].indexOf(modeRaw) >= 0 ? modeRaw : 'insert';
     const T = rbMake();
     let steps = [];
     let cur = -1;
@@ -17982,7 +18092,139 @@ WIDGETS['mysql-2pc-crash'] = (root) => {
 
     /* 静态图：只画树（给「长什么样」那类插图用，不做交互）。
        单棵用 tree:，几棵并排用 trees: [{ tree, cap, hl, show234 }] —— 对比用。 */
-    if (mode === 'show' || mode === '234') {
+    /* 2-3-4 逐步插入：math 在 rb234Insert 里，这里只做播放条 */
+    if (mode === '234' && cfg.insert !== undefined && cfg.insert !== null) {
+      const run = rb234Insert(cfg.tree, cfg.insert);
+      if (run.dup) {
+        ui.append(el('p', 'rb-empty', '键 ' + cfg.insert + ' 已经在树里了 —— 2-3-4 树也不允许重复键。'));
+        return;
+      }
+      let at = 0;
+      const bar2 = el('div', 'rb-bar');
+      const stage2 = el('div', 'rb-stage');
+      const say = el('div', 'rb-now');
+      const prev2 = el('button', 'rb-btn', '‹ 上一步');
+      const next2 = el('button', 'rb-btn', '下一步 ›');
+      const reset2 = el('button', 'rb-btn ghost', '回到插入前');
+      const counter = el('span', 'rb-counter');
+      bar2.append(prev2, next2, reset2, counter);
+      ui.append(bar2, stage2, say);
+
+      function paint() {
+        const st = run.steps[at];
+        drawStage234(stage2, st.spec, []);
+        counter.textContent = (at + 1) + ' / ' + run.steps.length;
+        prev2.disabled = at === 0;
+        next2.disabled = at === run.steps.length - 1;
+        say.className = 'rb-now tone-' + st.tone;
+        fill(say, []);
+        const head = el('div', 'rb-now-head');
+        head.append(el('span', 'rb-phase tone-' + st.tone, st.label));
+        say.append(head);
+        const p2 = el('p', 'rb-now-desc');
+        richText(p2, st.note || '');
+        say.append(p2);
+      }
+      prev2.addEventListener('click', () => { if (at > 0) { at--; paint(); } });
+      next2.addEventListener('click', () => { if (at < run.steps.length - 1) { at++; paint(); } });
+      reset2.addEventListener('click', () => { at = 0; paint(); });
+      paint();
+      return;
+    }
+
+    /* 认树练习：给一棵树，让人自己判断三条性质，再对答案。
+       为什么值得做：读者看懂了图和说法，不等于能在一棵陌生的树上核对 ——
+       而「能不能自己核对」才是「学会了」的判据。 */
+    if (mode === 'quiz') {
+      const snap = rbParse(cfg.tree);
+      const ck = rbCheck(snap);
+      const cl = rbClusters(snap);
+      const gauge = { 1: 0, 2: 0, 3: 0, bad: 0 };
+      cl.forEach((c) => { gauge[c.keys.length <= 3 ? c.keys.length : 'bad']++; });
+      const rootBlack = snap && snap.c === 'B';
+      const noRedRed = !ck.errs.some((e) => e.indexOf('红孩子') >= 0);
+      const sameBh = !ck.errs.some((e) => e.indexOf('黑高') >= 0);
+      const sortedOk = !ck.errs.some((e) => e.indexOf('边界') >= 0);
+
+      const QS = [
+        { k: 'root', q: '根节点是黑的吗？', yes: rootBlack,
+          why: rootBlack ? '根 ' + snap.k + ' 是黑的 ✓' : '根 ' + (snap && snap.k) + ' 是红的 ✗' },
+        { k: 'red', q: '有没有哪个红节点的孩子也是红的？', yes: noRedRed,
+          why: noRedRed ? '没有连着两个红 ✓' : '有：' + ck.errs.filter((e) => e.indexOf('红孩子') >= 0).join('；') },
+        { k: 'bh', q: '从根到每个空位，黑节点数一样吗？', yes: sameBh,
+          why: sameBh ? '每条路的黑节点数都是 ' + ck.bh + '（含末尾空位）✓' : '不一样：' + ck.errs.filter((e) => e.indexOf('黑高') >= 0).join('；') },
+        { k: 'bst', q: '中序遍历是递增的吗（它还是棵搜索树吗）？', yes: sortedOk,
+          why: sortedOk ? '左小右大，中序递增 ✓' : '有序性被破坏了 ✗' },
+      ];
+      const picked = {};
+
+      const wrap = el('div', 'rq-wrap');
+      const stage3 = el('div', 'rb-stage');
+      const qbox = el('div', 'rq-q');
+      const verdict = el('div', 'rq-verdict');
+      wrap.append(stage3, qbox, verdict);
+      ui.append(wrap);
+
+      drawStageInto(stage3, snap, new Set(), new Set(), null, { path: cfg.path, pathStyle: cfg.bh ? 'count' : 'mark' });
+      if (cfg.note) {
+        const p2 = el('p', 'rb-show-note');
+        richText(p2, cfg.note);
+        ui.append(p2);
+      }
+
+      QS.forEach((item) => {
+        const row = el('div', 'rq-row');
+        const lab = el('span', 'rq-lab', item.q);
+        const yes = el('button', 'rq-btn', '是');
+        const no = el('button', 'rq-btn', '不是');
+        const mark = el('span', 'rq-mark');
+        yes.addEventListener('click', () => { picked[item.k] = true; paint(); });
+        no.addEventListener('click', () => { picked[item.k] = false; paint(); });
+        row.append(lab, yes, no, mark);
+        qbox.append(row);
+        item.btns = [yes, no];
+        item.mark = mark;
+      });
+
+      function paint() {
+        let right = 0;
+        let answered = 0;
+        QS.forEach((item) => {
+          const got = picked[item.k];
+          const done = got !== undefined;
+          item.btns.forEach((b, i) => {
+            const val = i === 0;
+            b.classList.toggle('is-on', done && got === val);
+          });
+          if (!done) { item.mark.textContent = ''; item.mark.className = 'rq-mark'; return; }
+          answered++;
+          const ok = got === item.yes;
+          if (ok) right++;
+          item.mark.textContent = (ok ? '✓ ' : '✗ ') + item.why;
+          item.mark.className = 'rq-mark ' + (ok ? 'is-ok' : 'is-bad');
+        });
+        verdict.className = 'rq-verdict ' + (answered === QS.length ? (right === QS.length ? 'is-ok' : 'is-bad') : '');
+        fill(verdict, []);
+        richText(verdict, answered === 0
+          ? '四个问题都答一下 —— 答错不要紧，错的地方就是需要回头再看一眼的。'
+          : (answered < QS.length
+            ? '已答 ' + answered + ' / ' + QS.length + '，对 ' + right + ' 个。'
+            : (right === QS.length
+              ? '==全对==：这棵树你已经能自己核对三条性质了。'
+              : '对了 ' + right + ' / ' + QS.length + ' 个 —— 上面标 ✗ 的地方回头看一下。')));
+        if (answered === QS.length) {
+          const stats2 = el('div', 'rq-stats');
+          richText(stats2, '树本身：黑高 **' + ck.bh + '** · ' + ck.nodes + ' 个键 · 2-3-4 节点 '
+            + gauge[1] + '✕2-节点 / ' + gauge[2] + '✕3-节点 / ' + gauge[3] + '✕4-节点'
+            + (gauge.bad ? ' / ' + gauge.bad + ' 个超载' : ''));
+          verdict.append(stats2);
+        }
+      }
+      paint();
+      return;
+    }
+
+    if (mode === 'show' || mode === '234' || mode === 'walk' || mode === 'quiz') {
       const is234 = mode === '234';
       if (cfg.trees && cfg.trees.length) {
         const row = el('div', 'rb-row');
@@ -17996,13 +18238,17 @@ WIDGETS['mysql-2pc-crash'] = (root) => {
           if (is234) drawStage234(st, t.tree, t.hl, true);
           else {
             show234 = t.show234 === undefined ? show234 : !!t.show234;
-            drawStageInto(st, rbParse(t.tree), new Set(t.hl || []), new Set(t.db || []), null);
+            drawStageInto(st, rbParse(t.tree), new Set(t.hl || []), new Set(t.db || []), null,
+              { path: cfg.path || t.path, pathStyle: cfg.bh || t.bh ? 'count' : 'mark' });
           }
         });
       } else {
         ui.append(stage);
         if (is234) drawStage234(stage, cfg.tree, cfg.hl);
-        else drawStageInto(stage, rbParse(cfg.tree), new Set(cfg.hl || []), new Set(cfg.db || []), null);
+        else {
+          drawStageInto(stage, rbParse(cfg.tree), new Set(cfg.hl || []), new Set(cfg.db || []), null,
+            { path: cfg.path, pathStyle: cfg.bh ? 'count' : 'mark' });
+        }
       }
       if (cfg.note) {
         const p = el('p', 'rb-show-note');
@@ -18086,7 +18332,9 @@ WIDGETS['mysql-2pc-crash'] = (root) => {
 
     function drawStage(snap, hl, db, dbNil) { drawStageInto(stage, snap, hl, db, dbNil); }
 
-    function drawStageInto(host, snap, hl, db, dbNil) {
+    /* opts（可选）：{ path: [键...], pathStyle: 'mark'|'count' } —— 给「认路 / 数黑高」用。
+       同一个渲染器，避免「正文的树」和「演示的树」长得不一样。 */
+    function drawStageInto(host, snap, hl, db, dbNil, opts) {
       fill(host, []);
       const pos = [];
       let idx = 0;
@@ -18164,11 +18412,23 @@ WIDGETS['mysql-2pc-crash'] = (root) => {
         }
       }
 
+      /* 认路：把这条路径上的边和节点单独标出来 */
+      const pathSet = new Set((opts && opts.path) || []);
+      if (pathSet.size > 1) {
+        for (let i = 1; i < (opts.path || []).length; i++) {
+          const a = pos.filter((z) => z.n.k === opts.path[i - 1])[0];
+          const b = pos.filter((z) => z.n.k === opts.path[i])[0];
+          if (!a || !b) continue;
+          const pa = at(a), pb = at(b);
+          svg.append(rbEl('line', { x1: pa[0], y1: pa[1], x2: pb[0], y2: pb[1], class: 'rb-edge is-path' }));
+        }
+      }
+
       /* 节点 */
       pos.forEach((p) => {
         const c = at(p);
         const isDb = db.has(p.n.k);
-        const isHl = hl.has(p.n.k);
+        const isHl = hl.has(p.n.k) || pathSet.has(p.n.k);
         svg.append(rbEl('circle', {
           cx: c[0], cy: c[1], r: r,
           class: 'rb-node ' + (p.n.c === 'R' ? 'is-red' : 'is-black')
@@ -18182,10 +18442,30 @@ WIDGETS['mysql-2pc-crash'] = (root) => {
             x: c[0], y: c[1] - r - 6, class: 'rb-db-lab', 'text-anchor': 'middle',
           }, '双黑'));
         }
+        /* 数黑高模式：在黑节点右上角标「+1」 */
+        if (opts && opts.pathStyle === 'count' && p.n.c === 'B') {
+          svg.append(rbEl('text', {
+            x: c[0] + r - 1, y: c[1] - r + 4, class: 'rb-count', 'text-anchor': 'middle',
+          }, '+1'));
+        }
       });
       host.append(svg);
       if (show234) {
         host.append(el('div', 'rb-legend', '虚线框 = 一个 2-3-4 节点；框里几个键，它就是几-节点（1 个键是 2-节点）'));
+      }
+      if (opts && opts.path && opts.path.length > 1) {
+        if (opts.pathStyle === 'count') {
+          const blacks = (opts.path || []).filter((k) => {
+            const hit = pos.filter((z) => z.n.k === k)[0];
+            return hit && hit.n.c === 'B';
+          });
+          const line = el('div', 'rb-legend rb-legend-count');
+          richText(line, '常走这条路：**' + (opts.path || []).join(' → ') + '** ＋ 末尾空位（黑）。'
+            + '路上黑节点 ' + blacks.length + ' 个 + 空位 1 个 = 黑高 **' + (blacks.length + 1) + '**');
+          host.append(line);
+        } else {
+          host.append(el('div', 'rb-legend rb-legend-path', '发亮的这条就是查找路径：从根一路比较下来，' + (opts.path.length - 1) + ' 次比较'));
+        }
       }
     }
 
