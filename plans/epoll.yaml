@@ -1,104 +1,96 @@
 # 嵌套产物树 —— 理解 epoll
 #
-# 主线是一句话：**「等待」是怎么从「执行」里剥出来的。**
+# 这条树的唯一判据是同一个问题：**「等」这件事，由谁来承载？**
 #
-# 这句话不是修辞，它是这棵树唯一的判据：
-#   每剥掉一层，就少一点「因为要等而必须占着的执行资源」。
-#   线程占用 → 一次问一遍（不再占线程，但问本身有成本）→ 内核记住名单（问的成本不再随连接数涨）
+#   阻塞 read      等的人 = 一个线程（要占一个执行单位，还要被调度）
+#   忙轮询          等的人 = 还是那个线程，只是它没停（烧 CPU 换「不用睡」）
+#   select / poll   等的人 = 一个线程，内核替它在 N 个等待队列上挂了 N 个临时条目
+#   epoll           等的人 = 一段回调（挂在同一个等待队列上，不需要被调度）
+#
+# 所以「epoll 更快」具体指的是：**通知到达时，需要被调度唤醒的对象从「线程」变成了「链表节点」**。
+# 这个说法要成立，前提是读者先看懂两件事：
+#   · 阻塞 read 到底把什么挂到了哪里（② 的等待队列）
+#   · 一个线程在等的时候，占着的到底是什么（③）
+# 这两件讲完，④ 的「临时条目」和 ⑤ 的「常驻回调」才有对比对象。
 #
 # 两条边界：
-#   · 前面接 fs-vfs-layers（fd / 打开文件表）和 fs-io-models（等在哪一段、同步异步的分界）
-#     —— 这两层已经有笔记了，这里**接上，不重讲**
-#   · 后面接 go-goroutine 树的 goroutine-poller
-#     —— 那篇讲的是同一件事的另一半（让「执行单位」变轻），epoll 讲的是「让等待不占执行单位」
-#
-# ⓪ 是引子：从「你写的那段代码」出发，先看清哪些东西是一份、哪些是 N 份 ——
-# 尤其「线程不会复制代码」这件事，不讲清它，后面「一万条连接要一万个线程」就无从谈起。
-# ①② 是前提：先知道一条连接在内核里是什么、为什么它会「等」，
-# 再说清「一连接一线程」到底亏在哪（不是内存，是拿执行资源去承载等待）。
-# ③ 是这一篇的锤子：轮询把「等」换成「问」，一个线程终于能招呼多个连接了 ——
-# 但它自己有两个病，而且这两个病才是后面 epoll 存在的理由。
-# ③b select/poll 是第一版答案：把问搬进内核，线程终于能睡了；
-# 但内核失忆（名单重交 + 每轮两遍全扫）—— ①②没治，epoll 的题目就在这。
-# ④⑤ 是 epoll 的正身：先列需求，再看它怎么给；
-# 然后把「就绪」这个词抠开 —— 大多数讲 epoll 的材料都跳过这一步，
-# 而 LT/ET 讲不清，全都是因为没讲「接收缓冲区」。
-# ⑥ 收尾：它治好了什么、没治什么。
+#   · 前面接 fs-vfs-layers（fd 与打开文件表）—— 这里只用到「fd 是一个下标」这层，不重讲
+#   · 后面接 goroutine-poller（让执行单位变轻）—— 本树只解决「让等待不占执行单位」
 
 topic: epoll
 title: 理解 epoll
-summary: 一条连接在等什么、一个线程为什么会被「等」占死、轮询把等待换成了问却换来两个新病 —— 最后才是 epoll 那张「内核替你记住名单」的解法
-source: 机制核实自 man7 epoll(7) / epoll_ctl(2) / select(2) / poll(2)，以及 Linux 内核 eventpoll 源码分析
+summary: 从 read 卡住的那一刻开始，看「等」的载体怎样从线程换成一个回调 —— 轮询、select、epoll 各自治好了什么，又各自欠下什么
+source: 机制核实自 man7 epoll(7) / epoll_ctl(2) / select(2) / poll(2) / io_uring(7)，以及 Linux v6.6 内核源码 fs/eventpoll.c、fs/select.c、net/core/sock.c
 
 nodes:
-  - id: code
-    title: 你写的那段代码，跑起来之后
+  - id: overview
+    title: 一张图看全程：等的人越来越轻
     layer: 概念
     needs: []
-    artifact: server-code
+    artifact: epoll-overview
     status: drafted
-    blurb: 哪些东西是一份、哪些是 N 份 —— 顺手解开「线程会不会复制代码」
+    blurb: 四代方案都在换同一个东西 —— 「等」挂在哪里、谁被唤醒。先拿到整张地图，再决定从哪一篇进去
     children: []
 
-  - id: conn
-    title: 一条连接在内核里是什么
+  - id: read-blocking
+    title: read 卡住的那一刻
     layer: 概念
-    needs: [code]
-    artifact: socket-fd
+    needs: [overview]
+    artifact: epoll-read-blocking
     status: drafted
-    blurb: accept 还给你的只是个整数；fd 是内核那张表的下标，而 socket 为什么会「等」
+    blurb: 线程没有死、也没有空转；内核把它从运行队列摘下来，挂进 socket 自己的等待队列 —— 这个队列是全篇的钥匙
     children: []
 
-  - id: block
-    title: 一连接一线程亏在哪
+  - id: thread-per-conn
+    title: 一条连接一个线程，贵在哪
     layer: 架构
-    needs: [conn]
-    artifact: wait-vs-execute
+    needs: [read-blocking]
+    artifact: epoll-thread-per-conn
     status: drafted
-    blurb: 那个线程不是死了，是停在那占着名额 —— 等待不该占用执行资源
+    blurb: 不是 8MB 栈的传说，是「每多一条连接，就多一个必须存在的执行单位」，而它 99% 的时间在等
     children: []
 
-  - id: poll
-    title: 轮询解决了什么，又欠下什么
+  - id: poll-select
+    title: 把「等」换成「问」：轮询与 select / poll
     layer: 架构
-    needs: [block]
-    artifact: polling-and-its-cost
+    needs: [thread-per-conn]
+    artifact: epoll-poll-select
     status: drafted
-    blurb: 别等了去问，一个线程能招呼多个连接；但白问太多，而且名单每次都要重交一遍
+    blurb: 忙轮询让一个线程招呼多条连接；select/poll 让线程能睡 —— 代价是名单每次重交、醒来全扫一遍
     children: []
 
-  - id: select-poll
-    title: select / poll：第一次搬进内核
+  - id: mechanism
+    title: epoll：把名单留在内核
     layer: 架构
-    needs: [poll]
-    artifact: select-poll
-    status: drafted
-    blurb: 把问搬进内核，线程终于能睡了（③治了）；但名单每次重交、每轮全扫两遍，内核失忆（①②没治）—— 这两条就是 epoll 的题目
-    children: []
-
-  - id: epoll
-    title: epoll 到底做了什么
-    layer: 架构
-    needs: [select-poll]
+    needs: [poll-select]
     artifact: epoll-mechanism
     status: drafted
-    blurb: 先列三条需求，再看它怎么给 —— 内核里两张表，通知靠回调不靠遍历
+    blurb: 两张表、一条回调路径。挂在 socket 等待队列上的东西，从 task 换成了一个几十字节的条目
     children: []
 
-  - id: ready
-    title: 「就绪」是什么意思
+  - id: readiness
+    title: 「就绪」到底是什么意思
     layer: 概念
-    needs: [epoll]
-    artifact: readiness-and-buffers
+    needs: [mechanism]
+    artifact: epoll-readiness
     status: drafted
-    blurb: 可读不等于数据到手；LT 和 ET 争的就是接收缓冲区里那点残留
+    blurb: 可读不等于数据到手；LT 和 ET 争的就是接收缓冲区里那点残留，以及在什么时候再报一次
+    children: []
+
+  - id: cost
+    title: O(1) 说的是哪一段
+    layer: 架构
+    needs: [readiness]
+    artifact: epoll-cost
+    status: drafted
+    blurb: 三段成本分开算：登记、事件到达、收割。活跃率一变，结论就变；ONESHOT 和 EXCLUSIVE 各自解决哪种分派
     children: []
 
   - id: limits
     title: 它治好了什么，没治什么
     layer: 收束
-    needs: [ready]
+    needs: [cost]
     artifact: epoll-limits
     status: drafted
-    blurb: 等待不再要线程了，但系统调用和拷贝还在 —— io_uring 冲的正是这两处
+    blurb: 等待不再要线程了，但每次 I/O 的系统调用和拷贝还在 —— io_uring 换的是通信方式，不是等待方式
     children: []

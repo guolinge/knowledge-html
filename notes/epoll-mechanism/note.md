@@ -1,352 +1,329 @@
+> 上一篇留下的题目是两句话：内核要记住「谁在关心什么」，还要记住「谁已经就绪」。
+>
+> epoll 的答案就是这两张表。这一篇拆开看，重点不在数据结构，在一个容易被讲反的地方：**是谁把「就绪」这件事写进表里的。**
+
+## 01 · 三个调用，各管一件事
+
+```compare
+first: 调用
+head: [做什么, 和 poll 的差别]
+rows:
+  - epoll_create1:
+      - "建一个 eventpoll 对象，返回一个 fd 指向它"
+      - "poll 没有这一步。实例本身就是一个可以长期存在的内核对象"
+  - epoll_ctl:
+      - "ADD / MOD / DEL：把 fd 登记进这个实例，可以设关心哪些事件"
+      - "名单交一次就一直有效，不用每轮重交"
+  - epoll_wait:
+      - "取走这一刻就绪的事件，最多 maxevents 个"
+      - "只取就绪的那几个，不扫全部登记项"
+```
+
+注意 `epoll_create1` 返回的也是一个 fd。它和普通 fd 一样可以放进别的 epoll 实例里被监视，只是很少有人这么做。
+
+## 02 · 实例里就三样东西
+
+下面这张图是整篇的地图。左边是你的进程，中间是 epoll 实例，右边是两条连接，其中只有 A 有数据。
+
 ```arch
-svg: epoll-flow
-caption: 两张表是**结果**，这张图是**过程**：事件从网卡走到你的数组，每一步的内核代码都标了出处。**两条等待队列**是这张图的骨架 —— 每个 fd 一份回调（挂在它自己的队列上），epoll_wait 自己睡在实例的队列上。
+svg: epoll-map
+caption: 实线是登记与通知的路径。每个登记的 fd 在它自己的等待队列上各有一份回调，不是集中挂在 epoll 实例里。
 parts:
   thr:
     label: 你的线程
-    sub: 三个调用，一个循环
-    detail: |
-      你写的代码就这么多：==登记一次，然后循环收货==。
-      阻塞等待、找就绪者、挂回调、叫醒 —— 这些都不在这段代码里，
-      在内核里。下面每个格子都配了对应的内核代码，标了文件和函数名。
-    code: |
-      int epfd = epoll_create1(0);
-
-      struct epoll_event ev = { .events = EPOLLIN, .data.fd = listen_fd };
-      epoll_ctl(epfd, EPOLL_CTL_ADD, listen_fd, &ev);  // 每个 fd 只登记这一次
-      // 以后 accept 来的 conn_fd 也各 ADD 一次，之后不用再管
-
-      struct epoll_event out[64];
-      for (;;) {
-          int n = epoll_wait(epfd, out, 64, -1);  // 睡到有事为止
-          for (int i = 0; i < n; i++)
-              handle(out[i].data.fd);             // out 里全是就绪的
-      }
+    sub: epoll_ctl / epoll_wait / read
+    detail: 线程只在两个时刻进内核 —— 登记时、取事件时。数据到达时它可以在睡，也可以在处理别的事。
   rbr:
-    label: 红黑树 · 登记表
-    sub: epoll_ctl 往里加，一直在
-    detail: |
-      ==「内核那头记着」的数据结构就是它==。ADD 建一个 epitem 插进树，
-      DEL 摘掉；不删它就一直在，所以你不用每轮重新交代。
-      登记时它还顺手办了一件事：调这个 fd 自己的 poll 方法 ——
-      ==队列在哪，fd 自己最清楚==。
-    code: |
-      // fs/eventpoll.c · do_epoll_ctl(EPOLL_CTL_ADD) → ep_insert
-      epi = ep_alloc_epitem(ep, event, tf);  // 每个 fd 一个 epitem
-      ep_register_epitem(ctx, ep, epi, ...); // 挂到文件、进程
-      ep_rbtree_insert(ep, epi);             // 插进红黑树：登记长期有效
-
-      init_poll_funcptr(&epq.pt, ep_ptable_queue_proc);
-      revents = ep_item_poll(epi, &epq.pt, 1);
-      // ↑ 调这个 fd 自己的 poll 方法。socket 的 tcp_poll 会调
-      //   poll_wait(file, sk_sleep(sk), pt) —— 它自己的等待队列
-      //   就从这扇门交出来（select/poll 走的是同一扇门）
-  wqA:
-    label: 连接 A 的等待队列
-    sub: A 的回调挂在这 —— 每个 fd 一份
-    detail: |
-      ==「回调挂在这」的完整意思，就在这一格==：**每个登记的 fd，
-      都会在它自己的等待队列上挂一份 `ep_poll_callback`**。
-      A 有一份，B 也有一份（左边的格子），互不相干。
-      挂一次一直在，直到 DEL 或 fd 关闭。
-    code: |
-      /* 挂载：epoll_ctl(ADD) 时，每个登记的 fd 走一遍
-         fs/eventpoll.c · ep_ptable_queue_proc */
-      init_waitqueue_func_entry(&pwq->wait, ep_poll_callback); // 回调是谁
-      pwq->base = epi;                     // 记住：我为哪个 fd 服务
-      add_wait_queue(whead, &pwq->wait);   // 挂到这个 fd 自己的队列上
-
-      /* 触发：数据到的那一刻（同一个函数的另一半）
-         fs/eventpoll.c · ep_poll_callback */
-      epi = ep_item_from_wait(wait);              // 找回：我是为谁挂的
-      list_add_tail(&epi->rdllink, &ep->rdllist); // ← 把它挂进就绪表
-      if (waitqueue_active(&ep->wq))
-          wake_up(&ep->wq);                       // ← 顺手叫醒 epoll_wait
-  wqB:
-    label: 连接 B 的等待队列
-    sub: B 的那份 —— 此刻还没响
-    detail: |
-      B 也有一份一模一样的挂载：同一个回调函数、同样记着「我为 B 服务」，
-      挂在 B 自己的队列上。
-      ==「每一个 fd 都一样吗」的答案：是== —— 每个登记的 fd
-      都有属于自己的一份，区别只是有没有被敲响过。
+    label: 登记表 · rbr
+    sub: 红黑树，每个登记的 fd 一个 epitem
+    detail: 登记一次就在这，直到 DEL 或关闭 fd。==epoll_wait 不查这棵树==，它只在增删改时被用到。
+  rdl:
+    label: 就绪表 · rdllist
+    sub: 双向链表，只装这一刻真有事的 epitem
+    detail: 由回调在数据到达时挂进来。epoll_wait 取的是这里，取完按 LT / ET 决定要不要放回去。
+  ewq:
+    label: 实例的等待队列 · ep->wq
+    sub: epoll_wait 没事件时睡在这
+    detail: 和 socket 的等待队列是同一类东西。回调把条目放进就绪表后，会顺手 wake_up 它。
   sockA:
     label: 连接 A · socket
-    sub: 这一刻有数据（B 没有）
-    detail: |
-      数据落进 A 的接收缓冲区，内核沿着中断一路找到这条 socket，
-      然后敲它自己的等待队列。敲的是 ==socket 自己的==队列，
-      不是 epoll 实例里的什么东西 —— 这就是「回调挂在目标 fd 上」的确切含义。
-    code: |
-      // net/core/sock.c · 数据到达的那一刻
-      void sock_def_readable(struct sock *sk)
-      {
-          wq = rcu_dereference(sk->sk_wq);
-          if (skwq_has_sleeper(wq))
-              wake_up_interruptible_sync_poll(&wq->wait, EPOLLIN | ...);
-              // ↑ 敲这条 socket 自己的等待队列：
-              //   挂在上面的每份 ep_poll_callback 逐个被调用
-      }
+    sub: 接收队列非空，等待队列上挂着回调
+    detail: ==回调挂在这个 socket 自己的等待队列上==，不是挂在 epoll 实例里。所以每个登记的 fd 各有一份，互不影响。
+  sockB:
+    label: 连接 B · socket
+    sub: 接收队列空，回调待命
+    detail: 每个登记的 fd 都有这样一份。B 没数据，所以它的回调一次都没被调用。
   nic:
-    label: 网卡 · 数据到
-    sub: 中断 → 协议栈 → 接收缓冲区
-    detail: |
-      整条链路的物理起点：网卡收到包，中断，协议栈按四元组找到这条 socket，
-      把数据放进它的接收缓冲区，然后才有右边那记 wake_up。
-      ==「谁把 fd 放进就绪表」的第一推动力在这里，不在你的循环里==。
-  ewq:
-    label: 实例的等待队列 ep->wq
-    sub: epoll_wait 睡在这里
-    detail: |
-      ==图里的第二张等待队列==，也是「谁通知 epoll_wait」的答案所在：
-      epoll_wait 进来先看一眼就绪表，空的话就睡在这条队列上。
-      叫醒它的就是回调里那记 `wake_up(&ep->wq)` ——
-      ==发通知的和往就绪表挂东西的，是同一个回调==。
-    code: |
-      // fs/eventpoll.c · ep_poll（epoll_wait 的内核实现）
-      eavail = ep_events_available(ep);         // 先看一眼：就绪表空吗
-      while (1) {
-          if (eavail)
-              return ep_try_send_events(ep, events, maxevents); // 有货 → 拷走
-          if (timed_out) return 0;
-          __add_wait_queue_exclusive(&ep->wq, &wait);  // 空 → 睡到 ep->wq 上
-          schedule_hrtimeout_range(to, slack, HRTIMER_MODE_ABS);
-      }
-  rdl:
-    label: 就绪链表 rdllist
-    sub: 只装这一刻真有事的
-    detail: |
-      回调把它放进来，epoll_wait 把它拷走。
-      ==这张表永远很短==：没有人遍历去找就绪者，
-      就绪是「事件经过时顺手挂进来」的。
-      拷走之后登记表一个字节都不动 —— LT 模式下没处理完的
-      还会被挂回来，那是下一篇的正题。
-    code: |
-      // fs/eventpoll.c · ep_send_events：把就绪表逐项拷回用户数组
-      ep_start_scan(ep, &scan_batch);  // 把 rdllist 整体摘下来
-      list_for_each_entry_safe(epi, tmp, &scan_batch, rdllink)
-          ep_deliver_event(ep, epi, &pt, &events, &scan_batch); // 逐项拷给用户
+    label: 网卡
+    sub: 中断 → 协议栈
+    detail: 包从这进来，协议栈把它放进对应 socket 的接收队列。
 tours:
-  - id: journey
-    label: "一条事件的完整旅程"
+  - id: event
+    label: "一次数据到达走哪条路"
     steps:
-      - { at: [thr, rbr], text: "起点是你写的三个调用。`epoll_ctl` 把 fd 登记进红黑树，==加完一直在== ——「内核那头记着」落到数据结构上就是这棵树。", code: "epi = ep_alloc_epitem(ep, event, tf);\nep_rbtree_insert(ep, epi);" }
-      - { at: [rbr, wqA, wqB], text: "登记的同时，每个 fd 都得到==一份属于自己的回调==，挂在它自己的等待队列上 —— A 一份、B 一份，互不相干。", code: "init_waitqueue_func_entry(&pwq->wait, ep_poll_callback);\npwq->base = epi;                        // 记住我为谁服务\nadd_wait_queue(whead, &pwq->wait);      // 挂到它自己的队列上" }
-      - { at: [nic], text: "数据到：中断、协议栈、接收缓冲区。==整条链的第一推动力在硬件这一格==，从这一刻起，主动权在内核手里。" }
-      - { at: [sockA, wqA], text: "内核找到这条 socket，敲它自己的等待队列 —— 挂在上面的那份回调被调用。", code: "wake_up_interruptible_sync_poll(&wq->wait, EPOLLIN | ...);" }
-      - { at: [wqA, rdl], text: "回调做第一件事：==把这个 fd 挂进就绪表==。放进去的动作发生在「数据到的时刻」，不是「你去问的时刻」。", code: "epi = ep_item_from_wait(wait);\nlist_add_tail(&epi->rdllink, &ep->rdllist);" }
-      - { at: [wqA, ewq], text: "同一个回调顺手做第二件事：==`wake_up(&ep->wq)`==。==「谁通知 epoll_wait」的答案就是这一行== —— 记账的和敲门的是同一个函数。", code: "if (waitqueue_active(&ep->wq))\n    wake_up(&ep->wq);" }
-      - { at: [ewq, rdl], text: "睡在 ep->wq 上的 epoll_wait 醒来，确认就绪表非空，把这一批拷回用户数组。==「取走」是拷贝，登记表不动==。", code: "return ep_try_send_events(ep, events, maxevents);" }
-      - { at: [thr], text: "你的循环拿到 n 个就绪事件，挨个处理。==从睡到醒，你一行代码都没跑== —— 收包、分发、记账、叫醒，全是内核在干活。" }
-  - id: per-fd
-    label: "回调挂在哪：每个 fd 一份"
+      - at: [nic, sockA]
+        text: "包从网卡进来，协议栈把它放进连接 A 的接收队列。此刻 epoll 还不知道这件事。"
+      - at: [sockA]
+        text: "接收队列从空变成非空，协议栈调用 socket 的 `sk_data_ready`，敲响它自己的等待队列。"
+      - at: [sockA, rdl]
+        text: "队列上挂的不是线程，是回调。==回调在数据到达的上下文里直接执行==：把 A 的 epitem 挂进就绪表。"
+      - at: [rdl, ewq, thr]
+        text: "回调顺手 `wake_up(ep->wq)`。如果线程正睡在 `epoll_wait` 里，它被叫醒，从就绪表取走这一批。"
+  - id: register
+    label: "登记的时候做了什么"
     steps:
-      - { at: [rbr], text: "epoll_ctl 怎么知道该把回调挂到哪？==它不猜== —— 调这个 fd 自己的 poll 方法，驱动按 `poll_wait` 协议把自己的等待队列交出来。select / poll 挂 pollwake 走的也是这扇门。", code: "init_poll_funcptr(&epq.pt, ep_ptable_queue_proc);\nrevents = ep_item_poll(epi, &epq.pt, 1);  // ← fd 自己的 poll 方法" }
-      - { at: [wqA], text: "A 的那份：一个回调函数、一句「我为谁服务」、一次 `add_wait_queue`。==挂在 A 自己的队列上，不是挂在 epoll 实例里==。", code: "init_waitqueue_func_entry(&pwq->wait, ep_poll_callback);\npwq->base = epi;\nadd_wait_queue(whead, &pwq->wait);" }
-      - { at: [wqB], text: "B 的那份一模一样，挂在 B 自己的队列上，此刻还没响过。==所以「回调挂在这」不是一个格子，是每个登记的 fd 各自的一份==" }
-  - id: wake
-    label: "epoll_wait 什么时候拿、谁通知它"
-    steps:
-      - { at: [ewq], text: "epoll_wait 进来==先查再睡==：就绪表非空就直接拷走返回，一行都不多跑；空了才睡到 ep->wq 上。", code: "eavail = ep_events_available(ep);\nif (eavail) return ep_try_send_events(...);\n__add_wait_queue_exclusive(&ep->wq, &wait);  // 空 → 睡" }
-      - { at: [wqA], text: "通知者是它：数据到 → 敲 socket 队列 → 回调被调 → 回调顺手 `wake_up(&ep->wq)`。==通知不需要任何新机制，就是挂就绪表的那个回调多说了一句话==", code: "if (waitqueue_active(&ep->wq))\n    wake_up(&ep->wq);   // 叫醒睡在 ep->wq 上的 epoll_wait" }
-      - { at: [rdl], text: "醒来后从就绪表把这一批拷走。==取走的是拷贝== —— 登记还在、LT 模式下没处理完的还会挂回来。", code: "ep_start_scan(ep, &scan_batch);\nlist_for_each_entry_safe(epi, tmp, &scan_batch, rdllink)\n    ep_deliver_event(ep, epi, &pt, &events, &scan_batch);" }
-      - { at: [thr], text: "你的线程拿到 n 个事件，继续跑 handle。==整个「等待」期间它睡在 ep->wq 上，不占 CPU==" }
+      - at: [thr, rbr]
+        text: "`epoll_ctl(ADD)` 建一个 epitem，放进红黑树。这一步是 O(log n)，只在登记时发生。"
+      - at: [rbr, sockA, sockB]
+        text: "紧接着调一次这个 fd 自己的 poll 方法，通过 `poll_wait` 把回调挂到 fd 的等待队列上。==每个 fd 各一份，挂完就一直待命。=="
+bodies:
+  thr:
+    rows:
+      - { k: epoll_ctl, v: 登记 / 修改 / 删除 }
+      - { k: epoll_wait, v: 取就绪事件 }
+      - { k: read, v: 从接收队列拷数据 }
+  rbr:
+    badge: 登记一次，一直在
+    rows:
+      - { k: epitem, v: 12 个登记项 }
+      - { k: key, v: "fd + 打开文件描述" }
+  rdl:
+    badge: 只装这一刻有事的
+    rows:
+      - { k: A, v: 可读 }
+      - { k: 长度, v: 1 }
+  ewq:
+    badge: epoll_wait 睡这
+    rows:
+      - { k: 等待者, v: 1 个线程 }
+      - { k: 唤醒, v: 一次只叫一个 }
+  sockA:
+    badge: 两个队列
+    rows:
+      - { k: 接收队列, v: 3 个 skb }
+      - { k: 等待队列, v: 挂着 ep_poll_callback }
+      - { k: private, v: eppoll_entry → epitem }
+  sockB:
+    badge: 没数据
+    rows:
+      - { k: 接收队列, v: 空 }
+      - { k: 等待队列, v: 回调待命 }
+  nic:
+    rows:
+      - { k: 动作, v: 中断 → 协议栈 → 入队 }
 ```
 
----
+三样东西：
 
-## 01 · 三条需求，三样东西
-
-《轮询》把题目列了出来，[《select / poll》](../select-poll/) 还了第 ③ 条。剩下的，在 epoll 这里一一对上：
-
-```compare
-first: 需求
-head: [谁去满足它, 它做到了什么]
-rows:
-  - ① 内核得记住我关心哪些 fd: ["`epoll_create` + `epoll_ctl`", "在内核里**建一个对象**，把 fd 登记进去。登记一次，长期有效"]
-  - ② 内核得只把就绪的还给我: ["`epoll_wait`", "它返回的是**就绪的那几个本身**，不是「整份名单 + 几个标记位」"]
-  - ③ 等待不能再占用执行资源: ["①② 合起来", "名单存在内核里、谁就绪内核自己知道，线程才能真的睡到有事为止"]
+```cards
+cols: 3
+items:
+  - title: 登记表
+    tag: rbr · 红黑树
+    tone: blue
+    desc: 每个登记的 fd 一个 epitem。管增删改、去重，也管「这个 fd 我关心哪些事件」。
+  - title: 就绪表
+    tag: rdllist · 双向链表
+    tone: violet
+    desc: 只装这一刻真有事件的 epitem。epoll_wait 取的就是它，取完之后清空或按模式放回。
+  - title: 实例自己的等待队列
+    tag: ep->wq
+    tone: amber
+    desc: epoll_wait 没有事件时睡在这里。注意它和 socket 的等待队列不是同一个。
 ```
 
-==第三条是目的，前两条是手段。== 这个顺序别搞反，反过来就会把 epoll 记成三个 API。
-
-开头那张整体图就是三条需求的运行时样子：①是红黑树，②是就绪链表加拷回，③是 `epoll_wait` 睡在 `ep->wq` 上。上一篇 `select` / `poll` 的「拉」走到哪一步都全是内核在挨个查 —— 那张图和这张图对着看，分水岭会自己浮出来。
-
----
-
-## 02 · 内核里它就是两张表
-
-这是 epoll 的全部。左边的表登记，右边的表就绪：
+拖一下这个控件，看两张表怎么配合：
 
 ```demo
 widget: epoll-tables
-title: epoll 的全部就是这两张表
+title: 登记表与就绪表，各自装什么
+hint: 点登记表里的一格 = 这条连接来数据了；点 epoll_wait = 取走这一批
 config:
   conn: { min: 8, max: 40, step: 4, def: 24 }
 ```
 
-三个要点，都能从上面点出来：
 
-```cards
-cols: 1
-items:
-  - title: "登记表（interest list）：`epoll_ctl` 往里加，一直在"
-    tone: blue
-    body: |
-      它对应轮询篇的第一条需求。==因为**内核那头一直记着**，
-      所以调用一次之后你不需要再交代一遍==，这正是 `select` / `poll` 做不到的事。
-  - title: "就绪表（ready list）：谁有数据了，谁自己挂进来"
-    tone: green
-    body: |
-      它不是内核遍历找出来的，是**回调放进去的**。这一条是下一篇的主线，
-      这里先记住：==放进去这个动作发生在「数据到的那一刻」，不是「你问的那一刻」。==
-  - title: "`epoll_wait` 只是把就绪表拿走"
-    tone: violet
-    body: |
-      它不清空登记表，上面点完 `epoll_wait` 之后格子会回到左边，
-      因为**登记还在，只是不再"就绪"了**。这两张表的职责完全不同，别混。
+## 03 · 登记：把回调挂到别人的队列上
+
+`epoll_ctl(ADD)` 的内核路径里，有一件事决定了 epoll 的全部性能：
+
+```text
+ep_insert()
+  ├─ 建 epitem，插进红黑树 rbr
+  ├─ 调一次这个 fd 的 poll 方法，看它现在是否已经就绪
+  │    如果已经就绪 → 直接挂进就绪表
+  └─ 通过 poll_wait 协议，把 ep_poll_callback 挂到这个 fd 的等待队列上
+       init_waitqueue_func_entry(&pwq->wait, ep_poll_callback);
+       add_wait_queue(whead, &pwq->wait);
 ```
 
-!!注意右边那张表永远是短的。!! 不是「短一点」，是**量级上的不同**，它只装这一刻真有事的那几个。
-
----
-
-## 03 · 分水岭：谁把 fd 放进就绪表
-
-前面所有差别到这里收束成一件事。
+对比一下第 ② 篇里阻塞 read 挂上去的东西：
 
 ```compare
-first: 谁主动
-head: [什么时候干活, 成本跟什么成正比, 一句话]
+first: 挂在 socket 等待队列上的条目
+head: [阻塞 read, epoll]
 rows:
-  - "`select` / `poll` · 拉": ["**你调用**的那一刻，内核才挨个去查", { text: "你登记了多少条", tone: red }, "问了才知道"]
-  - "epoll · 推": ["**数据到**的那一刻，内核顺手把它挂进就绪表", { text: "这一刻真有几个就绪", tone: green }, "谁好了谁来排队"]
+  - func:
+      - "`woken_wake_function`：把 task 改回可运行"
+      - "`ep_poll_callback`：把 epitem 挂进就绪表"
+  - private:
+      - "指向那个 task"
+      - "指向 eppoll_entry，里面记着 epitem 和 epoll 实例"
+  - 被唤醒时的代价:
+      - "要调度一个线程，等调度器挑中它"
+      - "执行一段常数时间的代码，跑完就返回"
+  - 谁持有它:
+      - "线程自己。read 返回时摘掉"
+      - "epoll 实例。DEL 或关闭 fd 时才摘掉"
 ```
 
-==这是整棵树上最该记住的一句：**从「我去查」变成「你来告诉我」。**==
+==同一个队列，同一种节点，只是换了一个函数指针。==
 
-一旦换过来，两件事同时变好：
+这就是「epoll 不用遍历名单」的机制来源。不是因为它有一棵更聪明的树，而是因为**「谁在等」从「一个要被调度的线程」变成了「一段在数据到达上下文里就能跑完的函数」**。
 
-- 你不用每轮重交名单了（内核记着）
-- 内核不用每轮遍历全部了（只有真就绪的才发生那次「挂进链表」）
+还有两个容易忽略的点：
 
-上一版那个「白问」也没了：**没人再问，就没人白问。**
+- 回调挂在**每个 fd 自己的等待队列**上，不是集中挂在 epoll 实例里。所以连接 B 有 B 的一份，A 有 A 的一份。
+- 同一个 fd 可以被多个 epoll 实例监视，那它就会挂多份回调。回调只对自己那个实例负责。
+
+## 04 · 数据到达：回调干了三件小事
+
+连接 A 收到数据，协议栈把 skb 放进接收队列，然后调用 `sk_data_ready`（TCP 默认是 `sock_def_readable`），它唤醒这个 socket 的等待队列。队列上的条目逐个执行自己的 `func`。
+
+轮到 `ep_poll_callback` 时，它做的是：
+
+```lane-stack
+- badge: 第一件
+  title: 看这个事件我关不关心
+  desc: 登记时设过事件掩码
+  tone: muted
+  nodes:
+    - { title: "key 是唤醒时带的事件位", sub: "EPOLLIN / EPOLLOUT / ..." }
+    - { title: "和 epi->event.events 按位与，不关心就退出", sub: "关心 EPOLLIN 的连接不会被一次 EPOLLOUT 吵醒" }
+  next: "关心 :: 继续"
+
+- badge: 第二件
+  title: 把自己挂进就绪表
+  desc: 只挂一次
+  tone: violet
+  nodes:
+    - { title: "epi 不在链表上，list_add_tail 到 rdllist", sub: "同一轮里来十份数据，也只占一个位置" }
+    - { title: "已经在了就不重复挂", sub: "链表位置就是「还没被取走」的标记" }
+  next: "挂好了 :: 看看有没有人在等"
+
+- badge: 第三件
+  title: 叫醒可能睡着的线程
+  desc: 没有人睡就跳过
+  tone: blue
+  nodes:
+    - { title: "ep->wq 上有等待者，wake_up(&ep->wq)", sub: "把睡在 epoll_wait 里的线程叫醒" }
+```
+
+三件事都是常数时间，而且都在**数据到达的那个内核上下文**里完成：可能是软中断，可能是收包的内核线程。整个过程中没有调度你的线程，也没有遍历登记表。
 
 ```callout
 tone: violet
-icon: 🔁
+icon: 💡
 text: |
-  「推」是怎么实现的，看开头那张图上『回调』那两个动作就够：
+  这就是「O(1)」真正的落点：==一次事件的处理量，跟登记了多少个 fd 无关。==
 
-  每个 socket 上本来就挂着一个**等待队列**。`epoll_ctl` 登记的时候，
-  经由这个 fd 自己的 poll 方法，把 `ep_poll_callback` 挂到
-  **它自己的等待队列**上 —— 每个登记的 fd 一份；
-  数据一来，内核敲这个队列，回调被调用，它做两件事：
-  把对应的 epitem 挂进就绪表，顺手 `wake_up(&ep->wq)`
-  叫醒正在 `epoll_wait` 的线程。
-
-  所以「挂进就绪表」不是 epoll 主动做的，是**事件经过时顺手做的**。
-  epoll 只是提供了两张表、一份常驻回调，和一条能让线程睡着睡醒的队列。
+  第一万零一条连接的事件，和第一条连接的事件，走的是同样三段代码。
 ```
 
-顺带把「内核在整条链上干了什么」一次说清，因为这事散在图的每个格子里：==收包中断、按四元组找到 socket、敲它自己的等待队列、跑回调记账、睡和醒你的线程、把就绪事件拷回你的数组== —— 六件事全部在内核。你的代码只出现在两端：登记，和收货。
+## 05 · 收割：epoll_wait 取走这一批
 
----
+`epoll_wait` 进来先看就绪表：
 
-## 04 · 复杂度要怎么说才诚实
+- 非空：直接开始取，不睡。
+- 空：睡到 `ep->wq` 上。等待项是 **exclusive** 的，所以多个线程共用一个实例时，一次唤醒只会叫醒其中一个。
 
-几乎每篇讲 epoll 的文章都会写「O(1)」。这句话的方向对，但**说满了**。
+取的时候，内核不是把回调当时记下的事件原样交给你，而是对每个就绪的 epitem **再问一次它的 fd**「现在到底什么状态」，把最新的掩码拷进你的 `events` 数组。这一步在 `ep_send_events` 里完成。
+
+取完之后，按模式决定要不要放回就绪表：
 
 ```compare
-first: 说法
-head: [对不对, 该怎么讲]
+first: 模式
+head: [取走后, 结果]
 rows:
-  - "epoll 是 O(1)": [{ text: "不严谨", tone: red }, "登记要走红黑树、回调要加锁、事件要拷贝到用户态，这些都有成本"]
-  - "epoll 不随监听的 fd 总数变差": [{ text: "准", tone: green }, "==这才是它和 select/poll 的真正分野==，那两位的成本必然和登记数成正比"]
+  - 水平触发 LT（默认）:
+      - "只要还就绪，就把 epitem 放回就绪表"
+      - "下一次 epoll_wait 还会报它，直到你真的把数据读空"
+  - 边缘触发 ET:
+      - "不放回。等下一次状态变化，回调再挂进来"
+      - "这一轮没读完的数据，可能永远不会再触发通知"
 ```
 
-对比着看就很清楚：
+LT 和 ET 的分歧、以及「为什么必须先读到 EAGAIN」，是下一篇的全部内容。
 
-| | 成本跟什么走 |
-|---|---|
-| `select` / `poll` | **登记了多少条**，每次都全拷、全遍历 |
-| `epoll` | **这一刻真有几个就绪**，返回量只跟这个走 |
+## 06 · 那棵红黑树到底干什么
 
-==记住的是这个**函数关系**，不是那个「1」。== 面试答「不随 fd 总数增长」比答「O(1)」准确，而且显得你真读过实现。
+很多人把 epoll 的快归因于红黑树。这棵树确实存在，但它不在热路径上：
 
----
-
-## 05 · 三个调用分别管什么
-
-```cards
-cols: 1
-items:
-  - title: "`epoll_create()`，建那个内核对象"
-    tone: blue
-    body: |
-      它返回的**也是一个 fd**。epoll 实例本身就是一个文件描述符，
-      所以能进 `select`、能被子进程继承、能被 `close`。
-      常见误解：以为 epoll 是个「全局的机制」—— 它是**你建出来的一个对象**，一个进程可以有好几个。
-  - title: "`epoll_ctl()`，改登记表"
-    tone: violet
-    body: |
-      三个动作：`ADD` 加一条、`MOD` 改关注的事件、`DEL` 删一条。
-      ==它就是轮询篇那三条需求里第一条的落地==：名单交一次就够了，
-      以后要改，改的也是内核里那份，不是重新交一份。
-  - title: "`epoll_wait()`，把就绪表拿走"
-    tone: green
-    body: |
-      它一次返回**一批**就绪事件（一个数组），不是一个。
-      常见误解：以为它像 `read` 一样「取走」就绪状态。
-      实际上**取走之后那个 fd 还在登记表里**，而且下一篇会看到：
-      LT 模式下它可能马上又被挂回就绪表。
+```compare
+first: 操作
+head: [走不走红黑树]
+rows:
+  - epoll_ctl(ADD / MOD / DEL):
+      - "走。插入、查找、删除都是 O(log n)，n 是登记的 fd 数"
+  - 数据到达:
+      - "不走。回调直接拿 epitem，挂进就绪表"
+  - epoll_wait 取事件:
+      - "不走。只遍历就绪表，长度等于这一刻真有事的那几个"
 ```
 
----
+树的作用是**让登记这件事可控**：支持去重（同一个 fd 重复 ADD 会得到 `EEXIST`）、支持按 fd 快速找到并修改或删除、支持关闭 fd 时清理。它是一个账本。
 
-## 06 · 到这里，还剩一个词没交代
+让它比 `poll` 快的，是通知路径不碰这个账本。
 
-上面每一句都用了「**就绪**」：就绪表、就绪事件、这个 fd 就绪了。
+顺带一个数量级：man7 里写，每个登记的 fd 在内核里大约占 90 字节（32 位内核）到 160 字节（64 位内核）。这是一笔和连接数成正比的固定开销，很小，但也是为什么 `max_user_watches` 会有上限。
 
-但你有没有想过：==epoll 说「可读」的时候，**数据已经在你手里了吗**？==
+## 07 · 和 poll 并排看一次事件
 
-没有。那是下一篇要抠开的那个词，而 `epoll` 最有名的两个触发模式（LT / ET），争的也正是这件事。
+```compare
+first: 步骤
+head: [select / poll, epoll]
+rows:
+  - 事件发生前:
+      - "线程把 N 个 fd 的名单拷进内核，挂 N 个临时条目"
+      - "没有动作。登记的条目和回调一直待命"
+  - 数据到达:
+      - "socket 唤醒线程挂的那些条目 → 线程被唤醒"
+      - "socket 唤醒回调 → 回调把 epitem 挂进就绪表"
+  - 找出是哪个 fd:
+      - "线程醒来后重扫 N 个 fd"
+      - "不用找。就绪表里就是"
+  - 返回给用户:
+      - "就绪个数 + 每个 fd 的 revents"
+      - "就绪事件数组，最多 maxevents 个"
+  - 返回后要清理什么:
+      - "拆掉 N 个临时条目；名单下次重交"
+      - "没有。登记表还在，就绪表按模式处理"
+```
 
----
+```callout
+tone: green
+icon: ✅
+text: |
+  ==epoll 把「谁就绪」这件事，从「醒来以后找」提前到了「事件发生时就记下来」。==
+
+  这一步提前，发生在数据到达的内核上下文里，不需要你的线程参与。
+```
+
+下一篇把「就绪」这个词拆开。它是理解 LT、ET，以及理解线上为什么会「连接还在、但再也不响应」的关键。
 
 ```quiz
-- q: epoll 的三个系统调用分别对应轮询篇留下的哪条需求？
+- q: epoll 挂在 socket 等待队列上的是什么？它和阻塞 read 挂的东西有什么共同点？
   a: |
-    epoll_create + epoll_ctl 对应「内核得记住我关心哪些 fd」——
-    在内核里建一个对象，把 fd 登记进去（红黑树），登记一次长期有效。
-    epoll_wait 对应「内核得只把就绪的还给我」——返回的是就绪的那几个本身。
-    第三条「等待不该占用执行资源」是目的：线程睡在 ep->wq 上，
-    事件之间不占 CPU。
-- q: 「拉」和「推」的区别，一句话怎么说？
+    挂的是 ep_poll_callback 这个函数指针，外面包一个 eppoll_entry。
+    共同点是它们都是 wait_queue_entry：阻塞 read 的 func 唤醒 task，
+    epoll 的 func 把 epitem 挂进就绪表。同一个队列、同一种节点，换了 func。
+- q: 数据到达时，ep_poll_callback 做了哪三件事？
   a: |
-    select/poll 是拉：你调用的那一刻内核才挨个去查，成本跟「登记了多少条」成正比。
-    epoll 是推：数据到的那一刻内核顺手把它挂进就绪表，
-    成本跟「这一刻真有几个就绪」成正比。
-    从「我去查」变成「你来告诉我」——白问也没了，因为没人再问。
-- q: 「回调挂在目标 fd 的等待队列上」——每个 fd 挂几份？挂在哪里？怎么知道队列在哪？
+    先按事件掩码过滤，看这个事件是否在登记时关心；
+    再把自己这个 epitem 挂进就绪表（已经在表里就不重复挂）；
+    最后如果有人在 ep->wq 上等，wake_up 叫醒它。
+- q: epoll 为什么快？红黑树在其中起什么作用？
   a: |
-    每个登记的 fd 一份。epoll_ctl 登记时先建这个 fd 的 epitem（进红黑树），
-    然后调它自己的 poll 方法；驱动按 poll_wait 协议把自己等待队列的头交出来，
-    ep_ptable_queue_proc 就把 ep_poll_callback 挂上去（pwq->base = epi，
-    记住我为哪个 fd 服务）。挂一次一直在，直到 DEL 或 fd 关闭。
-    A 的挂在 A 的队列上，B 的挂在 B 的队列上，互不相干。
-- q: epoll_wait 是什么时候拿走就绪列表的？是谁通知它的？
-  a: |
-    先查再睡：epoll_wait 进来先看 ep_events_available ——
-    就绪表非空就直接 ep_try_send_events 拷回用户数组返回；
-    空才把自己挂到 epoll 实例自己的等待队列 ep->wq 上睡觉。
-    通知者是 ep_poll_callback：它往就绪表挂完 epitem 之后顺手
-    wake_up(&ep->wq)。记账的和敲门的是同一个函数，
-    所以不需要任何额外的通知机制。
-- q: 为什么说「epoll 是 O(1)」不够严谨？该怎么讲？
-  a: |
-    因为登记要走红黑树、回调要加锁、事件要拷贝到用户态，这些都有成本。
-    准确的说法是：epoll 的成本**不随监听的 fd 总数变差**，
-    而 select/poll 的成本必然和登记数成正比。
-    记住这个函数关系，而不是那个「1」。
+    快在通知路径：一次事件只做常数工作，跟登记了多少 fd 无关。
+    红黑树只服务 epoll_ctl 的增删改查和去重，事件到达和取事件都不走它。
 ```

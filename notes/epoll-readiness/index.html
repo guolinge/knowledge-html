@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-has-toc="1">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>「就绪」到底是什么意思</title>
+<meta name="description" content="可读指的是接收队列里还有数据（达到 SO_RCVLOWAT），不是「刚来了新数据」。LT 每轮都提醒条件还成立，ET 只在变化时提醒一次 —— 所以 ET 必须非阻塞读到 EAGAIN，否则剩下的数据永远等不到下一次通知。" />
+<link rel="stylesheet" href="../../assets/theme.css?v=b918ec5c83" />
+  <link rel="stylesheet" href="../../assets/blocks.css?v=69ac1ff279" />
+  <link rel="stylesheet" href="../../assets/archify-embed.css?v=68fec0b81b" />
+</head>
+<body>
+<div id="progress"></div>
+<div id="tocScrim"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
+    <a class="brand" href="../../index.html"><span class="dot"></span>知识笔记</a>
+    
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="toc" id="toc">
+      <p class="toc-title">目录</p>
+      <a href="../../index.html" class="sub">← 全部笔记</a>
+      <a href="#可读是一个条件">可读是一个条件</a>
+      <a href="#水平触发条件还成立就再报一次">水平触发：条件还成立，就再报一次</a>
+      <a href="#边缘触发只在变化的那一下报">边缘触发：只在变化的那一下报</a>
+      <a href="#一次完整的对照">一次完整的对照</a>
+      <a href="#那到底该用哪个">那到底该用哪个</a>
+      <a href="#几个能对上号的故障">几个能对上号的故障</a>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow">● I/O 多路复用 · ⑥ 就绪的语义</span>
+      <h1>「就绪」到底是什么意思</h1>
+      <p class="lede">可读指的是接收队列里还有数据（达到 SO_RCVLOWAT），不是「刚来了新数据」。LT 每轮都提醒条件还成立，ET 只在变化时提醒一次 —— 所以 ET 必须非阻塞读到 EAGAIN，否则剩下的数据永远等不到下一次通知。</p>
+    </div>
+
+<aside class="needs">
+      <p class="needs-title">读这篇之前，你需要先知道</p>
+      <a class="need" href="../epoll-mechanism/">← <b>5. epoll：把名单留在内核</b><span>两张表、一条回调路径。挂在 socket 等待队列上的东西，从 task 换成了一个几十字节的条目</span></a>
+    </aside>
+    <div class="provenance"><span><b>来源</b> man7 · epoll(7) https://man7.org/linux/man-pages/man7/epoll.7.html（LT / ET 定义、管道例子、ET 需非阻塞并读到 EAGAIN、事件合并） · Linux v6.6 · net/ipv4/tcp.c（tcp_poll：tcp_stream_is_readable + SO_RCVLOWAT 决定 EPOLLIN） · Linux v6.6 · fs/eventpoll.c（ep_send_events_proc 对 LT 把 epitem 放回就绪表；ep_poll_callback 只在未入表时挂入）</span><span><b>生成</b> 2026-10-19</span><span><b>模型</b> deepseek-v4.1-flash-1017</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">epoll</span> <span class="tag tone-muted">LT</span> <span class="tag tone-muted">ET</span> <span class="tag tone-muted">TCP</span> <span class="tag tone-muted">接收缓冲区</span></span></div>
+
+<blockquote>
+<p>epoll 交给你的是一个「事件」。这个事件说的是「这条连接现在可以读」，还是「刚来了新数据」？</p>
+<p>这两句话听起来差不多，差别决定了 LT 和 ET 的全部分歧，也决定了线上那种「连接还在、但再也不响应」的故障从哪里来。</p>
+</blockquote>
+<h2 id="可读是一个条件"><span class="num">01</span>可读是一个条件</h2>
+<p>在 TCP 的 <code>poll</code> 方法里，可读是这么判断的：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-c">if (tcp_stream_is_readable(sk, target))
+    mask |= EPOLLIN | EPOLLRDNORM;
+</code></pre></div>
+<p><code>target</code> 来自 <code>SO_RCVLOWAT</code>，默认是 1。也就是说，<strong>接收队列里攒够 1 个字节，这条连接就算可读</strong>。</p>
+<div class="callout tone-violet quote">
+      <span class="ic">💡</span>
+      <div><p><mark class="mk-blue">「可读」的意思是：现在调用 read 不会阻塞。</mark></p>
+<p>它没有说有多少字节，没有说是不是一条完整的消息，也没有说这些字节是什么时候到的。</p>
+</div>
+    </div><p>这个定义解释了几件事：</p>
+<ul>
+<li>数据早就到了、只是你还没读，它仍然可读；</li>
+<li>一次到了 2KB，你读了 1KB，剩下的 1KB 仍然可读；</li>
+<li>对端关闭了连接，接收队列为空，但可读（EOF）也会成立 —— 这时候 <code>read</code> 返回 0。</li>
+</ul>
+<p>所以「就绪」是<strong>条件的快照</strong>，不是「一条消息的送达证明」。</p>
+<h2 id="水平触发条件还成立就再报一次"><span class="num">02</span>水平触发：条件还成立，就再报一次</h2>
+<p>LT 是默认模式。内核在把事件交给你之后，会做一件很朴素的事：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-c">/* ep_send_events_proc()：不是 ET 就放回就绪表 */
+else if (!(epi-&gt;event.events &amp; EPOLLET)) {
+    list_add_tail(&amp;epi-&gt;rdllink, &amp;ep-&gt;rdllist);
+}
+</code></pre></div>
+<p>放回去之后，下一次 <code>epoll_wait</code> 会再问一次这个 fd「现在什么状态」。只要接收队列里还有数据，它就再报一次。</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>场景</th><th>LT 会怎样</th><th>风险</th></tr></thead><tbody><tr><th>一次来 2KB，你只读了 1KB</th><td data-label="LT 会怎样">下一轮 epoll_wait 立刻再报</td><td data-label="风险">没有风险。剩下的数据还在，你迟早会读到</td></tr><tr><th>收到事件但完全没读</th><td data-label="LT 会怎样">下一轮还是它，再下一轮还是它</td><td data-label="风险">epoll_wait 立刻返回，变成忙循环，CPU 空转</td></tr><tr><th>一次读完了</th><td data-label="LT 会怎样">条件不再成立，不再报</td><td data-label="风险">正常</td></tr></tbody></table></div><p>LT 的语义等于「<strong>只要条件成立，每轮都提醒你</strong>」。它的好处是不会丢事件：哪怕你这一轮只读了一半，下一轮还会有人提醒。代价是重复通知，以及「收到不读」会烧 CPU。</p>
+<h2 id="边缘触发只在变化的那一下报"><span class="num">03</span>边缘触发：只在变化的那一下报</h2>
+<p>ET 模式下，事件交给你之后<strong>不放回</strong>就绪表。下一次什么时候再报？等这个 fd 上发生新的「状态变化」：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-c">/* ep_poll_callback()：已经在就绪表里就不重复挂 */
+} else if (!ep_is_linked(epi)) {
+    list_add_tail_lockless(&amp;epi-&gt;rdllink, &amp;ep-&gt;rdllist);
+}
+</code></pre></div>
+<p>对接收方向来说，变化就是「从没数据变成有数据」。内核不记录「上次通知到哪了」，它靠的是一件更简单的事：回调只有在 epitem 不在就绪表时才会挂进去。</p>
+<p>这带来两个后果：</p>
+<div class="cards" data-cols="2"><div class="ccard tone-blue">
+          <span class="tag tone-blue">合并</span>
+          <h4>两次 wait 之间来了多个包</h4>
+          <p>第一个包把 epitem 挂进就绪表，后面的包看到它已经在表里，不会重复挂。一次 epoll_wait 只报一次。</p>
+          
+          
+        </div><div class="ccard tone-red">
+          <span class="tag tone-red">残留</span>
+          <h4>你只读了一半</h4>
+          <p>缓冲区里还有数据，但没有新的「无 → 有」，回调不会再触发。剩下的数据可能永远等不到下一次通知。</p>
+          
+          
+        </div></div><p>ET 的处理方式：</p>
+<ul class="check"><li>fd 必须是非阻塞的。否则读到没有数据时会卡住整个事件循环</li><li>收到事件后必须循环 read，直到返回 EAGAIN</li><li>不要假设一次 read 能读完。返回的字节数可能小于你请求的长度</li><li>对端关闭时 read 返回 0，也要当作「读完了」处理</li></ul><div class="callout tone-red">
+      <span class="ic">⚠</span>
+      <div><p><mark class="mk-blue">ET 漏读的后果不是「延迟变大」，是「在下一次新数据到达之前，这条连接不会再有事件」。</mark></p>
+<p>数据还在内核缓冲区里，连接也是好的，但通知已经用掉了。</p>
+</div>
+    </div><h2 id="一次完整的对照"><span class="num">04</span>一次完整的对照</h2>
+<p>LT 和 ET 是在登记时选定的。下面是同一个场景里，两种模式各自的下一次 <code>epoll_wait</code>。写端写 2KB，你读 1KB：</p>
+<div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;w&quot;,&quot;to&quot;:&quot;wait1&quot;,&quot;label&quot;:&quot;数据入队，回调进就绪表&quot;,&quot;tone&quot;:&quot;green&quot;},{&quot;from&quot;:&quot;wait1&quot;,&quot;to&quot;:&quot;read&quot;,&quot;label&quot;:&quot;按事件去读&quot;},{&quot;from&quot;:&quot;read&quot;,&quot;to&quot;:&quot;lt&quot;,&quot;label&quot;:&quot;还就绪&quot;},{&quot;from&quot;:&quot;read&quot;,&quot;to&quot;:&quot;et&quot;,&quot;label&quot;:&quot;但没变化&quot;},{&quot;from&quot;:&quot;lt&quot;,&quot;to&quot;:&quot;lt2&quot;,&quot;label&quot;:&quot;每轮都提醒&quot;},{&quot;from&quot;:&quot;et&quot;,&quot;to&quot;:&quot;et2&quot;,&quot;label&quot;:&quot;等下一次边沿&quot;}]" style="--flow-marker:url(#fa-1)">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa-1" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-muted" data-id="w">
+              
+              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="2.5" width="7.5" height="7.5" rx="1"/><path d="M8.5 9.5l4.5 4.5M13 9.8V13H9.8"/></svg>
+              <b>写端写入 2KB</b>
+              <small>缓冲区 0 → 2048</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="wait1">
+              
+              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5L3 8l3 4.5M10 3.5L13 8l-3 4.5"/></svg>
+              <b>epoll_wait 返回</b>
+              <small>EPOLLIN · 可读成立</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="read">
+              
+              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5L3 8l3 4.5M10 3.5L13 8l-3 4.5"/></svg>
+              <b>read(fd, buf, 1024)</b>
+              <small>缓冲区 2048 → 1024</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="lt">
+              
+              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="8" cy="4.2" rx="5" ry="1.9"/><path d="M3 4.2v7.6c0 1.05 2.24 1.9 5 1.9s5-.85 5-1.9V4.2"/></svg>
+              <b>LT 的下一轮 epoll_wait</b>
+              <small>还报可读 · 缓冲区 1024</small>
+            </div><div class="fnode tone-red" data-id="et">
+              
+              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2.2l4.8 1.9v4c0 2.9-2.1 4.8-4.8 5.7-2.7-.9-4.8-2.8-4.8-5.7v-4z"/></svg>
+              <b>ET 的下一轮 epoll_wait</b>
+              <small>不报 · 没有新边沿</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="lt2">
+              
+              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="8" cy="4.2" rx="5" ry="1.9"/><path d="M3 4.2v7.6c0 1.05 2.24 1.9 5 1.9s5-.85 5-1.9V4.2"/></svg>
+              <b>直到你读到空</b>
+              <small>这期间每一轮都会提醒</small>
+            </div><div class="fnode tone-red" data-id="et2">
+              
+              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2.2l4.8 1.9v4c0 2.9-2.1 4.8-4.8 5.7-2.7-.9-4.8-2.8-4.8-5.7v-4z"/></svg>
+              <b>直到新数据到达</b>
+              <small>新数据 = 新的边沿</small>
+            </div></div></div>
+      
+    </div><p>亲手点一遍这两条分支：</p>
+<div class="demo" data-widget="lt-vs-et" data-config="{&quot;total&quot;:128,&quot;chunk&quot;:64}">
+      <div class="demo-head">
+        <span class="title">缓冲区里剩下的那点数据</span>
+        <span class="status" data-status>切到 ET，写入 128 字节，只读 64 字节，再点一次 epoll_wait</span>
+        <span class="spacer"></span>
+        <button class="btn" data-run>▶ 开始模拟</button><button class="btn ghost" data-reset>重置</button>
+      </div>
+      <div class="demo-body custom" data-mount></div>
+    </div><p>写方向同理：<strong>可写 = 发送缓冲区还有空间</strong>，对端读得慢、缓冲区快满时它才会变成不可写。</p>
+<div class="callout tone-amber">
+      <span class="ic">⚠</span>
+      <div><p>LT 模式下长期登记 <code>EPOLLOUT</code>，几乎每一轮都会报「可写」，等于让事件循环空转。</p>
+<p>更常见的做法是：发送缓冲区满时再关注可写，写出去之后立刻取消关注。
+这和 ET / LT 无关，是「可写条件大部分时间都成立」带来的问题。</p>
+</div>
+    </div><h2 id="那到底该用哪个"><span class="num">05</span>那到底该用哪个</h2>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>维度</th><th>水平触发 LT</th><th>边缘触发 ET</th></tr></thead><tbody><tr><th>默认</th><td data-label="水平触发 LT"><span class="tag tone-green">是。不设 EPOLLET 就是它</span></td><td data-label="边缘触发 ET">要显式设置 EPOLLET</td></tr><tr><th>通知频率</th><td data-label="水平触发 LT">只要还就绪，每轮都报</td><td data-label="边缘触发 ET">每次状态变化只报一次</td></tr><tr><th>写错的后果</th><td data-label="水平触发 LT">收到不读 → 忙循环，CPU 高但连接还能救</td><td data-label="边缘触发 ET"><span class="tag tone-red">漏读 → 连接永久静默</span></td></tr><tr><th>对代码的要求</th><td data-label="水平触发 LT">收到就读，读多少都行</td><td data-label="边缘触发 ET">非阻塞 + 读到 EAGAIN + 处理 EOF</td></tr><tr><th>适合</th><td data-label="水平触发 LT">大多数业务；连接数多、逻辑复杂、怕丢事件</td><td data-label="边缘触发 ET">高吞吐代理、能严格排空的循环；想减少重复通知</td></tr></tbody></table></div><p>如果拿不准，用 LT。man7 里写得很直接：LT 的语义和 <code>poll</code> 一样，可以当成更快的 <code>poll</code> 来用。ET 是在你能保证排空的前提下，换来更少的重复通知。</p>
+<h2 id="几个能对上号的故障"><span class="num">06</span>几个能对上号的故障</h2>
+<ul class="check cross"><li>用了 ET，但 fd 还是阻塞的 —— 某次 read 读到空，整个事件循环卡在这条连接上</li><li>用了 ET，每次只 read 一次 —— 大包被截断，后半截数据再也没有事件</li><li>用了 ET，忘了 read 返回 0 表示 EOF —— 对端关闭后一直等</li><li>用了 LT，收到事件但没读 —— epoll_wait 立刻返回同一个 fd，CPU 打满</li><li>把 EPOLLIN 当成「有新数据」—— 于是以为每次事件都对应一条完整消息</li><li>忘了 EPOLLERR / EPOLLHUP 不登记也会报 —— 处理循环里必须有这两个分支</li></ul><p>这几条都能用同一句话解释：</p>
+<div class="callout tone-green">
+      <span class="ic">✅</span>
+      <div><p><mark class="mk-blue">事件描述的是条件，不是数据。</mark> LT 反复告诉你条件还在；ET 只在条件变化时告诉你一次。</p>
+<p>所以 LT 的处理是「读一点也行」；ET 的处理是「负责读到没有」。</p>
+</div>
+    </div><p>下一篇换个角度：epoll 被说成「O(1)」，这个说法在什么条件下成立，什么条件下不成立。</p>
+<div class="quiz"><details>
+        <summary>「可读」在 TCP socket 上具体指什么条件？</summary>
+        <div class="a"><p>接收队列里的数据达到了 SO_RCVLOWAT（默认 1 字节），或者收到了 EOF / 错误。
+它只说明现在 read 不会阻塞，不说明有多少数据、是不是新数据。</p>
+</div>
+      </details><details>
+        <summary>为什么 ET 模式下必须读到 EAGAIN？</summary>
+        <div class="a"><p>ET 只在状态变化时通知一次。如果只读了一部分，缓冲区里还有数据，
+但没有新的「无 → 有」，回调不会再触发，剩下的数据可能要等到下一次新数据到达才有通知。</p>
+</div>
+      </details><details>
+        <summary>LT 模式下收到事件却不读，会发生什么？</summary>
+        <div class="a"><p>条件仍然成立，epoll_wait 下一轮立刻又返回同一个 fd。
+程序会在事件循环里空转，CPU 占用升上去。</p>
+</div>
+      </details></div>
+
+    <footer>
+      <span>「就绪」到底是什么意思</span>
+      <span>最后更新 2026-10-19 · 单文件可离线打开</span>
+    </footer>
+  </main>
+</div>
+
+<script src="../../assets/app.js?v=0285b13817"></script>
+</body>
+</html>

@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-has-toc="1">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>在这里写标题</title>
+<meta name="description" content="一句话说清这篇笔记解决什么问题。" />
+<link rel="stylesheet" href="../../assets/theme.css?v=b918ec5c83" />
+  <link rel="stylesheet" href="../../assets/blocks.css?v=69ac1ff279" />
+  <link rel="stylesheet" href="../../assets/archify-embed.css?v=68fec0b81b" />
+</head>
+<body>
+<div id="progress"></div>
+<div id="tocScrim"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
+    <a class="brand" href="../../index.html"><span class="dot"></span>知识笔记</a>
+    
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="toc" id="toc">
+      <p class="toc-title">目录</p>
+      <a href="../../index.html" class="sub">← 全部笔记</a>
+      <a href="#忙轮询一个线程一堆-fd">忙轮询：一个线程，一堆 fd</a>
+      <a href="#把问搬进内核">把「问」搬进内核</a>
+      <a href="#内核做的是替你挂监听器" class="sub">内核做的是「替你挂监听器」</a>
+      <a href="#三个固定成本">三个固定成本</a>
+      <a href="#它还欠着一件事">它还欠着一件事</a>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow">● 知识笔记</span>
+      <h1>在这里写标题</h1>
+      <p class="lede">一句话说清这篇笔记解决什么问题。</p>
+    </div>
+
+
+    <div class="provenance"><span><b>生成</b> 2026-10-19</span><span><b>模型</b> deepseek-v4.1-flash-1017</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">待分类</span></span></div>
+
+<blockquote>
+<p>上一篇的结论是：一个执行单位只能等一条连接，因为它的执行现场停在那一行 <code>read()</code> 里。</p>
+<p>那就换个做法：不停了。线程挨个问过去，谁有数据就处理谁。这一篇从最朴素的忙轮询开始，走到 select / poll，看它们各自治好了什么，又欠下什么。</p>
+</blockquote>
+<h2 id="忙轮询一个线程一堆-fd"><span class="num">01</span>忙轮询：一个线程，一堆 fd</h2>
+<p>把 fd 设成非阻塞，<code>read()</code> 就不会再停了。没数据时它立刻返回 <code>-1</code>，<code>errno</code> 是 <code>EAGAIN</code>：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-c">for (;;) {
+    for (int i = 0; i &lt; n; i++) {
+        ssize_t r = read(fds[i], buf, sizeof buf);   /* 全部 O_NONBLOCK */
+        if (r &gt; 0) {
+            handle(fds[i], buf, r);
+        } else if (r == -1 &amp;&amp; errno == EAGAIN) {
+            continue;                                 /* 这条没有，问下一条 */
+        }
+    }
+}
+</code></pre></div>
+<p>一个线程从此可以招呼任意多条连接。它不会停在任何一条上，因为它根本没有「等」这个动作。</p>
+<p>代价立刻就出现了：<strong>没有数据的时候，这个循环照转</strong>。</p>
+<div class="cards" data-cols="3"><div class="ccard tone-muted">
+          <span class="tag tone-muted">CPU</span>
+          <h4>空转</h4>
+          <p>一万条连接全空闲，这个循环仍然跑满一个核。它在反复确认「还是没数据」。</p>
+          
+          
+        </div><div class="ccard tone-muted">
+          <span class="tag tone-muted">系统调用</span>
+          <h4>白问</h4>
+          <p>每一次 read 都要进一次内核。如果 99% 的连接此刻没数据，那 99% 的调用都是白跑。</p>
+          
+          
+        </div><div class="ccard tone-muted">
+          <span class="tag tone-muted">死结</span>
+          <h4>延迟与开销二选一</h4>
+          <p>想延迟低就得多问，多问就多烧 CPU；想省 CPU 就少问，延迟就上去。</p>
+          
+          
+        </div></div><p>拖一下这个控件，看白问率怎么随连接数变化：</p>
+<div class="demo" data-widget="poll-lab" data-config="{&quot;conn&quot;:{&quot;min&quot;:8,&quot;max&quot;:200,&quot;step&quot;:4,&quot;def&quot;:64},&quot;busy&quot;:{&quot;min&quot;:5,&quot;max&quot;:100,&quot;step&quot;:5,&quot;def&quot;:10}}">
+      <div class="demo-head">
+        <span class="title">一个线程挨个问过去</span>
+        <span class="status" data-status>拖大连接数，看「白问率」和「每次要交多少份名单」怎么一起变差</span>
+        <span class="spacer"></span>
+        <button class="btn" data-run>▶ 开始模拟</button><button class="btn ghost" data-reset>重置</button>
+      </div>
+      <div class="demo-body custom" data-mount></div>
+    </div><p>忙轮询的问题不在于它慢，而在于<strong>它的开销和「有多少连接」成正比，跟「有多少活」无关</strong>。</p>
+<h2 id="把问搬进内核"><span class="num">02</span>把「问」搬进内核</h2>
+<p>如果可以一次把一万个 fd 交给内核，让它替你检查，线程就能在没事的时候睡下 —— 那就两全了。<code>select</code> 和 <code>poll</code> 做的就是这件事：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>接口</th><th>怎么交名单</th><th>有什么限制</th></tr></thead><tbody><tr><th>select</th><td data-label="怎么交名单">三个 fd_set 位图：读、写、异常</td><td data-label="有什么限制">fd 号必须小于 FD_SETSIZE（通常是 1024），超出的位图放不下</td></tr><tr><th>poll</th><td data-label="怎么交名单">一个 pollfd 数组，每项带 fd 和关心的事件</td><td data-label="有什么限制">没有 1024 这个上限；nfds 受 RLIMIT_NOFILE 约束</td></tr></tbody></table></div><p>只要交一次名单，内核检查完，没事就让线程睡，有事就叫醒它。听起来像是「内核替你轮询」。<mark class="mk-blue">实际实现完全不是这样。</mark></p>
+<h3 id="内核做的是替你挂监听器">内核做的是「替你挂监听器」</h3>
+<p>一次 <code>poll()</code> 在内核里大致是这个过程：</p>
+<div class="pipe"><div class="lane tone-blue">
+        <div class="lane-meta">
+          <span class="ln">第一步</span>
+          <b>挂</b>
+          <small>对名单里的每个 fd 各挂一个临时条目</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>对每个 fd 调一次它自己的 poll 方法</b>
+        <small>socket 的 poll 会走到 poll_wait()</small>
+        <span class="tag tone-blue">N 次</span>
+      </div><div class="pnode">
+        <b>把当前线程的条目挂进那个 fd 的等待队列</b>
+        <small>每个 fd 一份，挂在 fd 自己的队列上</small>
+        <span class="tag tone-blue">N 份</span>
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">全部挂完，再看有没有现成的</span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-amber">
+        <div class="lane-meta">
+          <span class="ln">第二步</span>
+          <b>查</b>
+          <small>已经就绪的直接返回</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>有人就绪，这次调用立刻返回</b>
+        <small>不需要睡，也不用等</small>
+        
+      </div><div class="pnode">
+        <b>一个都没有，才准备睡</b>
+        <small>睡之前会再查一遍，防止挂完到睡下有数据到达</small>
+        
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">都没事 <span class="en">睡</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-violet">
+        <div class="lane-meta">
+          <span class="ln">第三步</span>
+          <b>睡</b>
+          <small>线程挂起，等待队列上的条目待命</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>状态置 TASK_INTERRUPTIBLE，让出 CPU</b>
+        <small>和阻塞 read 的睡法一样</small>
+        
+      </div><div class="pnode">
+        <b>任一 fd 有数据，它的队列唤醒你的条目</b>
+        <small>内核只知道「这个队列有人等」</small>
+        
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">被叫醒 <span class="en">但你不知道是谁</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-green">
+        <div class="lane-meta">
+          <span class="ln">第四步</span>
+          <b>醒</b>
+          <small>重新扫一遍，找是谁</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>对名单里每个 fd 再调一次 poll 方法</b>
+        <small>看谁的就绪位被置上了</small>
+        
+      </div><div class="pnode">
+        <b>返回就绪个数，拆掉所有临时条目</b>
+        <small>下一次调用，从头再挂一遍</small>
+        
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">名单和条目都拆了 <span class="en">下次重来</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div></div><p>关键在第 ③ 步和第 ④ 步：</p>
+<ul>
+<li>内核能让你睡，是因为它<strong>在你的线程和 N 个 fd 的等待队列之间，各挂了一个临时条目</strong>。这跟阻塞 read 挂的是同一种东西，只是这次挂了很多份，而且不属于某一个 fd。</li>
+<li>唤醒只说明「你挂的某一份被触发了」。它没有把「是哪个 fd、来了多少数据」送到你手上。所以醒来必须自己重扫名单。</li>
+<li>这 N 份条目在 <code>poll()</code> 返回前会被全部摘掉。<strong>下一次调用，得从头再挂一遍。</strong></li>
+</ul>
+<div class="callout tone-amber">
+      <span class="ic">⚠</span>
+      <div><p><mark class="mk-amber">「select / poll 在内核里轮询」是个很常见的误解。</mark></p>
+<p>内核里没有一张常驻名单，也没有一个循环在替你看守。它只是在你调用的这段时间里，
+临时把监听器挂到各个 fd 的等待队列上，等你醒来就全部拆掉。</p>
+</div>
+    </div><h2 id="三个固定成本"><span class="num">03</span>三个固定成本</h2>
+<p>理解实现之后，代价就很好数了：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>成本</th><th>发生在哪</th><th>怎么随连接数变</th></tr></thead><tbody><tr><th>名单拷贝</th><td data-label="发生在哪">每次调用，从用户空间把名单拷进内核</td><td data-label="怎么随连接数变">select 拷三张位图；poll 拷 N 个 pollfd。都是 O(N)</td></tr><tr><th>全量扫描</th><td data-label="发生在哪">挂的时候扫一遍；醒来找是谁，再扫一遍</td><td data-label="怎么随连接数变">O(N)，跟这一轮有几个 fd 真就绪无关</td></tr><tr><th>就绪信息</th><td data-label="发生在哪">只返回个数，以及每个 fd 的 revents 位</td><td data-label="怎么随连接数变">要自己遍历找出哪几个；select 还会改写你的 fd_set，下次要重填</td></tr></tbody></table></div><p>举一个具体的例子。一万条连接，这一轮只有 10 条有数据：</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>select / poll</th>
+<th>epoll</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>每次调用拷进内核的名单</td>
+<td>10,000 项</td>
+<td>0 项（登记早就在内核里）</td>
+</tr>
+<tr>
+<td>内核检查的 fd 数</td>
+<td>10,000</td>
+<td>0（没人遍历名单）</td>
+</tr>
+<tr>
+<td>返回给用户就绪项</td>
+<td>10 个，但要自己扫出来</td>
+<td>10 个，直接是一个数组</td>
+</tr>
+<tr>
+<td>调用结束后要拆掉的东西</td>
+<td>10,000 个临时条目</td>
+<td>0</td>
+</tr>
+</tbody>
+</table>
+<p>中间两行是分水岭。select / poll 的开销跟着「你关心多少条」走，epoll 的开销跟着「这一轮有多少条真有事」走。</p>
+<h2 id="它还欠着一件事"><span class="num">04</span>它还欠着一件事</h2>
+<p>把上面三笔成本归到一起，会发现它们都指向同一个缺失：</p>
+<div class="callout tone-violet quote">
+      <span class="ic">💡</span>
+      <div><p><mark class="mk-blue">内核没有「记住」谁在关心什么，也没有「记住」谁已经就绪。</mark></p>
+<p>名单是每次调用临时交的，监听器是临时挂的，就绪信息是醒来现扫的。</p>
+</div>
+    </div><p>要治这个，需要两样东西：</p>
+<ol>
+<li>一张<strong>常驻的登记表</strong>：登记一次，一直有效，不用每次重交；</li>
+<li>一张<strong>常驻的就绪表</strong>：数据到达时，由 fd 那边主动把「我好了」写进去，醒来直接取。</li>
+</ol>
+<p>这两张表就是 epoll。下一篇看它们长什么样，以及那个「主动写进去」的动作是谁做的。</p>
+<div class="quiz"><details>
+        <summary>忙轮询用非阻塞 read，为什么 CPU 还是会跑满？</summary>
+        <div class="a"><p>因为它在没数据时也一直循环，反复进内核确认「还是没数据」。
+开销跟连接数成正比，跟真正有数据的连接数无关。</p>
+</div>
+      </details><details>
+        <summary>select / poll 让线程能睡，靠的是什么？</summary>
+        <div class="a"><p>调用的过程中，内核对名单里的每个 fd 各挂一个临时等待条目，
+线程再睡下。任一 fd 有事件就唤醒线程。睡的能力来自这些临时条目，不是来自内核里的轮询。</p>
+</div>
+      </details><details>
+        <summary>为什么 select / poll 醒来后还要把名单扫一遍？</summary>
+        <div class="a"><p>唤醒只告诉线程「你挂的某个条目被触发了」，没有说明是哪个 fd、发生了什么。
+内核此时也不知道，因为它没有常驻的就绪信息。</p>
+</div>
+      </details></div>
+
+    <footer>
+      <span>在这里写标题</span>
+      <span>最后更新 2026-10-19 · 单文件可离线打开</span>
+    </footer>
+  </main>
+</div>
+
+<script src="../../assets/app.js?v=0285b13817"></script>
+</body>
+</html>
