@@ -1880,6 +1880,12 @@ archify 是一套完整的图渲染系统，能力**超出**我们自己的积�
   上下相邻两行的节点，自动推断可能给出 `fromSide: "left"`，然后报
   `first segment does not honor inferred fromSide "left"` ——
   ==错误里说的方向和你看到的走向对不上，直接写上 bottom/top 最省事。==
+- **写了 `via` 的手工坐标，首点要对齐起点边的中心线，末点要对齐终点边的中心线。**
+  左右边对齐 y，上下边对齐 x；斜着进入某条边会报 `does not honor fromSide/toSide`。
+  先按节点 `pos` + `size` 算出边中心，再拐弯。
+- **画布底部要给图例留一条带。** 节点或区域框压到画布底时，报
+  `legend needs N rows ... above the available legend band`；加高 `meta.viewBox`，
+  不要靠挪节点挤图例。
 - **`boundaries` 里的 `kind` 只有 `region` 和 `security-group` 两种**，
   而 `security-group` 画出来是**红色虚线框**。红色在别处一律表示「出事了」，
   知识图里没有这个含义，++默认用 `region`++。
