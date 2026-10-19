@@ -6,7 +6,7 @@
 <title>工程里为什么是它</title>
 <meta name="description" content="红黑树不是「最快的平衡树」，而是「最省心的那一个」：插入最多 2 次旋转、删除最多 3 次，任何输入下都不会突然卡一下。这一条让它在内核、标准库、事件驱动里被反复选中。而 Redis 选了跳表、MySQL 选了 B+ 树、Java 的 HashMap 平时根本不用树 —— 它们的理由同样具体。" />
 <link rel="stylesheet" href="../../assets/theme.css?v=b918ec5c83" />
-  <link rel="stylesheet" href="../../assets/blocks.css?v=de819b879d" />
+  <link rel="stylesheet" href="../../assets/blocks.css?v=69ac1ff279" />
   <link rel="stylesheet" href="../../assets/archify-embed.css?v=68fec0b81b" />
 </head>
 <body>
@@ -237,36 +237,74 @@
 </table>
 <p><mark class="mk-blue">红黑树从来不是「最好的平衡树」，它是「内存里、频繁改动、要求单次代价确定」这个交集的答案。</mark></p>
 <h2 id="一张选型表"><span class="num">08</span>一张选型表</h2>
-<p>最后把上面的东西收成一张可以直接查的表：</p>
+<p>最后把上面的东西收成一张表。两个轴就是前面反复出现的两个约束：</p>
 <div class="mx">
-      <div class="mx-ylab">改动频率</div>
+      <div class="mx-ylab">改动有多频繁 ↑</div>
       <div class="mx-body">
         <div class="mx-y mx-yto">频繁改</div>
         <div class="mx-grid">
           <div class="mcell tone-green">
             <b>红黑树</b>
-            <span>内存 + 频繁改：单次改动次数封顶，调度器、epoll 的处境</span>
+            <span>内存 + 频繁改：每次改动只动几个节点，单次代价封顶。调度器、epoll、定时器都在这格</span>
           </div>
           <div class="mcell tone-amber">
             <b>B+ 树 / LSM 树</b>
-            <span>磁盘 + 频繁改：把树高压到 3 层，一次 IO 搬一页</span>
+            <span>磁盘 + 频繁改：一个节点 = 一个磁盘页，树高压到 3 层；代价是每次改动要写页、可能分裂</span>
           </div>
           <div class="mcell tone-blue">
-            <b>谁都可以</b>
-            <span>内存 + 很少改：几种结构只差常数因子，按团队熟悉度选</span>
+            <b>红黑树 / 跳表都行</b>
+            <span>内存 + 很少改：差距只在常数因子，按团队熟悉度和要不要范围遍历来选</span>
           </div>
           <div class="mcell tone-muted">
-            <b>哈希索引 / 静态有序数组</b>
-            <span>磁盘 + 很少改：一次建好顺序读，不需要动态平衡</span>
+            <b>哈希索引 / 一次性排序的静态数组</b>
+            <span>磁盘 + 很少改：建好就不改，顺序读到底，不需要动态平衡</span>
           </div>
         </div>
         <div class="mx-y mx-yfrom">很少改</div>
         <div class="mx-xrow">
           <span>内存</span><span>磁盘</span>
         </div>
-        <div class="mx-xlab">数据在哪</div>
+        <div class="mx-xlab">数据主要放在哪 →</div>
       </div>
-    </div><p>矩阵只是粗略指路牌，不是判据。真正选型时还要看：要不要范围查询、要不要顺序遍历、内存预算、并发模型。</p>
+    </div><p>注意左列和右列的区别不是「内存 vs 磁盘」那么简单 —— <mark class="mk-blue">真正被这个轴改变的是「一次比较的代价」</mark>：内存里一次比较约 1 纳秒，所以层数多一点无所谓；磁盘上一次比较可能是一次 10 毫秒的 IO，所以必须用多路节点把层数压到 3 层。</p>
+<p>矩阵只是指路牌，不是判据。真要选型还得看三件事：要不要范围 / 顺序查询、内存预算、单次改动要不要有硬上界。具体到本文提到的几个系统，它们各自落在哪一格：</p>
+<table>
+<thead>
+<tr>
+<th>系统</th>
+<th>落在哪格</th>
+<th>它真正在意的</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Linux 调度器 / epoll / 定时器</td>
+<td>内存 + 频繁改</td>
+<td>改动发生在持锁临界区，时长必须有上界</td>
+</tr>
+<tr>
+<td>C++ / Java 的有序容器</td>
+<td>内存 + 频繁改</td>
+<td>标准承诺 O(log n)，且改动只影响局部</td>
+</tr>
+<tr>
+<td>HashMap 的树化桶</td>
+<td>内存 + 频繁改</td>
+<td>只是兜底 —— 平时是链表，桶挤了才转树</td>
+</tr>
+<tr>
+<td>Redis ZSet</td>
+<td>内存 + 频繁改</td>
+<td>但它要的是<strong>范围遍历</strong>，所以选跳表</td>
+</tr>
+<tr>
+<td>InnoDB 索引</td>
+<td>磁盘 + 频繁改</td>
+<td>一次 IO 要搬回几百个键，所以选 B+ 树</td>
+</tr>
+</tbody>
+</table>
+<p><mark class="mk-blue">同一格里的红黑树和跳表，是被「要不要范围遍历」这一条分开的。</mark></p>
 <div class="callout tone-violet quote">
       <span class="ic">🧭</span>
       <div><p><mark class="mk-blue">选树的时候，先问三个问题：</mark>
