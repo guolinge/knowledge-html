@@ -987,6 +987,18 @@ npm run view -- <slug>     # 构建 + 在浏览器打开
 npm run visual-check       # 无头浏览器真的去量每个积木有没有溢出
 ```
 
+```callout
+tone: amber
+icon: ⚠
+text: |
+  ==`visual-check` 和 `probe-arch` 读的是 `dist/<slug>.html`，不是 `notes/<slug>/index.html`。==
+
+  `npm run build` 只重建 notes 页；只跑它之后立刻量图，量到的是上一次
+  `build:standalone` 留下的旧页面 —— 报出来的可能是已经改掉的问题，
+  新问题也可能量不到。改完正文或图，先 `npm run build:standalone` 再量；
+  `npm run done` 的顺序已经是对的。
+```
+
 #### 但真正的回路是「写完一块就看一块」
 
 ```bash
