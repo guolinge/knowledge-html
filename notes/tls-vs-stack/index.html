@@ -1,0 +1,701 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-has-toc="1">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>TLS 与线程栈：一个柜子，一个工作台</title>
+<meta name="description" content="两者都「每线程一份」，但栈是函数调用的工作台，帧随调用压了又弹；TLS 是线程的储物柜，按线程存到退出。这篇还拆开柜子：errno、分配缓存、请求上下文、随机数引擎都在里面，以及为什么它跟线程、不跟请求。" />
+<link rel="stylesheet" href="../../assets/theme.css?v=b918ec5c83" />
+  <link rel="stylesheet" href="../../assets/blocks.css?v=1af3923321" />
+  <link rel="stylesheet" href="../../assets/archify-embed.css?v=68fec0b81b" />
+</head>
+<body>
+<div id="progress"></div>
+<div id="tocScrim"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
+    <a class="brand" href="../../index.html"><span class="dot"></span>知识笔记</a>
+    
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="toc" id="toc">
+      <p class="toc-title">目录</p>
+      <a href="../../index.html" class="sub">← 全部笔记</a>
+      <a href="#总图两块区域两个基址">总图：两块区域，两个基址</a>
+      <a href="#栈函数调用的工作台">栈：函数调用的工作台</a>
+      <a href="#tls同一个变量名两条线程为什么读到不同值">TLS：同一个变量名，两条线程为什么读到不同值</a>
+      <a href="#柜子里到底放什么">柜子里到底放什么</a>
+      <a href="#为什么放进去什么时候别放">为什么放进去，什么时候别放</a>
+      <a href="#生命周期一个到线程退出一个到函数返回">生命周期：一个到线程退出，一个到函数返回</a>
+      <a href="#容量与代价">容量与代价</a>
+      <a href="#速查">速查</a>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow">● 操作系统 · 线程与存储</span>
+      <h1>TLS 与线程栈：一个柜子，一个工作台</h1>
+      <p class="lede">两者都「每线程一份」，但栈是函数调用的工作台，帧随调用压了又弹；TLS 是线程的储物柜，按线程存到退出。这篇还拆开柜子：errno、分配缓存、请求上下文、随机数引擎都在里面，以及为什么它跟线程、不跟请求。</p>
+    </div>
+
+
+    <div class="provenance"><span><b>来源</b> 本机实测：podman 跑 Debian 12 / glibc 2.36 / x86-64（gcc 13），反汇编与运行输出见正文 · glibc manual 2.44: Dynamic Linking Tunables（glibc.rtld.optional_static_tls，默认 512 字节）— https://sourceware.org/glibc/manual/2.44/html_node/Dynamic-Linking-Tunables.html · glibc manual 2.44: Memory Allocation Tunables（per-thread cache）— https://sourceware.org/glibc/manual/2.44/html_node/Memory-Allocation-Tunables.html · pthread_key_create(3) / PTHREAD_KEYS_MAX — https://man7.org/linux/man-pages/man3/pthread_key_create.3.html · System V ABI: AMD64 (red zone、栈帧约定) — https://gitlab.com/x86-psABIs/x86-64-ABI · Ulrich Drepper: ELF Handling For Thread-Local Storage（四种访问模型）— https://www.akkadia.org/drepper/tls.pdf</span><span><b>生成</b> 2026-10-20</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">操作系统</span> <span class="tag tone-muted">Linux</span> <span class="tag tone-muted">TLS</span> <span class="tag tone-muted">线程</span> <span class="tag tone-muted">栈</span> <span class="tag tone-muted">glibc</span></span></div>
+
+<p><code>thread_local int counter;</code> 和 <code>int b = 2;</code> 之间只隔一行，行为却完全不同：一个跟着线程活到退出，一个跟着函数活到返回。它们还都「每个线程一份」，于是很容易被当成同一种东西。</p>
+<p>这篇把它们拆开。四件事要分开看：<strong>放在哪、靠什么找到、里面放什么、什么时候没。</strong></p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th></th><th>线程栈</th><th>TLS</th></tr></thead><tbody><tr><th>一句话</th><td data-label="线程栈">线程的临时工作台：每次函数调用往上摆一层，返回就收走</td><td data-label="TLS">线程的私人储物柜：线程建好就有，线程退出才清</td></tr><tr><th>用途</th><td data-label="线程栈">支撑函数调用：参数、局部变量、返回地址、保存的寄存器</td><td data-label="TLS">保存线程私有的长期数据：errno、分配缓存、请求上下文、计数器</td></tr><tr><th>组织方式</th><td data-label="线程栈">按调用链：后调用的压在先调用的上面</td><td data-label="TLS">按变量：每个变量在块里有自己的固定偏移</td></tr><tr><th>怎么找到</th><td data-label="线程栈">RSP / RBP 加偏移（<code>mov -0x8(%rbp),%rax</code>）</td><td data-label="TLS"><code>fs</code> 基址加偏移（<code>mov %fs:0xffffffffffffffb0,%eax</code>）</td></tr><tr><th>生命周期</th><td data-label="线程栈">线程创建到退出，但里面每个帧随函数进出</td><td data-label="TLS">线程创建到退出，变量本人在整个期间有效</td></tr><tr><th>函数返回后</th><td data-label="线程栈">这一帧作废，取地址就是悬空指针</td><td data-label="TLS">不受影响，还在这条线程的柜子里</td></tr><tr><th>谁分配</th><td data-label="线程栈">内核给主线程，pthread 库给其余线程</td><td data-label="TLS">glibc 在线程创建时一起划好</td></tr></tbody></table></div><h2 id="总图两块区域两个基址"><span class="num">01</span>总图：两块区域，两个基址</h2>
+<p>先看空间关系。下面这张图里，两条线程各有一块 TLS 区和一根用户栈，底下是全进程共享的同一段代码。</p>
+<figure class="archfig" data-arch style="--arch-max-width:1580px" data-boundaries="nested" data-pano data-parts='{"tlsA":{"label":"线程 A 的 TLS 区","sub":"TCB 加一块静态 TLS","detail":"这块区域在线程创建时由 glibc 一起划好。`fs` 基址（也叫线程指针 TP）指着 TCB，你声明的 `thread_local` 变量在 TCB 的**负偏移**处。==同一个偏移在两块区域里都存在，只是基址不同。==","facts":{"归属":"只有这条线程","谁分配":"glibc","什么时候没":"线程退出","访问方式":"fs + 偏移"}},"stackA":{"label":"线程 A 的用户栈","sub":"函数调用的工作区","detail":"每次函数调用压一帧，返回就弹一帧。栈本身只有一根，但里面每一格的有效期由函数决定：`bar` 返回后，它的帧就作废了。","facts":{"归属":"只有这条线程","谁分配":"内核或 pthread 库","什么时候没":"线程退出（帧随函数返回）","访问方式":"RSP / RBP + 偏移"}},"tlsB":{"label":"线程 B 的 TLS 区","sub":"同一批变量，另一份副本","detail":"偏移和 A 完全一样，只有 TP 不同。所以对同一条指令来说，==「变量名」在编译期就定了偏移，「哪个副本」在运行期由基址决定==。","facts":{"归属":"只有这条线程","谁分配":"glibc","什么时候没":"线程退出","访问方式":"fs + 偏移"}},"stackB":{"label":"线程 B 的用户栈","sub":"另一根，互不相干","detail":"两根栈在同一块地址空间里，通常彼此不相邻。B 无论怎么递归，都碰不到 A 的栈帧。","facts":{"归属":"只有这条线程","谁分配":"内核或 pthread 库","什么时候没":"线程退出","访问方式":"RSP / RBP + 偏移"}},"insn":{"label":"代码段 · 同一条指令","sub":"两条线程执行的是同一段机器码","detail":"这行代码只有一份，被所有线程共享。它之所以能为不同线程服务，是因为==没有一个寄存器是「全进程唯一」的==：`fs`、`rsp`、`rbp` 都是每条线程各自的值。","facts":{"归属":"全进程共享","谁分配":"加载器","什么时候没":"进程退出","访问方式":"取指执行"}}}' data-tours='[{"id":"two-copies","label":"两条线程为什么读到不同值","steps":[{"at":["tlsA","stackA"],"text":"A 在跑的时候，`fs` 指着 A 的 TCB，`rsp` 指在 A 的栈顶。同一条指令把偏移加上去，落到 A 的那一份。"},{"at":["tlsB","stackB"],"text":"换成 B 跑，这两个基址一起换成 B 的。==指令一个字节都没变，落点却换了。=="},{"at":["insn"],"text":"这就是全部秘密：编译期固定偏移，运行期换基址。栈的局部变量也是同一套把戏，只是基址是 `rbp` 而不是 `fs`。"}]}]' data-frames='[{"id":"a","boundary":0,"kind":"classification","label":"线程 A 私有","detail":"TLS 区和用户栈都是 A 自己的。fs 指向 A 的 TCB，RSP 指在 A 的栈顶；B 跑到同一个函数时，这两个值换成 B 的。","members":["tlsA","stackA"],"depth":1},{"id":"b","boundary":1,"kind":"classification","label":"线程 B 私有","detail":"布局和 A 一样，偏移也一样，只有基址不同。所以「同一个变量名 → 不同副本」不是靠不同的指令实现的。","members":["tlsB","stackB"],"depth":1}]'>
+      <div class="arch-boundary-ui">
+          <div class="arch-boundary-toolbar"><span class="arch-boundary-label">边界</span>
+            <button type="button" data-boundary-mode="nested" aria-pressed="true">多层归属框</button>
+            <button type="button" data-boundary-mode="flat" aria-pressed="false">只留一层分区</button>
+            <button type="button" data-arch-reset>恢复全图</button>
+          </div>
+          <div class="arch-address-box" aria-live="polite"><div data-arch-address>点一个零件，看完整归属路径；点一个区域标题，看这一层的含义。</div>
+            <div data-arch-frame-detail>最外框表示逻辑资源域，不表示所有对象在一块内存里。每层边界的标题说明分组依据。</div></div>
+        </div>
+      <div class="arch-canvas"><svg viewBox="0 0 1580 1020" role="img" aria-labelledby="tls-map-archify-diagram-title tls-map-archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
+        <title id="tls-map-archify-diagram-title">TLS 与线程栈：同一份代码、两条寻址路线</title>
+        <desc id="tls-map-archify-diagram-description">两条线程各自有一块 TLS 区和一根用户栈；同一条指令靠不同的基址落到各自的副本上</desc>
+        <!-- Definitions -->
+        <defs>
+          <marker id="tls-map-arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-default" />
+          </marker>
+          <marker id="tls-map-arrowhead-emphasis" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-emphasis" />
+          </marker>
+          <marker id="tls-map-arrowhead-security" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-security" />
+          </marker>
+          <marker id="tls-map-arrowhead-dashed" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-dashed" />
+          </marker>
+          <pattern id="tls-map-grid" width="40" height="40" patternUnits="userSpaceOnUse">
+            <path d="M 40 0 L 0 0 0 40" class="c-grid" stroke-width="0.5"/>
+          </pattern>
+        </defs>
+
+        <!-- Background Grid -->
+        <rect width="100%" height="100%" fill="url(#tls-map-grid)" />
+
+        <!-- Boundaries (behind everything) -->
+        <g class="arch-frame" data-frame="a" data-depth="1" data-frame-flat="false" data-frame-kind="classification" role="button" tabindex="0" aria-pressed="false" aria-label="线程 A 私有"><title>TLS 区和用户栈都是 A 自己的。fs 指向 A 的 TCB，RSP 指在 A 的栈顶；B 跑到同一个函数时，这两个值换成 B 的。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="0" data-frame-members="tlsA stackA" x="140" y="120" width="660" height="400" rx="12" class="c-region" stroke-width="1"/>
+        <text x="148" y="138" class="t-cloud" font-size="9" font-weight="600">线程 A 私有</text></g>
+
+        <g class="arch-frame" data-frame="b" data-depth="1" data-frame-flat="false" data-frame-kind="classification" role="button" tabindex="0" aria-pressed="false" aria-label="线程 B 私有"><title>布局和 A 一样，偏移也一样，只有基址不同。所以「同一个变量名 → 不同副本」不是靠不同的指令实现的。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="1" data-frame-members="tlsB stackB" x="820" y="120" width="660" height="400" rx="12" class="c-region" stroke-width="1"/>
+        <text x="828" y="138" class="t-cloud" font-size="9" font-weight="600">线程 B 私有</text></g>
+
+        <!-- Connection paths (before components for correct z-order) -->
+        <path data-edge-from="insn" data-edge-to="tlsA" data-edge-label="fs + 偏移" data-edge-key="0" data-edge-id="a-tls" data-composition-points="790,700;790,560;325,560;325,480" d="M 790 700 L 790 568 Q 790 560 782 560 L 333 560 Q 325 560 325 552 L 325 480" class="a-emphasis" stroke-width="1.8" marker-end="url(#tls-map-arrowhead-emphasis)"/>
+        <path data-edge-from="insn" data-edge-to="stackA" data-edge-label="RBP + 偏移" data-edge-key="1" data-edge-id="a-stack" data-composition-points="790,700;790,600;635,600;635,480" d="M 790 700 L 790 608 Q 790 600 782 600 L 643 600 Q 635 600 635 592 L 635 480" class="a-default" stroke-width="1.5" marker-end="url(#tls-map-arrowhead)"/>
+        <path data-edge-from="insn" data-edge-to="tlsB" data-edge-label="同一句，落到 B 的副本" data-edge-key="2" data-edge-id="b-tls" data-composition-points="790,700;790,640;1005,640;1005,480" d="M 790 700 L 790 648 Q 790 640 798 640 L 997 640 Q 1005 640 1005 632 L 1005 480" class="a-emphasis" stroke-width="1.8" marker-end="url(#tls-map-arrowhead-emphasis)"/>
+        <path data-edge-from="insn" data-edge-to="stackB" data-edge-label="同一句，落到 B 的帧" data-edge-key="3" data-edge-id="b-stack" data-composition-points="790,700;790,680;1315,680;1315,480" d="M 790 700 L 790 688 Q 790 680 798 680 L 1307 680 Q 1315 680 1315 672 L 1315 480" class="a-default" stroke-width="1.5" marker-end="url(#tls-map-arrowhead)"/>
+
+        <!-- Components -->
+        <g id="tls-map-node-tlsA" data-nb="1" data-node-id="tlsA" data-node-label="A 的 TLS 区" tabindex="0" role="button" aria-label="Focus A 的 TLS 区, TCB + 静态 TLS 块 + DTV, 线程 A 私有 · fs 指向 A 的 TCB，RSP 指在 A 的栈顶" aria-pressed="false" data-node-kind="database" data-node-sublabel="TCB + 静态 TLS 块 + DTV" data-node-context="线程 A 私有 · fs 指向 A 的 TCB，RSP 指在 A 的栈顶">
+          <title>A 的 TLS 区 · TCB + 静态 TLS 块 + DTV · 线程 A 私有 · fs 指向 A 的 TCB，RSP 指在 A 的栈顶</title>
+          <rect x="180" y="160" width="290" height="320" rx="6" class="c-mask"/>
+          <rect x="180" y="160" width="290" height="320" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(186 166) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <rect class="nb-badge" x="398.0" y="168" width="60.0" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="428.0" y="179" font-size="8" text-anchor="middle">每线程一块</text>
+          <text class="nb-title" x="214" y="181" font-size="10.5" font-weight="600">A 的 TLS 区</text>
+          <line class="nb-hr" x1="188" y1="188" x2="462" y2="188"/>
+          <text class="nb-k" x="192" y="297" font-size="9">谁分配的</text><text class="nb-v" x="244.2" y="297" font-size="9">线程创建时 glibc 一起划好</text>
+          <text class="nb-k" x="192" y="311" font-size="9">谁能写</text><text class="nb-v" x="244.2" y="311" font-size="9">只有这条线程的代码</text>
+          <rect class="nb-seg" x="192" y="321" width="266.0" height="12" rx="3"/><text class="nb-seg-t" x="199" y="330" font-size="8">TCB（fs 基址 / TP）· 存放 DTV、canary</text><text class="nb-note" x="451" y="330" font-size="7.5" text-anchor="end">TP</text>
+          <rect class="nb-seg" x="192" y="336" width="266.0" height="12" rx="3"/><text class="nb-seg-t" x="199" y="345" font-size="8">.tdata / .tbss · 你声明的 thread_local</text><text class="nb-note" x="451" y="345" font-size="7.5" text-anchor="end">TP−80</text>
+          <rect class="nb-seg" data-tone="idle" x="192" y="351" width="266.0" height="12" rx="3"/><text class="nb-seg-t" data-tone="idle" x="199" y="360" font-size="8">静态 TLS 剩余余量</text>
+          <text class="nb-note" x="192" y="472" font-size="8">偏移是编译期算好的常量，只有基址随线程换</text>
+        </g>
+
+        <g id="tls-map-node-stackA" data-nb="1" data-node-id="stackA" data-node-label="A 的用户栈" tabindex="0" role="button" aria-label="Focus A 的用户栈, 函数调用压出来的帧, 线程 A 私有 · fs 指向 A 的 TCB，RSP 指在 A 的栈顶" aria-pressed="false" data-node-kind="backend" data-node-sublabel="函数调用压出来的帧" data-node-context="线程 A 私有 · fs 指向 A 的 TCB，RSP 指在 A 的栈顶">
+          <title>A 的用户栈 · 函数调用压出来的帧 · 线程 A 私有 · fs 指向 A 的 TCB，RSP 指在 A 的栈顶</title>
+          <rect x="510" y="160" width="250" height="320" rx="6" class="c-mask"/>
+          <rect x="510" y="160" width="250" height="320" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(516 166) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <rect class="nb-badge" x="688.0" y="168" width="60.0" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="718.0" y="179" font-size="8" text-anchor="middle">每线程一根</text>
+          <text class="nb-title" x="544" y="181" font-size="10.5" font-weight="600">A 的用户栈</text>
+          <line class="nb-hr" x1="518" y1="188" x2="752" y2="188"/>
+          <text class="nb-k" x="522" y="289.5" font-size="9">谁在动它</text><text class="nb-v" x="585.0" y="289.5" font-size="9">call / ret、push / pop</text>
+          <text class="nb-k" x="522" y="303.5" font-size="9">什么时候没</text><text class="nb-v" x="585.0" y="303.5" font-size="9">函数返回，帧就作废</text>
+          <rect class="nb-seg" x="522" y="313.5" width="226.0" height="12" rx="3"/><text class="nb-seg-t" x="529" y="322.5" font-size="8">main 的帧</text><text class="nb-note" x="741" y="322.5" font-size="7.5" text-anchor="end">高地址</text>
+          <rect class="nb-seg" x="522" y="328.5" width="226.0" height="12" rx="3"/><text class="nb-seg-t" x="529" y="337.5" font-size="8">foo 的帧</text>
+          <rect class="nb-seg" x="522" y="343.5" width="226.0" height="12" rx="3"/><text class="nb-seg-t" x="529" y="352.5" font-size="8">bar 的帧（正在跑）</text><text class="nb-note" x="741" y="352.5" font-size="7.5" text-anchor="end">← RSP</text>
+          <rect class="nb-seg" data-tone="idle" x="522" y="358.5" width="226.0" height="12" rx="3"/><text class="nb-seg-t" data-tone="idle" x="529" y="367.5" font-size="8">栈顶以下还没用</text>
+          <text class="nb-note" x="522" y="472" font-size="8">向下长；RSP 指在最上面那一帧的底</text>
+        </g>
+
+        <g id="tls-map-node-tlsB" data-nb="1" data-node-id="tlsB" data-node-label="B 的 TLS 区" tabindex="0" role="button" aria-label="Focus B 的 TLS 区, 同一批变量，另一份副本, 线程 B 私有 · 同样的布局，另一套基址" aria-pressed="false" data-node-kind="database" data-node-sublabel="同一批变量，另一份副本" data-node-context="线程 B 私有 · 同样的布局，另一套基址">
+          <title>B 的 TLS 区 · 同一批变量，另一份副本 · 线程 B 私有 · 同样的布局，另一套基址</title>
+          <rect x="860" y="160" width="290" height="320" rx="6" class="c-mask"/>
+          <rect x="860" y="160" width="290" height="320" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(866 166) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <rect class="nb-badge" x="1078.0" y="168" width="60.0" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="1108.0" y="179" font-size="8" text-anchor="middle">每线程一块</text>
+          <text class="nb-title" x="894" y="181" font-size="10.5" font-weight="600">B 的 TLS 区</text>
+          <line class="nb-hr" x1="868" y1="188" x2="1142" y2="188"/>
+          <text class="nb-k" x="872" y="297" font-size="9">和 A 的区别</text><text class="nb-v" x="945.8" y="297" font-size="9">只有基址不同，偏移一模一样</text>
+          <text class="nb-k" x="872" y="311" font-size="9">互相看得见吗</text><text class="nb-v" x="945.8" y="311" font-size="9">看不见，除非你显式传出去</text>
+          <rect class="nb-seg" x="872" y="321" width="266.0" height="12" rx="3"/><text class="nb-seg-t" x="879" y="330" font-size="8">TCB（fs 基址 / TP）</text>
+          <rect class="nb-seg" x="872" y="336" width="266.0" height="12" rx="3"/><text class="nb-seg-t" x="879" y="345" font-size="8">同一个变量，B 的副本</text><text class="nb-note" x="1131" y="345" font-size="7.5" text-anchor="end">TP−80</text>
+          <rect class="nb-seg" data-tone="idle" x="872" y="351" width="266.0" height="12" rx="3"/><text class="nb-seg-t" data-tone="idle" x="879" y="360" font-size="8">静态 TLS 剩余余量</text>
+          <text class="nb-note" x="872" y="472" font-size="8">100 条线程就有 100 份</text>
+        </g>
+
+        <g id="tls-map-node-stackB" data-nb="1" data-node-id="stackB" data-node-label="B 的用户栈" tabindex="0" role="button" aria-label="Focus B 的用户栈, 另一根，互不相干, 线程 B 私有 · 同样的布局，另一套基址" aria-pressed="false" data-node-kind="backend" data-node-sublabel="另一根，互不相干" data-node-context="线程 B 私有 · 同样的布局，另一套基址">
+          <title>B 的用户栈 · 另一根，互不相干 · 线程 B 私有 · 同样的布局，另一套基址</title>
+          <rect x="1190" y="160" width="250" height="320" rx="6" class="c-mask"/>
+          <rect x="1190" y="160" width="250" height="320" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(1196 166) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <rect class="nb-badge" x="1368.0" y="168" width="60.0" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="1398.0" y="179" font-size="8" text-anchor="middle">每线程一根</text>
+          <text class="nb-title" x="1224" y="181" font-size="10.5" font-weight="600">B 的用户栈</text>
+          <line class="nb-hr" x1="1198" y1="188" x2="1432" y2="188"/>
+          <text class="nb-k" x="1202" y="289.5" font-size="9">和 A 的区别</text><text class="nb-v" x="1270.4" y="289.5" font-size="9">另一根栈，地址不相邻也无所谓</text>
+          <text class="nb-k" x="1202" y="303.5" font-size="9">谁在动它</text><text class="nb-v" x="1270.4" y="303.5" font-size="9">只有这条线程自己</text>
+          <rect class="nb-seg" x="1202" y="313.5" width="226.0" height="12" rx="3"/><text class="nb-seg-t" x="1209" y="322.5" font-size="8">main 的帧</text>
+          <rect class="nb-seg" x="1202" y="328.5" width="226.0" height="12" rx="3"/><text class="nb-seg-t" x="1209" y="337.5" font-size="8">别的函数的帧</text>
+          <rect class="nb-seg" x="1202" y="343.5" width="226.0" height="12" rx="3"/><text class="nb-seg-t" x="1209" y="352.5" font-size="8">正在跑的那一帧</text><text class="nb-note" x="1421" y="352.5" font-size="7.5" text-anchor="end">← RSP</text>
+          <rect class="nb-seg" data-tone="idle" x="1202" y="358.5" width="226.0" height="12" rx="3"/><text class="nb-seg-t" data-tone="idle" x="1209" y="367.5" font-size="8">栈顶以下还没用</text>
+          <text class="nb-note" x="1202" y="472" font-size="8">栈的「一份」是一条线程一根，不是每个变量一份</text>
+        </g>
+
+        <g id="tls-map-node-insn" data-nb="1" data-node-id="insn" data-node-label="代码段 · 同一条指令" tabindex="0" role="button" aria-label="Focus 代码段 · 同一条指令, 全进程共享，只有一份, Architecture component" aria-pressed="false" data-node-kind="external" data-node-sublabel="全进程共享，只有一份" data-node-context="Architecture component">
+          <title>代码段 · 同一条指令 · 全进程共享，只有一份 · Architecture component</title>
+          <rect x="400" y="700" width="780" height="200" rx="6" class="c-mask"/>
+          <rect x="400" y="700" width="780" height="200" rx="6" class="c-external" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="external" class="semantic-sigil s-external" transform="translate(406 706) scale(0.6875)">
+            <rect x="2.5" y="5" width="8.5" height="8" rx="1.5"/>
+            <path d="M8 2.5h5.5V8M13.5 2.5 7.5 8.5"/>
+          </g>
+          <rect class="nb-badge" x="1108.0" y="708" width="60.0" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="1138.0" y="719" font-size="8" text-anchor="middle">全进程一份</text>
+          <text class="nb-title" x="434" y="721" font-size="10.5" font-weight="600">代码段 · 同一条指令</text>
+          <line class="nb-hr" x1="408" y1="728" x2="1172" y2="728"/>
+          <text class="nb-k" x="412" y="796" font-size="9">访问 TLS</text><text class="nb-v" x="485.8" y="796" font-size="9">mov %fs:0xffffffffffffffb0,%eax</text>
+          <text class="nb-k" x="412" y="810" font-size="9">访问局部变量</text><text class="nb-v" x="485.8" y="810" font-size="9">mov -0x8(%rbp),%rax</text>
+          <text class="nb-k" x="412" y="824" font-size="9">微妙的地方</text><text class="nb-v" x="485.8" y="824" font-size="9">两条指令里的偏移都是常量，变的只是基址</text>
+          <text class="nb-note" x="412" y="892" font-size="8">编译器在编译期就算好了每个变量离基址多远</text>
+        </g>
+
+        <!-- Connection labels -->
+        <g data-detail="context" data-edge-from="insn" data-edge-to="tlsA" data-edge-label="fs + 偏移" data-edge-key="0" data-edge-id="a-tls">
+          <rect x="530.9" y="540" width="53.199999999999996" height="14" rx="3" class="c-mask"/>
+          <text x="557.5" y="550" class="t-backend" font-size="8" text-anchor="middle">fs + 偏移</text>
+        </g>
+        <g data-detail="context" data-edge-from="insn" data-edge-to="stackA" data-edge-label="RBP + 偏移" data-edge-key="1" data-edge-id="a-stack">
+          <rect x="683.5" y="580" width="58" height="14" rx="3" class="c-mask"/>
+          <text x="712.5" y="590" class="t-muted" font-size="8" text-anchor="middle">RBP + 偏移</text>
+        </g>
+        <g data-detail="context" data-edge-from="insn" data-edge-to="tlsB" data-edge-label="同一句，落到 B 的副本" data-edge-key="2" data-edge-id="b-tls">
+          <rect x="842.1" y="620" width="110.8" height="14" rx="3" class="c-mask"/>
+          <text x="897.5" y="630" class="t-backend" font-size="8" text-anchor="middle">同一句，落到 B 的副本</text>
+        </g>
+        <g data-detail="context" data-edge-from="insn" data-edge-to="stackB" data-edge-label="同一句，落到 B 的帧" data-edge-key="3" data-edge-id="b-stack">
+          <rect x="1001.9" y="660" width="101.2" height="14" rx="3" class="c-mask"/>
+          <text x="1052.5" y="670" class="t-muted" font-size="8" text-anchor="middle">同一句，落到 B 的帧</text>
+        </g>
+
+        <!-- Legend -->
+        <g data-legend data-legend-bridge>
+          <text x="40" y="984" class="t-primary" font-size="12" font-weight="650">Legend</text>
+          <g data-legend-semantic-kind="backend" data-legend-kind="backend" data-legend-label="Backend" data-legend-x="40" data-legend-baseline="1004" data-legend-width="78">
+            <rect x="40" y="995" width="16" height="10" rx="2.5" class="c-backend" stroke-width="1"/>
+            <text x="62" y="1004" class="t-muted" font-size="10" font-weight="500">Backend</text>
+          </g>
+          <g data-legend-semantic-kind="database" data-legend-kind="database" data-legend-label="Database" data-legend-x="140" data-legend-baseline="1004" data-legend-width="83">
+            <rect x="140" y="995" width="16" height="10" rx="2.5" class="c-database" stroke-width="1"/>
+            <text x="162" y="1004" class="t-muted" font-size="10" font-weight="500">Database</text>
+          </g>
+          <g data-legend-semantic-kind="external" data-legend-kind="external" data-legend-label="External" data-legend-x="245" data-legend-baseline="1004" data-legend-width="83">
+            <rect x="245" y="995" width="16" height="10" rx="2.5" class="c-external" stroke-width="1"/>
+            <text x="267" y="1004" class="t-muted" font-size="10" font-weight="500">External</text>
+          </g>
+        </g>
+      </svg></div>
+      <figcaption>左右两条线是两条线程，各有自己的 TLS 区和用户栈；底下是同一段代码。四条线说明「同一条指令靠不同的基址落到不同副本」。点零件看它装了什么。</figcaption>
+      <div class="pano-ui"></div>
+      <p class="arch-hint"><span class="idle">点头上的任意一个框看它的关系，点区域标题看分组含义，点零件看完整归属路径；用「对比两个零件」出一张对照表</span><span class="focused">再点一次空白处取消</span></p>
+    </figure><p>这里有个容易忽略的细节：<strong>偏移在链接时就定死了</strong>。我在 Debian 12 / glibc 2.36 上编了一段代码，<code>get_g()</code> 链接之后长这样：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">0000000000401200 &lt;get_g&gt;:
+  401200:	mov    %fs:0xffffffffffffffb0,%eax
+  401208:	ret
+</code></pre></div>
+<p><code>0xffffffffffffffb0</code> 就是 −80。运行起来核对一下：<code>&amp;g - fs 基址 = -80</code>，而且 <code>pthread_self()</code> 返回的就是 fs 基址——在 glibc 的 x86-64 实现里，线程指针（TP）就是 TCB 的地址。</p>
+<h2 id="栈函数调用的工作台"><span class="num">02</span>栈：函数调用的工作台</h2>
+<p>栈只做一件事：让函数调用能嵌套。</p>
+<p>一次 <code>foo(1)</code> 调用通常是这样：先把参数和返回地址放好，把栈指针往下挪出一帧的空间，再跳进去执行。帧里装着局部变量、保存的寄存器，以及对齐用的空隙。<code>foo</code> 里再调 <code>bar</code>，就在更低的地址上再压一帧。<code>bar</code> 返回，帧被弹掉；<code>foo</code> 返回，它那一帧也作废。</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-c">int *bad(void) {
+    int x = 42;
+    return &amp;x;      /* 函数一返回，这块就作废 */
+}
+</code></pre></div>
+<p><mark class="mk-blue">栈的「每线程一份」指的是那根栈，不是里面的变量。</mark> 每个局部变量都是这一帧里的一个位置，帧一撤，它的地址就不再指向任何有效的东西。</p>
+<p>两个具体的机制值得记住：</p>
+<ul>
+<li><strong>栈顶以下不一定是「空」</strong>：System V AMD64 ABI 给叶子函数留了 128 字节的红色区域（red zone），不调函数时可以往里写，不动 RSP。</li>
+<li><strong>栈有硬上限</strong>：递归太深或者开个大数组就会撞上保护页。实测拿一根 64 KiB 的线程栈做无限递归，进程直接 <code>Segmentation fault</code>（exit 139）。</li>
+</ul>
+<p>顺带一个把两件事连起来的细节：开了栈保护之后，编译器会从 <strong>TLS</strong> 里取一个值放进栈帧。</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">mov %fs:0x28,%rax      # 从 TCB 读出这个线程的栈保护值
+mov %rax,-0x8(%rbp)    # 放进当前帧
+...
+sub %fs:0x28,%rdx      # 返回前和 TLS 里的原值比对
+je  .ok                # 不一致就 __stack_chk_fail
+</code></pre></div>
+<p><code>0x28</code> 是 TCB 里的一个固定字段。<mark class="mk-blue">所以「栈里的东西全在栈上」也不对：帧里有个值来自 TLS。</mark></p>
+<p>在 Debian 12 + glibc 2.36 上实测的默认值：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">pthread default stack = 8192 KiB     guard = 4 KiB
+RLIMIT_STACK soft     = 8 MiB        PTHREAD_STACK_MIN = 16 KiB
+新建线程的实际栈       = 8192 KiB，guard 4 KiB
+</code></pre></div>
+<p>主线程那根栈受 <code>ulimit -s</code> 管，可以往上长；<code>pthread_create</code> 出来的栈在创建时就定好大小，之后不增长。所以「栈能装多少」是一条线程级别的常量，和你调了多少层函数无关。</p>
+<h2 id="tls同一个变量名两条线程为什么读到不同值"><span class="num">03</span>TLS：同一个变量名，两条线程为什么读到不同值</h2>
+<p>TLS 也是「基址 + 偏移」，只是基址换成了每线程一个的线程指针。</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-cpp">thread_local int g = 7;      /* 同一个名字 */
+</code></pre></div>
+<p>A 和 B 执行同一段代码，<code>g</code> 落到哪，取决于此刻 <code>fs</code> 指在谁身上。上面已经看过偏移是 −80，这里看<strong>访问方式本身</strong>：编译器会按变量所在的位置挑一种模型。</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>访问模型</th><th>什么时候用</th><th>实际生成的指令</th></tr></thead><tbody><tr><th>local-exec</th><td data-label="什么时候用">变量在可执行文件里，编译时就知道它在 TP 后面多远</td><td data-label="实际生成的指令"><code>mov %fs:0xffffffffffffffb0,%eax</code>（偏移是常量，链接期定死）</td></tr><tr><th>initial-exec</th><td data-label="什么时候用">变量在初始加载的共享库里；每次先查一次 GOT 里的偏移</td><td data-label="实际生成的指令"><code>mov 0x2ec1(%rip),%rax</code> 然后 <code>mov %fs:(%rax),%eax</code></td></tr><tr><th>general-dynamic</th><td data-label="什么时候用">变量在运行时才加载的模块里（<code>dlopen</code>），得问运行时</td><td data-label="实际生成的指令"><code>lea 0x2ea4(%rip),%rdi</code> 然后 <code>call __tls_get_addr</code>，返回值就是地址</td></tr></tbody></table></div><p>这三种都是我在容器里实际编出来、<code>objdump</code> 看到的，不是从记忆里写的。区别在于「偏移什么时候确定」：local-exec 是链接期，initial-exec 是加载期查 GOT，general-dynamic 是每次调用 <code>__tls_get_addr</code> 去查<strong>动态线程向量</strong>（DTV）——一张「模块 id → 该模块在这条线程里的 TLS 块」的表。</p>
+<p><code>errno</code> 也在这套机制里。实测它落在 <code>TP − 208</code>：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">&amp;g - fs_base    = -80
+errno - fs_base = -208
+pthread_self()  = 0xffff8cc18780    fs_base = 0xffff8cc18780
+</code></pre></div>
+<p><mark class="mk-blue">所以「errno 是线程私有的」不是约定，是寻址方式决定的</mark>：每个线程的 <code>fs</code> 不同，同一个偏移自然读到各自的格子。这个说法有硬证据：<code>errno</code> 在 libc 里就是一个 TLS 符号。</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">$ readelf -sW libc.so.6 | grep -w errno
+   876: 0000000000000010     4 TLS  GLOBAL DEFAULT  24 errno@@GLIBC_PRIVATE
+</code></pre></div>
+<p>这里还有一个坑，实测能复现：如果共享库用了 initial-exec 模型，而它是在进程启动后才被 <code>dlopen</code> 的，一旦 TLS 体积超过预留的余量，加载就会失败。</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">dlopen(liby.so) = ./liby.so: cannot allocate memory in static TLS block
+</code></pre></div>
+<p>glibc 为这种「运行时才来」的模块预留的静态 TLS 余量很小（2.44 手册里默认 512 字节，可以用 <code>glibc.rtld.optional_static_tls</code> 调大）。上面那个库只声明了 64 KiB 的 <code>thread_local</code>，就已经装不下了。</p>
+<h2 id="柜子里到底放什么"><span class="num">04</span>柜子里到底放什么</h2>
+<p>TLS 里放的东西五花八门，但可以按「谁放进去的」分三类，再加一个「放的是不是对象本身」的问题。</p>
+<figure class="archfig" data-arch style="--arch-max-width:1580px" data-boundaries="nested" data-pano data-parts='{"tls":{"label":"线程的 TLS 区","sub":"一块按线程定位的固定区域","detail":"它是线程私有的内存，但不是「每个变量一块」，而是所有 TLS 变量按偏移排在同一块里。第一条是 TCB，后面接着静态 TLS；动态加载的模块各有一块，由 DTV 索引。","facts":{"归属":"只有这条线程","谁分配":"glibc","什么时候没":"线程退出","地址怎么算":"TP + 偏移"}},"libc":{"label":"glibc 放进去的","sub":"不写在你的代码里，但每条线程都有一份","detail":"错误码 `errno`、分配缓存 `tcache`、栈保护值、`pthread_self` 都靠这块。它们的存在解释了「同一个函数在不同线程里行为不一样」的很多细节。","facts":{"属于":"运行时","举例":"errno / tcache / canary","你要管吗":"不用"}},"cxx":{"label":"编译器与 C++ 运行时放的","sub":"让 thread_local 对象能「每线程构造一次」","detail":"有构造函数的 `thread_local` 需要两样东西：一个每线程的 guard 字节，和一份「线程退出时要析构谁」的清单。它们也是 TLS 变量。","facts":{"属于":"编译器 / C++ 运行时","举例":"guard 字节、析构登记","你要管吗":"不用"}},"app":{"label":"业务代码放进去的","sub":"这条线程自己的长期状态","detail":"计数器、请求上下文、随机数引擎、日志缓冲都适合放这儿：每条线程各用各的，不用加锁，也不用一层层传参。","facts":{"属于":"业务","举例":"计数器 / request_id / 引擎状态","你要管吗":"要"}},"ptr":{"label":"柜子里只放指针","sub":"对象本体留在堆上","detail":"写成 `thread_local DatabaseConnection *conn` 时，放的是地址；真正的连接对象在堆上。线程退出时指针没了，对象不会自动释放——这是常见的泄漏点。","facts":{"属于":"业务","举例":"连接、上下文、缓存对象","你要管吗":"要（释放）"}},"heap":{"label":"堆上的对象本体","sub":"全进程共享","detail":"柜子里的指针指到这儿。堆不随线程退出回收，所以「每线程一个连接」很容易变成「线程池一扩，连接数爆掉」。","facts":{"属于":"全进程共享","谁分配":"malloc / new","什么时候没":"你释放时"}}}' data-tours='[{"id":"locker","label":"柜子里有什么","steps":[{"at":["libc"],"text":"先看你看不见的那层：`errno`、分配缓存、栈保护值。==它们都是 TLS 变量，所以同一个函数在不同线程里各算各的。=="},{"at":["cxx"],"text":"有构造函数的 `thread_local` 还多两样：一个 guard 字节，一份待析构清单。"},{"at":["app"],"text":"业务放的更直白：计数器、请求上下文、随机数引擎、日志缓冲。共同点是「每条线程各用各的，不用加锁」。"},{"at":["ptr","heap"],"text":"如果柜子里只放指针，对象本体在堆上。==线程退出只清柜子，不清堆==，所以每线程一个连接要自己收。"}]}]' data-frames='[{"id":"tlsframe","boundary":0,"kind":"contains","label":"这条线程的 TLS 区","detail":"一块由线程指针定位的固定区域。里面既有运行库自己的东西，也有你声明的变量；谁的偏移在前、谁的在后，由链接器和加载器排。","members":["tls"],"depth":1},{"id":"heapframe","boundary":1,"kind":"classification","label":"堆 · 全进程共享","detail":"TLS 里放指针时，对象本体在堆上。线程退出只清柜子，不清堆——那要你自己释放。","members":["heap"],"depth":1}]'>
+      <div class="arch-boundary-ui">
+          <div class="arch-boundary-toolbar"><span class="arch-boundary-label">边界</span>
+            <button type="button" data-boundary-mode="nested" aria-pressed="true">多层归属框</button>
+            <button type="button" data-boundary-mode="flat" aria-pressed="false">只留一层分区</button>
+            <button type="button" data-arch-reset>恢复全图</button>
+          </div>
+          <div class="arch-address-box" aria-live="polite"><div data-arch-address>点一个零件，看完整归属路径；点一个区域标题，看这一层的含义。</div>
+            <div data-arch-frame-detail>最外框表示逻辑资源域，不表示所有对象在一块内存里。每层边界的标题说明分组依据。</div></div>
+        </div>
+      <div class="arch-canvas"><svg viewBox="0 0 1580 1120" role="img" aria-labelledby="tls-payloads-archify-diagram-title tls-payloads-archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
+        <title id="tls-payloads-archify-diagram-title">一个线程的柜子里，谁往里放了什么</title>
+        <desc id="tls-payloads-archify-diagram-description">TLS 区是一个线程一块的固定区域：运行库、编译器、业务代码都往同一个偏移表里放东西</desc>
+        <!-- Definitions -->
+        <defs>
+          <marker id="tls-payloads-arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-default" />
+          </marker>
+          <marker id="tls-payloads-arrowhead-emphasis" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-emphasis" />
+          </marker>
+          <marker id="tls-payloads-arrowhead-security" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-security" />
+          </marker>
+          <marker id="tls-payloads-arrowhead-dashed" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-dashed" />
+          </marker>
+          <pattern id="tls-payloads-grid" width="40" height="40" patternUnits="userSpaceOnUse">
+            <path d="M 40 0 L 0 0 0 40" class="c-grid" stroke-width="0.5"/>
+          </pattern>
+        </defs>
+
+        <!-- Background Grid -->
+        <rect width="100%" height="100%" fill="url(#tls-payloads-grid)" />
+
+        <!-- Boundaries (behind everything) -->
+        <g class="arch-frame" data-frame="tlsframe" data-depth="1" data-frame-flat="false" data-frame-kind="contains" role="button" tabindex="0" aria-pressed="false" aria-label="这条线程的 TLS 区"><title>一块由线程指针定位的固定区域。里面既有运行库自己的东西，也有你声明的变量；谁的偏移在前、谁的在后，由链接器和加载器排。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="0" data-frame-members="tls" x="600" y="240" width="420" height="410" rx="12" class="c-region" stroke-width="1"/>
+        <text x="608" y="258" class="t-cloud" font-size="9" font-weight="600">这条线程的 TLS 区</text></g>
+
+        <g class="arch-frame" data-frame="heapframe" data-depth="1" data-frame-flat="false" data-frame-kind="classification" role="button" tabindex="0" aria-pressed="false" aria-label="堆 · 全进程共享"><title>TLS 里放指针时，对象本体在堆上。线程退出只清柜子，不清堆——那要你自己释放。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="1" data-frame-members="heap" x="1060" y="840" width="420" height="220" rx="12" class="c-region" stroke-width="1"/>
+        <text x="1068" y="858" class="t-cloud" font-size="9" font-weight="600">堆 · 全进程共享</text></g>
+
+        <!-- Connection paths (before components for correct z-order) -->
+        <path data-edge-from="libc" data-edge-to="tls" data-edge-label="errno、tcache、canary" data-edge-key="0" data-edge-id="from-libc" data-composition-points="500,255;570,255;570,438;640,438" d="M 500 255 L 562 255 Q 570 255 570 263 L 570 430 Q 570 438 578 438 L 640 438" class="a-default" stroke-width="1.5" marker-end="url(#tls-payloads-arrowhead)"/>
+        <path data-edge-from="cxx" data-edge-to="tls" data-edge-label="guard、析构登记" data-edge-key="1" data-edge-id="from-cxx" data-composition-points="1100,255;1040,255;1040,438;980,438" d="M 1100 255 L 1048 255 Q 1040 255 1040 263 L 1040 430 Q 1040 438 1032 438 L 980 438" class="a-default" stroke-width="1.5" marker-end="url(#tls-payloads-arrowhead)"/>
+        <path data-edge-from="app" data-edge-to="tls" data-edge-label="业务自己的长期状态" data-edge-key="2" data-edge-id="from-app" data-composition-points="500,660;570,660;570,452;640,452" d="M 500 660 L 562 660 Q 570 660 570 652 L 570 460 Q 570 452 578 452 L 640 452" class="a-default" stroke-width="1.5" marker-end="url(#tls-payloads-arrowhead)"/>
+        <path data-edge-from="ptr" data-edge-to="tls" data-edge-label="只放一个指针" data-edge-key="3" data-edge-id="from-ptr" data-composition-points="1100,660;1040,660;1040,452;980,452" d="M 1100 660 L 1048 660 Q 1040 660 1040 652 L 1040 460 Q 1040 452 1032 452 L 980 452" class="a-default" stroke-width="1.5" marker-end="url(#tls-payloads-arrowhead)"/>
+        <path data-edge-from="ptr" data-edge-to="heap" data-edge-label="对象本体" data-edge-key="4" data-edge-id="to-heap" data-composition-points="1270,760;1270,880" d="M 1270 760 L 1270 880" class="a-dashed" stroke-width="1.5" marker-end="url(#tls-payloads-arrowhead-dashed)"/>
+
+        <!-- Components -->
+        <g id="tls-payloads-node-tls" data-nb="1" data-node-id="tls" data-node-label="TLS 区" tabindex="0" role="button" aria-label="Focus TLS 区, TCB + 静态 TLS 变量 + DTV, 这条线程的 TLS 区 · 每线程一块，地址由 TP 决定" aria-pressed="false" data-node-kind="database" data-node-sublabel="TCB + 静态 TLS 变量 + DTV" data-node-context="这条线程的 TLS 区 · 每线程一块，地址由 TP 决定">
+          <title>TLS 区 · TCB + 静态 TLS 变量 + DTV · 这条线程的 TLS 区 · 每线程一块，地址由 TP 决定</title>
+          <rect x="640" y="280" width="340" height="330" rx="6" class="c-mask"/>
+          <rect x="640" y="280" width="340" height="330" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(646 286) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <rect class="nb-badge" x="908.0" y="288" width="60.0" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="938.0" y="299" font-size="8" text-anchor="middle">每线程一块</text>
+          <text class="nb-title" x="674" y="301" font-size="10.5" font-weight="600">TLS 区</text>
+          <line class="nb-hr" x1="648" y1="308" x2="972" y2="308"/>
+          <text class="nb-k" x="652" y="422" font-size="9">有多小</text><text class="nb-v" x="715.0" y="422" font-size="9">几百字节起，按你声明的东西长</text>
+          <text class="nb-k" x="652" y="436" font-size="9">线程多了呢</text><text class="nb-v" x="715.0" y="436" font-size="9">每条线程都来一份</text>
+          <rect class="nb-seg" x="652" y="446" width="316.0" height="12" rx="3"/><text class="nb-seg-t" x="659" y="455" font-size="8">TCB（TP）· 线程指针、DTV、canary</text><text class="nb-note" x="961" y="455" font-size="7.5" text-anchor="end">TP</text>
+          <rect class="nb-seg" x="652" y="461" width="316.0" height="12" rx="3"/><text class="nb-seg-t" x="659" y="470" font-size="8">静态 TLS · errno、tcache、你的变量</text><text class="nb-note" x="961" y="470" font-size="7.5" text-anchor="end">TP−80</text>
+          <rect class="nb-seg" data-tone="idle" x="652" y="476" width="316.0" height="12" rx="3"/><text class="nb-seg-t" data-tone="idle" x="659" y="485" font-size="8">动态库的 TLS（DTV 指过去）</text>
+          <text class="nb-note" x="652" y="602" font-size="8">柜子的门牌是线程指针，不是变量名</text>
+        </g>
+
+        <g id="tls-payloads-node-libc" data-nb="1" data-node-id="libc" data-node-label="glibc 放进去的" tabindex="0" role="button" aria-label="Focus glibc 放进去的, errno、分配缓存、栈保护值, Architecture component" aria-pressed="false" data-node-kind="external" data-node-sublabel="errno、分配缓存、栈保护值" data-node-context="Architecture component">
+          <title>glibc 放进去的 · errno、分配缓存、栈保护值 · Architecture component</title>
+          <rect x="160" y="160" width="340" height="190" rx="6" class="c-mask"/>
+          <rect x="160" y="160" width="340" height="190" rx="6" class="c-external" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="external" class="semantic-sigil s-external" transform="translate(166 166) scale(0.6875)">
+            <rect x="2.5" y="5" width="8.5" height="8" rx="1.5"/>
+            <path d="M8 2.5h5.5V8M13.5 2.5 7.5 8.5"/>
+          </g>
+          <rect class="nb-badge" x="428.0" y="168" width="60.0" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="458.0" y="179" font-size="8" text-anchor="middle">glibc 放的</text>
+          <text class="nb-title" x="194" y="181" font-size="10.5" font-weight="600">glibc 放进去的</text>
+          <line class="nb-hr" x1="168" y1="188" x2="492" y2="188"/>
+          <text class="nb-k" x="172" y="244" font-size="9">errno</text><text class="nb-v" x="245.8" y="244" font-size="9">每个线程一份错误码</text>
+          <text class="nb-k" x="172" y="258" font-size="9">分配缓存</text><text class="nb-v" x="245.8" y="258" font-size="9">tcache：小块内存先放自己这儿</text>
+          <text class="nb-k" x="172" y="272" font-size="9">栈保护值</text><text class="nb-v" x="245.8" y="272" font-size="9">canary，在 TCB 里（fs:0x28）</text>
+          <text class="nb-k" x="172" y="286" font-size="9">pthread_self</text><text class="nb-v" x="245.8" y="286" font-size="9">返回的就是 TP 本身</text>
+          <text class="nb-note" x="172" y="342" font-size="8">这些东西程序员一般看不见</text>
+        </g>
+
+        <g id="tls-payloads-node-cxx" data-nb="1" data-node-id="cxx" data-node-label="编译器与 C++ 运行时放的" tabindex="0" role="button" aria-label="Focus 编译器与 C++ 运行时放的, guard 字节、待析构清单, Architecture component" aria-pressed="false" data-node-kind="external" data-node-sublabel="guard 字节、待析构清单" data-node-context="Architecture component">
+          <title>编译器与 C++ 运行时放的 · guard 字节、待析构清单 · Architecture component</title>
+          <rect x="1100" y="160" width="340" height="190" rx="6" class="c-mask"/>
+          <rect x="1100" y="160" width="340" height="190" rx="6" class="c-external" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="external" class="semantic-sigil s-external" transform="translate(1106 166) scale(0.6875)">
+            <rect x="2.5" y="5" width="8.5" height="8" rx="1.5"/>
+            <path d="M8 2.5h5.5V8M13.5 2.5 7.5 8.5"/>
+          </g>
+          <rect class="nb-badge" x="1324.8" y="168" width="103.2" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="1376.4" y="179" font-size="8" text-anchor="middle">编译器 / 运行时放的</text>
+          <text class="nb-title" x="1134" y="181" font-size="10.5" font-weight="600">编译器与 C++ 运行时放的</text>
+          <line class="nb-hr" x1="1108" y1="188" x2="1432" y2="188"/>
+          <text class="nb-k" x="1112" y="251" font-size="9">guard 字节</text><text class="nb-v" x="1175.0" y="251" font-size="9">这个 thread_local 构造过没有</text>
+          <text class="nb-k" x="1112" y="265" font-size="9">析构清单</text><text class="nb-v" x="1175.0" y="265" font-size="9">线程退出时要跑哪些析构</text>
+          <text class="nb-k" x="1112" y="279" font-size="9">对象本体</text><text class="nb-v" x="1175.0" y="279" font-size="9">没有指针的 thread_local 就在这儿</text>
+          <text class="nb-note" x="1112" y="342" font-size="8">有构造函数的 thread_local 才需要这两样</text>
+        </g>
+
+        <g id="tls-payloads-node-app" data-nb="1" data-node-id="app" data-node-label="业务代码放进去的" tabindex="0" role="button" aria-label="Focus 业务代码放进去的, 计数器、请求上下文、缓冲区, Architecture component" aria-pressed="false" data-node-kind="backend" data-node-sublabel="计数器、请求上下文、缓冲区" data-node-context="Architecture component">
+          <title>业务代码放进去的 · 计数器、请求上下文、缓冲区 · Architecture component</title>
+          <rect x="160" y="560" width="340" height="200" rx="6" class="c-mask"/>
+          <rect x="160" y="560" width="340" height="200" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(166 566) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <rect class="nb-badge" x="437.6" y="568" width="50.4" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="462.8" y="579" font-size="8" text-anchor="middle">业务放的</text>
+          <text class="nb-title" x="194" y="581" font-size="10.5" font-weight="600">业务代码放进去的</text>
+          <line class="nb-hr" x1="168" y1="588" x2="492" y2="588"/>
+          <text class="nb-k" x="172" y="649" font-size="9">计数器</text><text class="nb-v" x="235.0" y="649" font-size="9">这条线程处理了多少请求</text>
+          <text class="nb-k" x="172" y="663" font-size="9">请求上下文</text><text class="nb-v" x="235.0" y="663" font-size="9">request_id、当前用户</text>
+          <text class="nb-k" x="172" y="677" font-size="9">随机数引擎</text><text class="nb-v" x="235.0" y="677" font-size="9">每条线程自己一个，不用抢锁</text>
+          <text class="nb-k" x="172" y="691" font-size="9">日志缓冲</text><text class="nb-v" x="235.0" y="691" font-size="9">自己拼串，拼完再提交</text>
+          <text class="nb-note" x="172" y="752" font-size="8">省掉层层传参，也省掉一把锁</text>
+        </g>
+
+        <g id="tls-payloads-node-ptr" data-nb="1" data-node-id="ptr" data-node-label="放的是指针，不是对象" tabindex="0" role="button" aria-label="Focus 放的是指针，不是对象, 柜子里只放一张取件单, Architecture component" aria-pressed="false" data-node-kind="backend" data-node-sublabel="柜子里只放一张取件单" data-node-context="Architecture component">
+          <title>放的是指针，不是对象 · 柜子里只放一张取件单 · Architecture component</title>
+          <rect x="1100" y="560" width="340" height="200" rx="6" class="c-mask"/>
+          <rect x="1100" y="560" width="340" height="200" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(1106 566) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <rect class="nb-badge" x="1377.6" y="568" width="50.4" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="1402.8" y="579" font-size="8" text-anchor="middle">只放指针</text>
+          <text class="nb-title" x="1134" y="581" font-size="10.5" font-weight="600">放的是指针，不是对象</text>
+          <line class="nb-hr" x1="1108" y1="588" x2="1432" y2="588"/>
+          <text class="nb-k" x="1112" y="656" font-size="9">柜子里</text><text class="nb-v" x="1175.0" y="656" font-size="9">一个地址，不是对象本体</text>
+          <text class="nb-k" x="1112" y="670" font-size="9">对象在哪</text><text class="nb-v" x="1175.0" y="670" font-size="9">堆上，size 再大也不进 TLS</text>
+          <text class="nb-k" x="1112" y="684" font-size="9">线程退出时</text><text class="nb-v" x="1175.0" y="684" font-size="9">指针没了，对象还在（泄漏点）</text>
+          <text class="nb-note" x="1112" y="752" font-size="8">pthread_setspecific 的键值槽也是这个形状</text>
+        </g>
+
+        <g id="tls-payloads-node-heap" data-nb="1" data-node-id="heap" data-node-label="真正的对象在堆上" tabindex="0" role="button" aria-label="Focus 真正的对象在堆上, 由 malloc / new 分配, 堆 · 全进程共享" aria-pressed="false" data-node-kind="database" data-node-sublabel="由 malloc / new 分配" data-node-context="堆 · 全进程共享">
+          <title>真正的对象在堆上 · 由 malloc / new 分配 · 堆 · 全进程共享</title>
+          <rect x="1100" y="880" width="340" height="140" rx="6" class="c-mask"/>
+          <rect x="1100" y="880" width="340" height="140" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(1106 886) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <rect class="nb-badge" x="1368.0" y="888" width="60.0" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="1398.0" y="899" font-size="8" text-anchor="middle">全进程共享</text>
+          <text class="nb-title" x="1134" y="901" font-size="10.5" font-weight="600">真正的对象在堆上</text>
+          <line class="nb-hr" x1="1108" y1="908" x2="1432" y2="908"/>
+          <text class="nb-k" x="1112" y="946" font-size="9">装什么</text><text class="nb-v" x="1175.0" y="946" font-size="9">UserContext、vector 的缓冲、连接对象</text>
+          <text class="nb-k" x="1112" y="960" font-size="9">谁释放</text><text class="nb-v" x="1175.0" y="960" font-size="9">你；线程退出不会替你 free</text>
+          <text class="nb-k" x="1112" y="974" font-size="9">怎么跨线程</text><text class="nb-v" x="1175.0" y="974" font-size="9">得显式把指针传出去</text>
+          <text class="nb-note" x="1112" y="1012" font-size="8">柜子里的指针指到这儿</text>
+        </g>
+
+        <!-- Connection labels -->
+        <g data-detail="context" data-edge-from="libc" data-edge-to="tls" data-edge-label="errno、tcache、canary" data-edge-key="0" data-edge-id="from-libc">
+          <rect x="514.6" y="326.5" width="110.8" height="14" rx="3" class="c-mask"/>
+          <text x="570" y="336.5" class="t-muted" font-size="8" text-anchor="middle">errno、tcache、canary</text>
+        </g>
+        <g data-detail="context" data-edge-from="cxx" data-edge-to="tls" data-edge-label="guard、析构登记" data-edge-key="1" data-edge-id="from-cxx">
+          <rect x="999" y="326.5" width="82" height="14" rx="3" class="c-mask"/>
+          <text x="1040" y="336.5" class="t-muted" font-size="8" text-anchor="middle">guard、析构登记</text>
+        </g>
+        <g data-detail="context" data-edge-from="app" data-edge-to="tls" data-edge-label="业务自己的长期状态" data-edge-key="2" data-edge-id="from-app">
+          <rect x="521.8" y="536" width="96.39999999999999" height="14" rx="3" class="c-mask"/>
+          <text x="570" y="546" class="t-muted" font-size="8" text-anchor="middle">业务自己的长期状态</text>
+        </g>
+        <g data-detail="context" data-edge-from="ptr" data-edge-to="tls" data-edge-label="只放一个指针" data-edge-key="3" data-edge-id="from-ptr">
+          <rect x="1006.2" y="536" width="67.6" height="14" rx="3" class="c-mask"/>
+          <text x="1040" y="546" class="t-muted" font-size="8" text-anchor="middle">只放一个指针</text>
+        </g>
+        <g data-detail="context" data-edge-from="ptr" data-edge-to="heap" data-edge-label="对象本体" data-edge-key="4" data-edge-id="to-heap">
+          <rect x="1245.8" y="810" width="48.4" height="14" rx="3" class="c-mask"/>
+          <text x="1270" y="820" class="t-messagebus" font-size="8" text-anchor="middle">对象本体</text>
+        </g>
+
+        <!-- Legend -->
+        <g data-legend data-legend-bridge>
+          <text x="40" y="1084" class="t-primary" font-size="12" font-weight="650">Legend</text>
+          <g data-legend-semantic-kind="backend" data-legend-kind="backend" data-legend-label="Backend" data-legend-x="40" data-legend-baseline="1104" data-legend-width="78">
+            <rect x="40" y="1095" width="16" height="10" rx="2.5" class="c-backend" stroke-width="1"/>
+            <text x="62" y="1104" class="t-muted" font-size="10" font-weight="500">Backend</text>
+          </g>
+          <g data-legend-semantic-kind="database" data-legend-kind="database" data-legend-label="Database" data-legend-x="140" data-legend-baseline="1104" data-legend-width="83">
+            <rect x="140" y="1095" width="16" height="10" rx="2.5" class="c-database" stroke-width="1"/>
+            <text x="162" y="1104" class="t-muted" font-size="10" font-weight="500">Database</text>
+          </g>
+          <g data-legend-semantic-kind="external" data-legend-kind="external" data-legend-label="External" data-legend-x="245" data-legend-baseline="1104" data-legend-width="83">
+            <rect x="245" y="1095" width="16" height="10" rx="2.5" class="c-external" stroke-width="1"/>
+            <text x="267" y="1104" class="t-muted" font-size="10" font-weight="500">External</text>
+          </g>
+        </g>
+      </svg></div>
+      <figcaption>中间是这条线程的 TLS 区，四周是往里放东西的三方，右边那条虚线是「柜子里只放指针」的情况。点零件看每一方具体放了什么。</figcaption>
+      <div class="pano-ui"></div>
+      <p class="arch-hint"><span class="idle">点头上的任意一个框看它的关系，点区域标题看分组含义，点零件看完整归属路径；用「对比两个零件」出一张对照表</span><span class="focused">再点一次空白处取消</span></p>
+    </figure><p>用大白话说，这张图就是：<strong>每个线程有一个储物柜</strong>。柜子里的物品名称是一样的（<code>errno</code>、<code>counter</code>、<code>g</code>），但每个线程拿到的都是自己那一份；运行库会往里塞工牌和记录本，业务往里塞计数器和草稿纸。有些人图省事，柜子里只放一张取件单，东西存在堆这个大仓库里。</p>
+<h2 id="为什么放进去什么时候别放"><span class="num">05</span>为什么放进去，什么时候别放</h2>
+<p>放 TLS 通常是为了三件事：</p>
+<ol>
+<li><strong>互不干扰</strong>：计数器、错误码、随机数状态，本来就不该共享。</li>
+<li><strong>少一把锁</strong>：共享变量要 <code>mutex</code>，TLS 变量不用。注意它换不来「全局计数」：想统计总数，最后还得汇总。</li>
+<li><strong>省掉层层传参</strong>：<code>request_id</code> 这类上下文放柜子里，日志函数就不用每层都收一个参数。代价是隐式依赖，滥用会让代码难测。</li>
+</ol>
+<p>反过来，三类东西不该放进去：</p>
+<ul>
+<li><strong>特别大的对象</strong>：<code>thread_local char cache[100 * 1024 * 1024]</code>，100 条线程就是 10 GB 级别的账。</li>
+<li><strong>需要所有人看见的数据</strong>：全局用户数、总计数。每线程一份，各看各的就是错的。</li>
+<li><strong>跟着「请求」或「任务」走的状态</strong>：这是最危险的一条。</li>
+</ul>
+<p>最后这条要展开，因为它不是风格问题，是会出错的问题。</p>
+<p><strong>TLS 跟的是线程，不是请求。</strong> 线程池里的线程会连续处理不同的请求：先做张三的，再做李四的。如果处理完张三没清柜子，李四进来就会看到张三的 <code>request_id</code> 和用户身份——日志串号、权限判断错、甚至在响应里带出别人的数据。</p>
+<p>更隐蔽的是异步和协程。我用 <code>ucontext</code> 造了两个 fiber 放在<strong>同一个线程</strong>里跑，各自改一次 <code>counter</code>：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">main   : &amp;counter=0xffffaeded73c counter=0
+fiber A: &amp;counter=0xffffaeded73c counter=1
+fiber B: &amp;counter=0xffffaeded73c counter=2
+main   : &amp;counter=0xffffaeded73c counter=2
+</code></pre></div>
+<p><mark class="mk-blue">两个 fiber 拿到的是同一个地址</mark>——因为切换 fiber 不会换 <code>fs</code>，只有换线程才会。所以「用 TLS 存协程上下文」这种做法，在 N:1 的协程实现里根本不成立；任务从线程 A 切到线程 B 时，柜子也不会跟着走。</p>
+<p>实务上的替代方案：显式传上下文对象（最稳）、<code>pthread_key_create</code> 的键值槽（每个线程一块，<code>PTHREAD_KEYS_MAX</code> 在 glibc 里是 1024）、或者干脆用连接池 / 上下文参数，而不是「每线程永久一个连接」。</p>
+<h2 id="生命周期一个到线程退出一个到函数返回"><span class="num">06</span>生命周期：一个到线程退出，一个到函数返回</h2>
+<p>两者都「每线程一份」，但「什么时候有、什么时候没」完全不同。下面是一个 <code>thread_local</code> 对象的一生，和旁边那行局部变量对照着看。</p>
+<div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-muted">① 线程创建</span>
+            <span class="name">线程还没跑，柜子已经就位</span>
+            <span class="spacer"></span>
+            <span class="tag tone-ok">空间先有</span>
+          </div>
+          <div class="rec"><div class="">
+            <b>TLS 区</b><span>glibc 划好，静态 TLS 部分按 .tbss 归零</span></div><div class="">
+            <b>thread_local 对象</b><span>还没构造</span></div></div>
+          
+          <p class="jnote">「线程创建就初始化」是错的，构造发生在<strong>第一次执行到声明处</strong>。</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">第一次执行到 thread_local 那一行<span class="note">看到 guard 字节还是 0</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-blue">② 第一次用到</span>
+            <span class="name">编译器插的守卫</span>
+            <span class="spacer"></span>
+            <span class="tag tone-ok">只构造一次</span>
+          </div>
+          
+          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>cmpb $0, %fs:_ZGVZ1fvE1t@tpoff   # 这条线程构造过吗
+jne  .L5
+movq %fs:0,%rax                  # 取 TP
+leaq _ZZ1fvE1t@tpoff(%rax),%rbx  # 算出这一份的地址
+call _ZN1MC1Ev                   # 构造 M::M
+movb $1, %fs:_ZGVZ1fvE1t@tpoff    # 打上标记
+call __cxa_thread_atexit         # 登记：线程退出时析构
+</pre></div>
+          <p class="jnote">guard 字节本身也是 TLS 变量，所以每条线程各有一个。</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">之后每次访问<span class="note">只查一次 guard，然后直接按偏移读</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-green">③ 之后每次访问</span>
+            <span class="name">就是一条 fs 相对寻址</span>
+            <span class="spacer"></span>
+            <span class="tag tone-ok">没有锁，没有函数调用</span>
+          </div>
+          <div class="rec"><div class="">
+            <b>代价</b><span>和读普通全局变量几乎一样</span></div><div class="">
+            <b>区别</b><span>基址是 fs，不是固定的地址</span></div></div>
+          
+          <p class="jnote">local-exec 模型下就一条 <code>mov</code> 指令。</p>
+        </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-amber">④ 线程退出</span>
+            <span class="name">按登记逆序析构</span>
+            <span class="spacer"></span>
+            <span class="tag tone-warn">只有线程退出才清</span>
+          </div>
+          <div class="rec"><div class="">
+            <b>谁触发</b><span>线程函数返回时，glibc 跑析构清单</span></div><div class="">
+            <b>主线程</b><span>在进程退出时才跑</span></div></div>
+          
+          <p class="jnote">和栈完全不同：栈上的局部变量在函数返回时就没了。</p>
+        </div><p>实测的打印顺序（同一个 <code>f()</code> 被主线程调两次、工作线程调一次）：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">main f() #1
+  ctor local        tid=48
+  ctor static       tid=48
+  ctor thread_local tid=48
+  dtor local        tid=48        ← 函数返回，局部变量先没
+main f() #2
+  ctor local        tid=48        ← 又一个新的局部变量
+  dtor local        tid=48
+spawn thread
+ thread f()
+  ctor local        tid=51
+  ctor thread_local tid=51        ← 工作线程自己的那份
+  dtor local        tid=51
+ thread exits
+  dtor thread_local tid=51        ← 线程退出，才轮到它
+after join
+  dtor thread_local tid=48        ← 主线程的那份，等到进程退出
+  dtor static       tid=48
+  dtor global       tid=48
+</code></pre></div>
+<p>三件事从这段输出里能直接看出来：局部变量每次调用都重新构造；<code>thread_local</code> 每条线程只构造一次；主线程的 <code>thread_local</code> 析构被推迟到进程退出，而不是 <code>main</code> 返回时。</p>
+<h2 id="容量与代价"><span class="num">07</span>容量与代价</h2>
+<p>栈和 TLS 都会「每条线程一份」，但一份的大小和增长方式不同。</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>维度</th><th>线程栈</th><th>TLS 区</th></tr></thead><tbody><tr><th>一份多大</th><td data-label="线程栈">默认 8 MiB（实测），可以用 <code>pthread_attr_setstacksize</code> 改，最小 16 KiB</td><td data-label="TLS 区">从几百字节起，按你声明的东西长；放个大数组就是几 MiB</td></tr><tr><th>谁在变</th><td data-label="线程栈">栈指针随调用上下移动，帧反复压弹</td><td data-label="TLS 区">大小在线程创建时就定，之后不变</td></tr><tr><th>危险动作</th><td data-label="线程栈">深递归、大局部数组 → 撞保护页，SIGSEGV</td><td data-label="TLS 区">每个线程一份大对象 → 线程越多，总内存越大</td></tr><tr><th>保护机制</th><td data-label="线程栈">guard 页（实测 4 KiB）：越界写直接崩，不会悄悄踩到别人的栈</td><td data-label="TLS 区">没有保护页；但访问只经由这段偏移，越界就是踩到 TLS 里的别的变量</td></tr><tr><th>跨线程可见性</th><td data-label="线程栈">完全不可见，除非把指针传出去</td><td data-label="TLS 区">同上</td></tr></tbody></table></div><p>TLS 的账要按线程数乘。实测 32 条线程、每条一个 1 MiB 的 <code>thread_local</code> 数组：每个线程拿到的地址都不一样，说明确实是 32 份。</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">sizeof(t) per thread = 1 MiB, threads = 32
+thread  0: &amp;t=0xffff99a096c0
+thread  1: &amp;t=0xffff991b86c0
+thread  2: &amp;t=0xffff88f326c0
+...
+RSS after = 21 MiB   （只碰了 TLS，没别的分配）
+</code></pre></div>
+<p><mark class="mk-blue">每个线程都保留完整的 1 MiB，所以这笔账要按线程数乘。</mark> 真正把它们写满时，100 条线程就是 100 MiB —— 这就是为什么柜子适合放「小而长期」的东西，不适合放缓存。</p>
+<h2 id="速查"><span class="num">08</span>速查</h2>
+<table>
+<thead>
+<tr>
+<th>问题</th>
+<th>答案</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>局部变量和 <code>thread_local</code> 变量都能「每线程一份」吗</td>
+<td>局部变量不是每线程一份，是每次调用一份</td>
+</tr>
+<tr>
+<td>两者都靠什么寻址</td>
+<td>基址 + 编译期偏移；栈的基址是 RSP/RBP，TLS 的基址是 <code>fs</code>（TP）</td>
+</tr>
+<tr>
+<td>TLS 里第一个东西是什么</td>
+<td>TCB，线程指针就指着它；静态 TLS 变量在它的负偏移处</td>
+</tr>
+<tr>
+<td><code>errno</code> 在哪</td>
+<td>TLS 里（实测 <code>TP − 208</code>），所以每个线程各有一份</td>
+</tr>
+<tr>
+<td><code>thread_local</code> 什么时候构造</td>
+<td>这条线程第一次执行到声明处（guard 字节为 0 时）</td>
+</tr>
+<tr>
+<td>什么时候析构</td>
+<td>线程退出时（主线程在进程退出时），由 <code>__cxa_thread_atexit</code> 登记的清单驱动</td>
+</tr>
+<tr>
+<td>函数返回后 <code>thread_local</code> 还能用吗</td>
+<td>能，只要线程还活着</td>
+</tr>
+<tr>
+<td>栈上的局部变量返回后还能用吗</td>
+<td>不能，帧已作废</td>
+</tr>
+<tr>
+<td>协程/fiber 之间 TLS 共享吗</td>
+<td>共享：同一个线程里 <code>fs</code> 不变（我实测两个 fiber 拿到同一个地址）</td>
+</tr>
+<tr>
+<td>TLS 适合放多大的东西</td>
+<td>小而长期；每线程一份，线程数一乘就放大</td>
+</tr>
+</tbody>
+</table>
+<p>一句话收尾：</p>
+<ul>
+<li><strong>栈是线程的临时工作台</strong>：摆上、收走，跟着函数走。</li>
+<li><strong>TLS 是线程的私人储物柜</strong>：一人一个，钥匙是线程指针，东西放到线程退出。</li>
+</ul>
+<div class="quiz"><details>
+        <summary>同一个 <code>thread_local int g</code>，两条线程执行同一条 <code>mov %fs:...,%eax</code>，为什么读到不同值？变的是哪一样？</summary>
+        <div class="a"><p>指令里的偏移是编译期/链接期定死的常量，变的是基址：<code>fs</code> 指到各自的 TCB（线程指针 TP）。偏移一样、基址不同，就落到各自的副本上。</p>
+</div>
+      </details><details>
+        <summary>为什么不能把「当前请求的 request_id」长期放在 TLS 里？</summary>
+        <div class="a"><p>因为 TLS 跟的是线程，不是请求。线程池里的线程会连续处理不同请求，异步任务还可能换线程；不清就会串号（日志、权限、响应里带出别人的数据）。要跟请求走，就把上下文显式往下传，或者放进任务对象。</p>
+</div>
+      </details><details>
+        <summary><code>thread_local</code> 对象是什么时候构造、什么时候析构的？</summary>
+        <div class="a"><p>构造发生在这条线程第一次执行到声明处（guard 字节为 0 时），不是线程创建时；析构在线程退出时（主线程推迟到进程退出），由 __cxa_thread_atexit 登记的清单驱动。</p>
+</div>
+      </details><details>
+        <summary>栈和 TLS 都「每条线程一份」，为什么栈上的局部变量取地址返回会出错，而 TLS 变量不会？</summary>
+        <div class="a"><p>栈的「一份」是那根栈；局部变量只是某一帧里的位置，函数返回帧就作废。TLS 的「一份」是变量本身，它在线程的整个生命周期里都占着同一块位置，只有线程退出才失效。</p>
+</div>
+      </details></div><p>想接着看这两块区域放在进程的哪里、和内核里的 task 是什么关系，见 <a href="../two-spaces/">两套空间：进程和线程各在两个空间里放着什么</a>。</p>
+
+
+    <footer>
+      <span>TLS 与线程栈：一个柜子，一个工作台</span>
+      <span>最后更新 2026-10-20 · 单文件可离线打开</span>
+    </footer>
+  </main>
+</div>
+
+<script src="../../assets/app.js?v=757eed9a2d"></script>
+</body>
+</html>
