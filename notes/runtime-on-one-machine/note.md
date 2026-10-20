@@ -317,7 +317,7 @@ nodes:
 edges:
   - { from: cli, to: dockerd, label: "" }
   - { from: api, to: kube, label: "" }
-  - { from: dockerd, to: cd, label: "gRPC" }
+  - { from: dockerd, to: cd, label: "gRPC", labelDy: 24 }
   - { from: kube, to: cd, label: "CRI", labelDx: 46 }
   - { from: cd, to: shim, label: "fork" }
   - { from: shim, to: ctn, label: "亲爹" }
