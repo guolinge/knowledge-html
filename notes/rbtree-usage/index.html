@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-has-toc="1">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>工程里为什么是它</title>
+<meta name="description" content="红黑树不是「最快的平衡树」，而是「最省心的那一个」：插入最多 2 次旋转、删除最多 3 次，任何输入下都不会突然卡一下。这一条让它在内核、标准库、事件驱动里被反复选中。而 Redis 选了跳表、MySQL 选了 B+ 树、Java 的 HashMap 平时根本不用树 —— 它们的理由同样具体。" />
+<link rel="stylesheet" href="../../assets/theme.css?v=b918ec5c83" />
+  <link rel="stylesheet" href="../../assets/blocks.css?v=69ac1ff279" />
+  <link rel="stylesheet" href="../../assets/archify-embed.css?v=68fec0b81b" />
+</head>
+<body>
+<div id="progress"></div>
+<div id="tocScrim"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
+    <a class="brand" href="../../index.html"><span class="dot"></span>知识笔记</a>
+    
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="toc" id="toc">
+      <p class="toc-title">目录</p>
+      <a href="../../index.html" class="sub">← 全部笔记</a>
+      <a href="#先把最好的树这个想法放下">先把「最好的树」这个想法放下</a>
+      <a href="#红黑树真正的卖点单次改动的硬上界">红黑树真正的卖点：单次改动的硬上界</a>
+      <a href="#内核它出现在几乎所有按顺序排队的地方">内核：它出现在几乎所有「按顺序排队」的地方</a>
+      <a href="#标准库它成了有序容器的默认实现">标准库：它成了「有序容器」的默认实现</a>
+      <a href="#一个漂亮的反例hashmap-平时根本不用树">一个漂亮的反例：HashMap 平时根本不用树</a>
+      <a href="#那为什么不是跳表redis-的答案">那为什么不是跳表？Redis 的答案</a>
+      <a href="#那为什么不是-b-树mysql-的答案">那为什么不是 B 树？MySQL 的答案</a>
+      <a href="#一张选型表">一张选型表</a>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow">● 红黑树 · ⑥</span>
+      <h1>工程里为什么是它</h1>
+      <p class="lede">红黑树不是「最快的平衡树」，而是「最省心的那一个」：插入最多 2 次旋转、删除最多 3 次，任何输入下都不会突然卡一下。这一条让它在内核、标准库、事件驱动里被反复选中。而 Redis 选了跳表、MySQL 选了 B+ 树、Java 的 HashMap 平时根本不用树 —— 它们的理由同样具体。</p>
+    </div>
+
+<aside class="needs">
+      <p class="needs-title">读这篇之前，你需要先知道</p>
+      <a class="need" href="../rbtree-delete/">← <b>5. 删除：补回欠下的那个黑</b><span>先看删除的目标有几种、为什么要有后继替换；双黑是什么；兄弟的四种情形回到 2-3-4 的借位与合并</span></a>
+    </aside>
+    <div class="provenance"><span><b>来源</b> Linux 内核文档 core-api/rbtree.rst：红黑树 vs AVL「插入最多 2 次旋转、删除最多 3 次」；列出的内核用例（deadline/CFQ IO 调度器、hrtimer、ext3 目录项、VMA、epoll、加密密钥、HTB 网络调度器） · Linux fs/eventpoll.c（master）：struct eventpoll 里 `struct rb_root_cached rbr` 登记被监控 fd，`struct epitem` 挂 rbn 到该树；就绪表是另一个 list（rdllist） · Linux kernel/sched/fair.c：struct cfs_rq 的 tasks_timeline 是 rb_root_cached，按 vruntime 排队；EEVDF（6.6 起）改为按 virtual deadline 排序 · OpenJDK java.util.TreeMap 注释：A Red-Black tree based NavigableMap implementation，算法改编自 CLRS · OpenJDK java.util.HashMap 实现注释：bin 超过 TREEIFY_THRESHOLD=8 才转成 TreeNode（红黑树），低于 UNTREEIFY_THRESHOLD=6 转回链表；TreeNode 约为普通节点两倍大 · libstdc++ stl_tree.h：`enum _Rb_tree_color { _S_red = false, _S_black = true }`，std::map/set 基于它 · libcxx __tree：注释写明 &quot;__tree is a red-black-tree implementation&quot; · Redis 官方文档与 antirez 对「ZSet 为什么用跳表」的说明：区间查询友好、并发/实现简单、内存可调</span><span><b>生成</b> 2026-10-19</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">红黑树</span> <span class="tag tone-muted">AVL</span> <span class="tag tone-muted">B 树</span> <span class="tag tone-muted">跳表</span> <span class="tag tone-muted">工程取舍</span></span></div>
+
+<h2 id="先把最好的树这个想法放下"><span class="num">01</span>先把「最好的树」这个想法放下</h2>
+<p>学完前五篇，很容易产生一个印象：红黑树是「正确」的平衡树，别的是妥协。</p>
+<p>实际不是。每种树都在解决一个具体约束，红黑树的强项很窄，但恰好是很多系统最在意的那一条。</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>树</th><th>它的强项</th><th>它为此放弃的</th></tr></thead><tbody><tr><th>红黑树</th><td data-label="它的强项">任何一次插入 / 删除的代价都有硬上界（2 / 3 次旋转）</td><td data-label="它为此放弃的">树比 AVL 略高（最多 2 倍 log n），查找略慢</td></tr><tr><th>AVL</th><td data-label="它的强项">树最矮，查找最快</td><td data-label="它为此放弃的">改树时可能连续旋转多处，单次代价没有这么好的上界</td></tr><tr><th>B+ 树</th><td data-label="它的强项">一个节点装几百个键，几层就到底，磁盘上顺序读</td><td data-label="它为此放弃的">内存里更新代价高、实现重</td></tr><tr><th>跳表</th><td data-label="它的强项">区间遍历天然是链表，实现简单</td><td data-label="它为此放弃的">内存开销更大，查找常数因子不如树</td></tr><tr><th>哈希表</th><td data-label="它的强项">平均 O(1)，最快</td><td data-label="它为此放弃的">完全无序 —— 范围查询、排序、找最小都没有</td></tr></tbody></table></div><p>所以真正该问的问题不是「哪个最快」，而是：<mark class="mk-blue">我这个系统的瓶颈是「查找次数」还是「单次改动的确定性」？</mark></p>
+<h2 id="红黑树真正的卖点单次改动的硬上界"><span class="num">02</span>红黑树真正的卖点：单次改动的硬上界</h2>
+<p>这是前两篇算出来的结论，Linux 内核文档也把它写在了最前面：</p>
+<div class="callout tone-violet quote">
+      <span class="ic">📌</span>
+      <div><p>红黑树和 AVL 相似，但<strong>插入删除的最坏情况有硬上界</strong>：
+<mark class="mk-blue">插入最多 2 次旋转，删除最多 3 次。</mark>
+查找略慢一点，但仍然是 O(log n)。</p>
+</div>
+    </div><p>为什么这一条这么重要？因为「平均快」和「最坏也快」在很多场景里是两件事：</p>
+<table>
+<thead>
+<tr>
+<th>场景</th>
+<th>为什么在意「单次改动的上界」</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>内核调度器</td>
+<td>每次切换任务都要改树，改动期间可能持有锁 —— 改动时长直接影响别的 CPU 等锁多久</td>
+</tr>
+<tr>
+<td>实时系统</td>
+<td>一个偶发的长操作会让本应准时的任务超时</td>
+</tr>
+<tr>
+<td>高并发数据结构</td>
+<td>旋转多意味着锁持有久，多核争用变严重</td>
+</tr>
+</tbody>
+</table>
+<p>AVL 的问题不在于它慢，而在于它的<strong>代价分布更不稳定</strong>：为了把高度差压到 1，一次插入可能需要沿着路径连续旋转多处。红黑树的规矩松一些（黑高相同），所以树高最多是 AVL 的两倍，但改动只影响极少数节点。</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>指标</th><th>红黑树</th><th>AVL</th></tr></thead><tbody><tr><th>树高上界</th><td data-label="红黑树">2·log₂(n+1)</td><td data-label="AVL">约 1.44·log₂(n+2)</td></tr><tr><th>查找</th><td data-label="红黑树">O(log n)，常数略大</td><td data-label="AVL">O(log n)，常数更小（树更矮）</td></tr><tr><th>插入旋转</th><td data-label="红黑树"><span class="tag tone-green">最多 2 次</span></td><td data-label="AVL"><span class="tag tone-amber">最坏可达 O(log n) 次</span></td></tr><tr><th>删除旋转</th><td data-label="红黑树"><span class="tag tone-green">最多 3 次</span></td><td data-label="AVL"><span class="tag tone-amber">最坏可达 O(log n) 次</span></td></tr><tr><th>每个节点额外存</th><td data-label="红黑树">1 个颜色位</td><td data-label="AVL">1 个高度 / 平衡因子（通常是 int）</td></tr></tbody></table></div><p><mark class="mk-blue">红黑树是拿「树高最多两倍」换了「改动次数封顶」。</mark>找到平衡树里最省心的那个点，这就是它在工程里被反复选中的原因。</p>
+<h2 id="内核它出现在几乎所有按顺序排队的地方"><span class="num">03</span>内核：它出现在几乎所有「按顺序排队」的地方</h2>
+<p>Linux 内核自己的文档里列了一串用例，都是同一个模式：<strong>一堆东西要按某个值排序，而且随时有人进出</strong>。</p>
+<div class="cards" data-cols="2"><div class="ccard tone-violet">
+          <span class="tag tone-violet">kernel/sched/fair.c</span>
+          <h4>进程调度 · CFS / EEVDF</h4>
+          <p>每个 CPU 一个 cfs_rq，里面的 tasks_timeline 是一棵按 vruntime（虚拟运行时间）排序的红黑树。挑下一个任务 = 取最左（最小）的那个。</p>
+          
+          
+        </div><div class="ccard tone-blue">
+          <span class="tag tone-blue">fs/eventpoll.c</span>
+          <h4>epoll 的登记表</h4>
+          <p>struct eventpoll 里 rbr 是一棵红黑树，按 fd 编号存所有被监控的 epitem。增删监控 = 树操作。</p>
+          
+          
+        </div><div class="ccard tone-green">
+          <span class="tag tone-green">hrtimer</span>
+          <h4>高精度定时器</h4>
+          <p>所有待触发的定时器按到期时间排在红黑树上，每次取最早的那个。</p>
+          
+          
+        </div><div class="ccard tone-amber">
+          <span class="tag tone-amber">mm</span>
+          <h4>虚拟内存区域（VMA）</h4>
+          <p>一个进程的所有内存映射按起始地址排序，缺页时按地址找它属于哪一段。</p>
+          
+          
+        </div><div class="ccard tone-muted">
+          <span class="tag tone-muted">fs/ext3</span>
+          <h4>ext3 目录项</h4>
+          <p>一个目录里的文件名按哈希排在红黑树上，查名字是树查找。</p>
+          
+          
+        </div><div class="ccard tone-muted">
+          <span class="tag tone-muted">net/sched</span>
+          <h4>网络 HTB 调度器</h4>
+          <p>分层令牌桶的各个类按速率排在一棵红黑树上。</p>
+          
+          
+        </div></div><p>这里的共同点是：<strong>这类结构每一毫秒都可能被改动，而且改动发生在持锁的临界区里</strong>。红黑树「改动只碰几个节点」这一条，直接决定了锁要持有多久。</p>
+<div class="callout tone-blue">
+      <span class="ic">🔍</span>
+      <div><p><strong>调度器为什么不能直接用一个排好序的数组？</strong>
+因为任务的 vruntime 会不断变化（每跑一次就往后挪），数组里挪一个元素要移动后面所有元素。
+红黑树让「挪位置」变成「删了再插」，代价 O(log n)，而且不会搬动别人。</p>
+</div>
+    </div><p><code>epoll</code> 特别值得看一眼，因为它同时用了两种结构，各管一件事：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>结构</th><th>在 epoll 里是什么</th><th>为什么是它</th></tr></thead><tbody><tr><th>红黑树（rbr）</th><td data-label="在 epoll 里是什么"><strong>登记表</strong>：所有被监控的 fd 都在这</td><td data-label="为什么是它">要按 fd 快速找到、增删 —— 有序 + O(log n) 改</td></tr><tr><th>链表（rdllist）</th><td data-label="在 epoll 里是什么"><strong>就绪表</strong>：此刻有数据的那些 fd</td><td data-label="为什么是它">只做「加进去 / 全取走」，不需要有序，也不需要查找</td></tr></tbody></table></div><p>这个分工很重要：<mark class="mk-blue">红黑树的职责是「记住有谁」，不是「记住谁准备好了」。</mark>「谁准备好了」由内核在事件到来时直接挂到链表上，所以 epoll_wait 的开销和登记了多少 fd 无关 —— 这是 epoll 比 select/poll 快的根本原因，而不是「红黑树比数组快」。</p>
+<h2 id="标准库它成了有序容器的默认实现"><span class="num">04</span>标准库：它成了「有序容器」的默认实现</h2>
+<p>C++ 和 Java 的标准库里，只要你说「我要一个按键排序的 map」，底层几乎一定是红黑树。</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>语言 / 库</th><th>具体是哪个容器</th><th>证据</th></tr></thead><tbody><tr><th>C++ (libstdc++)</th><td data-label="具体是哪个容器">std::map / std::set / std::multimap / std::multiset</td><td data-label="证据"><code>stl_tree.h</code> 里 <code>enum _Rb_tree_color { _S_red = false, _S_black = true }</code></td></tr><tr><th>C++ (libc++)</th><td data-label="具体是哪个容器">同上</td><td data-label="证据"><code>__tree</code> 的注释直接写着 &quot;is a red-black-tree implementation&quot;</td></tr><tr><th>Java</th><td data-label="具体是哪个容器">TreeMap / TreeSet</td><td data-label="证据">JDK 注释：「A Red-Black tree based NavigableMap implementation」，算法改编自 CLRS</td></tr><tr><th>Java (HashMap)</th><td data-label="具体是哪个容器">只在 bin 太挤时才用</td><td data-label="证据">见下一节 —— 这是个很好的反例</td></tr></tbody></table></div><p>为什么标准库选它？因为标准库的接口承诺的是<strong>最坏情况</strong>：<code>std::map::insert</code> 的复杂度保证是 O(log n)，而且 C++ 标准对关联容器的迭代器失效规则也依赖「改动只影响局部」。红黑树的硬上界正好能满足这种承诺。</p>
+<p>作为对比，AVL 也能满足 O(log n)，但标准库实现要写得更小心（旋转次数不定意味着代码路径更多），而查找那一点优势在大 O 记号里看不出来。</p>
+<h2 id="一个漂亮的反例hashmap-平时根本不用树"><span class="num">05</span>一个漂亮的反例：HashMap 平时根本不用树</h2>
+<p>如果红黑树这么好，为什么 Java 的 HashMap 主结构是<strong>数组 + 链表</strong>？</p>
+<p>因为哈希表在正常情况下根本不需要有序结构 —— 平均 O(1) 比 O(log n) 快得多。红黑树只在一种情况下被请出来：</p>
+<div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-green">① 正常情况</span>
+            <span class="name">数组 + 链表</span>
+            <span class="spacer"></span>
+            <span class="tag tone-green">每个 key 落进一个桶</span>
+          </div>
+          <div class="rec"><div class="">
+            <b>结构</b><span>Node[] table，每个桶是一条链表</span></div><div class="">
+            <b>查找</b><span>算 hash → 定位桶 → 桶内线性找</span></div><div class="ok">
+            <b>复杂度</b><span>平均 O(1)</span></div></div>
+          
+          <p class="jnote">桶里的元素通常只有 0~2 个（JDK 注释里按泊松分布算了概率：8 个元素的概率约千万分之一）。</p>
+        </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-red">② 攻击或坏 hash</span>
+            <span class="name">一个桶被塞满</span>
+            <span class="spacer"></span>
+            <span class="tag tone-red">链表退化</span>
+          </div>
+          <div class="rec"><div class="">
+            <b>结构</b><span>所有 key 都落进同一个桶</span></div><div class="">
+            <b>查找</b><span>桶内线性扫描 n 个</span></div><div class="warn">
+            <b>复杂度</b><span>O(n) —— 哈希表退化成链表</span><em>恶意构造的 hash 能打垮服务</em></div></div>
+          
+          <p class="jnote">这是真实的安全问题：攻击者构造大量同 hash 的 key，让单个桶变成长链。</p>
+        </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-violet">③ 转成树</span>
+            <span class="name">桶里有 8 个就树化</span>
+            <span class="spacer"></span>
+            <span class="tag tone-violet">TREEIFY_THRESHOLD = 8</span>
+          </div>
+          <div class="rec"><div class="">
+            <b>结构</b><span>链表转成 TreeNode（红黑树）</span><em>一个 TreeNode 约是普通节点的两倍大</em></div><div class="">
+            <b>查找</b><span>桶内变树查找</span></div><div class="ok">
+            <b>复杂度</b><span>O(log n) —— 退化被拦住</span></div></div>
+          
+          <p class="jnote">代价是每个节点更占内存，所以只在桶真的挤了才付这个钱。</p>
+        </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-blue">④ 挤完了</span>
+            <span class="name">降到 6 就转回链表</span>
+            <span class="spacer"></span>
+            <span class="tag tone-blue">UNTREEIFY_THRESHOLD = 6</span>
+          </div>
+          <div class="rec"><div class="">
+            <b>结构</b><span>TreeNode 转回 Node</span></div><div class="">
+            <b>为什么不是 8</b><span>留一个缓冲带，避免在 7~8 之间来回转</span><em>抖动会很浪费</em></div></div>
+          
+          <p class="jnote">6 和 8 之间留出缓冲带，是典型的「避免抖动」工程手法。</p>
+        </div><p>这个例子把红黑树的定位说得很清楚：<strong>它不是「更好的链表」，而是「链表退化时的兜底」</strong>。JDK 只在池子真的被塞满时才付「每个节点两倍内存」的钱。</p>
+<p><mark class="mk-blue">同一棵树，在 CFS 里是主力结构，在 HashMap 里是安全网。</mark>这就是「工程取舍」的意思 —— 同一个工具在不同约束下的位置完全不同。</p>
+<h2 id="那为什么不是跳表redis-的答案"><span class="num">06</span>那为什么不是跳表？Redis 的答案</h2>
+<p>Redis 的有序集合（ZSet）也用「有序 + 按分数排」的需求，但它选了跳表（skiplist）而不是红黑树。理由很具体：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>关注点</th><th>红黑树</th><th>跳表</th></tr></thead><tbody><tr><th>有序遍历 / 范围查询</th><td data-label="红黑树">需要中序后继：树的下一个节点，实现要处理父指针或栈</td><td data-label="跳表">底层本来就是有序链表，往后走就是了</td></tr><tr><th>实现复杂度</th><td data-label="红黑树">插入删除要处理多种情形 + 双黑 + 哨兵</td><td data-label="跳表">多层链表，插入就是「随机定层数 + 改指针」</td></tr><tr><th>内存</th><td data-label="红黑树">每个节点固定 1 个颜色位 + 3 个指针</td><td data-label="跳表">每层一个指针，层数可调（概率参数），可以压得比树更省</td></tr><tr><th>并发/锁粒度</th><td data-label="红黑树">旋转会改动父子关系，并发实现要小心</td><td data-label="跳表">改动只碰局部指针，做无锁实现容易得多</td></tr><tr><th>最坏情况</th><td data-label="红黑树">有硬上界 O(log n)</td><td data-label="跳表">概率性 O(log n)，理论上会退化（但概率极低）</td></tr></tbody></table></div><p>Redis 是单线程的，所以「并发」那条用不上；它真正在意的是<strong>范围查询和实现简单</strong> —— <code>ZRANGE</code> 就是在链表上走。这是另一个「约束决定选择」的例子。</p>
+<h2 id="那为什么不是-b-树mysql-的答案"><span class="num">07</span>那为什么不是 B 树？MySQL 的答案</h2>
+<p>MySQL 的 InnoDB 用 B+ 树，理由完全在磁盘上：</p>
+<div class="callout tone-amber">
+      <span class="ic">💾</span>
+      <div><p>红黑树的节点是<strong>一个键 + 两个指针</strong>。要找到一条记录，从根走到叶大约 log₂(n) 步 ——
+100 万行是 20 步。每一步都可能是一次随机磁盘读（节点分散在盘上）。
+<mark class="mk-blue">20 次随机 IO，每次 ~10ms，就是 200ms。</mark></p>
+<p>B+ 树的节点是<strong>一个磁盘页（通常 16KB）+ 几百个键</strong>。同样 100 万行，3 层就到底 ——
+<mark class="mk-blue">3 次随机 IO，往下的顺序读还可能是预读。</mark></p>
+</div>
+    </div><p>这就是「同一个问题，约束不同，答案不同」：</p>
+<table>
+<thead>
+<tr>
+<th>约束</th>
+<th>答案</th>
+<th>为什么</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>数据在内存里，每纳秒都在改</td>
+<td>红黑树</td>
+<td>单次改动次数封顶，之前讲的那两条</td>
+</tr>
+<tr>
+<td>数据在磁盘上，读一次 10ms</td>
+<td>B+ 树</td>
+<td>把「树高」压到最小，一次 IO 搬回几百个键</td>
+</tr>
+<tr>
+<td>数据在内存里，但要求区间遍历</td>
+<td>跳表</td>
+<td>天然是链表</td>
+</tr>
+</tbody>
+</table>
+<p><mark class="mk-blue">红黑树从来不是「最好的平衡树」，它是「内存里、频繁改动、要求单次代价确定」这个交集的答案。</mark></p>
+<h2 id="一张选型表"><span class="num">08</span>一张选型表</h2>
+<p>最后把上面的东西收成一张表。两个轴就是前面反复出现的两个约束：</p>
+<div class="mx">
+      <div class="mx-ylab">改动有多频繁 ↑</div>
+      <div class="mx-body">
+        <div class="mx-y mx-yto">频繁改</div>
+        <div class="mx-grid">
+          <div class="mcell tone-green">
+            <b>红黑树</b>
+            <span>内存 + 频繁改：每次改动只动几个节点，单次代价封顶。调度器、epoll、定时器都在这格</span>
+          </div>
+          <div class="mcell tone-amber">
+            <b>B+ 树 / LSM 树</b>
+            <span>磁盘 + 频繁改：一个节点 = 一个磁盘页，树高压到 3 层；代价是每次改动要写页、可能分裂</span>
+          </div>
+          <div class="mcell tone-blue">
+            <b>红黑树 / 跳表都行</b>
+            <span>内存 + 很少改：差距只在常数因子，按团队熟悉度和要不要范围遍历来选</span>
+          </div>
+          <div class="mcell tone-muted">
+            <b>哈希索引 / 一次性排序的静态数组</b>
+            <span>磁盘 + 很少改：建好就不改，顺序读到底，不需要动态平衡</span>
+          </div>
+        </div>
+        <div class="mx-y mx-yfrom">很少改</div>
+        <div class="mx-xrow">
+          <span>内存</span><span>磁盘</span>
+        </div>
+        <div class="mx-xlab">数据主要放在哪 →</div>
+      </div>
+    </div><p>注意左列和右列的区别不是「内存 vs 磁盘」那么简单 —— <mark class="mk-blue">真正被这个轴改变的是「一次比较的代价」</mark>：内存里一次比较约 1 纳秒，所以层数多一点无所谓；磁盘上一次比较可能是一次 10 毫秒的 IO，所以必须用多路节点把层数压到 3 层。</p>
+<p>矩阵只是指路牌，不是判据。真要选型还得看三件事：要不要范围 / 顺序查询、内存预算、单次改动要不要有硬上界。具体到本文提到的几个系统，它们各自落在哪一格：</p>
+<table>
+<thead>
+<tr>
+<th>系统</th>
+<th>落在哪格</th>
+<th>它真正在意的</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Linux 调度器 / epoll / 定时器</td>
+<td>内存 + 频繁改</td>
+<td>改动发生在持锁临界区，时长必须有上界</td>
+</tr>
+<tr>
+<td>C++ / Java 的有序容器</td>
+<td>内存 + 频繁改</td>
+<td>标准承诺 O(log n)，且改动只影响局部</td>
+</tr>
+<tr>
+<td>HashMap 的树化桶</td>
+<td>内存 + 频繁改</td>
+<td>只是兜底 —— 平时是链表，桶挤了才转树</td>
+</tr>
+<tr>
+<td>Redis ZSet</td>
+<td>内存 + 频繁改</td>
+<td>但它要的是<strong>范围遍历</strong>，所以选跳表</td>
+</tr>
+<tr>
+<td>InnoDB 索引</td>
+<td>磁盘 + 频繁改</td>
+<td>一次 IO 要搬回几百个键，所以选 B+ 树</td>
+</tr>
+</tbody>
+</table>
+<p><mark class="mk-blue">同一格里的红黑树和跳表，是被「要不要范围遍历」这一条分开的。</mark></p>
+<div class="callout tone-violet quote">
+      <span class="ic">🧭</span>
+      <div><p><mark class="mk-blue">选树的时候，先问三个问题：</mark>
+① 数据在内存还是磁盘？② 要不要范围 / 顺序查询？③ 单次改动的耗时要不要有硬上界？
+三个答案基本就定下来了 —— 红黑树是「内存 + 要范围 + 改动要确定」那个格子里的答案。</p>
+</div>
+    </div><div class="quiz"><details>
+        <summary>红黑树比不上 AVL 的地方是什么？为什么工程上仍然常选红黑树？</summary>
+        <div class="a"><p>AVL 的树更矮（约 1.44·log₂n vs 红黑树 2·log₂n），所以查找略快。
+但红黑树的插入最多 2 次旋转、删除最多 3 次 —— 单次改动有硬上界；
+AVL 为了维持严格的高度差，一次改动最坏要连续旋转 O(log n) 次。
+在持锁的临界区里，改动时长确定比平均快更重要。</p>
+</div>
+      </details><details>
+        <summary>epoll 里为什么同时用了红黑树和链表？</summary>
+        <div class="a"><p>红黑树是<strong>登记表</strong>（所有被监控的 fd），需要按 fd 快速增删查；
+链表是<strong>就绪表</strong>（此刻有数据的 fd），只做「挂上来 / 全取走」，不需要有序也不需要查找。
+分工清楚之后，epoll_wait 的开销只和「有几个就绪」有关，和登记了多少 fd 无关。</p>
+</div>
+      </details><details>
+        <summary>Java 的 HashMap 平时用链表，为什么还要准备红黑树？</summary>
+        <div class="a"><p>因为链表在「大量 key 落进同一个桶」时会退化成 O(n) —— 这既能被意外触发，
+也能被恶意构造的 hash 攻击。所以桶里元素超过 8 个（TREEIFY_THRESHOLD）就转成红黑树，
+降到 6 个再转回链表（留出缓冲带避免抖动）。
+平时不用树是因为 TreeNode 约占普通节点的两倍内存。</p>
+</div>
+      </details><details>
+        <summary>Redis 的 ZSet 为什么用跳表而不是红黑树？</summary>
+        <div class="a"><p>主要是范围查询和实现简单：ZSet 最常见的操作是 ZRANGE / ZREVRANGE，
+跳表底层本来就是有序链表，顺着走就行；红黑树要中序后继，实现更绕。
+另外跳表的层数概率可调，内存能压得比树更省；改动只碰局部指针，也更容易写无锁版本。
+代价是最坏情况变成概率性的 —— Redis 接受这个代价。</p>
+</div>
+      </details></div>
+
+    <footer>
+      <span>工程里为什么是它</span>
+      <span>最后更新 2026-10-19 · 单文件可离线打开</span>
+    </footer>
+  </main>
+</div>
+
+<script src="../../assets/app.js?v=9054a4c71d"></script>
+</body>
+</html>

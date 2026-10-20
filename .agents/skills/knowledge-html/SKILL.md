@@ -907,6 +907,11 @@ text: |
 
 把测试脚本注入该篇 `dist/<slug>.html` 的临时副本，用无头 Chrome 跑，再从 `<pre id="dbg">` 读结果；不要改正式产物。输出子块数仍要和预期对照，不只看有没有报错：
 
+!!要看的是页面下半部分的积木时，别用 `scrollIntoView` —— 无头截图只认滚动位置 0。!!
+把 demo 之前的内容 `display: none` 掉（`display` 让它脱离文档流，demo 自然顶上来），
+不要用 `remove()` 删布局容器 —— 删错了会把正文列宽一起删没，截出一张 230px 宽的窄图。
+
+
 ```js
 window.__errs = [];
 window.addEventListener('error', function (e) { window.__errs.push(String(e.message)); });
@@ -1637,7 +1642,7 @@ text: |
 | `summary` | 小结 |
 | `raw` | 直接写 HTML |
 
-**交互控件 63 个**（在 `assets/app.js` 的 `WIDGETS` 里，供 `demo` 积木引用）：
+**交互控件 64 个**（在 `assets/app.js` 的 `WIDGETS` 里，供 `demo` 积木引用）：
 `polling-vs-cdc` `combination-count` `join-lab` `on-vs-where` `knex-chain`
 `stepper` `tuner` `diff` `stream-modes` `operator-lab` `hashring` `partition-prune`
 `dsl-lab` `null-lab` `config-to-ui` `field-lineage` `count-dedup-lab`
@@ -1651,7 +1656,7 @@ text: |
 `combination-control-lab` `combination-values-lab` `combination-build-lab` `cand-pipe-lab`
 `s3-list-lab` `ec-lab` `mysql-2pc-crash` `join-driver-lab` `i18n-lab` `i18n-lookup`
 `relation-negation-lab` `rn-compile-lab`
-`notin-lab` `times-readings-lab`
+`notin-lab` `times-readings-lab` `rbtree-lab`
 
 **已知缺口**（按优先级）：
 
@@ -2942,6 +2947,7 @@ pre-push 会重建 + 量图。**它拦下来通常不是你的问题。**
 | YAML 裸标量里出现 `: `（冒号+空格） | 加引号，或用 `|-` 块标量 |
 | YAML 裸标量以反引号 `` ` `` 开头 | 加引号 |
 | YAML 裸标量以 `*` `&` `!` `%` `@` 开头 | 加引号（会被当成别名/锚点/标签） |
+| YAML 里 `mode: 234` 这种数字值到控件里是 number，不是字符串 | 控件里先 `String(cfg.mode)` 再比；否则静默走默认分支，`check` / `visual-check` 都不报 |
 | 值里有 `[` 或 `{` 却没加引号 | 加引号（`Rule[]` 里的方括号会被当数组起始） |
 | 担心 `**「术语」**` 这类中文加粗失效 | 已经修好了，不用管；但 `**` 跨行仍然不生效 |
 | 只给卡点画图，其余照搬原文 | ==用户已经有文字版了==。有「空间 / 顺序 / 状态 / 归属 / 对比」就用图、控件或表。是不是卡点只决定先做哪一块、哪里加交互。见原则 ① |
