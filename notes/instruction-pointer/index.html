@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-has-toc="1">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>RIP：CPU 怎么记住「下一条」</title>
+<meta name="description" content="RIP 存的是「下一条」而不是「正在执行的这条」；指令长度从 1 到 15 字节不等，所以它不是等步长。把谁在改它、为什么 mov rip 不存在、RIP 相对寻址怎么撑起 PIE 一起讲清楚，全部对照本机反汇编和汇编器报错。" />
+<link rel="stylesheet" href="../../assets/theme.css?v=b918ec5c83" />
+  <link rel="stylesheet" href="../../assets/blocks.css?v=28e4920214" />
+  <link rel="stylesheet" href="../../assets/archify-embed.css?v=68fec0b81b" />
+</head>
+<body>
+<div id="progress"></div>
+<div id="tocScrim"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
+    <a class="brand" href="../../index.html"><span class="dot"></span>知识笔记</a>
+    
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="toc" id="toc">
+      <p class="toc-title">目录</p>
+      <a href="../../index.html" class="sub">← 全部笔记</a>
+      <a href="#rip-指的是下一条">RIP 指的是「下一条」</a>
+      <a href="#它不是等步长" class="sub">它不是等步长</a>
+      <a href="#谁在改-rip">谁在改 RIP</a>
+      <a href="#为什么-mov-rip-rax-不存在">为什么 mov rip, rax 不存在</a>
+      <a href="#rip-相对寻址64-位里到处都是它">RIP 相对寻址：64 位里到处都是它</a>
+      <a href="#aarch64-没有-rip">AArch64 没有 RIP</a>
+      <a href="#速查容易记反的六件事">速查：容易记反的六件事</a>
+      <a href="#一句话" class="sub">一句话</a>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow">● 计算机基础 · 函数调用 ④</span>
+      <h1>RIP：CPU 怎么记住「下一条」</h1>
+      <p class="lede">RIP 存的是「下一条」而不是「正在执行的这条」；指令长度从 1 到 15 字节不等，所以它不是等步长。把谁在改它、为什么 mov rip 不存在、RIP 相对寻址怎么撑起 PIE 一起讲清楚，全部对照本机反汇编和汇编器报错。</p>
+    </div>
+
+<aside class="needs">
+      <p class="needs-title">读这篇之前，你需要先知道</p>
+      <a class="need" href="../stack-opcodes/">← <b>3. call / push / ret / leave：把指令拆成微步</b><span>每条指令背后的原子动作；先减指针再写、先读再抬指针；leave 之后 RSP 正好指着返回地址</span></a>
+    </aside>
+    <div class="provenance"><span><b>来源</b> Intel SDM · SYSCALL https://www.felixcloutier.com/x86/syscall —— 把 SYSCALL 之后那条指令的地址存进 RCX，再从 IA32_LSTAR 装入 RIP · Intel SDM · SYSRET https://www.felixcloutier.com/x86/sysret —— 从 RCX 取回 RIP，从 R11 取回 RFLAGS · Intel SDM Vol 1 · 3.7.5 RIP-Relative Addressing —— 有效地址 = 下一条指令的 RIP + 32 位位移（本文用本机二进制算例验证） · Procedure Call Standard for the Arm 64-bit Architecture (AAPCS64) —— 返回地址在 LR，PC 不是可随意读写的通用寄存器 · 本机实测（macOS arm64 · Apple clang 21 · x86_64 经 Rosetta）：calc 的真机指令长度、leaq 0x12(%rip) 与 __cstring 地址对账、mov %rax,%rip 与 mov x0,pc 的汇编器报错、call/pop 取 RIP</span><span><b>生成</b> 2026-10-20</span><span><b>模型</b> deepseek-v4.1-flash-1017</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">RIP</span> <span class="tag tone-muted">PC</span> <span class="tag tone-muted">寻址</span> <span class="tag tone-muted">PIE</span> <span class="tag tone-muted">汇编</span></span></div>
+
+<h2 id="rip-指的是下一条"><span class="num">01</span>RIP 指的是「下一条」</h2>
+<p><code>RIP</code> 是 x86-64 里的<strong>指令指针</strong>（Instruction Pointer），也叫<strong>程序计数器</strong>（PC，Program Counter）。它存着 CPU 接下来要执行的机器指令的地址。</p>
+<p>名字随位数变，位置和作用不变：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>模式</th><th>指令指针</th><th>出现在哪</th></tr></thead><tbody><tr><th>16 位 x86</th><td data-label="指令指针"><code>IP</code></td><td data-label="出现在哪">8086 时代</td></tr><tr><th>32 位 x86</th><td data-label="指令指针"><code>EIP</code></td><td data-label="出现在哪">保护模式</td></tr><tr><th>64 位 x86-64</th><td data-label="指令指针"><code>RIP</code></td><td data-label="出现在哪">现在的桌面 / 服务器</td></tr></tbody></table></div><p>「<code>RIP</code> 存着下一条指令的地址」这句话是对的，但要补一个容易忽略的细节：<strong>执行当前这条指令的时候，<code>RIP</code> 已经指向下一条了</strong>。取指完成后就自增，这条指令后续的动作都在「<code>RIP</code> 已经指好下一条」的前提下进行。</p>
+<p>这不是文字游戏，前面三篇里到处都用到了它：</p>
+<ul>
+<li><code>call</code> 压进栈的，就是 <code>RIP</code> 当时的值 —— 也就是下一条；</li>
+<li><code>syscall</code> 把「下一条」存进 <code>RCX</code>，回来时 <code>sysret</code> 再从 <code>RCX</code> 装回 <code>RIP</code>；</li>
+<li><code>lea 0x12(%rip), %rdi</code> 算的是「下一条 + 0x12」，不是「这条 + 0x12」。</li>
+</ul>
+<h3 id="它不是等步长">它不是等步长</h3>
+<p>x86 的指令长度从 1 字节到 15 字节不等。所以「<code>RIP</code> 每次加多少」得看这条指令有多长。<code>calc</code> 的真机反汇编，每条后面标了字节数：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">0x100000360  pushq %rbp              1 字节
+0x100000361  movq  %rsp, %rbp        3
+0x100000364  subq  $0x10, %rsp       4
+0x100000368  movl  %edi, -0x4(%rbp)  3
+0x10000036b  movl  -0x4(%rbp), %edi  3
+0x10000036e  movl  $0x3, %esi        5
+0x100000373  callq _add              5
+</code></pre></div>
+<p><code>movl -0x4(%rbp), %edi</code> 和 <code>movl $0x3, %esi</code> 是同一条指令的两个形态，一个 3 字节一个 5 字节 —— 差在后者带了一个立即数。</p>
+<div class="demo" data-widget="rip-lab">
+      <div class="demo-head">
+        <span class="title">RIP 怎么走</span>
+        <span class="status" data-status></span>
+        <span class="spacer"></span>
+        
+      </div>
+      <div class="demo-body custom" data-mount></div>
+    </div><p>第一个页签里点「下一步」，看 <code>RIP</code> 每次加 1、3、4、5，最后在 <code>call</code> 那一步直接跳到 <code>0x100000328</code>。</p>
+<h2 id="谁在改-rip"><span class="num">02</span>谁在改 RIP</h2>
+<p>只有三类事件会改它：</p>
+<table>
+<thead>
+<tr>
+<th>事件</th>
+<th><code>RIP</code> 怎么变</th>
+<th>顺手还做了什么</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>普通指令执行完</td>
+<td><code>RIP += 指令长度</code>（1–15 字节）</td>
+<td>—</td>
+</tr>
+<tr>
+<td><code>jmp</code> / <code>jcc</code></td>
+<td><code>RIP ← 目标</code>（条件跳转不成立时还是顺序下一条）</td>
+<td>—</td>
+</tr>
+<tr>
+<td><code>call</code></td>
+<td>先 <code>PUSH 下一条</code>，再 <code>RIP ← 目标</code></td>
+<td>往栈上压返回地址</td>
+</tr>
+<tr>
+<td><code>ret</code></td>
+<td><code>RIP ← [RSP]</code>，<code>RSP += 8</code></td>
+<td>从栈上弹返回地址</td>
+</tr>
+<tr>
+<td>中断 / 异常</td>
+<td>硬件把 <code>RIP</code> 存起来（多数情况压栈），<code>RIP ← 处理程序入口</code></td>
+<td>保存现场</td>
+</tr>
+<tr>
+<td><code>syscall</code></td>
+<td><code>RCX ← 下一条</code>，<code>RIP ← IA32_LSTAR</code></td>
+<td>切到内核</td>
+</tr>
+<tr>
+<td><code>sysret</code></td>
+<td><code>RIP ← RCX</code></td>
+<td>回到用户态</td>
+</tr>
+</tbody>
+</table>
+<p>后两条值得单独看一眼，因为它们是「<code>RIP</code> 被搬到别处」的典型：手册里写得很直白。</p>
+<div class="callout tone-muted quote">
+      <span class="ic">📖</span>
+      <div><p>SYSCALL invokes an OS system-call handler at privilege level 0. It does so by
+loading RIP from the IA32_LSTAR MSR (after saving the address of the instruction
+following SYSCALL into RCX).</p>
+</div>
+    </div><p>也就是说：<code>syscall</code> 把「下一条」存进 <code>RCX</code>，再从 <code>IA32_LSTAR</code> 这个 MSR 里取出内核入口地址放进 <code>RIP</code>。回来的时候 <code>sysret</code> 反过来：<code>RIP ← RCX</code>。</p>
+<p><mark class="mk-blue">所有「跳转」的实质都是同一件事：把一个新地址写进 <code>RIP</code></mark>。区别只在「新地址从哪来」—— 指令里带着（<code>jmp rel32</code>）、寄存器里带着（<code>jmp *%rax</code>）、从栈上弹（<code>ret</code>）、从 MSR 里取（<code>syscall</code> / <code>sysret</code>）、或者由硬件按中断向量表算出（中断）。</p>
+<h2 id="为什么-mov-rip-rax-不存在"><span class="num">03</span>为什么 <code>mov rip, rax</code> 不存在</h2>
+<p>把 <code>RIP</code> 当普通寄存器写，汇编器会直接拒绝。本机试的原文报错：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">$ clang -arch x86_64 -c bad.s
+bad.s:4:14: error: %rip can only be used as a base register
+  movq %rax, %rip
+             ^~~~
+</code></pre></div>
+<p>「只能当基址寄存器用」—— 这句话把 <code>RIP</code> 的身份说清楚了：它不是 <code>RAX</code> 那样的通用寄存器，没有编号可以填进「目的操作数」那一栏。它只能出现在寻址表达式里当基址（<code>[rip + 位移]</code>），或者被控制流指令整体改写。</p>
+<p>要<strong>读出</strong> <code>RIP</code> 的值，有两条合法路子，都不需要 <code>mov</code>：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">leaq  0(%rip), %rax       ; 7 字节：48 8D 05 00 00 00 00 —— 得到下一条指令的地址
+call  1f                  ; 5 字节：E8 00 00 00 00 —— 跳到下一条
+1: popq %rax              ; 把刚压进去的那个地址弹出来
+</code></pre></div>
+<p>第二条是早年 shellcode 找自己位置的经典写法（<code>call</code> 压「下一条」，紧接着 <code>pop</code>），现在有了 <code>lea</code> 就很少用了。两条的共同点是：<strong>它们都没有真的「读一个叫 RIP 的寄存器」，而是让 CPU 在算地址时把 <code>RIP</code> 用进去</strong>。</p>
+<div class="callout tone-violet">
+      <span class="ic">💡</span>
+      <div><p>这不是权限限制，是编码限制。</p>
+<p>改 <code>RIP</code> 等于改控制流，所以 CPU 要求你走「有明确语义」的指令：<code>jmp</code> / <code>call</code> / <code>ret</code> /
+<code>iret</code> / <code>sysret</code>。<mark class="mk-blue">它们除了换地址，还各自带着该做的事（压栈、弹栈、换特权级、
+检查影子栈）</mark> —— 这些是单给一个 <code>mov</code> 补不上的。</p>
+</div>
+    </div><h2 id="rip-相对寻址64-位里到处都是它"><span class="num">04</span>RIP 相对寻址：64 位里到处都是它</h2>
+<p>规则一句话：<code>[RIP + disp32]</code> 的有效地址 = <strong>下一条指令的地址 + 那个 32 位位移</strong>。</p>
+<p>本机一个能对账的例子（<code>probe-x86</code> 的反汇编）：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">0x100000595  leaq 0x12(%rip), %rdi    ; 7 字节，下一条是 0x10000059c
+</code></pre></div>
+<p>算一下：<code>0x10000059c + 0x12 = 0x1000005ae</code>。再看这个二进制里的字符串表：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">$ otool -v -s __TEXT __cstring probe-x86
+00000001000005ae  ret = 0x%lx\n
+</code></pre></div>
+<p>字符串就躺在 <code>0x1000005ae</code>。<mark class="mk-blue">指令里只写了 <code>0x12</code> 这么小一个数，却指到了 2GB 范围内的任何地方</mark> —— 因为基址是会变的 <code>RIP</code>，不是写死的常量。</p>
+<p>为什么 64 位里到处都是这种写法：</p>
+<ul>
+<li><strong>位置无关代码（PIC / PIE）</strong>。现在 macOS 和多数 Linux 发行版默认把程序编译成 PIE，加载地址每次运行都不同（ASLR）。机器码里不能写死绝对地址，只能写「相对当前位置多远」。</li>
+<li><strong>共享库</strong>。<code>.so</code> / <code>.dylib</code> 被映射到哪个地址，链接时根本不知道，只能用相对位移。</li>
+<li><strong>编码更短</strong>。64 位绝对地址要 10 字节（<code>movabs</code>）；<code>[rip + disp32]</code> 只要 7 字节。</li>
+</ul>
+<div class="demo" data-widget="rip-lab">
+      <div class="demo-head">
+        <span class="title">基址一动，谁跟着动</span>
+        <span class="status" data-status></span>
+        <span class="spacer"></span>
+        
+      </div>
+      <div class="demo-body custom" data-mount></div>
+    </div><p>切到第二个页签，拖那根滑块（模拟 ASLR 的加载偏移）。上面的轨道跟着一起平移，<code>[RIP+0x12]</code> 永远落在字符串上；下面那条轨道里写死的绝对地址不动，偏移一大就指空了。</p>
+<p>这也是为什么反汇编里几乎看不到裸的全局地址：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">0x10000058e  movq  _ret_(%rip), %rsi   ; 读全局变量，也是相对的
+0x100000595  leaq  0x12(%rip), %rdi    ; 取字符串地址
+</code></pre></div>
+<h2 id="aarch64-没有-rip"><span class="num">05</span>AArch64 没有 RIP</h2>
+<p>Arm 把「当前执行到哪」放在 PC 里，但 PC <strong>不是通用寄存器</strong>，不能当 <code>mov</code> 的源或目的。本机试的原文报错：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">$ clang -arch arm64 -c pc.s
+pc.s:11:11: error: unknown AArch64 fixup kind!
+  mov x0, pc
+          ^
+</code></pre></div>
+<p>（行号指向 clang 内部的临时汇编文件，不是你写的那一行，别去改第 11 行。）</p>
+<p>要拿「当前地址」，用的是 PC 相对的两条指令：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">adrp x0, 0            ; 取 PC 所在页的基址（页对齐，4KB）
+add  x0, x0, #0x5f4   ; 加上页内偏移
+adr  x0, 1f           ; 或者短距离直接用 adr（±1MB）
+</code></pre></div>
+<p>本机反汇编里给 <code>printf</code> 传格式串就是这两条：<code>adrp</code> + <code>add</code>。思路和 <code>[rip+disp]</code> 一样 —— <strong>不写绝对地址，写相对当前多远</strong>，只是拆成了两条指令、页 + 页内偏移各管一段。</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>对比项</th><th>x86-64</th><th>AArch64</th></tr></thead><tbody><tr><th>指令指针叫什么</th><td data-label="x86-64"><code>RIP</code></td><td data-label="AArch64"><code>PC</code>（不是通用寄存器）</td></tr><tr><th>能直接读出来吗</th><td data-label="x86-64">不能 <code>mov</code>，但 <code>lea 0(%rip)</code> 可以</td><td data-label="AArch64">不能 <code>mov</code>，但 <code>adr</code> / <code>adrp</code> 可以</td></tr><tr><th>能直接写吗</th><td data-label="x86-64">不能，只能走跳转/调用/返回</td><td data-label="AArch64">不能，只能走 <code>b</code> / <code>bl</code> / <code>ret</code> / <code>eret</code></td></tr><tr><th>相对寻址怎么写</th><td data-label="x86-64"><code>[RIP + disp32]</code>，一条指令</td><td data-label="AArch64"><code>adrp</code> + <code>add</code>（页 + 页内偏移）</td></tr><tr><th>返回地址存在哪</th><td data-label="x86-64">栈上（<code>call</code> 压的）</td><td data-label="AArch64"><code>LR</code>（<code>x30</code>），需要时自己压栈</td></tr></tbody></table></div><p>最后一行呼应第二篇：x86 的 <code>RIP</code> 在调用时被压进栈，Arm 的返回地址先进 <code>LR</code>。<strong>「下一条在哪」这件事两个架构都要记，只是记在不同的地方。</strong></p>
+<h2 id="速查容易记反的六件事"><span class="num">06</span>速查：容易记反的六件事</h2>
+<ul class="check cross"><li><code>RIP</code> 存的是正在执行的那条指令的地址。—— 存的是下一条；当前这条已经在执行了。</li><li><code>RIP</code> 每条指令固定加 1。—— 加的是这条指令的字节数，1 到 15 不等。</li><li><code>call</code> 之后 <code>RIP</code> 会等于 <code>call</code> 的地址加 5。—— <code>call</code> 是跳到目标，不是落到下一条。</li><li>可以用 <code>mov rax, rip</code> 读出来。—— 汇编器直接报错，只能用 <code>lea 0(%rip)</code> 这类相对寻址。</li><li><code>[rip + 0x12]</code> 里的 <code>0x12</code> 是相对这条指令的。—— 是相对<strong>下一条</strong>指令的。</li><li>AArch64 的 PC 和 x86 的 RIP 一样能随便读写。—— 同样不行，Arm 用 <code>adr</code> / <code>adrp</code> 代替。</li></ul><div class="summary">
+      <h3 id="一句话">一句话</h3>
+      <p><code>RIP</code> 是「下一条要执行的指令地址」。它按指令长度自动前进，被跳转/调用/返回/中断整体改写；
+你能让它相对自己算地址，但不能直接给它赋值。</p>
+
+    </div><div class="quiz"><details>
+        <summary>为什么 <code>[rip + 0x12]</code> 算出来的是「下一条 + 0x12」，而不是「这条 + 0x12」？</summary>
+        <div class="a"><p>因为取指之后 <code>RIP</code> 就已经指向下一条了，指令执行时它保存的就是下一条的地址。
+所以位移是相对下一条算的 —— <code>call</code> 压进栈的也是同一个值，道理相同。</p>
+</div>
+      </details><details>
+        <summary><code>mov rip, rax</code> 为什么不存在？</summary>
+        <div class="a"><p><code>RIP</code> 不在通用寄存器的编号表里，不能作为 <code>mov</code> 的目的操作数 —— 本机汇编器的报错是
+<code>%rip can only be used as a base register</code>。要改它只能走 <code>jmp</code> / <code>call</code> / <code>ret</code> / <code>iret</code> / <code>sysret</code>，
+这些指令除了换地址，还各自负责压栈、弹栈、换特权级等配套动作。</p>
+</div>
+      </details><details>
+        <summary>同一份程序，为什么换个加载地址还能跑对？</summary>
+        <div class="a"><p>因为访问全局变量和常量时用的是 <code>[rip + 位移]</code>：位移写在机器码里不变，<code>RIP</code> 跟着程序一起平移，
+算出来的绝对地址也跟着平移，还是落在同一个变量上。写死绝对地址的代码换个基址就指空了。</p>
+</div>
+      </details><details>
+        <summary>AArch64 上想取「当前代码的地址」，该用什么？</summary>
+        <div class="a"><p><code>adr</code>（±1MB 内）或 <code>adrp</code> + <code>add</code>（页基址 + 页内偏移）。PC 不是通用寄存器，
+<code>mov x0, pc</code> 汇编器会报错；返回地址则在 <code>LR</code>（<code>x30</code>）里。</p>
+</div>
+      </details></div>
+
+    <footer>
+      <span>RIP：CPU 怎么记住「下一条」</span>
+      <span>最后更新 2026-10-20 · 单文件可离线打开</span>
+    </footer>
+  </main>
+</div>
+
+<script src="../../assets/app.js?v=e8f85de541"></script>
+</body>
+</html>
