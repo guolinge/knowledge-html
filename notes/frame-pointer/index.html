@@ -1,0 +1,440 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-has-toc="1">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>栈帧基址：RBP 钉住的到底是什么</title>
+<meta name="description" content="「帧基址」不是这一帧的边界，而是一个原点：往下是自己的局部变量，往上是返回地址和上一帧。从 RBP+8 / RBP+0 / RBP-4 各装了什么讲起，最后用 [RBP] 链从 add 一路走回 main，并说清什么时候编译器真的需要它。" />
+<link rel="stylesheet" href="../../assets/theme.css?v=b918ec5c83" />
+  <link rel="stylesheet" href="../../assets/blocks.css?v=51ad3494a5" />
+  <link rel="stylesheet" href="../../assets/archify-embed.css?v=68fec0b81b" />
+</head>
+<body>
+<div id="progress"></div>
+<div id="tocScrim"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
+    <a class="brand" href="../../index.html"><span class="dot"></span>知识笔记</a>
+    
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="toc" id="toc">
+      <p class="toc-title">目录</p>
+      <a href="../../index.html" class="sub">← 全部笔记</a>
+      <a href="#三个东西先分开栈帧栈顶帧基址">三个东西先分开：栈帧、栈顶、帧基址</a>
+      <a href="#一帧就是一条从-rbp-出发的数轴">一帧就是一条从 RBP 出发的数轴</a>
+      <a href="#序言三条指令把原点钉下来">序言：三条指令把原点钉下来</a>
+      <a href="#别看见-push-rbp-就说用了帧指针" class="sub">别看见 push rbp 就说「用了帧指针」</a>
+      <a href="#尾声把原点还回去一整轮就闭合了">尾声：把原点还回去，一整轮就闭合了</a>
+      <a href="#顺着-rbp-链往上走就是调用栈">顺着 RBP 链往上走，就是调用栈</a>
+      <a href="#什么时候真的需要它">什么时候真的需要它</a>
+      <a href="#速查容易记反的六件事">速查：容易记反的六件事</a>
+      <a href="#一句话" class="sub">一句话</a>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow">● 计算机基础 · 函数调用 ②</span>
+      <h1>栈帧基址：RBP 钉住的到底是什么</h1>
+      <p class="lede">「帧基址」不是这一帧的边界，而是一个原点：往下是自己的局部变量，往上是返回地址和上一帧。从 RBP+8 / RBP+0 / RBP-4 各装了什么讲起，最后用 [RBP] 链从 add 一路走回 main，并说清什么时候编译器真的需要它。</p>
+    </div>
+
+<aside class="needs">
+      <p class="needs-title">读这篇之前，你需要先知道</p>
+      <a class="need" href="../stack-call-return/">← <b>1. 函数调用时，栈上到底放了什么</b><span>返回地址不是返回值；call 只压地址 + 跳转；栈帧里装了什么；递归与栈上限；AArch64 的 LR</span></a>
+    </aside>
+    <div class="provenance"><span><b>来源</b> System V AMD64 ABI 0.99.6 · 3.2.2 The Stack Frame https://refspecs.linuxbase.org/elf/x86_64-abi-0.99.pdf —— 8(RBP) 是返回地址、0(RBP) 是旧 RBP、16(RBP) 起是内存参数；红区 128 字节 · System V AMD64 ABI 0.99.6 · 3.2.1 寄存器用途 —— rbp 是 callee-saved、可选作帧指针 · Procedure Call Standard for the Arm 64-bit Architecture (AAPCS64 2025Q4) https://github.com/ARM-software/abi-aa/ —— 帧记录两格（旧 fp / 进入时的 LR），链尾用 0 表示；x29 是帧指针 · Intel SDM · PUSH / LEAVE / RET https://www.felixcloutier.com/x86/push —— push 先减 RSP 再写；leave = mov rsp,rbp + pop rbp · 本机实测（macOS 26.6.1 arm64 · Apple clang 21.0.0 · x86_64 经 Rosetta）：-O0/-O2 反汇编、lldb 读 rbp/x29 与 [rbp]、按 [RBP] 链走三级、VLA 场景下 -fomit-frame-pointer 被忽略</span><span><b>生成</b> 2026-10-20</span><span><b>模型</b> deepseek-v4.1-flash-1017</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">栈帧</span> <span class="tag tone-muted">RBP</span> <span class="tag tone-muted">帧指针</span> <span class="tag tone-muted">汇编</span> <span class="tag tone-muted">调试</span></span></div>
+
+<h2 id="三个东西先分开栈帧栈顶帧基址"><span class="num">01</span>三个东西先分开：栈帧、栈顶、帧基址</h2>
+<p>上一篇讲完了一次调用在栈上占的那一段，那一段叫<strong>栈帧</strong>（stack frame）。这里只讲其中一根指针：<strong>帧基址</strong>（frame base），也叫<strong>帧指针</strong>（frame pointer）。x86 上它是 <code>RBP</code>，AArch64 上它是 <code>x29</code>。</p>
+<p>一句话定义：<mark class="mk-blue">帧基址是这一帧里一个<strong>不动的地址</strong>，局部变量、返回地址、上一帧都按它加偏移去找</mark>。因为它不动，函数体里 <code>RSP</code> 怎么变都不影响这些查找。</p>
+<p>先把三个容易混的东西并排放好：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>看什么</th><th>栈帧 stack frame</th><th>栈顶 RSP / SP</th><th>帧基址 RBP / x29</th></tr></thead><tbody><tr><th>是什么</th><td data-label="栈帧 stack frame">一次调用占的那整段内存</td><td data-label="栈顶 RSP / SP">现在用到哪一格</td><td data-label="帧基址 RBP / x29">这一帧的固定原点</td></tr><tr><th>会不会动</th><td data-label="栈帧 stack frame">调用时整段出现，返回时整段消失</td><td data-label="栈顶 RSP / SP">函数体里一直在动</td><td data-label="帧基址 RBP / x29">序言之后基本不动</td></tr><tr><th>谁在管</th><td data-label="栈帧 stack frame">编译器排的布局</td><td data-label="栈顶 RSP / SP"><code>push</code> / <code>pop</code> / <code>sub</code> / <code>call</code></td><td data-label="帧基址 RBP / x29">序言里的一条 <code>mov</code></td></tr><tr><th>拿它算什么</th><td data-label="栈帧 stack frame">装返回地址、旧帧、局部变量</td><td data-label="栈顶 RSP / SP">下一次压栈往哪写</td><td data-label="帧基址 RBP / x29">局部变量和旧帧的固定偏移</td></tr></tbody></table></div><p>后两个的差别，在真机上停一下就看得见。x86-64 的 <code>calc</code> 停在 <code>callq _add</code> 之前（lldb 实测）：</p>
+<table>
+<thead>
+<tr>
+<th>东西</th>
+<th>值</th>
+<th>和 RBP 的关系</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>RBP</code></td>
+<td><code>0x30413cfa0</code></td>
+<td>原点</td>
+</tr>
+<tr>
+<td><code>RSP</code></td>
+<td><code>0x30413cf90</code></td>
+<td><code>RBP - 0x10</code>（<code>sub rsp,0x10</code> 腾出来的）</td>
+</tr>
+<tr>
+<td><code>&amp;x</code>（参数）</td>
+<td><code>0x30413cf9c</code></td>
+<td><code>RBP - 4</code></td>
+</tr>
+<tr>
+<td><code>&amp;s</code>（局部变量）</td>
+<td><code>0x30413cf98</code></td>
+<td><code>RBP - 8</code></td>
+</tr>
+<tr>
+<td><code>[RBP]</code> 那一格</td>
+<td><code>0x30413cfc0</code></td>
+<td>main 的帧底（旧 RBP）</td>
+</tr>
+<tr>
+<td><code>[RBP+8]</code> 那一格</td>
+<td><code>0x1000003a9</code></td>
+<td>main 里 <code>callq _calc</code> 的下一条</td>
+</tr>
+</tbody>
+</table>
+<p><code>RSP</code> 比 <code>RBP</code> 低 16 字节，局部变量全落在 <code>RBP</code> 下面，而返回地址和旧帧底在它上面。<mark class="mk-blue"><code>RBP</code> 不是这一帧的边界，它是一个原点</mark>：往下是自己的东西，往上是调用者的东西。</p>
+<div class="callout tone-violet">
+      <span class="ic">💡</span>
+      <div><p>「基址」这个词容易让人以为它是这一帧的<strong>底边</strong>。它不是。</p>
+<p><code>RBP</code> 指的那一格装的是<strong>上一帧的 <code>RBP</code></strong>，所以它刚好卡在两帧的交界处：
+这一帧的局部变量在它下面，返回地址和参数在它上面。</p>
+</div>
+    </div><h2 id="一帧就是一条从-rbp-出发的数轴"><span class="num">02</span>一帧就是一条从 RBP 出发的数轴</h2>
+<p>把上面那张表画成图，偏移量就成了刻度：</p>
+<figure class="memmap" data-memmap>
+      <figcaption class="mm-title">以 RBP 为原点看这一帧<span class="mm-cap-sub">x86-64 · calc() 停在 callq _add 之前（lldb 实测值）</span></figcaption>
+      <div class="mm-stack"><div class="mm-seg tone-muted" style="--mm-size:1.5">
+        <div class="mm-body">
+          <div class="mm-head"><b>调用者的地盘</b></div>
+          <p class="mm-sub">第 7 个及以后的参数放这里；calc 只有 1 个参数，这块归 main</p>
+        </div>
+        <div class="mm-side">
+              
+              <span class="mm-mark">RBP+16 往上</span>
+            </div>
+      </div><div class="mm-seg tone-blue" style="--mm-size:1.2">
+        <div class="mm-body">
+          <div class="mm-head"><b>返回地址</b></div>
+          <p class="mm-sub">0x1000003a9 —— call 压的</p>
+        </div>
+        <div class="mm-side">
+              
+              <span class="mm-mark">RBP+8</span>
+            </div>
+      </div><div class="mm-seg tone-violet" style="--mm-size:1.2">
+        <div class="mm-body">
+          <div class="mm-head"><b>旧的 RBP</b></div>
+          <p class="mm-sub">0x30413cfc0 —— push rbp 压的</p>
+        </div>
+        <div class="mm-side">
+              
+              <span class="mm-mark">RBP+0 · RBP 指这</span>
+            </div>
+      </div><div class="mm-seg tone-amber" style="--mm-size:1.4">
+        <div class="mm-body">
+          <div class="mm-head"><b>局部变量 int x、int s</b></div>
+          <p class="mm-sub">0x30413cf9c 和 0x30413cf98</p>
+        </div>
+        <div class="mm-side">
+              
+              <span class="mm-mark">RBP-4 / RBP-8</span>
+            </div>
+      </div><div class="mm-seg tone-muted" style="--mm-size:0.9">
+        <div class="mm-body">
+          <div class="mm-head"><b>腾出来没用上的 8 字节</b></div>
+          <p class="mm-sub">sub rsp, 0x10 给了 16 字节，两个 int 只用掉 8</p>
+        </div>
+        <div class="mm-side">
+              
+              <span class="mm-mark">RBP-8 以下</span>
+            </div>
+      </div><div class="mm-seg tone-green" style="--mm-size:0.9">
+        <div class="mm-body">
+          <div class="mm-head"><b>当前栈顶</b></div>
+          <p class="mm-sub">0x30413cf90 —— 下一次压栈写这里</p>
+        </div>
+        <div class="mm-side">
+              
+              <span class="mm-mark">RBP-0x10 = RSP</span>
+            </div>
+      </div></div>
+      <div class="mm-ends">
+            <span class="mm-end">高地址 调用者的方向</span>
+            <span class="mm-end">低地址 自己的方向</span>
+          </div>
+      <p class="mm-note">向上的偏移属于<strong>调用者</strong>（返回地址、参数），向下的偏移属于<strong>自己</strong>（局部变量）。</p>
+    </figure><p>刻度不是随便定的，来源得分开说：</p>
+<table>
+<thead>
+<tr>
+<th>偏移</th>
+<th>里面是什么</th>
+<th>谁定的</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>RBP+16</code> 起</td>
+<td>第 7 个及以后的整数参数（<code>+16</code>、<code>+24</code>、<code>+32</code> …）</td>
+<td><strong>ABI 定的</strong>。前 6 个走寄存器（<code>rdi</code> <code>rsi</code> <code>rdx</code> <code>rcx</code> <code>r8</code> <code>r9</code>），多出来的按顺序摆在返回地址之上</td>
+</tr>
+<tr>
+<td><code>RBP+8</code></td>
+<td>返回地址</td>
+<td><strong>ABI 定的</strong>。<code>call</code> 压的，所以它永远紧贴 <code>RBP+8</code></td>
+</tr>
+<tr>
+<td><code>RBP+0</code></td>
+<td>上一帧的 <code>RBP</code></td>
+<td><strong>序言定的</strong>。<code>push rbp</code> 压的，<code>mov rbp,rsp</code> 让 <code>RBP</code> 正好落回来</td>
+</tr>
+<tr>
+<td><code>RBP-4</code>、<code>RBP-8</code> …</td>
+<td>局部变量、保存的寄存器、临时数据</td>
+<td><strong>编译器自己排的</strong>，不同函数、不同优化级别都不一样</td>
+</tr>
+</tbody>
+</table>
+<p>前两行可以验：写一个 8 参数函数，第 7、8 个参数就出现在 <code>16(%rbp)</code> 和 <code>24(%rbp)</code>（本机 <code>clang -O0</code> 反汇编）：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">_many:
+0x100000340  pushq  %rbp
+0x100000341  movq   %rsp, %rbp            ; RBP 钉好
+0x100000344  movl   0x18(%rbp), %eax      ; 第 8 个参数 h
+0x100000347  movl   0x10(%rbp), %eax      ; 第 7 个参数 g
+0x10000034a  movl   %edi, -0x4(%rbp)      ; a —— 前 6 个从寄存器抄下来
+0x10000034d  movl   %esi, -0x8(%rbp)      ; b
+…
+</code></pre></div>
+<div class="callout tone-amber">
+      <span class="ic">⚠</span>
+      <div><p>所以「局部变量在 <code>RBP-4</code>、<code>RBP-8</code>」只是<strong>那一次编译</strong>的结果，不是规定。</p>
+<p>同一份代码换个优化级别，偏移就挪了：本机 <code>-O2</code> 下同一个函数的两个局部变量在
+<code>-16(%rbp)</code> 和 <code>-20(%rbp)</code> —— 因为中间先 <code>pushq %rbx</code> 占掉了 <code>-8</code> 那一格。</p>
+<p><mark class="mk-amber">把 <code>-4 / -8</code> 当成约定去读别的汇编，一定会对不上。</mark> 只有 <code>+0</code> 和 <code>+8</code> 是稳的。</p>
+</div>
+    </div><h2 id="序言三条指令把原点钉下来"><span class="num">03</span>序言：三条指令把原点钉下来</h2>
+<p><code>RBP</code> 落地只需要三条指令（x86-64，本机 <code>clang -O0</code>）：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">0x100000360  pushq  %rbp        ; 把调用者的帧底压栈：RSP -= 8，[RSP] = 旧 RBP
+0x100000361  movq   %rsp, %rbp  ; RBP = RSP —— 正好指到刚写的那一格
+0x100000364  subq   $0x10, %rsp ; 往下腾局部变量区；RBP 不动
+</code></pre></div>
+<p>关键在第三步之后：<mark class="mk-blue"><code>RBP</code> 指的那一格装的是「旧 RBP」，不是返回地址</mark>。返回地址在它上面一格，因为 <code>call</code> 比 <code>push rbp</code> 先发生。</p>
+<p>AArch64 上做同一件事，只是把「旧帧指针 + 返回地址」合成一次存储：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">_calc:
+0x100000348  sub  sp, sp, #0x20          ; 腾 32 字节
+0x10000034c  stp  x29, x30, [sp, #0x10]  ; [sp+0x10]=旧 fp，[sp+0x18]=返回地址
+0x100000350  add  x29, sp, #0x10         ; x29 = sp+0x10，正好指向那两格的第一格
+…
+</code></pre></div>
+<p>所以两个架构的帧头布局是一样的：<code>[FP]</code> 是上一帧的帧指针，<code>[FP+8]</code> 是返回地址。这也是为什么调试器可以只认这一个规律，就跨架构回溯。</p>
+<h3 id="别看见-push-rbp-就说用了帧指针">别看见 push rbp 就说「用了帧指针」</h3>
+<p><code>rbp</code> 和 <code>x29</code> 都是<strong>被调用者负责保存</strong>的寄存器（callee-saved）。函数要借用它们，就得先存起来；存了不等于拿它当帧指针用。判别看后半句：</p>
+<table>
+<thead>
+<tr>
+<th>架构</th>
+<th>只保存了寄存器</th>
+<th>真的当帧指针用</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>x86-64</td>
+<td><code>pushq %rbp</code></td>
+<td><code>pushq %rbp</code> <strong>加</strong> <code>movq %rsp, %rbp</code></td>
+</tr>
+<tr>
+<td>AArch64</td>
+<td><code>stp x29, x30, [sp, #16]</code></td>
+<td>再加一条 <code>add x29, sp, #16</code></td>
+</tr>
+</tbody>
+</table>
+<p>本机实测的反例：AArch64 加 <code>-fomit-frame-pointer</code> 编译后，<code>stp x29, x30</code> 仍然在（<code>x29</code> 必须保存），但 <code>add x29, sp, #16</code> 没了 —— 那才是帧指针。</p>
+<h2 id="尾声把原点还回去一整轮就闭合了"><span class="num">04</span>尾声：把原点还回去，一整轮就闭合了</h2>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">0x100000380  addq  $0x10, %rsp   ; 撤掉局部变量区
+0x100000384  popq  %rbp          ; 还原调用者的帧底
+0x100000385  retq                ; 弹出返回地址，跳回去
+</code></pre></div>
+<p>如果序言用的是 <code>push rbp; mov rbp,rsp; sub rsp,N</code>，尾声可以缩成两条：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">leave   ; = mov rsp, rbp  然后  pop rbp
+ret
+</code></pre></div>
+<p><code>mov rsp, rbp</code> 一句话就把 <code>RSP</code> 拉回帧底，中间那些局部变量<strong>不用清理</strong>：内存里的旧值还在，但已经没人认领了，下一次压栈会盖掉它。<mark class="mk-blue">「释放」在这里只改一个指针，不动内存。</mark></p>
+<p>序言和尾声分开看还是两段。把一整轮连起来走一遍，才看得清两个指针是怎么互相「铺路」的：右边两条通道各放一个标记，<code>SP</code> 是 <code>RSP</code>，<code>BP</code> 是 <code>RBP</code>，它们只在两步里站到同一行。</p>
+<div class="demo" data-widget="frame-anchor-lab">
+      <div class="demo-head">
+        <span class="title">RSP 和 RBP 怎么互相铺路</span>
+        <span class="status" data-status></span>
+        <span class="spacer"></span>
+        
+      </div>
+      <div class="demo-body"></div>
+    </div><p>看的时候盯三处：</p>
+<ul>
+<li><strong>第 3 步</strong>：<code>RBP ← RSP</code>。这一刻两个标记落在同一行，之后 <code>RSP</code> 怎么走，<code>RBP</code> 都不再跟。</li>
+<li><strong>第 8 步</strong>：<code>RSP</code> 加回 <code>0x10</code>，正好落回 <code>RBP</code> 那一行 —— 尾声靠的是「编译器记得 <code>sub</code> 了多少」，不是靠 <code>RBP</code>。</li>
+<li><strong>第 9 步</strong>：<code>RBP ← [RSP]</code>，把序言存进去的 main 帧底取回来。如果编译器用 <code>leave</code>，第 8、9 步就是一条指令。</li>
+</ul>
+<h2 id="顺着-rbp-链往上走就是调用栈"><span class="num">05</span>顺着 RBP 链往上走，就是调用栈</h2>
+<p>每一帧的第一格都存着上一帧的 <code>RBP</code>，于是这些格子串成一条链。回溯只需要重复两步：</p>
+<ol>
+<li>读 <code>[FP]</code> → 上一帧的帧指针</li>
+<li>读 <code>[FP+8]</code> → 这一帧的返回地址，也就是「谁调了我」</li>
+</ol>
+<p>本机实测（AArch64，停在 <code>calc</code> 里），顺着链走三跳：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">calc 的 fp = 0x16fdfef40
+  [0x16fdfef40] = 0x16fdfef60   ← main 的 fp
+  [0x16fdfef48] = 0x100000394   ← 返回地址：main 里 bl _calc 的下一条
+
+main 的 fp = 0x16fdfef60
+  [0x16fdfef60] = 0x16fdff5c0   ← dyld 的 start 的 fp
+  [0x16fdfef68] = 0x18e5e04e4   ← 返回地址：dyld 里调 main 之后
+
+dyld 的 fp = 0x16fdff5c0
+  [0x16fdff5c0] = 0              ← 链到头
+</code></pre></div>
+<p>最后那个 <code>0</code> 是<strong>约定的链尾</strong>（AAPCS64 明写：上一帧地址为 0 表示链结束；x86-64 的 ABI 同样要求最外层把帧指针置 0）。lldb 的 <code>bt</code> 打出来的就是同一条链：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">(lldb) bt
+* frame #0: 0x0000000100000358 demo-arm64`calc(x=10) at demo.c:4:17
+  frame #1: 0x0000000100000394 demo-arm64`main at demo.c:9:13
+  frame #2: 0x000000018e5e04e4 dyld`start + 6992
+</code></pre></div>
+<div class="flowd has-grid has-groups" data-flow data-edges="[{&quot;from&quot;:&quot;calc&quot;,&quot;to&quot;:&quot;main&quot;,&quot;label&quot;:&quot;读 [FP]&quot;,&quot;labelDx&quot;:56},{&quot;from&quot;:&quot;main&quot;,&quot;to&quot;:&quot;dyld&quot;,&quot;label&quot;:&quot;读 [FP]&quot;,&quot;labelDx&quot;:56}]" style="--flow-marker:url(#fa-1)">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa-1" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"><div class="fgroup tone-blue" data-group-box="stack">
+          <span class="fgroup-label">同一个线程的栈 · 高地址在上</span>
+        </div></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-muted" data-id="dyld" data-group="stack">
+              
+              
+              <b>dyld 的 start</b>
+              <small>fp = 0x16fdff5c0 · [fp] = 0 → 到头</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-blue" data-id="main" data-group="stack">
+              
+              
+              <b>main 的帧</b>
+              <small>fp = 0x16fdfef60</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="calc" data-group="stack">
+              
+              
+              <b>calc 的帧</b>
+              <small>fp = 0x16fdfef40 · 当前帧</small>
+            </div></div></div>
+      
+    </div><p>这条链就是「崩溃时看到的调用栈」和「性能剖析里的火焰图」的数据来源。代价是每个函数都多占一格存旧帧指针，再花两条指令维护它 —— 这正好引出下一节：什么时候值得。</p>
+<h2 id="什么时候真的需要它"><span class="num">06</span>什么时候真的需要它</h2>
+<p>教材里的说法通常是「<code>RSP</code> 会因为压栈出栈不断变化，所以按 <code>RSP</code> 算偏移不可靠」。这句话对了一半，真机上的情况更细。</p>
+<p><code>call</code> 返回之后 <code>RSP</code> 会复原，编译器在每一刻都清楚「<code>RSP</code> 离帧底多远」，所以它完全可以用 <code>RSP</code> 偏移。本机实测的几组编译组合：</p>
+<table>
+<thead>
+<tr>
+<th>平台 / 选项</th>
+<th>有没有帧指针</th>
+<th>局部变量怎么寻址</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Darwin x86-64 <code>-O0</code></td>
+<td>有（<code>push rbp</code> + <code>mov rbp,rsp</code>）</td>
+<td><code>-4(%rbp)</code>、<code>-8(%rbp)</code></td>
+</tr>
+<tr>
+<td>Darwin x86-64 <code>-O2</code></td>
+<td>有（Apple 工具链默认保留）</td>
+<td><code>-16(%rbp)</code>、<code>-20(%rbp)</code></td>
+</tr>
+<tr>
+<td>Darwin x86-64 <code>-O2 -fomit-frame-pointer</code></td>
+<td>无</td>
+<td><code>(%rsp)</code>、<code>12(%rsp)</code></td>
+</tr>
+<tr>
+<td>Linux x86-64 <code>-O2</code></td>
+<td>无（默认就省）</td>
+<td><code>(%rsp)</code>、<code>12(%rsp)</code></td>
+</tr>
+<tr>
+<td>Darwin arm64 <code>-O2</code></td>
+<td>有（<code>add x29, sp, #32</code>）</td>
+<td><strong>仍然是</strong> <code>[sp, #12]</code>、<code>[sp, #8]</code></td>
+</tr>
+</tbody>
+</table>
+<p>最后一行最值得看：帧指针明明维护好了，编译器还是拿 <code>SP</code> 去寻址局部变量 —— 因为这一帧大小是编译期固定的，用 <code>SP</code> 算更省事。<mark class="mk-blue">帧指针在不在，和用不用它寻址，是两件事。</mark></p>
+<p>真正把它逼回来的，是<strong>运行时才知道帧有多大的情况</strong>。加一个变长数组再看：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-c">int vla(int n) {
+    int a[n];
+    for (int i = 0; i &lt; n; i++) a[i] = i;
+    g();
+    return a[n - 1];
+}
+</code></pre></div>
+<p>即使显式加了 <code>-fomit-frame-pointer</code>，本机 <code>clang -O2 -arch arm64</code> 编出来的 <code>_vla</code> 里还是有这一行：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">_vla:
+    stp  x20, x19, [sp, #-32]!
+    stp  x29, x30, [sp, #16]
+    add  x29, sp, #16          ; ← 帧指针被逼回来了
+    sub  sp, sp, #16
+    …
+    stur x8, [x29, #-24]       ; 栈保护用的 canary，也只能按 x29 定位
+</code></pre></div>
+<p>帧的大小随 <code>n</code> 变，<code>RSP</code> 在函数体里被动态改过，编译器没法再用一个固定偏移找局部变量 —— 只能先钉一个不会动的原点。</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>对比项</th><th>有帧指针</th><th>省略帧指针（FPO）</th></tr></thead><tbody><tr><th>局部变量寻址</th><td data-label="有帧指针">用固定偏移找局部变量，读汇编好跟</td><td data-label="省略帧指针（FPO）">全按 <code>RSP</code> 偏移，靠编译器记账</td></tr><tr><th>变长数组 / <code>alloca</code></th><td data-label="有帧指针">直接支持</td><td data-label="省略帧指针（FPO）">要么被强制打开，要么另找寄存器存帧底</td></tr><tr><th>回溯调用栈</th><td data-label="有帧指针">读 <code>[FP]</code> 链，一步一帧</td><td data-label="省略帧指针（FPO）">解析 <code>.eh_frame</code> / DWARF 表（编译器留下的「每一刻帧多大」的元数据），慢一些</td></tr><tr><th>占用寄存器</th><td data-label="有帧指针">少一个通用寄存器</td><td data-label="省略帧指针（FPO）">多一个可用寄存器</td></tr><tr><th>典型默认</th><td data-label="有帧指针">Darwin 默认保留；Linux x86-64 默认省略</td><td data-label="省略帧指针（FPO）"><code>-O1</code> 以上常见</td></tr></tbody></table></div><p>所以「需要帧指针」有三种不同的理由，别混着说：</p>
+<ul>
+<li><strong>编译器需要</strong>：变长栈分配、<code>alloca</code>、某些需要精确定位的调试/插桩特性。</li>
+<li><strong>工具需要</strong>：崩溃栈、性能剖析、调试器 —— 有它就省掉解析 unwind 表。</li>
+<li><strong>人需要</strong>：读汇编时有个不动的锚点，心理负担小很多。</li>
+</ul>
+<h2 id="速查容易记反的六件事"><span class="num">07</span>速查：容易记反的六件事</h2>
+<ul class="check cross"><li><code>RBP</code> 指向返回地址。—— 返回地址在 <code>RBP+8</code>；<code>RBP</code> 指的那格是旧的帧指针。</li><li><code>RBP</code> 是这一帧的最低地址。—— 那是 <code>RSP</code>；<code>RBP</code> 在帧里偏上的位置。</li><li>局部变量固定在 <code>RBP-4</code>、<code>RBP-8</code>。—— 偏移是编译器排的，存个 callee-saved 寄存器就会挪。</li><li>看见 <code>push rbp</code> 就说明用了帧指针。—— 还要看有没有 <code>mov rbp, rsp</code>；<code>x29</code> 同理，看 <code>add x29, sp, #N</code>。</li><li>没有 <code>RBP</code> 就没有栈帧。—— 帧还在，只是没有固定原点，寻址全靠 <code>RSP</code> 加编译期记账。</li><li>顺着 <code>[RBP]</code> 能一直走到程序入口。—— 链尾是 0，到 0 就停。</li></ul><div class="summary">
+      <h3 id="一句话">一句话</h3>
+      <p><code>RBP</code> 是这一帧的<strong>原点</strong>：<code>+8</code> 是返回地址、<code>+0</code> 是上一帧、负偏移是自己的局部变量。
+它不动，所以局部变量和回溯都有一个稳定参照；<code>RSP</code> 会动，管的是「下一次往哪写」。</p>
+
+    </div><div class="quiz"><details>
+        <summary><code>RBP</code> 指向的那一格里，装的是什么？</summary>
+        <div class="a"><p>调用者的帧指针（旧 <code>RBP</code>）。它由序言的 <code>push rbp</code> 压进去，<code>mov rbp,rsp</code> 让 <code>RBP</code> 正好落在这一格。
+返回地址在它上面一格（<code>RBP+8</code>），是更早的 <code>call</code> 压的。</p>
+</div>
+      </details><details>
+        <summary>为什么同一个函数的两份汇编里，局部变量偏移会不一样？</summary>
+        <div class="a"><p><code>RBP-*</code> 的偏移是编译器排的，不是 ABI 规定的。函数里多保存一个寄存器（比如 <code>push rbx</code>）、
+换个优化级别、或者改变量类型，偏移都会跟着动。只有 <code>RBP+0</code> 和 <code>RBP+8</code> 是稳定的。</p>
+</div>
+      </details><details>
+        <summary>一个函数只写了 <code>push rbp</code>，没写 <code>mov rbp, rsp</code>，能说它用了帧指针吗？</summary>
+        <div class="a"><p>不能。<code>rbp</code> / <code>x29</code> 都是 callee-saved 寄存器，函数要借用就得先保存。
+判断依据是「有没有把它设成当前帧的基准」：x86-64 看 <code>mov rbp,rsp</code>，AArch64 看 <code>add x29, sp, #N</code>。</p>
+</div>
+      </details><details>
+        <summary>编译器明明维护了 x29，为什么还用 <code>[sp, #12]</code> 找局部变量？</summary>
+        <div class="a"><p>因为这一帧的大小在编译期就固定了，<code>RSP</code> 到帧底的距离每一刻都已知，用 <code>SP</code> 寻址同样稳，还省一条指令。
+只有在栈大小运行期才确定（变长数组、<code>alloca</code>）时，编译器才必须依赖帧指针。</p>
+</div>
+      </details></div>
+
+    <footer>
+      <span>栈帧基址：RBP 钉住的到底是什么</span>
+      <span>最后更新 2026-10-20 · 单文件可离线打开</span>
+    </footer>
+  </main>
+</div>
+
+<script src="../../assets/app.js?v=8361dc0a5f"></script>
+</body>
+</html>
