@@ -1,237 +1,175 @@
-## 01 · 为什么不是一条大队列
+## 01 · 一个 M 找活干，按这个顺序走
 
-最省脑子的实现是：所有可运行 G 放一条全局队列，任何 M 都从这里取。它会挨两刀，刀刀致命。
+前一篇说 G 会被放进 P 的队列。这一篇看另一半：M 空闲下来之后，按什么顺序找下一个 G。
+
+入口是 `findRunnable()`（`proc.go:3389`）。Go 1.26 的顺序是这样的（省略了 GC、trace、finalizer 这些旁路）：
 
 ```flow
 grid: true
 groups:
-  - { id: bad, label: "一条全局队列 + 一把锁", tone: red }
+  - { id: order, label: "找不到就继续往下；到最后一格才睡觉", tone: violet }
 nodes:
-  - { id: m1, label: "M1", sub: "要取 G", row: 0, tone: blue, group: bad }
-  - { id: m2, label: "M2", sub: "也要取 G", row: 0, tone: blue, group: bad }
-  - { id: m3, label: "M3 … 都要取 G", sub: "M 越多，锁越烫", row: 0, tone: blue, group: bad }
-  - { id: grq, label: "全局队列 GRQ", sub: "所有人抢同一把锁", row: 1, tone: red, group: bad }
-  - { id: k1, label: "第一刀：锁竞争", sub: "取 G 这件事本身成了瓶颈", row: 2, tone: red, group: bad }
-  - { id: k2, label: "第二刀：缓存失配", sub: "G 上次在核 0 跑，这次被核 7 取走", row: 3, tone: red, group: bad }
+  - { id: g61, label: "每 61 次：看 GRQ", sub: "schedtick % 61 == 0 才查；有就拿一个", row: 0, tone: violet, group: order }
+  - { id: rn, label: "runnext", sub: "1 格：刚刚被唤醒、最该接着跑的 G", row: 1, tone: green, group: order }
+  - { id: lrq, label: "本地队列 LRQ", sub: "256 槽的环形数组，取队头", row: 2, tone: green, group: order }
+  - { id: gb, label: "GRQ 批量", sub: "本地空了，一次搬一半到 LRQ", row: 3, tone: blue, group: order }
+  - { id: np, label: "netpoll(0)", sub: "非阻塞看一眼网络，有就绪的就取", row: 4, tone: amber, group: order }
+  - { id: steal, label: "偷别的 P", sub: "拿走对方队列的一半", row: 5, tone: amber, group: order }
+  - { id: park, label: "停 P，睡 M", sub: "都没有活；等事件把它叫醒", row: 6, tone: muted, group: order }
 edges:
-  - { from: m1, to: grq, label: "一起抢锁" }
-  - { from: m2, to: grq, label: "" }
-  - { from: m3, to: grq, label: "" }
-  - { from: grq, to: k1, label: "M 一多就显现" }
-  - { from: k1, to: k2, label: "工作集刚被逐出，又要在新核重建" }
+  - { from: g61, to: rn, label: "没有" }
+  - { from: rn, to: lrq }
+  - { from: lrq, to: gb }
+  - { from: gb, to: np }
+  - { from: np, to: steal }
+  - { from: steal, to: park }
 ```
 
-这两刀都有历史证据：**Go 1.1 之前真的只有一条全局队列**，当时的调度 trace 里锁竞争一望便知。今天的 per-P 本地队列就是那个教训的产物。
+==61 这一步在本地队列**之前**，这是 Go 1.26 源码里的顺序。== 它排在 `runqget` 前面（`proc.go:3458`），意思是「即使我本地有活，也要隔一段时间先看全局」——如果放在本地队列之后，本地一直有活的 P 就永远不会去取全局队列里的 G，那些 G 会饿死。旧版本和不少文章的写法是本地优先，读之前先对一下版本。
 
-改进来自内核自己的教科书 —— 学 per-CPU 运行队列：
+`GODEBUG=schedtrace` 能把每个 P 的队列长度打出来。本机跑 8 个计算任务：
+
+```text
+$ GOMAXPROCS=4 GODEBUG=schedtrace=200 ./sched
+SCHED 209ms: gomaxprocs=4 idleprocs=0 threads=5 spinningthreads=0 runqueue=2 [ 1 1 0 0 ] schedticks=[ 8 6 8 7 ]
+SCHED 415ms: gomaxprocs=4 idleprocs=1 threads=5 spinningthreads=0 runqueue=0 [ 0 0 0 0 ] schedticks=[ 10 9 10 13 ]
+```
+
+`runqueue=2` 是全局队列长度，方括号里是四个 P 各自的 LRQ 长度。`schedticks` 是每个 P 被调度的次数，它们不平均是正常的 —— 负载不会自动均分，这正是下面「窃取」要解决的事。
+
+## 02 · 为什么要三层队列
+
+最省事的实现是一条全局队列，所有 M 都从里面取。它会挨两下：
+
+- **锁**：每次取/放都要拿 `sched.lock`，M 越多争得越凶；
+- **缓存**：G 上次在核 0 上跑，这次被核 7 取走，工作集不在同一个缓存里。
+
+所以每个 P 有一条自己的队列，取放只动 `runqhead` / `runqtail` 两个原子变量；全局队列降级成兜底。局部性有了，新的问题也来了：负载不均。
 
 ```flow
 grid: true
 groups:
-  - { id: good, label: "每个 P 一条本地队列：平时只碰自己那份", tone: green }
-nodes:
-  - { id: p0, label: "P0", sub: "M0 绑定", row: 0, tone: green, group: good }
-  - { id: q0, label: "LRQ: G1 G2 G3", sub: "无锁或低竞争", row: 1, tone: blue, group: good }
-  - { id: p1, label: "P1", sub: "M1 绑定", row: 2, tone: green, group: good }
-  - { id: q1, label: "LRQ: G8 G9", sub: "同样无锁", row: 3, tone: blue, group: good }
-  - { id: grq2, label: "GRQ 降级为兜底队列", sub: "只在本地空了的时候才看", row: 4, tone: muted, group: good }
-edges:
-  - { from: p0, to: q0, label: "各吃各的" }
-  - { from: p1, to: q1, label: "各吃各的" }
-  - { from: q1, to: grq2, label: "本地空了才回头找全局", dashed: true }
-```
-
-但局部性会带来新毛病：**负载不均**。任务长短不一，新 G 又都由 `go` 语句创建在本地 P —— 一个扇出型任务会把一百个新 G 全灌进创建者的队列，别的 P 却空转。
-
-```callout
-tone: violet
-icon: ⚖️
-text: |
-  ==负载不均不需要极端场景。==
-
-  一个扇出任务在新 G 落进本地队列的那一刻，不均衡就已经注定了。
-
-  所以在多核上，**工作窃取不是锦上添花的优化，而是这套设计的常态机制。**
-```
-
-```flow
-grid: true
-groups:
-  - { id: steal, label: "空闲的 P 主动去偷 —— 一次拿走一半", tone: amber }
+  - { id: steal, label: "空闲的 P 主动去偷；一次拿走一半", tone: amber }
 nodes:
   - { id: p1, label: "P1 的 LRQ", sub: "G1 G2 G3 G4 G5 G6", row: 0, tone: blue, group: steal }
-  - { id: p2, label: "P2 的 LRQ: 空", sub: "M2 先原地自旋一小会儿", row: 1, tone: muted, group: steal }
-  - { id: half, label: "偷走 G4 G5 G6", sub: "只偷一半", row: 2, tone: green, group: steal }
-  - { id: why, label: "为什么偷一半", sub: "摊薄「动别人队列」的同步成本，也避免为一个小任务反复上门", row: 3, tone: violet, group: steal }
+  - { id: p2, label: "P2 的 LRQ：空", sub: "M2 自旋了一小会儿", row: 1, tone: muted, group: steal }
+  - { id: take, label: "偷走 G4 G5 G6", sub: "只偷一半", row: 2, tone: green, group: steal }
+  - { id: why, label: "为什么是一半", sub: "摊薄「动别人队列」的同步成本，也给被偷的 P 留活", row: 3, tone: violet, group: steal }
 edges:
-  - { from: p1, to: p2, label: "P2 空转" }
-  - { from: p2, to: half, label: "盯上最长的那个" }
-  - { from: half, to: why, label: "" }
+  - { from: p1, to: p2, label: "P2 空了" }
+  - { from: p2, to: take, label: "盯上队列最长的那个" }
+  - { from: take, to: why }
 ```
 
-干这事的 M 在源码里叫 **spinning M**。它自旋时不是盲转，==同时盯着其他 P 的队列和 netpoller==，一有货立即出手。
+源码里「一半」写得很直白（`runqgrab`，`proc.go:7662`）：
 
----
-
-## 02 · 取下一个 G 的顺序
-
-```flow
-grid: true
-groups:
-  - { id: order, label: "一个 M 要取材时，按这个顺序找下去", tone: violet }
-nodes:
-  - { id: rn, label: "runnext", sub: "单槽缓存：刚刚让出的那个 G", row: 0, tone: amber, group: order }
-  - { id: lrq, label: "本 P 的 LRQ", sub: "本地优先：无锁 + 缓存友好", row: 1, tone: green, group: order }
-  - { id: grq, label: "全局队列 GRQ", sub: "每 61 次取 G 才查一次", row: 2, tone: violet, group: order }
-  - { id: th, label: "偷其他 P 的 LRQ", sub: "拿一半", row: 3, tone: amber, group: order }
-  - { id: np, label: "netpoller", sub: "都没有了，看网络事件唤醒了谁", row: 4, tone: blue, group: order }
-edges:
-  - { from: rn, to: lrq, label: "没有就往下" }
-  - { from: lrq, to: grq, label: "本地空了" }
-  - { from: grq, to: th, label: "兜底也没拿到" }
-  - { from: th, to: np, label: "还是没有，才去问网络" }
+```go
+n := t - h        // 队列长度
+n = n - n/2       // 留一半，偷另一半（向上取整）
 ```
 
-**runnext 值得单独说一句。** 它放的是「刚刚变得可运行的那个 G」—— 比如刚从一次短阻塞里醒来。调度器优先取它，是因为==这个 G 最可能马上要接着跑，它的数据还热在缓存里==。优先取它，等于白捡一次局部性。
+不是随便定的：偷一个的话，本地一空就要再上门一次；每次「动别人队列」都有同步成本，为一个小任务反复上门不划算。一次拿一半，把这份成本摊薄，同时被偷的 P 还剩一些活干。
 
-**1/61 这个比例也有它的道理。** 局部性与公平性是对头：LRQ 偏袒局部性，GRQ 维护公平性。定期抽查一次全局队列，既防止 GRQ 里的 G 被饿死，又不让 GRQ 成为常态竞争点。
+去偷的 M 在源码里叫 **spinning M**。它自旋的时候不是空转，眼睛同时盯着别的 P 的队列和 netpoller。自旋的 M 数量也有限制（`proc.go:3571`）：
 
-换个熟悉的锚点：==这和 git 的对象访问同构 —— 平时只看本地对象库，隔一段时间 fetch 一次 origin，1/61 就是那个「定期 fetch」的节流阀。==
-
-```callout
-tone: amber
-icon: 🔧
-text: |
-  **这个顺序和 1/61 都是 runtime 实现细节，随时可变。**
-
-  业务代码不应依赖它们。理解它的价值在于知道「平衡点在哪」——
-  而不是把它当成一份稳定的 API 契约。
+```go
+if mp.spinning || 2*sched.nmspinning.Load() < gomaxprocs-sched.npidle.Load() {
+    // 才允许进入窃取
+}
 ```
 
----
+大意是：自旋的 M 不超过「正在干活的 P」的一半。自旋本身烧 CPU，太多了反而干扰正在跑的 G。
 
-## 03 · 正在跑的 G 不撒手怎么办
+## 03 · runnext：刚醒的 G 为什么先跑
 
-队列决定「取谁」，抢占解决「上一个赖着不走」。先纠正一句过时的话：**「Go 调度器是协作式的」对 Go 1.14 之后的紧循环已经不成立。**
+`runnext` 只有一格，放的是「刚刚被 `goready` 唤醒的 G」。`runqget`（`proc.go:7598`）先取它，源码注释给的理由是：
 
-```flow
-grid: true
-groups:
-  - { id: coop, label: "协作抢占（Go 1.2 起）：给栈守卫下毒", tone: blue }
-nodes:
-  - { id: sm, label: "sysmon", sub: "后台监控线程，发现某 G 跑超 10ms", row: 0, tone: violet, group: coop }
-  - { id: poison, label: "把 stackguard0 改成毒值", sub: "stackPreempt", row: 1, tone: red, group: coop }
-  - { id: prologue, label: "等 G 走到下一次函数序言", sub: "序言本来就要检查栈边界", row: 2, tone: blue, group: coop }
-  - { id: yield, label: "触发 morestack，发现守卫被下毒", sub: "当作它自己调了 Gosched，让出 P", row: 3, tone: green, group: coop }
-edges:
-  - { from: sm, to: poison, label: "下单" }
-  - { from: poison, to: prologue, label: "毒就这样等在那" }
-  - { from: prologue, to: yield, label: "搭了个便车" }
+> 一批 G 如果卡在 communicate-and-wait 模式里（一个发、一个收，收完再发），把它们当作一个单元调度，可以消除「把刚唤醒的 G 放到队列尾部」带来的调度延迟。
+
+换句话说：刚刚从 channel 或网络醒来的 G，数据很可能还在缓存里，让它接着跑，比让队列里的另一个 G 先跑更划算。`execute` 时它还会继承当前时间片剩下的部分（`inheritTime`），不重新开始计时。
+
+代价是它可能被别的 P 偷走。`runqgrab` 里偷 runnext 的分支会先睡 3µs（`usleep(3)`），给对方一个先跑的机会，避免两个 P 把同一个 G 来回抢（`proc.go:7690` 附近）。这是一个针对「抢来抢去」的退避，不是调度正确性的一部分。
+
+## 04 · 抢占：正在跑的 G 不撒手怎么办
+
+队列解决「取谁」，抢占解决「上一个赖着不走」。
+
+协作抢占很早就有了：`sysmon` 发现某个 G 跑得太久，就把它的 `stackguard0` 改成 `stackPreempt`（`preemptone`，`proc.go:6866`）。Go 的函数序言本来就要检查栈边界，检查到这个毒值就调用 `morestack`，顺带把 G 让出去。栈检查本来就要做，所以这条路径几乎没有额外成本。
+
+但它有一个死穴：**没有函数调用的紧循环永远走不到序言**。`for {}` 里没有栈检查，毒值没人查收，P 就被占死了。Go 1.14 之前，这种代码能把调度器和 GC 一起拖住。
+
+Go 1.14 加了异步抢占：`sysmon` 给目标 M 发 `SIGURG`（`signal_unix.go` 里 `sigPreempt = _SIGURG`），信号处理器把 PC 改到 `asyncPreempt` 入口，保存用户寄存器，再转入 `gopreempt_m` 让出 P。这就是为什么 Go 1.14 之后，Unix 程序会收到更多信号，一些慢系统调用会更常以 `EINTR` 失败。
+
+可以自己验证。同一个程序，`GOMAXPROCS=1`，先开一个 `for {}` 的 G，再让主 G 睡 100ms：
+
+```go
+runtime.GOMAXPROCS(1)
+go func() {
+    for {}          // 没有函数调用，协作抢占找不到安全点
+}()
+time.Sleep(100 * time.Millisecond)
+fmt.Println("main 醒了")
 ```
 
-妙处是**零额外成本**：栈检查本来就要做，抢占只是搭便车。
+```text
+$ ./preempt
+main 醒了：紧循环被抢占了
 
-```compare
-first: 为什么不能任意点切换
-head: [说明]
-rows:
-  - 栈可能正在搬迁: ["上一节说的连续栈扩容，拷贝到一半把 G 换下去，指针修正就乱套了"]
-  - GC 可能正在扫描栈找指针: ["扫到一半换人，GC 的记录和实际栈就对不上了"]
-  - 所以需要「安全点」: [{ text: "安全点就是「这些不变量都不处于中途」的代码位置", tone: green }]
+$ GODEBUG=asyncpreemptoff=1 ./preempt
+（挂住，1.5 秒后被 kill）
 ```
 
-但协作抢占有一个死穴，而且非常致命：
-
-```flow
-grid: true
-groups:
-  - { id: bug, label: "没有函数调用的紧循环，毒值永远没人查收", tone: red }
-nodes:
-  - { id: loop, label: "for { i++ }", sub: "一个函数调用都没有", row: 0, tone: red, group: bug }
-  - { id: nope, label: "没有序言可查", sub: "毒值躺在守卫里，没人看", row: 1, tone: red, group: bug }
-  - { id: starve, label: "P 被占死", sub: "其他 G 饿死，GC 的 STW 也拖不动", row: 2, tone: red, group: bug }
-edges:
-  - { from: loop, to: nope, label: "" }
-  - { from: nope, to: starve, label: "Go 1.14 之前就是这样" }
-```
-
-Go 1.14 官方发布说明承认了这件事：紧循环「可能饿死调度器或严重拖延 GC」。
-
-于是有了异步抢占：
-
-```flow
-grid: true
-groups:
-  - { id: async, label: "异步抢占（Go 1.14 起）：直接发信号打断", tone: green }
-nodes:
-  - { id: sig, label: "sysmon 发 SIGURG", sub: "选它正因为它是「无事发生」型信号", row: 0, tone: violet, group: async }
-  - { id: hdl, label: "信号处理器确认在异步安全点", sub: "不在 runtime 关键段里", row: 1, tone: blue, group: async }
-  - { id: pc, label: "把 PC 改成 asyncPreempt 入口", sub: "一段汇编：保存全部用户寄存器", row: 2, tone: amber, group: async }
-  - { id: done, label: "转入 gopreempt_m，让出 P", sub: "紧循环不再可能饿死调度器", row: 3, tone: green, group: async }
-edges:
-  - { from: sig, to: hdl, label: "打断" }
-  - { from: hdl, to: pc, label: "确认安全" }
-  - { from: pc, to: done, label: "接管" }
-```
-
-```timeline
-- when: Go 1.2 · 2013
-  title: 协作抢占
-  desc: 靠函数序言里的栈边界检查搭便车。成本几乎为零，但紧循环会饿死 GC
-  tone: blue
-- when: Go 1.14 · 2020
-  title: 异步抢占兜底
-  desc: 用 SIGURG 打断任意用户态代码点。紧循环饿死成为历史，代价是每次打断要保存全套寄存器
-  tone: green
-```
+关掉异步抢占就挂住，打开就能醒 —— 这就是 Go 1.14 那条路径在起作用。
 
 ```compare
 first: 维度
 head: [协作抢占, 异步抢占]
 rows:
-  - 触发: ["G 自己跑到安全点", "runtime 发 SIGURG 打断"]
-  - 时机: ["函数序言、同步操作处", "任意用户态代码点（异步安全点）"]
-  - 代价: [{ text: "几乎为零（搭栈检查的便车）", tone: green }, { text: "每次打断要保存全部寄存器", tone: amber }]
-  - 边界: [{ text: "紧循环永不触发", tone: red }, "runtime 关键段与信号处理中不可打断"]
+  - 触发: ["G 自己走到安全点（函数序言等）", "runtime 发 SIGURG 打断"]
+  - 时机: ["下一次函数调用 / 栈检查", "任意用户态代码点"]
+  - 代价: [{ text: "几乎为零（搭栈检查的便车）", tone: green }, { text: "要保存整套用户寄存器", tone: amber }]
+  - 边界: [{ text: "紧循环永远不触发", tone: red }, "runtime 关键段和信号处理中不能打断"]
 ```
 
-!!副作用要知道：Unix 下信号会打断慢速系统调用，使它们更常以 EINTR 失败。!!
+## 05 · 怎么读调度器
 
-标准库的多数调用已经按契约自动重试了，但自己写 raw syscall 或包装 C 库时，要保留「错误是 EINTR 就重试」的循环。
+三个入口，按「你想回答什么问题」选：
 
-所以今天准确的定性是：**协作为主、异步抢占兜底**。正常代码在安全点自己让出（便宜），长期不合作者被信号打断（兜底）。
+| 你想知道 | 用什么 | 看什么 |
+|---|---|---|
+| 某个 P 队列是不是堆住了、M 是不是太多 | `GODEBUG=schedtrace=1000` | `runqueue`、方括号里的每 P 长度、`threads`、`idleprocs` |
+| 某个请求为什么等了 200ms | `go tool trace` 的 goroutine analysis | runnable 到 running 的延迟、阻塞原因、被谁唤醒 |
+| 线上偶发卡顿，不想一直开 trace | `runtime/trace.FlightRecorder`（Go 1.25） | 环形缓冲，出事时 `WriteTo` 把最近几秒落盘 |
 
-```callout
-tone: violet
-icon: 🎲
-text: |
-  **这也解释了一个观感：Go 的调度「看起来像抢占式、行为不可预测」。**
+`schedtrace` 是最便宜的：它只打印，不记录，开销小，适合在容器里临时开。读的时候先看三件事：
 
-  因为决策权在 runtime 手里，不在开发者手里 ——
-  ==你永远不知道 G 会在哪两条语句之间被换下去。==
+1. `gomaxprocs` 和你以为的一样吗？容器里默认值在 Go 1.25 之后跟随 cgroup 限额。
+2. `runqueue` 和方括号里的数字长期不空？说明 P 不够，或者有 G 在长时间占着 P。
+3. `threads` 远大于 `gomaxprocs`？说明有大量 M 卡在系统调用里（第 ⑤ 篇的 hand-off）。
 
-  sysmon 除了抢占，还负责：把 GRQ 里的 G 灌给空闲 P、唤醒休眠的 M、
-  驱动 netpoll、回收空闲资源。它是调度器里唯一「不管业务」的角色。
-```
+`go tool trace` 的信息量大得多，适合带着假设去读：比如「这个接口的 p99 高，是不是因为它在等 P」，就去 goroutine analysis 里找 runnable 时间长的 G，再看它被哪个 M 跑、中间被抢占了几次。没有假设地打开 trace，通常只会看到一片看不懂的色块。
 
----
+## quiz
 
 ```quiz
-- q: 为什么每个 P 要有一条自己的本地队列，而不是共用一条全局队列？
+- q: "`findRunnable` 里「每 61 次看一次全局队列」为什么排在本地队列之前？"
   a: |
-    因为共用一条会挨两刀：一是锁竞争（每个 M 每次取 G 都要抢同一把锁，M 越多越烫），
-    二是缓存局部性差（G 上次在核 0 跑，下次被核 7 取走，工作集刚被逐出又要重建）。
-    本地队列让 M 平时只碰自己那份，无锁且缓存友好。代价是负载不均，于是有了工作窃取。
+    为了公平。如果先取本地队列，本地一直有活的 P 就永远不会去看全局队列，
+    GRQ 里的 G 会饿死。放在前面，等于强制每个 P 隔一段时间先看全局，
+    再回到本地。61 是经验值，不是 API 契约。
 - q: 工作窃取为什么偷一半，而不是偷一个？
   a: |
-    偷一个的话，每次本地队列空了都要上门一次，而「动别人队列」本身有同步成本 ——
-    为一个小任务反复上门不划算。一次拿一半把这份同步成本摊薄了，
-    同时也让被偷的 P 还能剩下一些活干。
-- q: Go 1.14 之前，一个 `for { i++ }` 为什么能把调度器饿死？
+    偷一个会让本地一空就再上门一次，而「动别人的队列」有同步成本，
+    为一个小任务反复上门不划算。偷一半把这份成本摊薄，
+    也给被偷的 P 留一些活，避免它马上又变成空队列。
+- q: Go 1.14 之前，一个 `for {}` 为什么能把调度器饿死？
   a: |
-    因为协作抢占只在安全点生效，而安全点之一是函数序言里的栈边界检查。
-    紧循环里没有任何函数调用，也就没有序言 ——
-    sysmon 把 stackguard0 改成毒值后，那个毒值永远没人查收，P 被占死，
-    其他 G 饿死，GC 的 STW 也拖不动。
-    Go 1.14 起改用 SIGURG 直接打断，这个问题才消失。
+    协作抢占靠函数序言里的栈边界检查触发。紧循环没有函数调用，也就没有序言，
+    sysmon 把 stackguard0 改成毒值后没人查收，P 一直被占着。
+    Go 1.14 起用 SIGURG 直接打断，才不再依赖安全点。
+- q: "`schedtrace` 里 `threads` 远大于 `gomaxprocs`，说明什么？"
+  a: |
+    说明有很多 M 卡在系统调用里，或者曾经卡过还没被回收。
+    GOMAXPROCS 限制的是同时执行 Go 代码的 M 数量，不是线程总数；
+    文件 I/O、cgo 这类不能 poll 的等待，每条都要一条 M 陪着。
 ```

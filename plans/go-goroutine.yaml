@@ -9,21 +9,24 @@
 #   原文的主线是一句：一条执行流，如何被从内核里一步步「拆轻」。
 #   所以这棵树是一条链，不是一张网 —— 每一篇都在拆上一层的重量。
 #
-#   ① 称重             一条执行流由什么构成、线程切换到底贵在哪
-#   ② 前人怎么死的      为什么「一任务一线程」不成立，旧 M:N 与 async/await 各栽在哪
-#   ③ G 是什么          拆出来的这个新东西，和线程/进程各占哪一层
-#   ④ G 挂回线程        GMP 三件套：谁调度谁、谁持有谁
-#   ⑤ 阻塞了怎么办      这是 Go 能复兴 M:N 的真正核心，也是原文的重点
-#   ⑥ 调度器怎么挑     队列、窃取、抢占
-#   ⑦ 工程判断          什么时候该开、会踩什么坑
+#   读者：没写过 Go，但懂线程 / Node / JVM 的并发模型。
+#   目标：读完能讲清调度器怎么转、能顺着 runtime 源码读、能排查泄漏和变慢。
+#
+#   ① 称重             一条执行流由什么构成、线程切换与栈预留贵在哪
+#   ② 前人怎么死的      1:1 的三堵墙、旧 M:N 的连坐、async/await 的颜色
+#   ③ G 是什么          拆出来的这个任务，和函数/线程/进程各是什么关系
+#   ④ G 挂回线程        GMP 三件套：谁持有谁、P 为什么存在、GOMAXPROCS 是什么
+#   ⑤ 阻塞了怎么办      网络走 netpoller，真阻塞走 hand-off —— 两条路的分界线
+#   ⑥ 调度器怎么挑      队列、窃取、runnext、两次抢占
+#   ⑦ 工程判断          泄漏、版本敏感、排障入口、什么时候不该开
 #
 #   ⑤⑥ 都只 needs ④（它们各自回答一个不同的问题：阻塞怎么办 / 挑谁跑）
-#   ⑦ needs ④⑤（选型矩阵里的「高等待」那一格，正是 netpoller 的地盘）
+#   ⑦ needs ④⑤（排障要同时用到调度与阻塞两条链路）
 
 topic: go-goroutine
 title: 理解 Go 协程
 summary: 内核只认识进程和线程，Go 却造出了第三种「看起来会阻塞、实际不阻塞」的执行流 —— 一条执行流被拆轻的全过程
-source: 飞书文档《从进程线程理解 Go 协程》 @ revision 105
+source: 飞书文档《从进程线程理解 Go 协程》 @ revision 105；事实核对 Go 1.26.2 源码与本机实测（2026-10-20）
 
 nodes:
   - id: weight
@@ -32,7 +35,7 @@ nodes:
     needs: []
     artifact: goroutine-weight
     status: drafted
-    blurb: 执行流由三样东西构成、线程切换的直接成本与缓存还债、8MiB 栈只是虚拟预留
+    blurb: 现场只有 PC、寄存器、私有栈；线程重在一次切换要进内核、一份栈在创建时定死
     children: []
 
   - id: whynot
@@ -41,7 +44,7 @@ nodes:
     needs: [weight]
     artifact: goroutine-why-not
     status: drafted
-    blurb: 一任务一线程的三重天花板、旧 M:N 的连坐、async/await 的颜色传染
+    blurb: 1:1 的三堵墙、旧 M:N 的连坐、async/await 的函数颜色；Go 选的是分流
     children: []
 
   - id: anatomy
@@ -50,7 +53,7 @@ nodes:
     needs: [whynot]
     artifact: goroutine-anatomy
     status: drafted
-    blurb: 三态状态机、没有 ID、2KB 起步的可增长栈、只有两个值的上下文
+    blurb: 一个任务 = 入口 + 栈 + 六个字的现场 + 状态；2 KiB 起步，没有页表和 fd 表
     children: []
 
   - id: gmp
@@ -59,7 +62,7 @@ nodes:
     needs: [anatomy]
     artifact: goroutine-gmp
     status: drafted
-    blurb: G / M / P 各自的职责与生命周期，LRQ、runnext、mcache 和 GOMAXPROCS
+    blurb: G 是数据、M 是线程、P 是许可；本地队列与 mcache 各省一把锁
     children: []
 
   - id: poller
@@ -68,7 +71,7 @@ nodes:
     needs: [gmp]
     artifact: goroutine-poller
     status: drafted
-    blurb: 网络 I/O 交给 netpoller，真阻塞走 hand-off —— 这是能复兴 M:N 的真正核心
+    blurb: 能 poll 的交给 netpoller，不能的让 M 陪着睡，sysmon 把 P 交给新 M
     children: []
 
   - id: scheduler
@@ -77,7 +80,7 @@ nodes:
     needs: [gmp]
     artifact: goroutine-scheduler
     status: drafted
-    blurb: 全局队列为什么不行、偷一半摊销了什么、紧循环是怎么被 SIGURG 打断的
+    blurb: 61 次抽查、runnext、偷一半、SIGURG 异步抢占
     children: []
 
   - id: practice
@@ -86,5 +89,5 @@ nodes:
     needs: [gmp, poller]
     artifact: goroutine-practice
     status: drafted
-    blurb: 并发不等于并行、选型看两个变量、四类泄漏、版本敏感误区与调试入口
+    blurb: 四类泄漏、goroutineleak profile、版本敏感、按现象选工具
     children: []

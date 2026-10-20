@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>一条执行流有多重 · 进程、线程与那趟内核之旅</title>
-<meta name="description" content="要理解 Go 为什么能造出第三种执行流，先得知道前两种有多重。线程的重一半在切换路径上（进出内核 + 缓存还债），一半在栈预留上（8MiB 只是虚拟地址空间，但它锁死了数量）。" />
+<title>一条执行流有多重 · 从线程的现场与栈说起</title>
+<meta name="description" content="一条执行流要暂停、恢复，靠的是 PC、寄存器、私有栈三样。线程的重一半在切换（进内核 + 缓存重装），一半在栈（创建时定死大小）。本机实测：G 交接 170ns、跨线程交接 13µs、百万条 G 占 1.8GiB。" />
 <link rel="stylesheet" href="../../assets/theme.css?v=b918ec5c83" />
   <link rel="stylesheet" href="../../assets/blocks.css?v=f1eceacc25" />
   <link rel="stylesheet" href="../../assets/archify-embed.css?v=68fec0b81b" />
@@ -27,311 +27,413 @@
   <aside class="toc" id="toc">
       <p class="toc-title">目录</p>
       <a href="../../index.html" class="sub">← 全部笔记</a>
-      <a href="#一条执行流由什么构成">一条执行流由什么构成</a>
-      <a href="#文件描述符不在上面这张图里" class="sub">文件描述符不在上面这张图里</a>
-      <a href="#一次切换是一趟进出内核的旅程">一次切换，是一趟进出内核的旅程</a>
-      <a href="#一次切换并不算慢">一次切换并不算慢</a>
-      <a href="#第二条重量线栈">第二条重量线：栈</a>
+      <a href="#先看两种你熟悉的写法">先看两种你熟悉的写法</a>
+      <a href="#暂停一条流要记下什么">暂停一条流，要记下什么</a>
+      <a href="#一次切换的直接成本">一次切换的直接成本</a>
+      <a href="#间接成本缓存里的残留">间接成本：缓存里的残留</a>
+      <a href="#第二条重量栈在创建时定死">第二条重量：栈在创建时定死</a>
+      <a href="#这两条重量决定了后面要拆哪两样">这两条重量，决定了后面要拆哪两样</a>
+      <a href="#quiz">quiz</a>
   </aside>
 
   <main>
     <div class="hero">
       <span class="eyebrow">● Go 协程 · ①</span>
-      <h1>一条执行流有多重 · 进程、线程与那趟内核之旅</h1>
-      <p class="lede">要理解 Go 为什么能造出第三种执行流，先得知道前两种有多重。线程的重一半在切换路径上（进出内核 + 缓存还债），一半在栈预留上（8MiB 只是虚拟地址空间，但它锁死了数量）。</p>
+      <h1>一条执行流有多重 · 从线程的现场与栈说起</h1>
+      <p class="lede">一条执行流要暂停、恢复，靠的是 PC、寄存器、私有栈三样。线程的重一半在切换（进内核 + 缓存重装），一半在栈（创建时定死大小）。本机实测：G 交接 170ns、跨线程交接 13µs、百万条 G 占 1.8GiB。</p>
     </div>
 
 
-    <div class="provenance"><span><b>来源</b> 飞书文档《从进程线程理解 Go 协程》 https://futu.feishu.cn/docx/MtjTdgOM2okwOdxpPDecVZMrnqc @ revision 105</span><span><b>生成</b> 2026-10-01</span><span><b>模型</b> claude-opus-4-5</span></div>
+    <div class="provenance"><span><b>来源</b> 飞书文档《从进程线程理解 Go 协程》 https://futu.feishu.cn/docx/MtjTdgOM2okwOdxpPDecVZMrnqc @ revision 105 · Go 1.26.2 源码 /usr/local/go/src/runtime（proc.go / runtime2.go / stack.go / netpoll.go / asm_arm64.s），2026-03-27 · 本机实测 Apple M4 / macOS 26 / Go 1.26.2（2026-10-20）</span><span><b>生成</b> 2026-10-01</span><span><b>模型</b> deepseek-v4.1-flash-1017</span></div>
     <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">Go</span> <span class="tag tone-muted">协程</span> <span class="tag tone-muted">线程</span> <span class="tag tone-muted">上下文切换</span></span></div>
 
-<h2 id="一条执行流由什么构成"><span class="num">01</span>一条执行流由什么构成</h2>
-<p>进程和线程的区别，卡在「围栏画在哪里」这一件事上。先把一个进程的地址空间摊开看：</p>
-<figure class="memmap" data-memmap>
-      <figcaption class="mm-title">一个进程的虚拟地址空间里有什么<span class="mm-cap-sub">Linux x86-64</span></figcaption>
-      <div class="mm-stack"><div class="mm-seg tone-muted" style="--mm-size:1.1">
-        <div class="mm-body">
-          <div class="mm-head"><b>内核空间</b></div>
-          <p class="mm-sub">用户程序碰不到；每个进程都映射同一份内核</p>
-        </div>
-        <div class="mm-side">
-              <span class="mm-addr">0xffff_8000...</span>
-              
-            </div>
-      </div><div class="mm-seg tone-blue" style="--mm-size:2.2">
-        <div class="mm-body">
-          <div class="mm-head"><b>线程 A 的栈</b><span class="mm-dir mm-down" title="向下增长">↓ 向下长</span></div>
-          <p class="mm-sub">pthread 默认 8MB 上限、定死不变；Go 的 goroutine 是 2KB 起步、用时自己长</p>
-        </div>
-        <div class="mm-side">
-              
-              <span class="mm-mark">线程独享</span>
-            </div>
-      </div><div class="mm-seg tone-blue" style="--mm-size:2.2">
-        <div class="mm-body">
-          <div class="mm-head"><b>线程 B 的栈</b><span class="mm-dir mm-down" title="向下增长">↓ 向下长</span></div>
-          <p class="mm-sub">各自独立。越界就撞上护栏页，直接崩</p>
-        </div>
-        <div class="mm-side">
-              
-              <span class="mm-mark">线程独享</span>
-            </div>
-      </div><div class="mm-seg tone-blue" style="--mm-size:2.2">
-        <div class="mm-body">
-          <div class="mm-head"><b>主线程的栈</b><span class="mm-dir mm-down" title="向下增长">↓ 向下长</span></div>
-          <p class="mm-sub">进程一启动就有的那一个</p>
-        </div>
-        <div class="mm-side">
-              <span class="mm-addr">0x7fff_ffff_ffff</span>
-              <span class="mm-mark">线程独享</span>
-            </div>
-      </div><div class="mm-seg tone-amber" style="--mm-size:3">
-        <div class="mm-body">
-          <div class="mm-head"><b>mmap 区</b></div>
-          <p class="mm-sub">共享库、文件映射。Go 的 goroutine 栈也从这里要内存</p>
-        </div>
-        <div class="mm-side">
-              
-              <span class="mm-mark">全进程共享</span>
-            </div>
-      </div><div class="mm-seg tone-violet" style="--mm-size:3.4">
-        <div class="mm-body">
-          <div class="mm-head"><b>堆</b><span class="mm-dir mm-up" title="向上增长">↑ 向上长</span></div>
-          <p class="mm-sub">malloc / new，向上长。谁都能申请，没人独占</p>
-        </div>
-        <div class="mm-side">
-              
-              <span class="mm-mark">全进程共享</span>
-            </div>
-      </div><div class="mm-seg tone-muted" style="--mm-size:1.5">
-        <div class="mm-body">
-          <div class="mm-head"><b>BSS</b></div>
-          <p class="mm-sub">未初始化的全局变量</p>
-        </div>
-        <div class="mm-side">
-              
-              <span class="mm-mark">全进程共享</span>
-            </div>
-      </div><div class="mm-seg tone-muted" style="--mm-size:1.5">
-        <div class="mm-body">
-          <div class="mm-head"><b>数据段</b></div>
-          <p class="mm-sub">已初始化的全局变量</p>
-        </div>
-        <div class="mm-side">
-              
-              <span class="mm-mark">全进程共享</span>
-            </div>
-      </div><div class="mm-seg tone-green" style="--mm-size:1.9">
-        <div class="mm-body">
-          <div class="mm-head"><b>代码段</b></div>
-          <p class="mm-sub">只读。同一份程序跑多个进程时，物理内存里只有一份</p>
-        </div>
-        <div class="mm-side">
-              
-              <span class="mm-mark">可共享</span>
-            </div>
-      </div></div>
-      <div class="mm-ends">
-            <span class="mm-end">高地址 0x7fff_ffff_ffff</span>
-            <span class="mm-end">低地址 0x0000_0000_0000</span>
+<h2 id="先看两种你熟悉的写法"><span class="num">01</span>先看两种你熟悉的写法</h2>
+<p>一个 Node 服务处理请求，代码大概长这样：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-javascript">async function handle(req, res) {
+  const user = await db.getUser(req.params.id);  // 让出执行权
+  const orders = await db.getOrders(user.id);    // 再让出一次
+  res.json({ user, orders });
+}
+</code></pre></div>
+<p><code>await</code> 是一个明确的让出点：数据库没返回时，这段代码停在这里，事件循环去处理别的连接。JVM 的写法是另一条路：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-java">new Thread(() -&gt; handle(conn)).start();
+</code></pre></div>
+<p>每个连接一条线程，<code>handle</code> 里可以放心地阻塞 —— 数据库慢，就慢这条线程。</p>
+<p>Go 的写法介于两者之间：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-go">func handle(conn net.Conn) {
+    buf := make([]byte, 4096)
+    n, _ := conn.Read(buf)      // 看起来会阻塞
+    conn.Write(process(buf[:n]))
+}
+
+// 每个连接一行，不关心线程，也不写回调
+go handle(conn)
+</code></pre></div>
+<p><code>conn.Read</code> 的写法是同步的，没有 <code>await</code>，也没有线程池。但进程可以同时服务很多连接。要理解这件事，得先回答一个更基础的问题：一条「执行流」到底是什么？</p>
+<p>用一句话说：它是一条线性的指令序列，可以暂停，也可以从暂停的地方继续。这个定义对线程、goroutine、Node 的回调都成立。区别只在于：<strong>谁来决定它在哪停、停了之后谁接上。</strong></p>
+<h2 id="暂停一条流要记下什么"><span class="num">02</span>暂停一条流，要记下什么</h2>
+<figure class="archfig" data-arch style="--arch-max-width:1600px" data-boundaries="nested" data-pano data-parts='{"t1":{"label":"执行流 A1","sub":"一条可以暂停、可以恢复的指令序列","detail":"它自己带一份栈和一份现场。线程和 goroutine 都是这个形状，差别在谁保存、保存在哪。"},"t2":{"label":"执行流 A2","sub":"同样的结构","detail":"栈大小在创建时定死，这是线程数量的第一道天花板。"},"t3":{"label":"执行流 A3","sub":"同样的结构","detail":"三条流共用下面那份资产，所以共享数据要自己加锁。"},"shared":{"label":"进程共享的那一份","sub":"代码、堆、fd 表","detail":"切换线程时不用搬这些；进程之间隔离靠页表，也不靠把它们复制一份。"},"kern":{"label":"内核","sub":"保存现场、挑下一条、换页表","detail":"线程切换的「直接成本」就发生在这三步里。间接成本发生在缓存，不在这一步的耗时数字里。"},"c0":{"label":"核 0","sub":"此刻在跑的线程","detail":"核只执行指令。它不知道这条指令属于哪个进程，也不知道语言层面的 G。"},"c1":{"label":"核 1","sub":"另一条线程","detail":"两条线程可以同时跑，这就是并行。"},"c2":{"label":"核 2","sub":"这个快照里空着","detail":"线程数少于核数时，核会空着；线程数多于核数时，线程排队。"},"c3":{"label":"核 3","sub":"这个快照里空着","detail":"这里画的是「三条流、两个核在跑」的一个时刻，不是整台机器的常态。"},"cache":{"label":"L1 / L2 / TLB","sub":"工作集和页表项","detail":"换线程之后，新线程要用的数据要重新装进来。切换越频繁，这部分开销越大。"},"mem":{"label":"物理内存","sub":"页帧","detail":"栈的 8 MiB 是虚拟地址预留；只有真正写到的页才占物理内存。"}}' data-tours='[{"id":"private","label":"一条流自己带着什么","steps":[{"at":["t1","shared"],"text":"PC、寄存器、栈跟着流走；代码、堆、fd 表留在进程上。暂停一条流只需要前三样。"},{"at":["t1"],"text":"栈是唯一私有的内存区域，也是「创建时定死大小」的那个东西。"}]},{"id":"switch","label":"一次切换经过哪几层","steps":[{"at":["kern"],"text":"陷入内核，保存 A1 的寄存器现场，从就绪队列里挑 A2。"},{"at":["c0","c1"],"text":"恢复 A2 的现场，回到用户态。到这一步，直接成本结束。"},{"at":["cache","mem"],"text":"A2 的工作集不在缓存里，要一条条从内存拉回来 —— 这部分不出现在切换耗时里。"}]}]' data-frames='[{"id":"proc","boundary":0,"kind":"contains","label":"进程 A · 页表把这一圈围起来","detail":"三条执行流和它们共用的资产在同一个地址空间里。外面的进程即使拿到这个地址，页表也不会让它读写。","members":["t1","t2","t3","shared"],"depth":1},{"id":"hw","boundary":1,"kind":"contains","label":"硬件","detail":"核和缓存不认识进程或 G，只认识此刻在它上面执行的指令。谁上核由内核决定。","members":["c0","c1","c2","c3","cache","mem"],"depth":1}]'>
+      <div class="arch-boundary-ui">
+          <div class="arch-boundary-toolbar"><span class="arch-boundary-label">边界</span>
+            <button type="button" data-boundary-mode="nested" aria-pressed="true">多层归属框</button>
+            <button type="button" data-boundary-mode="flat" aria-pressed="false">只留一层分区</button>
+            <button type="button" data-arch-reset>恢复全图</button>
           </div>
-      <p class="mm-note">分界线只有一条：<strong>栈随线程走，其余全随进程走</strong>。页表把这一整圈围起来，围栏外面碰不到 —— 那是别的进程的地盘。</p>
-    </figure><p><mark class="mk-blue">只看右边那一列就够了：标着「线程独享」的只有三块栈。</mark> 代码段、数据段、堆、mmap 区全是整个进程共用的。</p>
-<h3 id="文件描述符不在上面这张图里">文件描述符不在上面这张图里</h3>
-<p>这一点很容易搞错。fd 是<strong>一个整数</strong>，但它并不是地址空间里的某个地址：</p>
-<div class="flowd has-grid has-groups" data-flow data-edges="[{&quot;from&quot;:&quot;app&quot;,&quot;to&quot;:&quot;arr&quot;,&quot;label&quot;:&quot;3 就是这个数组的下标&quot;},{&quot;from&quot;:&quot;arr&quot;,&quot;to&quot;:&quot;std&quot;},{&quot;from&quot;:&quot;arr&quot;,&quot;to&quot;:&quot;mine&quot;,&quot;label&quot;:&quot;第 3 格&quot;},{&quot;from&quot;:&quot;std&quot;,&quot;to&quot;:&quot;file&quot;,&quot;dashed&quot;:true},{&quot;from&quot;:&quot;mine&quot;,&quot;to&quot;:&quot;file&quot;,&quot;label&quot;:&quot;每一格都是一个指针&quot;},{&quot;from&quot;:&quot;file&quot;,&quot;to&quot;:&quot;ino&quot;,&quot;label&quot;:&quot;多个表项可以指向同一个 inode&quot;}]" style="--flow-marker:url(#fa-1)">
-      <svg class="flowd-svg" aria-hidden="true">
+          <div class="arch-address-box" aria-live="polite"><div data-arch-address>点一个零件，看完整归属路径；点一个区域标题，看这一层的含义。</div>
+            <div data-arch-frame-detail>最外框表示逻辑资源域，不表示所有对象在一块内存里。每层边界的标题说明分组依据。</div></div>
+        </div>
+      <div class="arch-canvas"><svg viewBox="0 0 1600 1024" role="img" aria-labelledby="go-weight-archify-diagram-title go-weight-archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
+        <title id="go-weight-archify-diagram-title">一条执行流由什么构成：什么随流走，什么随进程走</title>
+        <desc id="go-weight-archify-diagram-description">暂停一条流，要记的是 PC、寄存器和私有栈；代码、堆、fd 表挂在进程上，不属于任何一条流</desc>
+        <!-- Definitions -->
         <defs>
-          <marker id="fa-1" viewBox="0 0 10 10" refX="9" refY="5"
-                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
-            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          <marker id="go-weight-arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-default" />
           </marker>
+          <marker id="go-weight-arrowhead-emphasis" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-emphasis" />
+          </marker>
+          <marker id="go-weight-arrowhead-security" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-security" />
+          </marker>
+          <marker id="go-weight-arrowhead-dashed" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-dashed" />
+          </marker>
+          <pattern id="go-weight-grid" width="40" height="40" patternUnits="userSpaceOnUse">
+            <path d="M 40 0 L 0 0 0 40" class="c-grid" stroke-width="0.5"/>
+          </pattern>
         </defs>
-      </svg>
-      <div class="flowd-groups"><div class="fgroup tone-blue" data-group-box="user">
-          <span class="fgroup-label">用户态</span>
-        </div><div class="fgroup tone-violet" data-group-box="kern">
-          <span class="fgroup-label">内核态</span>
-        </div></div>
-      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-blue" data-id="app" data-group="user">
-              
-              
-              <b>fd = 3</b>
-              <small>程序里唯一拿得到的把手</small>
-            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="arr" data-group="kern">
-              
-              
-              <b>文件描述符表</b>
-              <small>一个数组，每个进程一份（files_struct）。它不在你的地址空间里</small>
-            </div></div><div class="flowd-row"><div class="fnode tone-muted" data-id="std" data-group="kern">
-              
-              
-              <b>数组[0][1][2]</b>
-              <small>标准输入 / 输出 / 错误</small>
-            </div><div class="fnode tone-green" data-id="mine" data-group="kern">
-              
-              
-              <b>数组[3]</b>
-              <small>你刚 open 出来的那一格</small>
-            </div></div><div class="flowd-row"><div class="fnode tone-amber" data-id="file" data-group="kern">
-              
-              
-              <b>打开文件表项</b>
-              <small>读偏移 + 打开标志，一次 open 一份</small>
-            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="ino" data-group="kern">
-              
-              
-              <b>inode</b>
-              <small>权限 · 大小 · 数据块在哪</small>
-            </div></div></div>
-      
-    </div><p>所以「线程共享文件描述符」这句话的准确含义是：<strong>同一个进程里的线程共用一份 <code>files_struct</code></strong>，不是「栈旁边有一块放 fd 的地方」。</p>
-<hr>
-<p>那一条执行流本身，拆开来只有三样东西。这三样加起来，就是「暂停一条流时要记下的东西」：</p>
-<div class="flowd has-grid has-groups" data-flow data-edges="[{&quot;from&quot;:&quot;pc&quot;,&quot;to&quot;:&quot;reg&quot;,&quot;label&quot;:&quot;一起被打包成一份现场&quot;},{&quot;from&quot;:&quot;reg&quot;,&quot;to&quot;:&quot;sp&quot;,&quot;label&quot;:&quot;一起被打包成一份现场&quot;},{&quot;from&quot;:&quot;sp&quot;,&quot;to&quot;:&quot;heap&quot;,&quot;label&quot;:&quot;恢复时不用搬它&quot;,&quot;dashed&quot;:true}]" style="--flow-marker:url(#fa-2)">
-      <svg class="flowd-svg" aria-hidden="true">
-        <defs>
-          <marker id="fa-2" viewBox="0 0 10 10" refX="9" refY="5"
-                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
-            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
-          </marker>
-        </defs>
-      </svg>
-      <div class="flowd-groups"><div class="fgroup tone-blue" data-group-box="snap">
-          <span class="fgroup-label">暂停一条执行流，只需要记下这三样（里面没有堆）</span>
-        </div></div>
-      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-violet" data-id="pc">
-              
-              
-              <b>指令指针 PC</b>
-              <small>下一条指令在哪</small>
-            </div></div><div class="flowd-row"><div class="fnode tone-blue" data-id="reg">
-              
-              
-              <b>寄存器现场</b>
-              <small>算到一半的中间值</small>
-            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="sp">
-              
-              
-              <b>私有栈</b>
-              <small>局部变量、返回地址</small>
-            </div></div><div class="flowd-row"><div class="fnode tone-muted" data-id="heap">
-              
-              
-              <b>堆</b>
-              <small>挂在进程上，不挂在执行流上</small>
-            </div></div></div>
-      
-    </div><p><mark class="mk-blue">快照里没有堆，这条分界线是后面一切成本差异的钥匙。</mark></p>
-<p>栈必须跟着执行流走（它是这条流自己的调用链）；堆挂在进程上，谁都不独占。所以线程切换不用搬堆，而进程隔离却要用页表把堆整个隔开。</p>
-<p>拿一个熟悉的东西对照一下更容易记住：</p>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>操作系统这边</th><th>git 那边</th><th>为什么对得上</th></tr></thead><tbody><tr><th>进程</th><td data-label="git 那边">一个独立的仓库</td><td data-label="为什么对得上">对象库与工作区彼此不可见，隔离由各自的 <code>.git</code> 强制</td></tr><tr><th>共享的堆</th><td data-label="git 那边">同一个对象库</td><td data-label="为什么对得上">多条操作线共用同一份对象，谁都能改</td></tr><tr><th>私有栈</th><td data-label="git 那边">各自的暂存区</td><td data-label="为什么对得上">每条线一份，暂停时连它一起快照</td></tr><tr><th>指令指针 PC</th><td data-label="git 那边">各自的 HEAD 游标</td><td data-label="为什么对得上">记着这条线走到哪了</td></tr></tbody></table></div><hr>
-<h2 id="一次切换是一趟进出内核的旅程"><span class="num">02</span>一次切换，是一趟进出内核的旅程</h2>
-<div class="seqd has-grid" data-seq data-n="3"
-      style="--seq-fill:url(#s-fill-1);--seq-open:url(#s-fill-1-open)">
-      <svg class="seqd-svg" aria-hidden="true">
-        <defs>
-          <marker id="s-fill-1" viewBox="0 0 10 10" refX="9" refY="5"
-                  markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
-          </marker>
-          <marker id="s-fill-1-open" viewBox="0 0 10 10" refX="9" refY="5"
-                  markerWidth="8" markerHeight="8" orient="auto-start-reverse">
-            <path d="M 0 0 L 10 5 L 0 10" fill="none" stroke="currentColor" stroke-width="1.4"/>
-          </marker>
-        </defs>
-      </svg>
-      <div class="seqd-head"><div class="scell"><div class="spart tone-green" data-id="a">
-          <b>用户态 · 线程 A</b><small>正在 CPU 上</small>
-        </div></div><div class="scell"><div class="spart tone-violet" data-id="k">
-          <b>内核</b><small>调度器在这里</small>
-        </div></div><div class="scell"><div class="spart tone-blue" data-id="b">
-          <b>用户态 · 线程 B</b><small>在运行队列里等</small>
-        </div></div></div>
-      <div class="seqd-body"><div class="smsg" data-from="a" data-to="k" data-kind="sync" data-i="1" data-note="1"><span class="snote">1</span><span class="slabel">时钟中断 / 系统调用：陷入内核</span></div><div class="smsg is-self" data-from="k" data-to="k" data-kind="self" data-i="2" data-note="2"><span class="snote">2</span><span class="slabel">保存 A 的全部寄存器</span></div><div class="smsg is-self" data-from="k" data-to="k" data-kind="self" data-i="3" data-note="3"><span class="snote">3</span><span class="slabel">在运行队列里选下一个</span></div><div class="smsg is-self" data-from="k" data-to="k" data-kind="self" data-i="4" data-note="4"><span class="snote">4</span><span class="slabel">切换页表、累计运行统计</span></div><div class="smsg" data-from="k" data-to="b" data-kind="reply" data-i="5" data-note="5"><span class="snote">5</span><span class="slabel">恢复 B 的寄存器，回到用户态</span></div><div class="smsg is-self" data-from="b" data-to="b" data-kind="self" data-i="6" data-note="6"><span class="snote">6</span><span class="slabel">接着跑</span></div></div>
-    </div><p>第 1 到 5 步看得见、测得出，叫直接成本。第 6 步看不见，才是大头 —— B 开始跑的时候，缓存里装的全是 A 的工作集。</p>
-<div class="jcard">
-          <div class="jcard-head">
-            <span class="tag tone-blue">直接成本</span>
-            <span class="name">进出内核那一趟</span>
-            <span class="spacer"></span>
-            <span class="tag tone-blue">1.2 ~ 2.2 μs</span>
-          </div>
-          <div class="rec"><div class="ok">
-            <b>绑核</b><span>1.2 ~ 1.5 μs</span></div><div class="warn">
-            <b>不绑核</b><span>约 2.2 μs</span><em>核间迁移更贵</em></div><div class="">
-            <b>里面干了啥</b><span>特权级切换 + 保存/恢复寄存器 + 记账</span></div></div>
-          
-          <p class="jnote">这部分有实测数据，数字比较硬</p>
-        </div><div class="conn">
-      <span class="stem"></span>
-      <span class="pill">B 上线之后<span class="note">真正的账单才刚开始</span></span>
-      <span class="stem"></span><span class="head"></span>
-    </div><div class="jcard">
-          <div class="jcard-head">
-            <span class="tag tone-red">间接成本</span>
-            <span class="name">缓存还债</span>
-            <span class="spacer"></span>
-            <span class="tag tone-red">常超过直接成本</span>
-          </div>
-          <div class="rec"><div class="">
-            <b>L1 / L2</b><span>里面装的是 A 的工作集</span></div><div class="">
-            <b>要做什么</b><span>把 A 的逐出，再把 B 的填进来</span></div><div class="">
-            <b>TLB</b><span>跨进程时整个作废</span></div></div>
-          
-          <p class="jnote bad">这笔按切换频率计息，而且不出现在切换的耗时数字里</p>
-        </div><hr>
-<h2 id="一次切换并不算慢"><span class="num">03</span>一次切换并不算慢</h2>
-<p>「线程切换慢」是一句被传过头的话。放几个参照系进去看：</p>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>动作</th><th>耗时 / 速率</th><th>说明</th></tr></thead><tbody><tr><th>一次线程切换（绑核）</th><td data-label="耗时 / 速率">1.2 ~ 1.5 μs</td><td data-label="说明">直接成本部分</td></tr><tr><th>一次线程切换（不绑核）</th><td data-label="耗时 / 速率">约 2.2 μs</td><td data-label="说明">多了一次核间迁移</td></tr><tr><th>64 KiB memcpy</th><td data-label="耗时 / 速率">约 3 μs</td><td data-label="说明"><span class="tag tone-amber">比一次切换还贵</span></td></tr><tr><th>管道乒乓</th><td data-label="耗时 / 速率">约 40 万次 / 秒</td><td data-label="说明">进程间通信的老基准</td></tr><tr><th>Go channel 乒乓</th><td data-label="耗时 / 速率"><span class="tag tone-green">约 280 万次 / 秒</span></td><td data-label="说明">同一台机器上，快了 7 倍左右</td></tr></tbody></table></div><p><mark class="mk-blue">单独一次微秒级的切换，在大多数场景里根本感知不到。</mark></p>
-<p>真正杀人的是<strong>规模</strong>：十万个细粒度任务各占一条线程时，切换量随任务数线性增长，第 2 节的「缓存还债」跟着一起放大。慢的不是一次切换，而是「切换次数 × 任务数」。</p>
-<hr>
-<h2 id="第二条重量线栈"><span class="num">04</span>第二条重量线：栈</h2>
-<p>线程的另一半重量不在切换，在<strong>预留</strong>。</p>
-<div class="demo" data-widget="tuner" data-config="{&quot;param&quot;:{&quot;label&quot;:&quot;线程数&quot;,&quot;unit&quot;:&quot;条&quot;,&quot;values&quot;:[1000,5000,10000,20000,50000]},&quot;outputs&quot;:[{&quot;label&quot;:&quot;虚拟地址空间预留&quot;,&quot;unit&quot;:&quot;GiB&quot;,&quot;values&quot;:[8,40,80,160,400],&quot;tone&quot;:&quot;amber&quot;},{&quot;label&quot;:&quot;实际常驻（浅栈估算）&quot;,&quot;unit&quot;:&quot;MiB&quot;,&quot;values&quot;:[8,40,80,160,400],&quot;tone&quot;:&quot;green&quot;}]}">
-      <div class="demo-head">
-        <span class="title">Linux 默认 8MiB 线程栈：虚拟预留 vs 实际常驻</span>
-        <span class="status" data-status>拖动滑块换线程数</span>
-        <span class="spacer"></span>
-        
-      </div>
-      <div class="demo-body custom" data-mount></div>
-    </div><p><mark class="mk-blue">8MiB 是虚拟地址空间的预留，不是物理内存。</mark> 页只在真正用到栈的时候才分配，所以 1 万条线程大约是 80GiB 虚拟空间、80MiB 物理内存。</p>
-<p>但虚拟空间不是无限的，天花板就在这儿：</p>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>平台</th><th>默认线程栈</th><th>把线程数卡在多少</th></tr></thead><tbody><tr><th>32 位 Linux</th><td data-label="默认线程栈">2MiB（用户空间只有约 3GiB）</td><td data-label="把线程数卡在多少"><span class="tag tone-red">约 1500 条</span></td></tr><tr><th>64 位 JVM</th><td data-label="默认线程栈">1MB 固定</td><td data-label="把线程数卡在多少"><span class="tag tone-red">实测约 1.15 万条就 OOM</span></td></tr><tr><th>64 位 Linux</th><td data-label="默认线程栈">8MiB 虚拟预留</td><td data-label="把线程数卡在多少">虚拟空间宽裕，但物理内存和调度成本仍然在线</td></tr></tbody></table></div><div class="callout tone-violet">
-      <span class="ic">🔒</span>
-      <div><p><strong>为什么线程不能像 G 那样「小了再长」？</strong></p>
-<p>因为线程栈的大小在<strong>创建时一次定死</strong>，内核不会在运行中帮你搬家。</p>
-<p>于是线程库只能按<strong>最坏情况</strong>预留 —— 递归深一点、大数组多一点，栈就得留够。
-预留本身不立刻花物理内存，但它锁死了数量上限，
-而且把「最坏情况是多少」这份估算责任，压给了写代码的人。</p>
+
+        <!-- Background Grid -->
+        <rect width="100%" height="100%" fill="url(#go-weight-grid)" />
+
+        <!-- Boundaries (behind everything) -->
+        <g class="arch-frame" data-frame="proc" data-depth="1" data-frame-flat="false" data-frame-kind="contains" role="button" tabindex="0" aria-pressed="false" aria-label="进程 A · 页表把这一圈围起来"><title>三条执行流和它们共用的资产在同一个地址空间里。外面的进程即使拿到这个地址，页表也不会让它读写。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="0" data-frame-members="t1 t2 t3 shared" x="20" y="40" width="1100" height="440" rx="12" class="c-region" stroke-width="1"/>
+        <text x="28" y="58" class="t-cloud" font-size="9" font-weight="600">进程 A · 页表把这一圈围起来</text></g>
+
+        <g class="arch-frame" data-frame="hw" data-depth="1" data-frame-flat="false" data-frame-kind="contains" role="button" tabindex="0" aria-pressed="false" aria-label="硬件"><title>核和缓存不认识进程或 G，只认识此刻在它上面执行的指令。谁上核由内核决定。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="1" data-frame-members="c0 c1 c2 c3 cache mem" x="40" y="660" width="1440" height="340" rx="12" class="c-region" stroke-width="1"/>
+        <text x="48" y="678" class="t-cloud" font-size="9" font-weight="600">硬件</text></g>
+
+        <!-- Connection paths (before components for correct z-order) -->
+        <path data-edge-from="t1" data-edge-to="shared" data-edge-label="共用" data-edge-key="0" data-edge-id="t1-sh" data-composition-points="230,230;230,265;556,265;556,300" d="M 230 230 L 230 257 Q 230 265 238 265 L 548 265 Q 556 265 556 273 L 556 300" class="a-dashed" stroke-width="1.5" marker-end="url(#go-weight-arrowhead-dashed)"/>
+        <path data-edge-from="t2" data-edge-to="shared" data-edge-key="1" data-edge-id="t2-sh" data-composition-points="570,230;570,300" d="M 570 230 L 570 300" class="a-dashed" stroke-width="1.5" marker-end="url(#go-weight-arrowhead-dashed)"/>
+        <path data-edge-from="t3" data-edge-to="shared" data-edge-key="2" data-edge-id="t3-sh" data-composition-points="910,230;910,265;584,265;584,300" d="M 910 230 L 910 257 Q 910 265 902 265 L 592 265 Q 584 265 584 273 L 584 300" class="a-dashed" stroke-width="1.5" marker-end="url(#go-weight-arrowhead-dashed)"/>
+        <path data-edge-from="kern" data-edge-to="c0" data-edge-label="挑一条线程" data-edge-key="3" data-edge-id="k-c0" data-composition-points="749,610;749,655;200,655;200,700" d="M 749 610 L 749 647 Q 749 655 741 655 L 208 655 Q 200 655 200 663 L 200 700" class="a-default" stroke-width="1.5" marker-end="url(#go-weight-arrowhead)"/>
+        <path data-edge-from="kern" data-edge-to="c1" data-edge-key="4" data-edge-id="k-c1" data-composition-points="763,610;763,655;480,655;480,700" d="M 763 610 L 763 647 Q 763 655 755 655 L 488 655 Q 480 655 480 663 L 480 700" class="a-default" stroke-width="1.5" marker-end="url(#go-weight-arrowhead)"/>
+        <path data-edge-from="kern" data-edge-to="c2" data-edge-key="5" data-edge-id="k-c2" data-composition-points="777,610;777,655;760,655;760,700" d="M 777 610 L 777 647 Q 777 655 769 655 L 768 655 Q 760 655 760 663 L 760 700" class="a-dashed" stroke-width="1.5" marker-end="url(#go-weight-arrowhead-dashed)"/>
+        <path data-edge-from="kern" data-edge-to="c3" data-edge-key="6" data-edge-id="k-c3" data-composition-points="791,610;791,655;1040,655;1040,700" d="M 791 610 L 791 647 Q 791 655 799 655 L 1032 655 Q 1040 655 1040 663 L 1040 700" class="a-dashed" stroke-width="1.5" marker-end="url(#go-weight-arrowhead-dashed)"/>
+        <path data-edge-from="c3" data-edge-to="cache" data-edge-label="工作集" data-edge-key="7" data-edge-id="c3-cache" data-composition-points="1160,750;1200,750" d="M 1160 750 L 1200 750" class="a-default" stroke-width="1.5" marker-end="url(#go-weight-arrowhead)"/>
+        <path data-edge-from="cache" data-edge-to="mem" data-edge-label="缺页才去" data-edge-key="8" data-edge-id="cache-mem" data-composition-points="1320,800;1320,860" d="M 1320 800 L 1320 860" class="a-default" stroke-width="1.5" marker-end="url(#go-weight-arrowhead)"/>
+
+        <!-- Components -->
+        <g id="go-weight-node-t1" data-nb="1" data-node-id="t1" data-node-label="执行流 A1" tabindex="0" role="button" aria-label="Focus 执行流 A1, PC · 寄存器 · 私有栈, 进程 A · 页表把这一圈围起来" aria-pressed="false" data-node-kind="backend" data-node-sublabel="PC · 寄存器 · 私有栈" data-node-tag="随流走" data-node-context="进程 A · 页表把这一圈围起来">
+          <title>执行流 A1 · PC · 寄存器 · 私有栈 · 进程 A · 页表把这一圈围起来 · 随流走</title>
+          <rect x="80" y="100" width="300" height="130" rx="6" class="c-mask"/>
+          <rect x="80" y="100" width="300" height="130" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(86 106) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <rect class="nb-badge" x="327.2" y="108" width="40.8" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="347.6" y="119" font-size="8" text-anchor="middle">随流走</text>
+          <text class="nb-title" x="114" y="121" font-size="10.5" font-weight="600">执行流 A1</text>
+          <line class="nb-hr" x1="88" y1="128" x2="372" y2="128"/>
+          <text class="nb-k" x="92" y="161" font-size="9">现场</text><text class="nb-v" x="122.6" y="161" font-size="9">PC + 寄存器 + 栈指针</text>
+          <text class="nb-k" x="92" y="175" font-size="9">栈</text><text class="nb-v" x="122.6" y="175" font-size="9">创建时定死；Linux 常见 8 MiB，macOS pthread 默认 524 KiB</text>
+          <text class="nb-k" x="92" y="189" font-size="9">归属</text><text class="nb-v" x="122.6" y="189" font-size="9">这条流私有，别的流碰不到</text>
+          <text class="nb-note" x="92" y="222" font-size="8">暂停时把这三样存起来，恢复时原样装回</text>
+        </g>
+
+        <g id="go-weight-node-t2" data-nb="1" data-node-id="t2" data-node-label="执行流 A2" tabindex="0" role="button" aria-label="Focus 执行流 A2, 栈在创建时定死大小, 进程 A · 页表把这一圈围起来" aria-pressed="false" data-node-kind="backend" data-node-sublabel="栈在创建时定死大小" data-node-context="进程 A · 页表把这一圈围起来">
+          <title>执行流 A2 · 栈在创建时定死大小 · 进程 A · 页表把这一圈围起来</title>
+          <rect x="420" y="100" width="300" height="130" rx="6" class="c-mask"/>
+          <rect x="420" y="100" width="300" height="130" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(426 106) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text class="nb-title" x="454" y="121" font-size="10.5" font-weight="600">执行流 A2</text>
+          <line class="nb-hr" x1="428" y1="128" x2="712" y2="128"/>
+          <text class="nb-k" x="432" y="168" font-size="9">现场</text><text class="nb-v" x="462.6" y="168" font-size="9">和 t1 同样的结构</text>
+          <text class="nb-k" x="432" y="182" font-size="9">栈</text><text class="nb-v" x="462.6" y="182" font-size="9">大小在创建那一刻就定了</text>
+          <text class="nb-note" x="432" y="222" font-size="8">内核不会在运行中帮你搬家</text>
+        </g>
+
+        <g id="go-weight-node-t3" data-nb="1" data-node-id="t3" data-node-label="执行流 A3" tabindex="0" role="button" aria-label="Focus 执行流 A3, 暂停时连栈一起快照, 进程 A · 页表把这一圈围起来" aria-pressed="false" data-node-kind="backend" data-node-sublabel="暂停时连栈一起快照" data-node-context="进程 A · 页表把这一圈围起来">
+          <title>执行流 A3 · 暂停时连栈一起快照 · 进程 A · 页表把这一圈围起来</title>
+          <rect x="760" y="100" width="300" height="130" rx="6" class="c-mask"/>
+          <rect x="760" y="100" width="300" height="130" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(766 106) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text class="nb-title" x="794" y="121" font-size="10.5" font-weight="600">执行流 A3</text>
+          <line class="nb-hr" x1="768" y1="128" x2="1052" y2="128"/>
+          <text class="nb-k" x="772" y="168" font-size="9">现场</text><text class="nb-v" x="802.6" y="168" font-size="9">和 t1 同样的结构</text>
+          <text class="nb-k" x="772" y="182" font-size="9">栈</text><text class="nb-v" x="802.6" y="182" font-size="9">越界会撞上护栏页</text>
+          <text class="nb-note" x="772" y="222" font-size="8">一张进程里可以有很多条这样的流</text>
+        </g>
+
+        <g id="go-weight-node-shared" data-nb="1" data-node-id="shared" data-node-label="进程共享的那一份" tabindex="0" role="button" aria-label="Focus 进程共享的那一份, 代码段 · 堆 · 文件描述符表, 进程 A · 页表把这一圈围起来" aria-pressed="false" data-node-kind="database" data-node-sublabel="代码段 · 堆 · 文件描述符表" data-node-tag="全进程一份" data-node-context="进程 A · 页表把这一圈围起来">
+          <title>进程共享的那一份 · 代码段 · 堆 · 文件描述符表 · 进程 A · 页表把这一圈围起来 · 全进程一份</title>
+          <rect x="80" y="300" width="980" height="120" rx="6" class="c-mask"/>
+          <rect x="80" y="300" width="980" height="120" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(86 306) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <rect class="nb-badge" x="988.0" y="308" width="60.0" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="1018.0" y="319" font-size="8" text-anchor="middle">全进程一份</text>
+          <text class="nb-title" x="114" y="321" font-size="10.5" font-weight="600">进程共享的那一份</text>
+          <line class="nb-hr" x1="88" y1="328" x2="1052" y2="328"/>
+          <text class="nb-k" x="92" y="349" font-size="9">代码段</text><text class="nb-v" x="133.4" y="349" font-size="9">只读；同一程序跑多个进程时物理页可以共享</text>
+          <text class="nb-k" x="92" y="363" font-size="9">堆</text><text class="nb-v" x="133.4" y="363" font-size="9">谁都能申请，谁都不独占</text>
+          <text class="nb-k" x="92" y="377" font-size="9">fd 表</text><text class="nb-v" x="133.4" y="377" font-size="9">同一进程的线程共用一份（内核里的 files_struct）</text>
+          <text class="nb-k" x="92" y="391" font-size="9">页表</text><text class="nb-v" x="133.4" y="391" font-size="9">不在用户态地址空间里，由内核持有</text>
+          <text class="nb-note" x="92" y="412" font-size="8">这些东西不随某一条流走，所以切换时不用搬</text>
+        </g>
+
+        <g id="go-weight-node-kern" data-nb="1" data-node-id="kern" data-node-label="内核" tabindex="0" role="button" aria-label="Focus 内核, 页表 · 调度器 · 线程控制块, Architecture component" aria-pressed="false" data-node-kind="cloud" data-node-sublabel="页表 · 调度器 · 线程控制块" data-node-tag="切换发生在这里" data-node-context="Architecture component">
+          <title>内核 · 页表 · 调度器 · 线程控制块 · Architecture component · 切换发生在这里</title>
+          <rect x="80" y="500" width="1380" height="110" rx="6" class="c-mask"/>
+          <rect x="80" y="500" width="1380" height="110" rx="6" class="c-cloud" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="cloud" class="semantic-sigil s-cloud" transform="translate(86 506) scale(0.6875)">
+            <path d="M4.3 12.5h7.3a2.4 2.4 0 0 0 .2-4.8 4 4 0 0 0-7.5-1.3A3.1 3.1 0 0 0 4.3 12.5Z"/>
+          </g>
+          <rect class="nb-badge" x="1368.8" y="508" width="79.2" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="1408.4" y="519" font-size="8" text-anchor="middle">切换发生在这里</text>
+          <text class="nb-title" x="114" y="521" font-size="10.5" font-weight="600">内核</text>
+          <line class="nb-hr" x1="88" y1="528" x2="1452" y2="528"/>
+          <text class="nb-k" x="92" y="551" font-size="9">页表</text><text class="nb-v" x="155.0" y="551" font-size="9">把进程的地址空间围起来</text>
+          <text class="nb-k" x="92" y="565" font-size="9">调度器</text><text class="nb-v" x="155.0" y="565" font-size="9">从就绪的线程里挑下一条</text>
+          <text class="nb-k" x="92" y="579" font-size="9">线程控制块</text><text class="nb-v" x="155.0" y="579" font-size="9">保存线程的寄存器现场</text>
+          <text class="nb-note" x="92" y="602" font-size="8">一次线程切换 = 进内核 + 保存 + 选择 + 恢复</text>
+        </g>
+
+        <g id="go-weight-node-c0" data-nb="1" data-node-id="c0" data-node-label="核 0" tabindex="0" role="button" aria-label="Focus 核 0, 此刻跑着 A1, 硬件" aria-pressed="false" data-node-kind="external" data-node-sublabel="此刻跑着 A1" data-node-context="硬件">
+          <title>核 0 · 此刻跑着 A1 · 硬件</title>
+          <rect x="80" y="700" width="240" height="100" rx="6" class="c-mask"/>
+          <rect x="80" y="700" width="240" height="100" rx="6" class="c-external" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="external" class="semantic-sigil s-external" transform="translate(86 706) scale(0.6875)">
+            <rect x="2.5" y="5" width="8.5" height="8" rx="1.5"/>
+            <path d="M8 2.5h5.5V8M13.5 2.5 7.5 8.5"/>
+          </g>
+          <text class="nb-title" x="114" y="721" font-size="10.5" font-weight="600">核 0</text>
+          <line class="nb-hr" x1="88" y1="728" x2="312" y2="728"/>
+          <text class="nb-k" x="92" y="760" font-size="9">此刻</text><text class="nb-v" x="122.6" y="760" font-size="9">执行流 A1 在跑</text>
+          <text class="nb-note" x="92" y="792" font-size="8">这是一个时间快照，不是永久状态</text>
+        </g>
+
+        <g id="go-weight-node-c1" data-nb="1" data-node-id="c1" data-node-label="核 1" tabindex="0" role="button" aria-label="Focus 核 1, 此刻跑着 A2, 硬件" aria-pressed="false" data-node-kind="external" data-node-sublabel="此刻跑着 A2" data-node-context="硬件">
+          <title>核 1 · 此刻跑着 A2 · 硬件</title>
+          <rect x="360" y="700" width="240" height="100" rx="6" class="c-mask"/>
+          <rect x="360" y="700" width="240" height="100" rx="6" class="c-external" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="external" class="semantic-sigil s-external" transform="translate(366 706) scale(0.6875)">
+            <rect x="2.5" y="5" width="8.5" height="8" rx="1.5"/>
+            <path d="M8 2.5h5.5V8M13.5 2.5 7.5 8.5"/>
+          </g>
+          <text class="nb-title" x="394" y="721" font-size="10.5" font-weight="600">核 1</text>
+          <line class="nb-hr" x1="368" y1="728" x2="592" y2="728"/>
+          <text class="nb-k" x="372" y="767" font-size="9">此刻</text><text class="nb-v" x="402.6" y="767" font-size="9">执行流 A2 在跑</text>
+        </g>
+
+        <g id="go-weight-node-c2" data-nb="1" data-node-id="c2" data-node-label="核 2" tabindex="0" role="button" aria-label="Focus 核 2, 空着, 硬件" aria-pressed="false" data-node-kind="external" data-node-sublabel="空着" data-node-context="硬件">
+          <title>核 2 · 空着 · 硬件</title>
+          <rect x="640" y="700" width="240" height="100" rx="6" class="c-mask"/>
+          <rect x="640" y="700" width="240" height="100" rx="6" class="c-external" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="external" class="semantic-sigil s-external" transform="translate(646 706) scale(0.6875)">
+            <rect x="2.5" y="5" width="8.5" height="8" rx="1.5"/>
+            <path d="M8 2.5h5.5V8M13.5 2.5 7.5 8.5"/>
+          </g>
+          <text class="nb-title" x="674" y="721" font-size="10.5" font-weight="600">核 2</text>
+          <line class="nb-hr" x1="648" y1="728" x2="872" y2="728"/>
+          <text class="nb-k" x="652" y="767" font-size="9">此刻</text><text class="nb-v" x="682.6" y="767" font-size="9">这组流没有用到它</text>
+        </g>
+
+        <g id="go-weight-node-c3" data-nb="1" data-node-id="c3" data-node-label="核 3" tabindex="0" role="button" aria-label="Focus 核 3, 空着, 硬件" aria-pressed="false" data-node-kind="external" data-node-sublabel="空着" data-node-context="硬件">
+          <title>核 3 · 空着 · 硬件</title>
+          <rect x="920" y="700" width="240" height="100" rx="6" class="c-mask"/>
+          <rect x="920" y="700" width="240" height="100" rx="6" class="c-external" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="external" class="semantic-sigil s-external" transform="translate(926 706) scale(0.6875)">
+            <rect x="2.5" y="5" width="8.5" height="8" rx="1.5"/>
+            <path d="M8 2.5h5.5V8M13.5 2.5 7.5 8.5"/>
+          </g>
+          <text class="nb-title" x="954" y="721" font-size="10.5" font-weight="600">核 3</text>
+          <line class="nb-hr" x1="928" y1="728" x2="1152" y2="728"/>
+          <text class="nb-k" x="932" y="767" font-size="9">此刻</text><text class="nb-v" x="962.6" y="767" font-size="9">这组流没有用到它</text>
+        </g>
+
+        <g id="go-weight-node-cache" data-nb="1" data-node-id="cache" data-node-label="L1 / L2 / TLB" tabindex="0" role="button" aria-label="Focus L1 / L2 / TLB, 装着当前线程的工作集, 硬件" aria-pressed="false" data-node-kind="external" data-node-sublabel="装着当前线程的工作集" data-node-context="硬件">
+          <title>L1 / L2 / TLB · 装着当前线程的工作集 · 硬件</title>
+          <rect x="1200" y="700" width="240" height="100" rx="6" class="c-mask"/>
+          <rect x="1200" y="700" width="240" height="100" rx="6" class="c-external" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="external" class="semantic-sigil s-external" transform="translate(1206 706) scale(0.6875)">
+            <rect x="2.5" y="5" width="8.5" height="8" rx="1.5"/>
+            <path d="M8 2.5h5.5V8M13.5 2.5 7.5 8.5"/>
+          </g>
+          <rect class="nb-badge" x="1348.8" y="708" width="79.2" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="1388.4" y="719" font-size="8" text-anchor="middle">间接成本在这里</text>
+          <text class="nb-title" x="1234" y="721" font-size="10.5" font-weight="600">L1 / L2 / TLB</text>
+          <line class="nb-hr" x1="1208" y1="728" x2="1432" y2="728"/>
+          <text class="nb-k" x="1212" y="753" font-size="9">L1 / L2</text><text class="nb-v" x="1258.8" y="753" font-size="9">装着当前线程的工作集</text>
+          <text class="nb-k" x="1212" y="767" font-size="9">TLB</text><text class="nb-v" x="1258.8" y="767" font-size="9">页表项的缓存；跨进程切换要作废</text>
+          <text class="nb-note" x="1212" y="792" font-size="8">换一条流上来，缓存里是上一条流的残留</text>
+        </g>
+
+        <g id="go-weight-node-mem" data-nb="1" data-node-id="mem" data-node-label="物理内存" tabindex="0" role="button" aria-label="Focus 物理内存, 页帧按需分配, 硬件" aria-pressed="false" data-node-kind="external" data-node-sublabel="页帧按需分配" data-node-context="硬件">
+          <title>物理内存 · 页帧按需分配 · 硬件</title>
+          <rect x="1200" y="860" width="240" height="100" rx="6" class="c-mask"/>
+          <rect x="1200" y="860" width="240" height="100" rx="6" class="c-external" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="external" class="semantic-sigil s-external" transform="translate(1206 866) scale(0.6875)">
+            <rect x="2.5" y="5" width="8.5" height="8" rx="1.5"/>
+            <path d="M8 2.5h5.5V8M13.5 2.5 7.5 8.5"/>
+          </g>
+          <text class="nb-title" x="1234" y="881" font-size="10.5" font-weight="600">物理内存</text>
+          <line class="nb-hr" x1="1208" y1="888" x2="1432" y2="888"/>
+          <text class="nb-k" x="1212" y="920" font-size="9">页帧</text><text class="nb-v" x="1264.2" y="920" font-size="9">真正碰到才分配</text>
+          <text class="nb-k" x="1212" y="934" font-size="9">8 MiB 栈</text><text class="nb-v" x="1264.2" y="934" font-size="9">预留的是虚拟地址，不是 8 MiB 物理内存</text>
+        </g>
+
+        <!-- Connection labels -->
+        <g data-detail="context" data-edge-from="t1" data-edge-to="shared" data-edge-label="共用" data-edge-key="0" data-edge-id="t1-sh">
+          <rect x="378" y="245" width="30" height="14" rx="3" class="c-mask"/>
+          <text x="393" y="255" class="t-messagebus" font-size="8" text-anchor="middle">共用</text>
+        </g>
+
+
+        <g data-detail="context" data-edge-from="kern" data-edge-to="c0" data-edge-label="挑一条线程" data-edge-key="3" data-edge-id="k-c0">
+          <rect x="445.5" y="635" width="58" height="14" rx="3" class="c-mask"/>
+          <text x="474.5" y="645" class="t-muted" font-size="8" text-anchor="middle">挑一条线程</text>
+        </g>
+
+
+
+        <g data-detail="context" data-edge-from="c3" data-edge-to="cache" data-edge-label="工作集" data-edge-key="7" data-edge-id="c3-cache">
+          <rect x="1160.6" y="740" width="38.8" height="14" rx="3" class="c-mask"/>
+          <text x="1180" y="750" class="t-muted" font-size="8" text-anchor="middle">工作集</text>
+        </g>
+        <g data-detail="context" data-edge-from="cache" data-edge-to="mem" data-edge-label="缺页才去" data-edge-key="8" data-edge-id="cache-mem">
+          <rect x="1295.8" y="820" width="48.4" height="14" rx="3" class="c-mask"/>
+          <text x="1320" y="830" class="t-muted" font-size="8" text-anchor="middle">缺页才去</text>
+        </g>
+
+        <!-- Legend -->
+
+      </svg></div>
+      <figcaption>从左边三条执行流进入：栈跟着每条流走，代码、堆、fd 表挂在进程上。往下看内核和核，切换的代价就在那两层里。</figcaption>
+      <div class="pano-ui"></div>
+      <p class="arch-hint"><span class="idle">点头上的任意一个框看它的关系，点区域标题看分组含义，点零件看完整归属路径</span><span class="focused">再点一次空白处取消</span></p>
+    </figure><p>图里也有省略：只画了三条执行流、两个核在跑，实际数量随进程变化；三条流到共享资产的三条虚线是「共用同一份」，不是三次拷贝。</p>
+<h2 id="一次切换的直接成本"><span class="num">03</span>一次切换的直接成本</h2>
+<p>先给这台机器上的实测（Apple M4、macOS 26、Go 1.26.2）：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">BenchmarkGPingPong-10      170 ns/op    两个 G 在一个无缓冲 channel 上来回递一次
+BenchmarkMPingPong-10    13143 ns/op    两个 G 各自 LockOSThread，跨线程递一次
+BenchmarkMemcpy64K-10      934 ns/op    64 KiB 内存拷贝
+BenchmarkSyscallGetpid     7.4 ns/op    getpid
+BenchmarkGoCreate          128 ns/op    创建一个 G 并等它结束
+</code></pre></div>
+<p>先解释这两行容易误读的数字：</p>
+<ul>
+<li><strong>G 的 170 ns 是一次往返</strong>，包含两次交接，所以单次约 85 ns。两个 G 可能跑在同一个 M 上，也可能不跨线程，具体取决于调度器把它们放在哪。</li>
+<li><strong>M 的 13.1 µs 也不是纯粹的内核切换</strong>。两个 G 被锁在不同线程上，一个 G 阻塞、另一个被唤醒，这里面包含的是「唤醒另一条线程」的完整路径，不是一次裸的内核上下文切换。不同系统的唤醒实现差别很大，这个数不能直接和 Linux 上常见的「1~2 µs」比较。</li>
+</ul>
+<p>要比较的是量级：<mark class="mk-blue">跨线程交接比同一 M 上的 G 交接贵两个数量级。</mark> 但单次微秒级的开销，在大多数业务里感知不到。让线程方案撞墙的不是「一次切换慢」，而是「切换次数 × 任务数」：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">10,000 条线程，每条每秒被切换 1,000 次
+= 每秒 10,000,000 次切换
+× 每次 13 µs（这台机器上跨线程交接的量级）
+= 130 秒的切换时间，摊在 1 秒里 —— 还没算干活
+</code></pre></div>
+<p>这个算式只是用来说明规模效应，不代表真实负载的切换频率。它想说的是：单次成本和总成本之间隔着一个「并发任务数」。</p>
+<h2 id="间接成本缓存里的残留"><span class="num">04</span>间接成本：缓存里的残留</h2>
+<p>切换的账单有两张。第一张是上面那些微秒；第二张不在切换的耗时里，而在切换之后的执行里。</p>
+<p>一条线程在核上跑，它最近用过的指令和数据会被装进 L1/L2，页表项会被装进 TLB。换一条线程上来，缓存里装的是上一条线程的工作集：</p>
+<ul>
+<li>新线程要用的数据不在 L1/L2，要一条条从更远的层级拉回来；</li>
+<li>如果换了进程，页表也换了，TLB 里的映射整体作废；</li>
+<li>如果两条线程在同一个进程里，TLB 还能复用一部分，但数据缓存仍然要重装。</li>
+</ul>
+<p>这部分开销和「工作集有多大」「切换有多频繁」都有关，没法用一个固定的微秒数概括。它也是为什么「线程切换只要 1 µs」这句话不能直接推出「开十万条线程没问题」：被乘上任务数的是它，不是那 1 µs。</p>
+<h2 id="第二条重量栈在创建时定死"><span class="num">05</span>第二条重量：栈在创建时定死</h2>
+<p>线程的另一半重量不在切换，在预留。</p>
+<table>
+<thead>
+<tr>
+<th>平台</th>
+<th>默认线程栈</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Linux（glibc pthread）</td>
+<td>常见 8 MiB</td>
+<td>跟随 <code>RLIMIT_STACK</code>；<code>ulimit -s</code> 默认 8192 KiB</td>
+</tr>
+<tr>
+<td>macOS（pthread）</td>
+<td>524 KiB（本机实测）</td>
+<td><code>pthread_get_stacksize_np</code> 读出来是 524 KiB，含护栏页</td>
+</tr>
+<tr>
+<td>JVM（64 位 Linux）</td>
+<td>1 MiB</td>
+<td><code>-Xss</code> 的默认值</td>
+</tr>
+</tbody>
+</table>
+<p>关键区别是「预留」和「常驻」：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">10,000 条线程 × 8 MiB = 80 GiB 虚拟地址空间
+真正用到多少，才分配多少物理页
+</code></pre></div>
+<p>所以 8 MiB 不会立刻吃掉 80 GiB 内存。但它锁死了数量上限：虚拟地址空间是有限的（32 位进程只有 3 GiB 左右用户空间，2 MiB 一条时一千多条就到顶），而且「最坏情况要多少栈」这份估算被压给了写代码的人 —— 递归深一点、局部数组大一点，就得留够。</p>
+<p>线程栈不能在运行中搬家，原因是内核不知道栈里哪一格是整数、哪一格是指针。要扩容就得复制整段栈，再把栈内的指针全部改到新地址；内核没有这份「哪里是指针」的信息，所以做不到。</p>
+<p>Go 的 G 把这两件事都换了：栈 2 KiB 起步、不够就换一块两倍大的连续内存再搬（靠 GC 的栈图修正指针），调度也搬到了用户态。本机实测：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">100,000 条 G：栈 196 MiB + 堆 61 MiB，进程 RSS 256 MiB，内核线程 11 条
+1,000,000 条 G：栈 1954 MiB + 堆 609 MiB，进程 RSS 1800 MiB，内核线程 11 条
+</code></pre></div>
+<p>一百万条执行流、十一条线程。这不是「线程变快了」，是「每条流的固定成本被拆掉了」。</p>
+<div class="callout tone-amber">
+      <span class="ic">⚠</span>
+      <div><p><strong>但栈小不等于没有成本。</strong></p>
+<p>一个 G 大约 2 KiB 栈 + 600 B 结构体；一百万条也是 2.6 GiB。
+轻量改变的是单条成本，不是「可以无限开」。
+第 ⑦ 篇会讲：难的不是开，而是让它们都能结束。</p>
 </div>
-    </div><p>这两条重量线，正好对应后面要拆的两条路线：<strong>切换路径</strong>（第 ⑥ 篇的调度器）和<strong>栈预留</strong>（第 ③ 篇的可增长栈）。</p>
-<hr>
+    </div><h2 id="这两条重量决定了后面要拆哪两样"><span class="num">06</span>这两条重量，决定了后面要拆哪两样</h2>
+<p>把上面的账收一下，Go 要解决的是两个具体问题：</p>
+<ol>
+<li><strong>切换路径</strong>：线程切换必须进内核。要绕过它，就得在用户态决定「下一条跑谁」—— 这是第 ④、⑥ 篇的 GMP 和调度器。</li>
+<li><strong>栈预留</strong>：线程栈创建时定死。要绕过它，就得让栈能按需增长 —— 这是第 ③ 篇的可增长栈。</li>
+</ol>
+<p>而在这之前，得先看前人试过什么、为什么没成（第 ② 篇）。否则很容易把「用户态调度」当成 Go 的首创，重复踩一遍旧 M:N 的坑。</p>
+<h2 id="quiz">quiz</h2>
 <div class="quiz"><details>
-        <summary>为什么说「栈随流走、堆随容器走」？这条分界线决定了什么？</summary>
-        <div class="a"><p>栈是这条执行流自己的调用链，必须跟着它走，所以切换时要保存恢复；
-堆挂在进程上，不属于任何一条流，所以线程切换不用搬堆。
-而进程之间的隔离，恰恰是要用页表把堆整个隔开 ——
-这条分界线决定了「线程切换便宜、进程切换贵」这个成本差异。</p>
+        <summary>暂停一条执行流，必须记下哪三样？为什么堆不在其中？</summary>
+        <div class="a"><p>PC（下一条指令）、寄存器现场、私有栈。
+堆挂在进程上，不属于任何一条执行流；多条流共用同一份堆，
+所以切换时不用搬它，进程隔离才需要用页表把堆隔开。</p>
 </div>
       </details><details>
-        <summary>8MiB 的线程栈，开一万条线程会立刻吃掉 80GiB 内存吗？</summary>
-        <div class="a"><p>不会。8MiB 是虚拟地址空间的预留，页是按需分配的 ——
-真正触到那段栈才会分配物理页。一万条浅栈线程大约只占 80MiB 常驻内存。
-但预留仍然有意义：它锁死了虚拟空间能容纳多少条线程。</p>
+        <summary>8 MiB 的线程栈，开一万条线程会立刻占掉 80 GiB 物理内存吗？</summary>
+        <div class="a"><p>不会。8 MiB 是虚拟地址空间的预留，物理页按需分配。
+但预留仍然有意义：它锁死了虚拟空间能容纳多少条线程，
+而且把「最坏情况要多少栈」的估算压给了写代码的人。</p>
 </div>
       </details><details>
-        <summary>既然一次线程切换只要 1 点几微秒，为什么还说线程重？</summary>
-        <div class="a"><p>因为重不在单次，在规模。加一个参照系就看出来了：64KiB 的 memcpy 要 3 微秒，
-比一次切换还贵。真正的问题是有十万个细粒度任务时，
-切换次数随任务数线性增长，而「缓存还债」这部分间接成本会同步放大。</p>
+        <summary>这台机器上跨线程递一次值要 13 µs，为什么不能直接说「线程切换要 13 µs」？</summary>
+        <div class="a"><p>因为那 13 µs 里包含 park/unpark 的系统调用，不是纯粹的内核上下文切换。
+不同系统、不同唤醒路径的差距很大（Linux futex 通常比 Darwin 便宜）。
+要比较的是量级和趋势：跨线程交接比同一 M 上的 G 交接贵两个数量级，
+而总成本还要乘上切换频率和任务数。</p>
+</div>
+      </details><details>
+        <summary>为什么线程栈不能在运行中扩容，而 G 的栈可以？</summary>
+        <div class="a"><p>扩容要复制栈并把栈内指针改到新地址，前提是知道「哪一格是指针」。
+内核没有这份信息；runtime 有，因为 GC 扫描栈时本来就要记录指针位置。
+所以 G 的连续栈和 GC 是绑在一起的，不是单独实现的。</p>
 </div>
       </details></div>
 
     <footer>
-      <span>一条执行流有多重 · 进程、线程与那趟内核之旅</span>
-      <span>最后更新 2026-10-01 · 单文件可离线打开</span>
+      <span>一条执行流有多重 · 从线程的现场与栈说起</span>
+      <span>最后更新 2026-10-20 · 单文件可离线打开</span>
     </footer>
   </main>
 </div>

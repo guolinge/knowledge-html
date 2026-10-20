@@ -1,299 +1,192 @@
-## 01 · 两种并发模型
+## 01 · 一任务一线程，会依次撞上三堵墙
 
-最朴素的方案是「一个任务一条线程」。它简单到不需要解释，但和「多路复用」放在一起看，差别立刻出来：
+最朴素的并发模型是「一个任务一条线程」：
+
+```java
+// 每个连接一条线程，handler 里可以放心阻塞
+while (true) {
+    Socket conn = server.accept();
+    new Thread(() -> handle(conn)).start();
+}
+```
+
+它简单到不需要解释：线程替你挂起，代码是线性的，内核负责调度。C10K 之前，Apache 的 prefork（一连接一进程）和 JVM 的 servlet 容器（一请求一线程）都是这个思路。问题不在「一次处理一个请求」，在把这条路线推到规模上时，会按顺序撞上三堵墙。
+
+```lane-stack
+- badge: 第一堵
+  title: 栈在创建时定死
+  desc: 最先撞上，和负载无关
+  tone: red
+  nodes:
+    - { title: 每条线程一份栈, sub: "Linux 常见 8 MiB，macOS pthread 默认 524 KiB" }
+    - { title: 不能中途搬家, sub: "内核不知道栈里哪一格是指针，没法修" }
+    - { title: 只能按最坏情况预留, sub: "1 万条就是 80 GiB 虚拟地址空间；32 位进程一两千条就到顶" }
+  next: "内存能缓解一部分 :: :: 下一堵随负载出现"
+- badge: 第二堵
+  title: 切换成本随任务数放大
+  desc: 有活了才显现
+  tone: amber
+  nodes:
+    - { title: 直接成本, sub: "进出内核 + 保存恢复现场，微秒级" }
+    - { title: 间接成本, sub: "缓存和 TLB 要换成另一条线程的工作集" }
+    - { title: 总账, sub: "切换次数 × 任务数；单次不痛，规模上很痛" }
+  next: "硬件更快能缓解 :: :: 第三堵不行"
+- badge: 第三堵
+  title: 内核看不懂「在等什么」
+  desc: 最隐蔽，也最致命
+  tone: violet
+  nodes:
+    - { title: 内核只有两种状态, sub: "可运行 / 阻塞" }
+    - { title: 但等待有很多种, sub: "等 channel、等锁、等定时器、等下游返回" }
+    - { title: 于是无法择优唤醒, sub: "谁先醒、醒了先跑谁，内核没有这份信息" }
+```
+
+前两堵墙可以靠更多内存、更快的 CPU 缓解。第三堵墙要求换一个调度者：一个知道「这条流在等什么」的调度器。这正是用户态调度的动机，也是 Go 后来做的事。
+
+## 02 · 旧 M:N：一个阻塞，全船停
+
+用户态调度不是 Go 的首创。Solaris 在 1992 年就有 M:N 线程，FreeBSD 5 的 KSE 也是这个模型：N 条用户线程复用到 M 条内核线程上，用户态库决定哪条用户线程跑。
+
+想法是对的，死法很具体：
+
+```flow
+grid: true
+groups:
+  - { id: kse, label: "三条用户线程骑在同一条内核线程 K1 上", tone: red }
+nodes:
+  - { id: u1, label: "U1", sub: "发起一次磁盘 read", row: 0, tone: red, group: kse }
+  - { id: k1, label: "K1 被内核整个挂起", sub: "执行权被内核收走", row: 1, tone: red, group: kse }
+  - { id: u2, label: "U2", sub: "本来可以跑", row: 2, tone: muted, group: kse }
+  - { id: u3, label: "U3", sub: "本来可以跑", row: 2, tone: muted, group: kse }
+  - { id: dead, label: "U2、U3 一起停", sub: "用户态调度器想救也救不了", row: 3, tone: red, group: kse }
+edges:
+  - { from: u1, to: k1, label: "一个阻塞" }
+  - { from: u2, to: dead, label: "骑在同一条线程上" }
+  - { from: u3, to: dead }
+```
+
+关键在最后一步：内核挂起的是 K1，不是 U1。用户态调度器这时也在 K1 上，它没有机会运行，自然没法把 U2、U3 搬到别的内核线程上。
+
+补救办法是「给每个可能阻塞的调用配一条专属内核线程」。可这样补下去，每条用户线程最终都要一条内核线程，就退化成了 1:1。两个系统都在同一个地方掉头：
+
+```timeline
+- when: 1992
+  title: Solaris 引入 M:N
+  desc: 用户线程复用到少量内核线程上，当时看起来是正确方向
+  tone: blue
+- when: 2002
+  title: Solaris 回到 1:1
+  desc: M:N 变成可选，默认模型改回一条用户线程对一条内核线程
+  tone: red
+- when: 2008
+  title: FreeBSD 7.0 换成 1:1
+  desc: KSE 的 M:N 实现被 1:1 的 libthr 取代，成为默认
+  tone: red
+```
+
+一句话总结这次失败：==用户态调度器可以决定「谁跑」，但决定不了「谁醒」。== 阻塞发生在它看不见的那一层，它连补救的机会都没有。
+
+## 03 · async/await：把「别阻塞」写进函数签名
+
+第二条路线换了个方向：不救阻塞，而是要求代码永远不要阻塞。
+
+```javascript
+// 同步函数：内部不能 await
+function parse(row) {
+  return JSON.parse(row);          // 纯计算，没问题
+}
+
+// 一旦内部要等 I/O，就得变成 async
+async function loadUser(id) {
+  const row = await db.get(id);    // 断点：这里让出执行权
+  return parse(row);
+}
+
+// 调用方也得是 async，颜色一路往上染
+async function handle(req, res) {
+  const user = await loadUser(req.params.id);
+  res.json(user);
+}
+```
+
+`await` 在编译后是一台状态机：函数被切成几段，每段之间保存局部变量，`await` 处登记一个回调，然后返回。等到 Promise 完成，再从断点恢复。执行流还是那条执行流，只是它不再对应一条线程 —— 事件循环在多个任务之间切换。
+
+这套模型能扛住很多连接，代价写在类型里：
 
 ```compare
 first: 维度
-head: [1:1（一个任务一条线程）, M:N（任务交给用户态调度器）]
+head: [async/await 的做法, 带来的约束]
 rows:
-  - 任务和线程的关系: ["一一对应，开一个任务就开一条线程", "本来就是两条队伍，任务先排进队列"]
-  - 谁决定「下一个跑谁」: [{ text: "内核调度器", tone: violet }, { text: "用户态调度器 —— 整套逻辑在你自己的进程里", tone: green }]
-  - 每条任务占多少栈: ["每条都要预留（pthread 默认 8MB）", "2KB 起步，用到才长"]
-  - 线程数上限: [{ text: "被栈预留和内核成本卡死", tone: red }, "跟任务数无关，约等于核数"]
+  - 谁能调用谁: ["async 可以调同步；同步不能直接调 async", { text: "要拿到结果就得自己变 async，把 Promise 继续往上传", tone: red }]
+  - 函数签名: ["返回 Promise<T>，而不是 T", "接口、回调、中间件都被迫跟着改"]
+  - 阻塞调用: ["任何一次同步阻塞都会冻住整个事件循环", "数据库驱动、文件读写、加密库都要提供异步版本"]
+  - 生态: ["同步库和异步库分成两套", "选型时先看它有没有 async 版本"]
 ```
 
-把 M:N 这条链一路画到硬件上，就是下面这张。==注意它是一条完整的通路：任务在哪儿排队、谁在挑、挑完交给谁、最后落在哪个核上。==
+这不是语法问题，是契约问题。「这段代码会不会让出线程」变成了编译期可见的信息，函数被分成两种颜色，颜色沿着调用链传染。Bob Nystrom 在 2015 年把这个现象写成《What Color is Your Function?》，它到今天还是理解 async/await 成本的最好入口。
 
-```flow
-grid: true
-groups:
-  - { id: q,   label: "① 任务先在这一排格子里排队", tone: green }
-  - { id: m,   label: "③ 内核线程 —— 同一时刻只有这几条在外面", tone: blue }
-  - { id: hw,  label: "④ 硬件：三个核占满，一个从头到尾空着", tone: muted }
-nodes:
-  - { id: t1, label: T1, sub: "", row: 0, tone: green, group: q }
-  - { id: t2, label: T2, sub: "", row: 0, tone: green, group: q }
-  - { id: t3, label: T3, sub: "", row: 0, tone: green, group: q }
-  - { id: t4, label: T4, sub: "", row: 0, tone: green, group: q }
-  - { id: t5, label: T5, sub: "", row: 0, tone: green, group: q }
-  - { id: t6, label: T6, sub: "", row: 0, tone: green, group: q }
-  - { id: sch, label: 用户态调度器, sub: "② 在自己进程里挑下一个，不惊动内核", row: 1, tone: green }
-  - { id: m1, label: M1, sub: "正跑着某个 T", row: 2, tone: blue, group: m }
-  - { id: m2, label: M2, sub: "正跑着某个 T", row: 2, tone: blue, group: m }
-  - { id: m3, label: M3, sub: "正跑着某个 T", row: 2, tone: blue, group: m }
-  - { id: c1, label: 核 0, sub: "满的", row: 3, tone: green, group: hw }
-  - { id: c2, label: 核 1, sub: "满的", row: 3, tone: green, group: hw }
-  - { id: c3, label: 核 2, sub: "满的", row: 3, tone: green, group: hw }
-  - { id: c4, label: 核 3, sub: "从头到尾空着", row: 3, tone: muted, group: hw }
-edges:
-  - { from: t1, to: sch }
-  - { from: t2, to: sch }
-  - { from: t3, to: sch }
-  - { from: t4, to: sch }
-  - { from: t5, to: sch }
-  - { from: t6, to: sch }
-  - { from: sch, to: m1 }
-  - { from: sch, to: m2 }
-  - { from: sch, to: m3 }
-  - { from: m1, to: c1 }
-  - { from: m2, to: c2 }
-  - { from: m3, to: c3 }
-```
+## 04 · Go 的第三条路：不消灭阻塞，分流
 
-顺着这张图讲一遍就是整个模型：
-
-> 六个任务排在队列里（**T1..T6**）→ 用户态调度器一次取一个，不惊动内核 →
-> 同一时刻只放 **3 个**在外面，交给 3 条真线程 → 3 条线程各自占住一个核 →
-> **第 4 个核从头到尾没被用上**。
-
-最后那句就是这套模型的问题所在，也是后面要讲的：线程数约等于核数是**理想情况**；
-真正的麻烦是其中一条线程一旦阻塞在系统调用上，它占着的核就空转了 ——
-==而用户态调度器管不了这件事，因为阻塞发生在它看不见的那一层。==
-
-````callout
-tone: amber
-icon: 🔍
-text: |
-  **顺带看一眼 1:1 在这张图上会长什么样。**
-
-  同样 6 个任务，1:1 会开出 **6 条线程**去抢 **4 个核**。
-  核还是那 4 个，但队伍变成两排：
-
-  ```
-  任务  T1 T2 T3 T4 T5 T6
-  线程  M1 M2 M3 M4 M5 M6      ← 六条真实线程，每条占着 8MB 栈预留
-  核    [核0][核1][核2][核3]    ← 同一时刻只有 4 条能真的在跑
-         ↑ M1~M4 在跑，M5 M6 在队列里等内核调度
-  ```
-
-  多出来的那两条线程不是「更并发」，是**在等核**。
-  任务数一大，等核的线程就排成长龙，光是它们之间的上下文切换就把收益吃光了。
-````
-
-1:1 的好处很实在：每个任务的逻辑是一条线性同步代码，阻塞就阻塞，线程替你挂起；内核视角也最简单。它曾经是主流 —— Apache 每个连接一个 worker，JVM servlet 每个请求一个线程。衰败从 C10K 开始。
-
-把 1:1 往规模上推，会**按顺序**撞上三重天花板：
-
-```lane-stack
-- badge: 天花板一
-  title: 栈预留封顶数量
-  desc: 最硬性，最先撞上
-  tone: red
-  nodes:
-    - { title: 每线程固定预留, sub: "Linux 8MiB / JVM 1MB", tag: 创建时定死 }
-    - { title: 不能中途搬家, sub: "内核不会帮你扩栈", tag: 只能按最坏情况留 }
-    - { title: 结果, sub: "32 位约 1500 条；JVM 实测 1.15 万条 OOM", tag: 想开十万先问内存 }
-  next: "内存缓解不了 :: :: 下一重天花板随负载显现"
-- badge: 天花板二
-  title: 切换成本随任务数放大
-  desc: 其次，负载一上来就显现
-  tone: amber
-  nodes:
-    - { title: 直接成本, sub: "微秒级，单次不痛" }
-    - { title: 间接成本, sub: "缓存与 TLB 污染，乘以任务数" }
-    - { title: 一笔账, sub: "单核每秒的切换预算只养得起约十万线程", tag: 还没算干活时间 }
-  next: "前两重还能靠硬件缓解 :: :: 第三重不行"
-- badge: 天花板三
-  title: 内核看不懂等待语义
-  desc: 最隐蔽，规模够大才成为主要矛盾
-  tone: violet
-  nodes:
-    - { title: 内核只认两个状态, sub: "可运行 / 阻塞", tag: 没有第三种 }
-    - { title: 但等待有四种, sub: "等 channel、等定时器、等业务结果、等网络" }
-    - { title: 于是只能干等, sub: "调度器无法择优唤醒", tag: 要靠换调度者解决 }
-```
-
-第三重是真正把需求逼出来的那一重。前两重可以靠「更多内存、更快切换」缓解，第三重要求**换一个更懂业务的调度者** —— 而这正是 Go 后来做的事。
-
-同一个需求在别处出现过 —— 而且解法长得几乎一样：
+Go 既没有要求你写 `await`，也没有让每条 G 独占一条线程。它做的是把「等」分成两类，分别处理：
 
 ```compare
-first: 层次
-head: ["HTTP/1.1 → HTTP/2", "线程 → Goroutine"]
+first: 等待的类型
+head: [谁来接管, 线程会怎样]
 rows:
-  - 承载单位: ["每个请求独占一条 TCP 连接", "每个任务独占一条线程"]
-  - 上限卡在哪: ["连接数上限 + 队头阻塞", "栈预留 + 切换成本"]
-  - 解法: ["多个逻辑 stream 复用到少量连接上", "多个 G 复用到少量 M 上"]
-  - 逻辑单元: ["stream 有独立的流控与生命周期", "G 有独立的栈与三态"]
-  - 承载单元: [{ text: "TCP 连接只有几条", tone: green }, { text: "M 只有核数那么多", tone: green }]
+  - 网络 I/O（socket、pipe）: ["netpoller（epoll / kqueue）", { text: "G 被挂起，M 回去跑别的 G", tone: green }]
+  - 不能 poll 的 I/O（普通文件、部分 cgo）: ["只能真的阻塞", { text: "一条 M 陪着睡，P 交给别的 M", tone: amber }]
 ```
 
----
+这套分流有一个前提：runtime 必须能看见每一次可能阻塞的调用。Go 能做到，是因为标准库的 I/O 路径和 runtime 是一起设计的 —— `net` 包知道自己要注册 netpoller，`os` 包知道普通文件注册不上，`syscall` 包知道什么时候该进 `_Gsyscall`。
 
-## 02 · 前人两条路线，各栽在哪
-
-用户态调度不是 Go 首创。Java 1.1 有 green threads，Solaris 和 FreeBSD 都有 M:N 线程库。先看它们怎么死的。
-
-```timeline
-- when: SunOS 5.2
-  title: Solaris 开始做 M:N
-  desc: 把用户线程多路复用到少量内核线程上，当时的「正确答案」
-  tone: blue
-- when: Solaris 9 · 2002
-  title: Solaris 放弃 M:N
-  desc: 退回 1:1，十几年试验结束
-  tone: red
-- when: FreeBSD 5 · 2003
-  title: FreeBSD 也做 M:N
-  desc: 换了个系统，同一个方向又来一遍
-  tone: blue
-- when: FreeBSD 7 · 2008
-  title: 默认回到 1:1
-  desc: 一年后彻底移除 M:N
-  tone: red
-```
-
-两个系统、十几年、同一个结论。死法只有一条主线：
-
-```flow
-grid: true
-groups:
-  - { id: kt, label: "三个用户线程骑在同一个内核线程 K1 上", tone: red }
-nodes:
-  - { id: u1, label: "U1", sub: "发起一次磁盘 read", row: 0, tone: blue, group: kt }
-  - { id: kern, label: "内核把 K1 整个挂起", sub: "执行权被内核收走了", row: 1, tone: red, group: kt }
-  - { id: u2, label: "U2", sub: "本来能跑", row: 2, tone: muted, group: kt }
-  - { id: u3, label: "U3", sub: "本来能跑", row: 2, tone: muted, group: kt }
-  - { id: dead, label: "U2 / U3 全部连坐", sub: "用户态调度器想救都救不了", row: 3, tone: red, group: kt }
-edges:
-  - { from: u1, to: kern, label: "一个阻塞" }
-  - { from: u2, to: dead, label: "骑在同一根线程上" }
-  - { from: u3, to: dead, label: "" }
-```
-
-一句话总结这件事：**M:N 线程是操作系统支持不足的产物，核心问题是系统调用会阻塞。**
-
-补救方向本来是「给每个易阻塞的调用配一个专属内核线程」—— 可补着补着，就退化成 1:1 了。
-
-第二条现代路线不救阻塞，而是**消灭「阻塞的线程」**：
-
-```journey
-- tag: 起点
-  tone: blue
-  name: 一个普通的同步函数
-  badge: 一个颜色
-  fields:
-    - { k: 写起来, v: "顺序、直观、好读" }
-    - { k: 问题, v: "它内部要发网络请求" }
-  note: 编译器把 async 函数切成状态机，每个 await 是一个断点
-  next: "想拿异步结果 :: :: 调用链开始变色"
-- tag: 传染
-  tone: red
-  name: 颜色沿调用链往上爬
-  badge: 两种颜色
-  fields:
-    - { k: helper, v: "自己也得改成 async" }
-    - { k: 上层, v: "一路传染到入口" }
-    - { k: 断不开, v: "同步代码无法直接调用异步函数" }
-  noteTone: bad
-  note: 「这段代码会不会让出线程」变成了编译期可见的契约，中间层必须站队
-- tag: 代价
-  tone: amber
-  name: 语法糖解决不了
-  badge: 契约问题
-  fields:
-    - { k: 好处, v: "线程永不睡眠，调度权在 runtime 手里" }
-    - { k: 代价, v: "函数签名里多了不可消除的信息" }
-  note: 两条路线只是把「异步的难」放在了不同位置
-```
+四条路线放在一起：
 
 ```compare
 first: 路线
-head: [阻塞怎么处理, 谁在调度, API 侵入性]
+head: [承载单位, 阻塞怎么处理, API 侵入, 主要代价]
 rows:
-  - 旧式 M:N 线程: [{ text: "连坐：一个阻塞全船停", tone: red }, "用户态库，但被内核架空", "无（同步外观）"]
-  - async / await: ["消灭阻塞：状态机 + 非阻塞 I/O", "runtime 的事件循环", { text: "高：颜色侵入函数签名", tone: red }]
-  - Goroutine: [{ text: "分流：能异步的走 netpoller，真阻塞换 M", tone: green }, "Go runtime（用户态）", { text: "无（同步外观）", tone: green }]
+  - 1:1 线程: ["一条线程一个任务", "线程自己睡", "无", { text: "栈预留 + 切换成本封顶", tone: red }]
+  - 旧 M:N: ["N 条用户线程 / M 条内核线程", { text: "一个阻塞，整条内核线程连坐", tone: red }, "无（同步外观）", "需要内核配合，补到最后退化成 1:1"]
+  - async/await: ["事件循环 + 状态机", "代码里不能阻塞", { text: "高：函数被染色", tone: red }, "同步库要重写一套"]
+  - Go: ["G / M / P，G 由 runtime 调度", { text: "能 poll 的交给 netpoller，不能的换 M", tone: green }, { text: "无：代码是同步外观", tone: green }, "不能 poll 的 I/O 仍然要一条 M 陪着"]
 ```
 
----
+Go 的代价不是零：文件 I/O 密集时，线程数会随并发读增长（第 ⑤ 篇实测 64 条 G → 66 条线程）。它换到的是：代码里没有颜色，写阻塞式代码不会冻住整个进程。
 
-## 03 · Go 的第三条路
+## 05 · 为什么这一次能成
 
-Go 回到了 green thread，但把当年的死穴逐个补上：
+把旧 M:N 和 Go 放在一起，差别不在「调度算法更聪明」，而在三个前提：
 
-Go 的两条修复路径是分开的两张图 —— 它们要解决的根本不是同一件事。
+1. **I/O 层在 runtime 手里。** 网络 fd 能注册进 netpoller，等待被事件机制接管；旧式线程库只能包裹既有系统调用，改不了等待方式。
+2. **栈能增长。** 每条任务 2 KiB 起步，不需要按最坏情况预留；旧式用户线程仍然要给每条线程一份固定栈，规模上限没有消失。
+3. **语言和 runtime 一起设计。** `go` 语句、channel、`conn.Read` 的同步外观，让 runtime 能在每一次可能阻塞的地方接手；async/await 把这件事推给了类型系统，旧 M:N 推给了库。
 
-```flow
-grid: true
-groups:
-  - { id: p1, label: "路径一 · 网络 I/O：等待移交给 netpoller", tone: green }
-nodes:
-  - { id: g1, label: "G1 等待网络数据", sub: "注册 epoll，然后被挂起", row: 0, tone: green, group: p1 }
-  - { id: m1, label: "M 没睡", sub: "转头继续跑 G3、G4", row: 1, tone: green, group: p1 }
-  - { id: ok, label: "连坐没有发生的机会", sub: "P 一直有 M 在跑 Go 代码", row: 2, tone: green, group: p1 }
-edges:
-  - { from: g1, to: m1, label: "挂起的只是 G" }
-  - { from: m1, to: ok, label: "" }
-```
+三个前提缺一个，结果就会退化成前面某条路线。这也是为什么「自己实现一个用户态调度器」很难成功：调度算法不是难点，接管等待才是。
 
-```flow
-grid: true
-groups:
-  - { id: p2, label: "路径二 · 真阻塞系统调用：换一个 M 顶上", tone: amber }
-nodes:
-  - { id: g2, label: "G2 进入文件 read", sub: "没有 poll 接口可用", row: 0, tone: amber, group: p2 }
-  - { id: m2, label: "M1 陪 G2 沉进内核", sub: "先把 P 解绑交出去", row: 1, tone: amber, group: p2 }
-  - { id: m3, label: "M2 接管 P", sub: "继续跑 G5，没受影响", row: 2, tone: green, group: p2 }
-  - { id: back, label: "read 返回后 M1 变备用", sub: "P 早已还回来了", row: 3, tone: muted, group: p2 }
-edges:
-  - { from: g2, to: m2, label: "解绑 P" }
-  - { from: m2, to: m3, label: "P 交给别人" }
-  - { from: m3, to: back, label: "" }
-```
-
-同一个 `conn.Read`，在两种语言里的样子差别就在这：
-
-```go
-// Go：同步外观。conn.Read 可能真的阻塞 —— 但阻塞的是 G，不是 M
-func handle(conn net.Conn) {
-    data, err := conn.Read(buf)   // 底层走 netpoller；M 转头去跑别的 G
-    if err != nil {
-        return
-    }
-    conn.Write(process(data))
-}
-```
-
-```javascript
-// JS：显式异步。每多一个 await，签名就多一个 async，颜色一路传上去
-async function handle(conn) {
-  const data = await conn.read();   // 状态机断点
-  await conn.write(process(data));
-}
-```
-
-==Go 的代码没有颜色，但「读完之后再写」的顺序感完整保留。== 哪种更好没有标准答案 —— 这是两条路线，不是「goroutine 完胜 async」。
-
----
+## quiz
 
 ```quiz
-- q: 旧式 M:N 线程的死穴到底是什么？
+- q: 旧 M:N 线程为什么「一个阻塞全船停」？
   a: |
-    多个用户线程骑在同一个内核线程上，只要其中一个进入阻塞系统调用，
-    整个内核线程被内核挂起，骑在它身上的其他人全部连坐。
-    用户态调度器救不了，因为执行权已经被内核整个收走了。
-    补救办法是给每个易阻塞的调用配专属内核线程 —— 补着补着就退化成 1:1 了。
-- q: async/await 的「函数颜色」问题为什么语法糖解决不了？
+    多条用户线程复用在一条内核线程上。其中一条进入阻塞系统调用后，
+    内核挂起的是整条内核线程，用户态调度器也在这条线程上，没机会运行，
+    所以搬不动另外两条。补救办法是给每个可能阻塞的调用配专属内核线程，
+    补到最后就退化成 1:1。
+- q: async/await 的「函数颜色」为什么不能靠语法糖解决？
   a: |
-    因为颜色不是语法问题，是契约问题。它把「这段代码会不会让出线程」
-    变成了编译期可见的信息，于是函数的签名里多了一样东西。
-    同步代码一旦要调用异步函数，自己也得变异步，颜色只能沿调用链往上传染。
-    Go 回避这件事的方式是让阻塞留在同步外观里，把复杂度收进 runtime。
-- q: 三重天花板是按什么顺序撞上的？
+    因为颜色不是语法问题，是契约问题：它把「这段代码会不会让出线程」
+    写进了函数签名。同步函数调用 async 函数时，要么自己变 async，
+    要么阻塞事件循环。颜色只能沿着调用链传染，编译器没法替你消除。
+- q: Go 为什么不需要给函数染色？
   a: |
-    内存最硬性，最先到（栈预留把线程数锁死）；
-    切换成本其次，随负载显现（直接成本加缓存还债，再乘任务数）；
-    语义盲区最隐蔽，规模大到一定程度才成为主要矛盾。
-    前两重可以靠更多内存和更快切换缓解，第三重要求换一个更懂业务的调度者。
+    因为 Go 允许代码保持同步外观，把「等」的处理收进 runtime：
+    能 poll 的 fd 交给 netpoller，G 挂起、M 继续；
+    不能 poll 的才真的阻塞一条 M，并把 P 交给别人。
+    前提是标准库 I/O 和 runtime 一起设计，runtime 能看见每一次等待。
+- q: 三条路线各自的主要代价是什么？
+  a: |
+    1:1 线程：栈预留和切换成本把并发数量封顶；
+    旧 M:N：内核挂起整条线程，用户态调度器救不了；
+    async/await：函数被染色，同步库要重写，任何阻塞都会冻住事件循环。
+    Go 的代价是：不能 poll 的 I/O 仍然要一条 M 陪着。
 ```

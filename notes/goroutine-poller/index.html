@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>阻塞了怎么办 · netpoller 与 hand-off 两条路</title>
-<meta name="description" content="同样是「等」，网络 fd 能被 epoll 监视、交给 netpoller，文件 read 只能在核心里睡到磁盘把数据搬上来。Go 必须准备两条路，而这两条路的边界决定了它的优势在哪打折。" />
+<title>阻塞了怎么办 · netpoller 与 hand-off</title>
+<meta name="description" content="同一个 read，网络 fd 交给 netpoller（G 挂起、M 继续），普通文件只能阻塞（M 陪着睡，sysmon 把 P 交给新 M）。本机实测：64 条 G 读裸 socket 用 66 条线程，读 net socket 只用 5 条。" />
 <link rel="stylesheet" href="../../assets/theme.css?v=b918ec5c83" />
   <link rel="stylesheet" href="../../assets/blocks.css?v=f1eceacc25" />
   <link rel="stylesheet" href="../../assets/archify-embed.css?v=68fec0b81b" />
@@ -27,69 +27,282 @@
   <aside class="toc" id="toc">
       <p class="toc-title">目录</p>
       <a href="../../index.html" class="sub">← 全部笔记</a>
-      <a href="#同样是等内核给不给句柄">同样是「等」，内核给不给句柄</a>
-      <a href="#泳道一网络-io等待被-netpoller-吸收">泳道一：网络 I/O，等待被 netpoller 吸收</a>
-      <a href="#泳道二真阻塞换一条-m-顶上">泳道二：真阻塞，换一条 M 顶上</a>
-      <a href="#旧-mn-为什么没有这条路">旧 M:N 为什么没有这条路</a>
-      <a href="#内核看到的和-runtime-看到的">内核看到的，和 runtime 看到的</a>
+      <a href="#先看一个能测出来的差别">先看一个能测出来的差别</a>
+      <a href="#把两条路画在一张图上">把两条路画在一张图上</a>
+      <a href="#路径一netpoller-把等待接过去">路径一：netpoller 把等待接过去</a>
+      <a href="#路径二p-不是立刻交出去的">路径二：P 不是立刻交出去的</a>
+      <a href="#边界哪些-fd-走哪条路">边界：哪些 fd 走哪条路</a>
+      <a href="#这条边界决定了-go-的优势在哪打折">这条边界决定了 Go 的优势在哪打折</a>
+      <a href="#quiz">quiz</a>
   </aside>
 
   <main>
     <div class="hero">
       <span class="eyebrow">● Go 协程 · ⑤</span>
-      <h1>阻塞了怎么办 · netpoller 与 hand-off 两条路</h1>
-      <p class="lede">同样是「等」，网络 fd 能被 epoll 监视、交给 netpoller，文件 read 只能在核心里睡到磁盘把数据搬上来。Go 必须准备两条路，而这两条路的边界决定了它的优势在哪打折。</p>
+      <h1>阻塞了怎么办 · netpoller 与 hand-off</h1>
+      <p class="lede">同一个 read，网络 fd 交给 netpoller（G 挂起、M 继续），普通文件只能阻塞（M 陪着睡，sysmon 把 P 交给新 M）。本机实测：64 条 G 读裸 socket 用 66 条线程，读 net socket 只用 5 条。</p>
     </div>
 
 <aside class="needs">
       <p class="needs-title">读这篇之前，你需要先知道</p>
-      <a class="need" href="../goroutine-gmp/">← <b>4. GMP · G 怎么挂回线程</b><span>G / M / P 各自的职责与生命周期，LRQ、runnext、mcache 和 GOMAXPROCS</span></a>
+      <a class="need" href="../goroutine-gmp/">← <b>4. GMP · G 怎么挂回线程</b><span>G 是数据、M 是线程、P 是许可；本地队列与 mcache 各省一把锁</span></a>
     </aside>
-    <div class="provenance"><span><b>来源</b> 飞书文档《从进程线程理解 Go 协程》 https://futu.feishu.cn/docx/MtjTdgOM2okwOdxpPDecVZMrnqc @ revision 105</span><span><b>生成</b> 2026-10-01</span><span><b>模型</b> claude-opus-4-5</span></div>
+    <div class="provenance"><span><b>来源</b> 飞书文档《从进程线程理解 Go 协程》 https://futu.feishu.cn/docx/MtjTdgOM2okwOdxpPDecVZMrnqc @ revision 105 · Go 1.26.2 源码 /usr/local/go/src/runtime（proc.go / runtime2.go / stack.go / netpoll.go / asm_arm64.s），2026-03-27 · Go 1.27 发布说明（goroutineleak profile） https://go.dev/doc/go1.27 · 本机实测 Apple M4 / macOS 26 / Go 1.26.2（2026-10-20）</span><span><b>生成</b> 2026-10-01</span><span><b>模型</b> deepseek-v4.1-flash-1017</span></div>
     <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">Go</span> <span class="tag tone-muted">netpoller</span> <span class="tag tone-muted">epoll</span> <span class="tag tone-muted">系统调用</span></span></div>
 
-<h2 id="同样是等内核给不给句柄"><span class="num">01</span>同样是「等」，内核给不给句柄</h2>
-<p>G 已经挂回了 M，那 G 阻塞了怎么办？</p>
-<p>答案是<strong>分流</strong>。而分流的原因只有一条：<strong>「等待」能不能被内核以外的机制接管，取决于内核给不给句柄。</strong></p>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>等的是什么</th><th>内核给不给句柄</th><th>于是怎么处理</th></tr></thead><tbody><tr><th>网络 fd</th><td data-label="内核给不给句柄"><span class="tag tone-green">给。epoll / kqueue / IOCP 能统一监视</span></td><td data-label="于是怎么处理">注册一个事件，数据到了内核来喊你 → 交给 netpoller</td></tr><tr><th>文件 I/O</th><td data-label="内核给不给句柄"><span class="tag tone-red">不给。read 就是要在内核里睡到磁盘把数据搬上来</span></td><td data-label="于是怎么处理">只能真的阻塞一条 M → 走 hand-off</td></tr><tr><th>CGO / 部分同步系统调用</th><td data-label="内核给不给句柄"><span class="tag tone-red">同理，没有 poll 接口</span></td><td data-label="于是怎么处理">同上</td></tr></tbody></table></div><p><mark class="mk-blue">这就是「网络 I/O 与阻塞系统调用为什么走两条路」的全部理由。</mark> runtime 必须准备两条路，因为有一类等待它接管不了。</p>
-<hr>
-<h2 id="泳道一网络-io等待被-netpoller-吸收"><span class="num">02</span>泳道一：网络 I/O，等待被 netpoller 吸收</h2>
-<div class="flowd has-grid has-groups" data-flow data-edges="[{&quot;from&quot;:&quot;g&quot;,&quot;to&quot;:&quot;park&quot;,&quot;label&quot;:&quot;挂起&quot;},{&quot;from&quot;:&quot;park&quot;,&quot;to&quot;:&quot;m&quot;,&quot;label&quot;:&quot;它去干别的了&quot;},{&quot;from&quot;:&quot;m&quot;,&quot;to&quot;:&quot;ready&quot;,&quot;label&quot;:&quot;epoll 通知 fd 就绪&quot;}]" style="--flow-marker:url(#fa-1)">
-      <svg class="flowd-svg" aria-hidden="true">
-        <defs>
-          <marker id="fa-1" viewBox="0 0 10 10" refX="9" refY="5"
-                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
-            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
-          </marker>
-        </defs>
-      </svg>
-      <div class="flowd-groups"><div class="fgroup tone-green" data-group-box="np">
-          <span class="fgroup-label">G 挂在 netpoller 上，M 全程没睡</span>
-        </div></div>
-      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-green" data-id="g" data-group="np">
-              
-              
-              <b>G 调 conn.Read</b>
-              <small>数据还没到</small>
-            </div></div><div class="flowd-row"><div class="fnode tone-amber" data-id="park" data-group="np">
-              
-              
-              <b>gopark</b>
-              <small>fd 注册进 epoll，G 状态改成 Waiting</small>
-            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="m" data-group="np">
-              
-              
-              <b>M 立刻取下一个 G</b>
-              <small>从 LRQ 拿一个继续跑</small>
-            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="ready" data-group="np">
-              
-              
-              <b>goready</b>
-              <small>fd 就绪，G 被放回 LRQ</small>
-            </div></div></div>
+<h2 id="先看一个能测出来的差别"><span class="num">01</span>先看一个能测出来的差别</h2>
+<p>同一个「等数据」的动作，写在不同类型的 fd 上，线程数完全不一样。下面两段程序各开 64 条 G 去读一个永远没有数据的 fd：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-go">// 路径 A：裸 socketpair + syscall.Read
+fds, _ := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_STREAM, 0)
+go func() {
+    buf := make([]byte, 8)
+    syscall.Read(fds[0], buf)   // 没有数据，线程睡在内核里
+}()
+
+// 路径 B：net.Dial + conn.Read
+c, _ := net.Dial(&quot;tcp&quot;, ln.Addr().String())
+go func() {
+    buf := make([]byte, 8)
+    c.Read(buf)                 // 没有数据，G 挂起
+}()
+</code></pre></div>
+<p>本机（Apple M4、macOS 26、Go 1.26.2）实测，<code>GOMAXPROCS=4</code>：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">路径 A（裸 socket）：goroutines=65  threads=66
+路径 B（net 包）：   goroutines=66  threads=5
+</code></pre></div>
+<p>同样是 64 条 G 在等，路径 A 让进程多出 61 条线程，路径 B 几乎没变。差别不在「网络比文件快」，而在于：<mark class="mk-blue">这条等待能不能被事件机制接管。</mark></p>
+<h2 id="把两条路画在一张图上"><span class="num">02</span>把两条路画在一张图上</h2>
+<figure class="archfig" data-arch style="--arch-max-width:1720px" data-pano data-parts='{"read":{"label":"发起读","sub":"G 在用户态调用的那一行","detail":"它不知道下面会 park 还是睡线程。这个差别由 fd 的注册状态决定。"},"dec":{"label":"分叉点","sub":"这个 fd 能不能被 epoll / kqueue 监视","detail":"关键不在「读的时候」，在「创建 fd 的时候」。注册失败之后，Read 不会尝试等事件。"},"np":{"label":"netpoller","sub":"等待被事件机制吸收","detail":"G 被挂起，M 回去干活。唤醒时把 G 放进 runnext，让它尽快接着跑。"},"mgo":{"label":"M 继续","sub":"同一个 M，不用新建","detail":"这条路上线程数不变，这是 goroutine 在 I/O 密集场景的优势来源。"},"park":{"label":"挂起的 G","sub":"只改状态和入队","detail":"没有系统调用，没有线程切换。内核看不到这件事。"},"hand":{"label":"进入系统调用","sub":"线程要睡，P 得让出来","detail":"entersyscall 只是标记状态；handoff 由 sysmon 观察后执行，最多等 10ms。"},"sys":{"label":"内核里的 read","sub":"整条 M 停在这里","detail":"对普通文件，这一步没有 poll 接口可用，只能等磁盘把数据搬上来。"},"sysmon":{"label":"sysmon","sub":"后台监控线程","detail":"除了 retake P，它还负责抢占长跑的 G、驱动 netpoll、触发 GC。它不执行业务代码。"},"mnew":{"label":"新 M","sub":"接管被让出的 P","detail":"P 是许可；旧 M 睡着时把许可交出去，别的 M 才能继续跑 Go 代码。"}}' data-tours='[{"id":"net","label":"网络读：只停 G","steps":[{"at":["read","dec"],"text":"socket 在 Dial 时注册进了 netpoller，Read 走到 EAGAIN 后去 `waitRead`。"},{"at":["np","park"],"text":"`gopark` 把 G 改成 `_Gwaiting`，fd 留在 epoll 的监视列表里。"},{"at":["mgo"],"text":"M 没睡，直接取下一个 G。数据到了由 `goready` 放回 runnext。"}]},{"id":"file","label":"文件读：停整条 M","steps":[{"at":["read","dec"],"text":"普通文件在 os.Open 时就没注册成功 —— epoll 不支持它。"},{"at":["hand","sys"],"text":"`entersyscall` 标记 `_Gsyscall`，线程进内核读盘。这一步没有事件可等。"},{"at":["sysmon","mnew"],"text":"sysmon 发现 P 卡住，`handoffp` 把 P 交给一条新 M；旧 M 留在内核里。"}]}]'>
       
-    </div><p><mark class="mk-blue">gopark 和 goready 这两个名字值得记住：所谓「阻塞」在 Go 里就是一次状态改写加一次入队，没有任何内核参与。</mark> 这正是第 ① 篇那趟「进出内核的旅程」被绕开的全部秘密。</p>
-<p>谁在驱动 netpoller？两条路：<strong>空闲的 M 取不到 G 时会顺带 poll 一次</strong>；<strong>后台的 sysmon 也会周期性检查</strong>。就绪的 G 被批量放回 LRQ，等下一次被选中。</p>
+      <div class="arch-canvas"><svg viewBox="0 0 1720 940" role="img" aria-labelledby="go-blocking-archify-diagram-title go-blocking-archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
+        <title id="go-blocking-archify-diagram-title">同样是等：一个 read 的两种命运</title>
+        <desc id="go-blocking-archify-diagram-description">能不能把等待交给事件机制，取决于这个 fd 在创建时有没有注册进 netpoller</desc>
+        <!-- Definitions -->
+        <defs>
+          <marker id="go-blocking-arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-default" />
+          </marker>
+          <marker id="go-blocking-arrowhead-emphasis" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-emphasis" />
+          </marker>
+          <marker id="go-blocking-arrowhead-security" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-security" />
+          </marker>
+          <marker id="go-blocking-arrowhead-dashed" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-dashed" />
+          </marker>
+          <pattern id="go-blocking-grid" width="40" height="40" patternUnits="userSpaceOnUse">
+            <path d="M 40 0 L 0 0 0 40" class="c-grid" stroke-width="0.5"/>
+          </pattern>
+        </defs>
+
+        <!-- Background Grid -->
+        <rect width="100%" height="100%" fill="url(#go-blocking-grid)" />
+
+        <!-- Boundaries (behind everything) -->
+
+
+        <!-- Connection paths (before components for correct z-order) -->
+        <path data-edge-from="read" data-edge-to="dec" data-edge-key="0" data-edge-id="r-d" data-composition-points="840,160;840,210" d="M 840 160 L 840 210" class="a-default" stroke-width="1.5" marker-end="url(#go-blocking-arrowhead)"/>
+        <path data-edge-from="dec" data-edge-to="np" data-edge-label="注册了" data-edge-key="1" data-edge-id="d-np" data-composition-points="640,270;240,270;240,400" d="M 640 270 L 248 270 Q 240 270 240 278 L 240 400" class="a-default" stroke-width="1.5" marker-end="url(#go-blocking-arrowhead)"/>
+        <path data-edge-from="dec" data-edge-to="hand" data-edge-label="没注册" data-edge-key="2" data-edge-id="d-hand" data-composition-points="1040,270;1250,270;1250,400" d="M 1040 270 L 1242 270 Q 1250 270 1250 278 L 1250 400" class="a-default" stroke-width="1.5" marker-end="url(#go-blocking-arrowhead)"/>
+        <path data-edge-from="np" data-edge-to="mgo" data-edge-label="M 不等" data-edge-key="3" data-edge-id="np-mgo" data-composition-points="400,470;480,470" d="M 400 470 L 480 470" class="a-default" stroke-width="1.5" marker-end="url(#go-blocking-arrowhead)"/>
+        <path data-edge-from="np" data-edge-to="park" data-edge-label="gopark" data-edge-key="4" data-edge-id="np-park" data-composition-points="240,540;240,620" d="M 240 540 L 240 620" class="a-default" stroke-width="1.5" marker-end="url(#go-blocking-arrowhead)"/>
+        <path data-edge-from="hand" data-edge-to="sys" data-edge-label="M 睡下" data-edge-key="5" data-edge-id="hand-sys" data-composition-points="1250,520;1250,570;1130,570;1130,620" d="M 1250 520 L 1250 562 Q 1250 570 1242 570 L 1138 570 Q 1130 570 1130 578 L 1130 620" class="a-default" stroke-width="1.5" marker-end="url(#go-blocking-arrowhead)"/>
+        <path data-edge-from="hand" data-edge-to="sysmon" data-edge-label="过一会儿" data-edge-key="6" data-edge-id="hand-sysmon" data-composition-points="1420,460;1490,460;1490,620" d="M 1420 460 L 1482 460 Q 1490 460 1490 468 L 1490 620" class="a-dashed" stroke-width="1.5" marker-end="url(#go-blocking-arrowhead-dashed)"/>
+        <path data-edge-from="sysmon" data-edge-to="mnew" data-edge-label="交 P" data-edge-key="7" data-edge-id="sysmon-mnew" data-composition-points="1490,740;1490,800" d="M 1490 740 L 1490 800" class="a-default" stroke-width="1.5" marker-end="url(#go-blocking-arrowhead)"/>
+
+        <!-- Components -->
+        <g id="go-blocking-node-read" data-nb="1" data-node-id="read" data-node-label="G 调 conn.Read" tabindex="0" role="button" aria-label="Focus G 调 conn.Read, 数据还没到, Architecture component" aria-pressed="false" data-node-kind="backend" data-node-sublabel="数据还没到" data-node-context="Architecture component">
+          <title>G 调 conn.Read · 数据还没到 · Architecture component</title>
+          <rect x="660" y="60" width="360" height="100" rx="6" class="c-mask"/>
+          <rect x="660" y="60" width="360" height="100" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(666 66) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text class="nb-title" x="694" y="81" font-size="10.5" font-weight="600">G 调 conn.Read</text>
+          <line class="nb-hr" x1="668" y1="88" x2="1012" y2="88"/>
+          <text class="nb-k" x="672" y="120" font-size="9">调用链</text><text class="nb-v" x="713.4" y="120" font-size="9">conn.Read → net.(*conn).Read → internal/poll.FD.Read</text>
+          <text class="nb-k" x="672" y="134" font-size="9">返回</text><text class="nb-v" x="713.4" y="134" font-size="9">n, err；数据没到时阻塞在这一行</text>
+        </g>
+
+        <g id="go-blocking-node-dec" data-nb="1" data-node-id="dec" data-node-label="这个 fd 注册进 netpoller 了吗？" tabindex="0" role="button" aria-label="Focus 这个 fd 注册进 netpoller 了吗？, 创建 fd 时就定了；网络 socket 注册，普通文件不注册, Architecture component" aria-pressed="false" data-node-kind="backend" data-node-sublabel="创建 fd 时就定了；网络 socket 注册，普通文件不注册" data-node-tag="分叉点" data-node-context="Architecture component">
+          <title>这个 fd 注册进 netpoller 了吗？ · 创建 fd 时就定了；网络 socket 注册，普通文件不注册 · Architecture component · 分叉点</title>
+          <rect x="640" y="210" width="400" height="120" rx="6" class="c-mask"/>
+          <rect x="640" y="210" width="400" height="120" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(646 216) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <rect class="nb-badge" x="939.2" y="218" width="88.8" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="983.6" y="229" font-size="8" text-anchor="middle">创建 fd 时就定了</text>
+          <text class="nb-title" x="674" y="231" font-size="10.5" font-weight="600">这个 fd 注册进 netpoller 了吗？</text>
+          <line class="nb-hr" x1="648" y1="238" x2="1032" y2="238"/>
+          <text class="nb-k" x="652" y="266" font-size="9">网络 socket</text><text class="nb-v" x="720.4" y="266" font-size="9">Dial / Listen 时注册进 netpoller</text>
+          <text class="nb-k" x="652" y="280" font-size="9">普通文件</text><text class="nb-v" x="720.4" y="280" font-size="9">os.Open 时发现 epoll 不支持，不注册</text>
+          <text class="nb-k" x="652" y="294" font-size="9">结果</text><text class="nb-v" x="720.4" y="294" font-size="9">注册了的 fd 是非阻塞的，EAGAIN 时 park；没注册的是阻塞的，read 直接睡线程</text>
+          <text class="nb-note" x="652" y="322" font-size="8">这个判断不在 Read 里做，在 fd 初始化时做</text>
+        </g>
+
+        <g id="go-blocking-node-np" data-nb="1" data-node-id="np" data-node-label="netpoller" tabindex="0" role="button" aria-label="Focus netpoller, epoll / kqueue：等事件，不等线程, Architecture component" aria-pressed="false" data-node-kind="cloud" data-node-sublabel="epoll / kqueue：等事件，不等线程" data-node-tag="路径一" data-node-context="Architecture component">
+          <title>netpoller · epoll / kqueue：等事件，不等线程 · Architecture component · 路径一</title>
+          <rect x="80" y="400" width="320" height="140" rx="6" class="c-mask"/>
+          <rect x="80" y="400" width="320" height="140" rx="6" class="c-cloud" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="cloud" class="semantic-sigil s-cloud" transform="translate(86 406) scale(0.6875)">
+            <path d="M4.3 12.5h7.3a2.4 2.4 0 0 0 .2-4.8 4 4 0 0 0-7.5-1.3A3.1 3.1 0 0 0 4.3 12.5Z"/>
+          </g>
+          <rect class="nb-badge" x="347.2" y="408" width="40.8" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="367.6" y="419" font-size="8" text-anchor="middle">只停 G</text>
+          <text class="nb-title" x="114" y="421" font-size="10.5" font-weight="600">netpoller</text>
+          <line class="nb-hr" x1="88" y1="428" x2="392" y2="428"/>
+          <text class="nb-k" x="92" y="466" font-size="9">Linux</text><text class="nb-v" x="133.4" y="466" font-size="9">epoll</text>
+          <text class="nb-k" x="92" y="480" font-size="9">macOS</text><text class="nb-v" x="133.4" y="480" font-size="9">kqueue</text>
+          <text class="nb-k" x="92" y="494" font-size="9">谁在等</text><text class="nb-v" x="133.4" y="494" font-size="9">一条 M 在 epoll_wait 里等，或 sysmon 周期性来看</text>
+          <text class="nb-k" x="92" y="508" font-size="9">唤醒</text><text class="nb-v" x="133.4" y="508" font-size="9">goready 把 G 放回某个 P 的 runnext</text>
+        </g>
+
+        <g id="go-blocking-node-mgo" data-nb="1" data-node-id="mgo" data-node-label="M：没睡" tabindex="0" role="button" aria-label="Focus M：没睡, 转头从队列里取下一个 G, Architecture component" aria-pressed="false" data-node-kind="backend" data-node-sublabel="转头从队列里取下一个 G" data-node-tag="同一个 M" data-node-context="Architecture component">
+          <title>M：没睡 · 转头从队列里取下一个 G · Architecture component · 同一个 M</title>
+          <rect x="480" y="400" width="340" height="140" rx="6" class="c-mask"/>
+          <rect x="480" y="400" width="340" height="140" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(486 406) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text class="nb-title" x="514" y="421" font-size="10.5" font-weight="600">M：没睡</text>
+          <line class="nb-hr" x1="488" y1="428" x2="812" y2="428"/>
+          <text class="nb-k" x="492" y="473" font-size="9">动作</text><text class="nb-v" x="522.6" y="473" font-size="9">gopark 返回后，M 直接调 schedule()</text>
+          <text class="nb-k" x="492" y="487" font-size="9">结果</text><text class="nb-v" x="522.6" y="487" font-size="9">P 没有空转，队列里的下一个 G 接着跑</text>
+          <text class="nb-note" x="492" y="532" font-size="8">这就是「看起来阻塞、实际不阻塞」的字面含义</text>
+        </g>
+
+        <g id="go-blocking-node-park" data-nb="1" data-node-id="park" data-node-label="G：_Gwaiting" tabindex="0" role="button" aria-label="Focus G：_Gwaiting, waitreason = IO wait, Architecture component" aria-pressed="false" data-node-kind="database" data-node-sublabel="waitreason = IO wait" data-node-tag="只停 G" data-node-context="Architecture component">
+          <title>G：_Gwaiting · waitreason = IO wait · Architecture component · 只停 G</title>
+          <rect x="80" y="620" width="320" height="100" rx="6" class="c-mask"/>
+          <rect x="80" y="620" width="320" height="100" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(86 626) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <text class="nb-title" x="114" y="641" font-size="10.5" font-weight="600">G：_Gwaiting</text>
+          <line class="nb-hr" x1="88" y1="648" x2="392" y2="648"/>
+          <text class="nb-k" x="92" y="673" font-size="9">状态</text><text class="nb-v" x="122.6" y="673" font-size="9">_Gwaiting</text>
+          <text class="nb-k" x="92" y="687" font-size="9">原因</text><text class="nb-v" x="122.6" y="687" font-size="9">waitReasonIOWait（pprof 里能看到）</text>
+          <text class="nb-k" x="92" y="701" font-size="9">栈</text><text class="nb-v" x="122.6" y="701" font-size="9">还归它自己；可能被移动</text>
+        </g>
+
+        <g id="go-blocking-node-hand" data-nb="1" data-node-id="hand" data-node-label="entersyscall" tabindex="0" role="button" aria-label="Focus entersyscall, G 变 _Gsyscall，M 进内核, Architecture component" aria-pressed="false" data-node-kind="cloud" data-node-sublabel="G 变 _Gsyscall，M 进内核" data-node-tag="路径二" data-node-context="Architecture component">
+          <title>entersyscall · G 变 _Gsyscall，M 进内核 · Architecture component · 路径二</title>
+          <rect x="1080" y="400" width="340" height="120" rx="6" class="c-mask"/>
+          <rect x="1080" y="400" width="340" height="120" rx="6" class="c-cloud" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="cloud" class="semantic-sigil s-cloud" transform="translate(1086 406) scale(0.6875)">
+            <path d="M4.3 12.5h7.3a2.4 2.4 0 0 0 .2-4.8 4 4 0 0 0-7.5-1.3A3.1 3.1 0 0 0 4.3 12.5Z"/>
+          </g>
+          <rect class="nb-badge" x="1357.6" y="408" width="50.4" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="1382.8" y="419" font-size="8" text-anchor="middle">停整条 M</text>
+          <text class="nb-title" x="1114" y="421" font-size="10.5" font-weight="600">entersyscall</text>
+          <line class="nb-hr" x1="1088" y1="428" x2="1412" y2="428"/>
+          <text class="nb-k" x="1092" y="463" font-size="9">状态</text><text class="nb-v" x="1122.6" y="463" font-size="9">G 变 _Gsyscall；P 还挂着，但随时会被收走</text>
+          <text class="nb-k" x="1092" y="477" font-size="9">谁收</text><text class="nb-v" x="1122.6" y="477" font-size="9">sysmon 的 retake，不是 entersyscall 自己</text>
+          <text class="nb-k" x="1092" y="491" font-size="9">源码</text><text class="nb-v" x="1122.6" y="491" font-size="9">reentersyscall (proc.go:4627)</text>
+        </g>
+
+        <g id="go-blocking-node-sys" data-nb="1" data-node-id="sys" data-node-label="read(2)" tabindex="0" role="button" aria-label="Focus read(2), 线程真的睡在内核里, Architecture component" aria-pressed="false" data-node-kind="database" data-node-sublabel="线程真的睡在内核里" data-node-tag="整条 M 停" data-node-context="Architecture component">
+          <title>read(2) · 线程真的睡在内核里 · Architecture component · 整条 M 停</title>
+          <rect x="980" y="620" width="300" height="100" rx="6" class="c-mask"/>
+          <rect x="980" y="620" width="300" height="100" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(986 626) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <text class="nb-title" x="1014" y="641" font-size="10.5" font-weight="600">read(2)</text>
+          <line class="nb-hr" x1="988" y1="648" x2="1272" y2="648"/>
+          <text class="nb-k" x="992" y="680" font-size="9">位置</text><text class="nb-v" x="1022.6" y="680" font-size="9">内核里，线程真的睡了</text>
+          <text class="nb-k" x="992" y="694" font-size="9">回来</text><text class="nb-v" x="1022.6" y="694" font-size="9">read 返回后走 exitsyscall</text>
+        </g>
+
+        <g id="go-blocking-node-sysmon" data-nb="1" data-node-id="sysmon" data-node-label="sysmon · retake" tabindex="0" role="button" aria-label="Focus sysmon · retake, 发现 P 卡在系统调用里 → handoffp, Architecture component" aria-pressed="false" data-node-kind="cloud" data-node-sublabel="发现 P 卡在系统调用里 → handoffp" data-node-tag="10ms 内" data-node-context="Architecture component">
+          <title>sysmon · retake · 发现 P 卡在系统调用里 → handoffp · Architecture component · 10ms 内</title>
+          <rect x="1340" y="620" width="300" height="120" rx="6" class="c-mask"/>
+          <rect x="1340" y="620" width="300" height="120" rx="6" class="c-cloud" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="cloud" class="semantic-sigil s-cloud" transform="translate(1346 626) scale(0.6875)">
+            <path d="M4.3 12.5h7.3a2.4 2.4 0 0 0 .2-4.8 4 4 0 0 0-7.5-1.3A3.1 3.1 0 0 0 4.3 12.5Z"/>
+          </g>
+          <text class="nb-title" x="1374" y="641" font-size="10.5" font-weight="600">sysmon · retake</text>
+          <line class="nb-hr" x1="1348" y1="648" x2="1632" y2="648"/>
+          <text class="nb-k" x="1352" y="676" font-size="9">周期</text><text class="nb-v" x="1382.6" y="676" font-size="9">20µs 起，翻倍到 10ms</text>
+          <text class="nb-k" x="1352" y="690" font-size="9">判断</text><text class="nb-v" x="1382.6" y="690" font-size="9">P 在系统调用里超过一个 tick，且有活要干</text>
+          <text class="nb-k" x="1352" y="704" font-size="9">动作</text><text class="nb-v" x="1382.6" y="704" font-size="9">handoffp → startm</text>
+          <text class="nb-note" x="1352" y="732" font-size="8">没有活干时，它可以等满 10ms 再收</text>
+        </g>
+
+        <g id="go-blocking-node-mnew" data-nb="1" data-node-id="mnew" data-node-label="新 M 接管 P" tabindex="0" role="button" aria-label="Focus 新 M 接管 P, startm 新建或唤醒一条, Architecture component" aria-pressed="false" data-node-kind="backend" data-node-sublabel="startm 新建或唤醒一条" data-node-tag="服务没停" data-node-context="Architecture component">
+          <title>新 M 接管 P · startm 新建或唤醒一条 · Architecture component · 服务没停</title>
+          <rect x="1340" y="800" width="300" height="100" rx="6" class="c-mask"/>
+          <rect x="1340" y="800" width="300" height="100" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(1346 806) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text class="nb-title" x="1374" y="821" font-size="10.5" font-weight="600">新 M 接管 P</text>
+          <line class="nb-hr" x1="1348" y1="828" x2="1632" y2="828"/>
+          <text class="nb-k" x="1352" y="860" font-size="9">来源</text><text class="nb-v" x="1382.6" y="860" font-size="9">startm 新建，或唤醒空闲 M</text>
+          <text class="nb-k" x="1352" y="874" font-size="9">之后</text><text class="nb-v" x="1382.6" y="874" font-size="9">P 继续被使用；旧 M 从内核返回后变备用</text>
+        </g>
+
+        <!-- Connection labels -->
+
+        <g data-detail="context" data-edge-from="dec" data-edge-to="np" data-edge-label="注册了" data-edge-key="1" data-edge-id="d-np">
+          <rect x="460.6" y="290" width="38.8" height="14" rx="3" class="c-mask"/>
+          <text x="480" y="300" class="t-muted" font-size="8" text-anchor="middle">注册了</text>
+        </g>
+        <g data-detail="context" data-edge-from="dec" data-edge-to="hand" data-edge-label="没注册" data-edge-key="2" data-edge-id="d-hand">
+          <rect x="1100.6" y="290" width="38.8" height="14" rx="3" class="c-mask"/>
+          <text x="1120" y="300" class="t-muted" font-size="8" text-anchor="middle">没注册</text>
+        </g>
+        <g data-detail="context" data-edge-from="np" data-edge-to="mgo" data-edge-label="M 不等" data-edge-key="3" data-edge-id="np-mgo">
+          <rect x="420.6" y="460" width="38.8" height="14" rx="3" class="c-mask"/>
+          <text x="440" y="470" class="t-muted" font-size="8" text-anchor="middle">M 不等</text>
+        </g>
+        <g data-detail="context" data-edge-from="np" data-edge-to="park" data-edge-label="gopark" data-edge-key="4" data-edge-id="np-park">
+          <rect x="220.6" y="565" width="38.8" height="14" rx="3" class="c-mask"/>
+          <text x="240" y="575" class="t-muted" font-size="8" text-anchor="middle">gopark</text>
+        </g>
+        <g data-detail="context" data-edge-from="hand" data-edge-to="sys" data-edge-label="M 睡下" data-edge-key="5" data-edge-id="hand-sys">
+          <rect x="1060.6" y="565" width="38.8" height="14" rx="3" class="c-mask"/>
+          <text x="1080" y="575" class="t-muted" font-size="8" text-anchor="middle">M 睡下</text>
+        </g>
+        <g data-detail="context" data-edge-from="hand" data-edge-to="sysmon" data-edge-label="过一会儿" data-edge-key="6" data-edge-id="hand-sysmon">
+          <rect x="1575.8" y="550" width="48.4" height="14" rx="3" class="c-mask"/>
+          <text x="1600" y="560" class="t-messagebus" font-size="8" text-anchor="middle">过一会儿</text>
+        </g>
+        <g data-detail="context" data-edge-from="sysmon" data-edge-to="mnew" data-edge-label="交 P" data-edge-key="7" data-edge-id="sysmon-mnew">
+          <rect x="1475" y="750" width="30" height="14" rx="3" class="c-mask"/>
+          <text x="1490" y="760" class="t-muted" font-size="8" text-anchor="middle">交 P</text>
+        </g>
+
+        <!-- Legend -->
+
+      </svg></div>
+      <figcaption>从顶上的 Read 进分叉点：注册进 netpoller 的走左边（只停 G），没注册的走右边（停整条 M，由 sysmon 把 P 交给别人）。点 G 看它停成什么状态，点 sysmon 看它多久来一次。</figcaption>
+      <div class="pano-ui"></div>
+      <p class="arch-hint"><span class="idle">点头上的任意一个框看它的关系</span><span class="focused">再点一次空白处取消</span></p>
+    </figure><h2 id="路径一netpoller-把等待接过去"><span class="num">03</span>路径一：netpoller 把等待接过去</h2>
+<p>网络 fd 在创建时会被注册进 runtime 的 netpoller。之后每次读，走到内核返回 <code>EAGAIN</code>（数据还没到）时，Go 不会重试，而是把当前 G 挂起：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-go">// runtime/netpoll.go
+func netpollblock(pd *pollDesc, mode int32, waitio bool) bool {
+    ...
+    if waitio || netpollcheckerr(pd, mode) == pollNoError {
+        gopark(netpollblockcommit, unsafe.Pointer(gpp), waitReasonIOWait, traceBlockNet, 5)
+    }
+    ...
+}
+</code></pre></div>
+<p><code>gopark</code> 把 G 改成 <code>_Gwaiting</code>，然后当前 M 返回调度器，去取队列里的下一个 G。<mark class="mk-blue">这一步没有系统调用，也没有线程切换 —— 只是把一条执行流标成「等」，然后换一条跑。</mark></p>
+<p>谁来发现数据到了？</p>
+<ul>
+<li><code>findRunnable</code> 在本地队列和全局队列都空了之后，会做一次非阻塞的 <code>netpoll(0)</code>；</li>
+<li><code>sysmon</code> 每 10ms 检查一次网络（<code>lastpoll + 10ms &lt; now</code> 时调 <code>netpoll(0)</code>）；</li>
+<li>实在没活干的 M，会带着一个超时值阻塞在 <code>epoll_wait</code> 里。</li>
+</ul>
+<p>就绪的 G 被 <code>goready</code> 放回某个 P 的 <code>runnext</code>，下一次调度就轮到它。G 醒来时看到的是 <code>Read</code> 返回了数据，调用栈和挂起前一模一样 —— 它不知道自己中间被搬过。</p>
 <div class="seqd has-grid" data-seq data-n="3"
       style="--seq-fill:url(#s-fill-1);--seq-open:url(#s-fill-1-open)">
       <svg class="seqd-svg" aria-hidden="true">
@@ -104,132 +317,132 @@
           </marker>
         </defs>
       </svg>
-      <div class="seqd-head"><div class="scell"><div class="spart tone-green" data-id="g1">
-          <b>G1</b><small>要读网络</small>
+      <div class="seqd-head"><div class="scell"><div class="spart tone-green" data-id="g">
+          <b>G</b><small>发起 Read</small>
         </div></div><div class="scell"><div class="spart tone-violet" data-id="rt">
-          <b>runtime</b><small>netpoller 在这</small>
+          <b>runtime</b><small>netpoller</small>
         </div></div><div class="scell"><div class="spart tone-blue" data-id="m">
-          <b>M</b><small>那条真线程</small>
+          <b>M</b><small>执行线程</small>
         </div></div></div>
-      <div class="seqd-body"><div class="smsg" data-from="g1" data-to="rt" data-kind="sync" data-i="1" data-note="1"><span class="snote">1</span><span class="slabel">conn.Read → 数据没到</span></div><div class="smsg is-self" data-from="rt" data-to="rt" data-kind="self" data-i="2" data-note="2"><span class="snote">2</span><span class="slabel">fd 注册进 epoll；G1 状态改为 Waiting</span></div><div class="smsg" data-from="rt" data-to="m" data-kind="sync" data-i="3" data-note="3"><span class="snote">3</span><span class="slabel">M 转头去跑 LRQ 里的 G3</span></div><div class="smsg is-self" data-from="rt" data-to="rt" data-kind="self" data-i="4" data-note="4" style="margin-top:40px"><span class="snote">4</span><span class="slabel">epoll 通知 fd 就绪 → goready，G1 回 LRQ</span></div><div class="smsg" data-from="rt" data-to="g1" data-kind="reply" data-i="5" data-note="5"><span class="snote">5</span><span class="slabel">下次被选中时，它像什么都没发生过</span></div></div>
-    </div><hr>
-<h2 id="泳道二真阻塞换一条-m-顶上"><span class="num">03</span>泳道二：真阻塞，换一条 M 顶上</h2>
-<div class="flowd has-grid has-groups" data-flow data-edges="[{&quot;from&quot;:&quot;g&quot;,&quot;to&quot;:&quot;unbind&quot;,&quot;label&quot;:&quot;entersyscall&quot;},{&quot;from&quot;:&quot;unbind&quot;,&quot;to&quot;:&quot;m1&quot;,&quot;label&quot;:&quot;解绑之后才敢进去睡&quot;},{&quot;from&quot;:&quot;m1&quot;,&quot;to&quot;:&quot;m2&quot;,&quot;label&quot;:&quot;不能让它拖着 P 一起睡&quot;},{&quot;from&quot;:&quot;m2&quot;,&quot;to&quot;:&quot;back&quot;,&quot;label&quot;:&quot;exitsyscall&quot;}]" style="--flow-marker:url(#fa-2)">
-      <svg class="flowd-svg" aria-hidden="true">
-        <defs>
-          <marker id="fa-2" viewBox="0 0 10 10" refX="9" refY="5"
-                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
-            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
-          </marker>
-        </defs>
-      </svg>
-      <div class="flowd-groups"><div class="fgroup tone-amber" data-group-box="ho">
-          <span class="fgroup-label">hand-off：M 与 P 解绑，P 交给别人</span>
-        </div></div>
-      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-amber" data-id="g" data-group="ho">
-              
-              
-              <b>G 要读文件</b>
-              <small>没有 poll 接口可用</small>
-            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="unbind" data-group="ho">
-              
-              
-              <b>先解绑 P</b>
-              <small>交出「运行 Go 代码的许可」</small>
-            </div></div><div class="flowd-row"><div class="fnode tone-amber" data-id="m1" data-group="ho">
-              
-              
-              <b>M1 陪 G 沉进内核</b>
-              <small>它这下是真的睡了</small>
-            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="m2" data-group="ho">
-              
-              
-              <b>P 交给 M2</b>
-              <small>继续消费 LRQ，服务没停</small>
-            </div></div><div class="flowd-row"><div class="fnode tone-muted" data-id="back" data-group="ho">
-              
-              
-              <b>read 返回</b>
-              <small>G 重新入队，M1 变成备用线程</small>
-            </div></div></div>
-      
-    </div><div class="callout tone-red">
-      <span class="ic">⚠</span>
-      <div><p><strong>hand-off 是兜底，不是免费。</strong></p>
-<p>每个真阻塞的调用都要一条 M 沉底陪着。一百个 G 同时做文件 I/O，
-runtime 就要维持一百条 M —— <mark class="mk-blue">M 膨胀，内核调度压力回升，第 ① 篇的线程成本原样回来。</mark></p>
-<p>这也是为什么重文件 I/O 场景里，goroutine 的优势会打折：
-netpoller 才是优势的主引擎，hand-off 只是止损。</p>
-</div>
-    </div><p>拖一下滑块，看两条路的代价怎么分道扬镳：</p>
-<div class="demo" data-widget="handoff-lab" data-config="{&quot;gomaxprocs&quot;:4,&quot;blocked&quot;:30,&quot;max&quot;:120}">
-      <div class="demo-head">
-        <span class="title">同样在等，M 的数量不一样</span>
-        <span class="status" data-status>拖动滑块改阻塞的 G 数</span>
-        <span class="spacer"></span>
-        
-      </div>
-      <div class="demo-body custom" data-mount></div>
-    </div><p>顺带解释一个常见疑问：<strong>为什么 M2 是「新建或唤醒」，而不是等 M1 回来复用？</strong> 因为阻塞的 M1 何时醒来无人知晓，runtime 不会把赌注压在它身上 —— 先补一个可用的，等 M1 回来再收编。</p>
-<hr>
-<h2 id="旧-mn-为什么没有这条路"><span class="num">04</span>旧 M:N 为什么没有这条路</h2>
-<div class="cards" data-cols="2"><div class="ccard tone-red">
-          <span class="tag tone-red">机制缺口</span>
-          <h4>缺一半：没有 netpoller</h4>
-          <p>没人把网络等待统一收进用户态调度器</p>
-          <div class="cbody"><p>旧式线程库只能<strong>包裹既有的系统调用接口</strong>，
-它无法要求内核把等待语义交出来。</p>
-<p>于是网络等待只能和文件等待一样，一条 M 配一个 —— 或者干脆连坐。</p>
-</div>
-          
-        </div><div class="ccard tone-amber">
-          <span class="tag tone-amber">契约缺口</span>
-          <h4>缺另一半：语言级封装</h4>
-          <p>没有语言级 I/O 封装来保证「每次阻塞前都先解绑」</p>
-          <div class="cbody"><p>就算有 netpoller，也得保证<strong>每一次</strong>可能阻塞的调用都走正确的路径。
-这件事只能由语言和标准库一起保证。</p>
-<p><mark class="mk-blue">Go 能做成，是因为 runtime 与标准库是一起设计的</mark> ——
-netpoller 是 runtime 的一部分，net 包天生知道该怎么配合它。</p>
-</div>
-          
-        </div></div><hr>
-<h2 id="内核看到的和-runtime-看到的"><span class="num">05</span>内核看到的，和 runtime 看到的</h2>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>视角</th><th>看到的画面</th><th>结论</th></tr></thead><tbody><tr><th>OS 看到的</th><td data-label="看到的画面">M 一直在跑，<strong>从未进入等待态</strong></td><td data-label="结论"><span class="tag tone-violet">「这个进程是 CPU 密集的」</span></td></tr><tr><th>runtime 看到的</th><td data-label="看到的画面">G 在等：等网络、等 channel、等定时器</td><td data-label="结论"><span class="tag tone-green">「绝大多数 G 只是暂时睡着」</span></td></tr></tbody></table></div><p><mark class="mk-blue">从 OS 的视角看，那条线程从未进入等待态。</mark> Go 在操作系统层面，把 I/O 密集型活折叠成了 CPU 密集型活。</p>
-<p>这就是「看起来会阻塞、实际不阻塞」的完整含义 —— 阻塞的语义被 netpoller 与 hand-off 消化在用户态，内核看到的只是一台一直在干活的机器。</p>
+      <div class="seqd-body"><div class="smsg" data-from="g" data-to="rt" data-kind="sync" data-i="1" data-note="1"><span class="snote">1</span><span class="slabel">Read → EAGAIN</span></div><div class="smsg" data-from="rt" data-to="g" data-kind="reply" data-i="2" data-note="2"><span class="snote">2</span><span class="slabel">gopark：_Gwaiting</span></div><div class="smsg" data-from="rt" data-to="m" data-kind="sync" data-i="3" data-note="3"><span class="snote">3</span><span class="slabel">返回 schedule，取下一个 G</span></div><div class="smsg is-self" data-from="rt" data-to="rt" data-kind="self" data-i="4" data-note="4" style="margin-top:46px"><span class="snote">4</span><span class="slabel">epoll_wait 返回：fd 就绪</span></div><div class="smsg" data-from="rt" data-to="g" data-kind="reply" data-i="5" data-note="5"><span class="snote">5</span><span class="slabel">goready：放回 runnext</span></div></div>
+    </div><h2 id="路径二p-不是立刻交出去的"><span class="num">04</span>路径二：P 不是立刻交出去的</h2>
+<p>文件读走另一条路。<code>os.Open</code> 在创建 <code>*os.File</code> 时会判断这个 fd 能不能注册进 netpoller（<code>os/file_unix.go:155</code> 起）：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-go">pollable := kind == kindOpenFile || kind == kindPipe || kind == kindSock || nonBlocking
+
+// darwin / *BSD：普通文件和目录不进 kqueue
+if err == nil &amp;&amp; (typ == syscall.S_IFREG || typ == syscall.S_IFDIR) {
+    pollable = false
+}
+
+// 注册失败（Linux 上的普通文件会 EPERM），也当作不可 poll
+if pollErr := f.pfd.Init(&quot;file&quot;, pollable); pollErr != nil &amp;&amp; clearNonBlock {
+    ...
+}
+</code></pre></div>
+<p>注册失败之后，这个 fd 仍然是阻塞模式：<code>syscall.Read</code> 直接睡到数据回来，没有 <code>EAGAIN</code>、也没有人去等事件。这时：</p>
+<ol>
+<li><code>entersyscall</code> 把 G 标成 <code>_Gsyscall</code>，保存 sp/pc/bp（<code>reentersyscall</code>，<code>proc.go:4627</code>）。P 还挂在 M 上，但已经处于「随时会被收走」的状态。</li>
+<li>M 进内核，睡在 <code>read</code> 里。</li>
+<li><code>sysmon</code> 周期性检查所有 P（<code>retake</code>，<code>proc.go:6630</code>）。如果发现某个 P 的 G 在系统调用里超过一个 tick，而且有活要干，就调 <code>handoffp</code>（<code>proc.go:3131</code>）：
+<ul>
+<li>P 的本地队列非空，或全局队列非空 → <code>startm</code> 直接开一条（或唤醒一条）M；</li>
+<li>没有活，但也没有空闲/自旋的 M → 还是开一条；</li>
+<li>否则把 P 标成 idle，等需要时再用。</li>
+</ul>
+</li>
+<li>新 M 拿着 P 继续跑队列里的 G。旧 M 从 <code>read</code> 返回后走 <code>exitsyscall</code>，能抢回一个 P 就继续跑，抢不到就把 G 放进全局队列、自己睡觉。</li>
+</ol>
 <div class="callout tone-amber">
-      <span class="ic">🔄</span>
-      <div><p><strong>一个正在发生的变化。</strong></p>
-<p>io_uring 让普通文件也能提交异步读、由内核完成队列回调，正在改变文件 I/O 的处境。</p>
-<p>但截至 Go 1.27，标准库的文件 I/O 仍走<strong>阻塞系统调用加 hand-off</strong>，
-io_uring 的集成仍在演进。<mark class="mk-blue">读这类文档时要分清版本。</mark></p>
+      <span class="ic">⏱</span>
+      <div><p><strong>「最多 10ms」是个容易读错的数字。</strong></p>
+<p><code>retake</code> 的判断是：这个 P 的 G 在系统调用里待了超过一个 sysmon tick，
+<mark class="mk-blue">并且</mark> 有活要干（队列非空，或没有可用的 M）。
+两个条件都满足才立刻 handoff；否则它可以等满 10ms ——
+这就是「短系统调用不值得为它开线程」的折中。</p>
 </div>
-    </div><hr>
+    </div><p>代价也直接：每一个真的阻塞在系统调用里的 G，都要一条 M 陪着。64 条 G 读文件，就是 64 条 M。这部分成本没有被消除，只是从「所有 I/O」缩小到了「不能 poll 的 I/O」。</p>
+<h2 id="边界哪些-fd-走哪条路"><span class="num">05</span>边界：哪些 fd 走哪条路</h2>
+<table>
+<thead>
+<tr>
+<th>fd 类型</th>
+<th>能不能注册进 netpoller</th>
+<th>等待时发生什么</th>
+<th>怎么观测</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>网络 socket（<code>net</code> 包）</td>
+<td>能（epoll / kqueue）</td>
+<td>G 变 <code>_Gwaiting</code>，M 继续跑</td>
+<td>线程数不变；pprof 里是 <code>IO wait</code></td>
+</tr>
+<tr>
+<td>pipe / <code>os.Pipe</code></td>
+<td>能</td>
+<td>同上</td>
+<td>同上</td>
+</tr>
+<tr>
+<td>普通文件（<code>os.File</code>）</td>
+<td>不能（Linux 的 epoll 不支持；darwin 明确排除）</td>
+<td>M 睡在 <code>read(2)</code>，P 可能被 handoff</td>
+<td>线程数随并发读增长</td>
+</tr>
+<tr>
+<td><code>syscall.Read</code> 裸调用</td>
+<td>不经过 netpoller</td>
+<td>同普通文件</td>
+<td>线程数增长（上面的实测）</td>
+</tr>
+<tr>
+<td>cgo 调用</td>
+<td>不一定</td>
+<td>M 可能被标记为系统调用</td>
+<td><code>CGO_CALLS</code> / trace</td>
+</tr>
+</tbody>
+</table>
+<p>几个会变的地方：</p>
+<ul>
+<li><strong>io_uring</strong>：Linux 上它可以让普通文件也走异步提交。截至 Go 1.27，标准库的 <code>os</code> / <code>internal/poll</code> 里没有 io_uring 的接入（<code>grep -r io_uring /usr/local/go/src</code> 没有结果），文件 I/O 仍然走阻塞系统调用 + handoff。这是一条会随版本变化的边界，读旧文章时要先看它写的版本。</li>
+<li><strong><code>SetDeadline</code></strong>：对不可 poll 的 fd 设置读超时会返回 <code>ErrNoDeadline</code>，因为 runtime 没法用定时器把它叫醒。这不是 bug，是这条路的边界。</li>
+<li><strong><code>GOMAXPROCS</code> 不影响这条边界</strong>：它限制的是同时跑 Go 代码的 M 数；睡在 <code>read</code> 里的 M 不算，所以文件 I/O 并发高时线程数照样能涨到几百。</li>
+</ul>
+<h2 id="这条边界决定了-go-的优势在哪打折"><span class="num">06</span>这条边界决定了 Go 的优势在哪打折</h2>
+<p>把两条路放回业务里看：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>场景</th><th>等待被谁吸收</th><th>结果</th></tr></thead><tbody><tr><th>网关 / RPC / 消息消费</th><td data-label="等待被谁吸收">netpoller，M 不睡</td><td data-label="结果"><span class="tag tone-green">G 的主场：几万条连接、几十条线程</span></td></tr><tr><th>本地文件读写 / 大日志</th><td data-label="等待被谁吸收">阻塞系统调用，一条 M 陪一个 G</td><td data-label="结果"><span class="tag tone-amber">线程数随并发增长，goroutine 的优势打折</span></td></tr><tr><th>cgo / 某些驱动调用</th><td data-label="等待被谁吸收">同样没有 poll 接口</td><td data-label="结果"><span class="tag tone-amber">同上，且更难预测</span></td></tr></tbody></table></div><p>所以「Go 用 goroutine 就能扛十万并发」这句话要加限定：它成立的前提是等待能被 netpoller 接管。文件密集的服务里，G 仍然比线程轻（栈小、切换不走内核），但「不阻塞线程」这一条不成立。</p>
+<h2 id="quiz">quiz</h2>
 <div class="quiz"><details>
-        <summary>为什么网络 I/O 和文件 I/O 在 Go 里走两条完全不同的路？</summary>
-        <div class="a"><p>因为「等待」能不能被内核以外的机制接管，取决于内核给不给句柄。
-网络 fd 可以被 epoll/kqueue/IOCP 统一监视，所以能交给 netpoller；
-文件 read 在经典模型里没有 poll 接口，就是要在内核里睡到磁盘把数据搬上来，
-只能走 hand-off，让一条 M 陪着沉下去。</p>
+        <summary>同样是 64 条 G 在等数据，为什么一个进程只有 5 条线程，另一个有 66 条？</summary>
+        <div class="a"><p>因为等待能不能被 netpoller 接管，取决于 fd 在创建时有没有注册进去。
+网络 socket 注册了，G 用 gopark 挂起，M 回去干活，线程数不变；
+裸 socket 或普通文件没注册，read 只能睡在内核里，每个等待的 G 要一条 M 陪着。</p>
 </div>
       </details><details>
-        <summary>hand-off 的代价是什么，什么时候会显出来？</summary>
-        <div class="a"><p>每个真阻塞的调用都要一条 M 陪着。一百个 G 同时做文件 I/O，
-runtime 就要维持一百条 M，内核调度压力回升，线程成本原样回来。
-所以在重文件 I/O 或 CGO 场景里，goroutine 的优势会明显打折 ——
-netpoller 才是优势主引擎，hand-off 只是止损。</p>
+        <summary><code>entersyscall</code> 会立刻把 P 交出去吗？</summary>
+        <div class="a"><p>不会。它只是把 G 标成 _Gsyscall、保存现场，P 还挂在 M 上。
+handoff 由 sysmon 的 retake 执行：发现 P 在系统调用里超过一个 tick、
+并且有活要干，才调 handoffp → startm。没有活时它可以等满 10ms。</p>
 </div>
       </details><details>
-        <summary>为什么说「从 OS 视角，那条线程从未进入等待态」？</summary>
-        <div class="a"><p>因为网络等待被 netpoller 消化了：G 被挂起，M 转头去跑别的 G，内核看不到 M 睡过。
-文件 I/O 确实会让一条 M 睡下去，但那条 M 已经把 P 交了出去，
-剩下的 P 继续在跑 Go 代码。所以内核看到的是一台一直在干活的机器，
-而 runtime 看到的是「绝大多数 G 只是暂时睡着」。</p>
+        <summary>为什么普通文件不能交给 netpoller？</summary>
+        <div class="a"><p>因为 epoll / kqueue 不支持普通文件：Linux 上 epoll_ctl 会返回 EPERM，
+darwin 上标准库明确把普通文件和目录排除。
+注册失败之后，read 没有事件可等，只能阻塞线程。</p>
+</div>
+      </details><details>
+        <summary>goroutine 在文件 I/O 密集的服务里还有优势吗？</summary>
+        <div class="a"><p>有，但不是「不阻塞线程」那条。栈更小、切换不走内核、创建更便宜仍然成立；
+但每个阻塞的读要一条 M 陪着，线程数会随并发读增长。
+这正是 hand-off 的代价，也是 io_uring 这类机制值得关注的原因。</p>
 </div>
       </details></div>
 
     <footer>
-      <span>阻塞了怎么办 · netpoller 与 hand-off 两条路</span>
-      <span>最后更新 2026-10-01 · 单文件可离线打开</span>
+      <span>阻塞了怎么办 · netpoller 与 hand-off</span>
+      <span>最后更新 2026-10-20 · 单文件可离线打开</span>
     </footer>
   </main>
 </div>
