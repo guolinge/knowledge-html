@@ -1656,7 +1656,7 @@ text: |
 | `summary` | 小结 |
 | `raw` | 直接写 HTML |
 
-**交互控件 68 个**（在 `assets/app.js` 的 `WIDGETS` 里，供 `demo` 积木引用）：
+**交互控件 70 个**（在 `assets/app.js` 的 `WIDGETS` 里，供 `demo` 积木引用）：
 `polling-vs-cdc` `combination-count` `join-lab` `on-vs-where` `knex-chain`
 `stepper` `tuner` `diff` `stream-modes` `operator-lab` `hashring` `partition-prune`
 `dsl-lab` `null-lab` `config-to-ui` `field-lineage` `count-dedup-lab`
@@ -1671,6 +1671,7 @@ text: |
 `s3-list-lab` `ec-lab` `mysql-2pc-crash` `join-driver-lab` `i18n-lab` `i18n-lookup`
 `relation-negation-lab` `rn-compile-lab`
 `notin-lab` `times-readings-lab` `rbtree-lab` `call-stack-lab` `frame-anchor-lab` `micro-op-lab` `rip-lab`
+`gswitch-lab` `spawn-budget-lab`
 
 **已知缺口**（按优先级）：
 
@@ -2969,7 +2970,7 @@ pre-push 会重建 + 量图。**它拦下来通常不是你的问题。**
 | YAML 裸标量以 `*` `&` `!` `%` `@` 开头 | 加引号（会被当成别名/锚点/标签） |
 | YAML 里 `mode: 234` 这种数字值到控件里是 number，不是字符串 | 控件里先 `String(cfg.mode)` 再比；否则静默走默认分支，`check` / `visual-check` 都不报 |
 | 值里有 `[` 或 `{` 却没加引号 | 加引号（`Rule[]` 里的方括号会被当数组起始） |
-| 担心 `**「术语」**` 这类中文加粗失效 | 已经修好了，不用管；但 `**` 跨行仍然不生效 |
+| 担心 `**「术语」**` 这类中文加粗失效 | 开头的 `**` 已经修好了（CJK 插件兜住了 flanking 规则）；但 `**` 跨行仍然不生效。==还有一种没兜住：闭合的 `**` 前面是中文标点、后面紧跟汉字（`…副本。**全文…`）会原样显示==；把整句换成 `==…==`，或在 `**` 后面补一个空格 |
 | 只给卡点画图，其余照搬原文 | ==用户已经有文字版了==。有「空间 / 顺序 / 状态 / 归属 / 对比」就用图、控件或表。是不是卡点只决定先做哪一块、哪里加交互。见原则 ① |
 | 因为「没有现成积木」就把关系和过程退回段落 | 按原则 ⑨ 组合或扩展表达，不丢结构；判断、依据和取舍理由仍按原则 ⑧⑪ 保留文字 |
 | 先甩一个抽象判断，再用破折号复述一遍 | 两句话说的是同一件事。==直接从具体的东西说起，把结论留给读者== |

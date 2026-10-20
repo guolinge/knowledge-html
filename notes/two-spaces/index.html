@@ -1,0 +1,1587 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-has-toc="1">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>两套空间：进程和线程各在两个空间里放着什么</title>
+<meta name="description" content="同一个线程既有用户空间里的栈和数据，也有内核里的 task、内核栈和几组调度与信号状态 —— 但两边不是各存一份副本。五张整体图分别回答：一个进程在两边的家当、一条线程的上下文散在哪几处、进内核时栈怎么换、创建时各多出什么、哪些线程内核根本不知道。" />
+<link rel="stylesheet" href="../../assets/theme.css?v=b918ec5c83" />
+  <link rel="stylesheet" href="../../assets/blocks.css?v=da2bd0f592" />
+  <link rel="stylesheet" href="../../assets/archify-embed.css?v=68fec0b81b" />
+</head>
+<body>
+<div id="progress"></div>
+<div id="tocScrim"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
+    <a class="brand" href="../../index.html"><span class="dot"></span>知识笔记</a>
+    
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="toc" id="toc">
+      <p class="toc-title">目录</p>
+      <a href="../../index.html" class="sub">← 全部笔记</a>
+      <a href="#两组词谁在跑访问哪块地址">两组词：谁在跑，访问哪块地址</a>
+      <a href="#总图一个进程在两边的家当">总图：一个进程在两边的家当</a>
+      <a href="#一条线程的完整上下文散在三个地方">一条线程的完整上下文，散在三个地方</a>
+      <a href="#两套栈进内核时-sp-换到哪">两套栈：进内核时 SP 换到哪</a>
+      <a href="#创建时两边各发生了什么">创建时，两边各发生了什么</a>
+      <a href="#切走时保存的到底是什么">切走时，保存的到底是什么</a>
+      <a href="#有些线程内核根本不知道">有些「线程」，内核根本不知道</a>
+      <a href="#速查每个名词在哪张图上">速查：每个名词在哪张图上</a>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow">● 操作系统 · 进程与线程</span>
+      <h1>两套空间：进程和线程各在两个空间里放着什么</h1>
+      <p class="lede">同一个线程既有用户空间里的栈和数据，也有内核里的 task、内核栈和几组调度与信号状态 —— 但两边不是各存一份副本。五张整体图分别回答：一个进程在两边的家当、一条线程的上下文散在哪几处、进内核时栈怎么换、创建时各多出什么、哪些线程内核根本不知道。</p>
+    </div>
+
+
+    <div class="provenance"><span><b>来源</b> Linux Kernel Documentation: x86_64 Memory Management — https://docs.kernel.org/arch/x86/x86_64/mm.html · Linux Kernel Documentation: Kernel stacks — https://docs.kernel.org/arch/x86/kernel-stacks.html · Linux Kernel Documentation: Kernel Entries — https://docs.kernel.org/arch/x86/entry_64.html · clone(2) — https://man7.org/linux/man-pages/man2/clone.2.html · pthreads(7) — https://man7.org/linux/man-pages/man7/pthreads.7.html · Linux Kernel Labs: Processes — https://linux-kernel-labs.github.io/refs/heads/master/lectures/processes.html</span><span><b>生成</b> 2026-10-20</span><span><b>模型</b> claude-opus-4-5</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">操作系统</span> <span class="tag tone-muted">Linux</span> <span class="tag tone-muted">用户态</span> <span class="tag tone-muted">内核栈</span> <span class="tag tone-muted">task_struct</span> <span class="tag tone-muted">fork</span> <span class="tag tone-muted">clone</span></span></div>
+
+<p>排查一个卡住的进程时，两条命令常常给出两种答案。<code>top</code> 里是一个进程吃了 400% 的 CPU；<code>/proc/&lt;pid&gt;/status</code> 却写着它只有一条线程。再 <code>ls /proc/&lt;pid&gt;/task</code>，那里躺着好几个目录。</p>
+<p>同一个东西在不同地方长得不一样，这就是本文要说的事：<mark class="mk-blue">一个进程或线程，在用户空间和内核里都有东西，但两边放的不是同一份副本</mark>。全文按六个问题推进，其中五张整体图各回答一个：</p>
+<ul>
+<li>一个进程在两边的家当分别是什么（§02）</li>
+<li>一条线程的「上下文」分散在哪几处（§03）</li>
+<li>进内核时用的是哪根栈（§04）</li>
+<li>创建进程和创建线程各在哪边发生什么（§05）</li>
+<li>切走时到底保存了什么（§06）</li>
+<li>哪些「线程」内核根本不知道（§07）</li>
+</ul>
+<h2 id="两组词谁在跑访问哪块地址"><span class="num">01</span>两组词：谁在跑，访问哪块地址</h2>
+<p>「内核」和「用户态」经常被混着用，其实它们指两件不同的事。</p>
+<ul>
+<li><strong>用户态 / 内核态</strong>：CPU 此刻的权限级。x86 用 <code>CS</code> 里的 CPL 判断能不能执行特权指令；Linux 只用两级，ring 0 和 ring 3。</li>
+<li><strong>用户空间 / 内核空间</strong>：同一张虚拟地址空间里的两半。x86-64 上用户那半在低处（低 47 位，到 <code>0x0000_7fff_ffff_ffff</code>），内核那半在高处（从 <code>0xffff_8000_0000_0000</code> 起）。</li>
+</ul>
+<p>两个维度互相独立，四种组合在现实里各有各的名字：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>组合</th><th>CPU 在哪个态</th><th>访问的是哪块地址</th><th>现实里叫什么</th></tr></thead><tbody><tr><th>正常执行</th><td data-label="CPU 在哪个态">用户态</td><td data-label="访问的是哪块地址">用户空间</td><td data-label="现实里叫什么">程序自己跑：取指令、读写自己的全局变量、调自己的函数</td></tr><tr><th>撞墙</th><td data-label="CPU 在哪个态">用户态</td><td data-label="访问的是哪块地址">内核空间</td><td data-label="现实里叫什么">页表把内核那半标成「只有内核能访问」，CPU 拦下，进程收到 <code>SIGSEGV</code></td></tr><tr><th>替程序搬数据</th><td data-label="CPU 在哪个态">内核态</td><td data-label="访问的是哪块地址">用户空间</td><td data-label="现实里叫什么">内核按程序给的指针读写那块缓冲，例如 <code>copy_from_user()</code>、<code>put_user()</code></td></tr><tr><th>内核自己干活</th><td data-label="CPU 在哪个态">内核态</td><td data-label="访问的是哪块地址">内核空间</td><td data-label="现实里叫什么">分配内存页、改 fd 表、从运行队列挑下一个 task</td></tr></tbody></table></div><p><mark class="mk-blue">「进入内核态」不是换了一条线程。</mark> 同一个 task 从 ring 3 掉进 ring 0，处理完再回来：tid 没变，引用的资源没变，地址空间也没变。变的只有权限级、当前的栈指针，以及此刻能碰哪些地址。</p>
+<h2 id="总图一个进程在两边的家当"><span class="num">02</span>总图：一个进程在两边的家当</h2>
+<p>这张图把一个三线程进程的全部家当摊开。上半是它的用户空间，中间是内核里描述它的对象，底下是真在干活的硬件。读法是从左到右（用户地址由低到高），再从用户栈那根线走进内核。</p>
+<figure class="archfig" data-arch style="--arch-max-width:1580px" data-boundaries="nested" data-pano data-parts='{"text":{"label":"代码与全局数据","sub":"程序本体，映射自可执行文件","detail":"加载器按 ELF 的 `PT_LOAD` 段把这几块映射进地址空间。代码段只读可执行，写它会触发段错误；`.bss` 在文件里不占空间，加载时补零。==这两类内容的权限不同，所以同一个程序的多份实例可以共享代码页。==","facts":{"归属":"全进程共享","谁分配":"加载器","谁能改":"代码段谁都不能，全局变量谁都能","要不要进内核":"不用"}},"heap":{"label":"堆","sub":"malloc / new 的地盘","detail":"用户态分配器在堆上切块，只有空间不够时才用 `brk` / `mmap` 向内核要更多。堆的边界变化由内核完成，堆里面的分配完全在用户态。","facts":{"归属":"全进程共享","谁分配":"malloc / free","谁能改":"任何线程","要不要进内核":"不用"}},"mmap":{"label":"映射区","sub":"共享库、文件映射、线程栈","detail":"动态库、`mmap` 的文件页、以及 `pthread_create` 给新线程划的用户栈都在这一块。私有映射写入时复制，共享映射的修改会写回文件。","facts":{"归属":"全进程共享","谁分配":"动态加载器 / pthread 库","谁能改":"映射权限说了算","要不要进内核":"建映射要"}},"ustack":{"label":"用户栈与 TLS","sub":"每条执行流一组","detail":"每条线程一根用户栈，存局部变量、返回地址和栈帧；TLS 是 `thread_local` 变量的家，用 `fs` 基址定位。三根栈在同一块地址空间里，所谓「私有」只是约定。","facts":{"归属":"每条线程一组","谁分配":"主线程由内核给，其余由 pthread 库 mmap","谁能改":"同进程任何线程都能越界写","要不要进内核":"不用"}},"libc":{"label":"libc 与线程库的数据","sub":"内核完全不认识","detail":"句柄 `pthread_t` 是线程库自己的东西，指向一块用户态结构；取消状态、join 状态、TLS 块都挂在这套结构上。==内核只知道 task，不知道这些结构存在。==","facts":{"归属":"每条线程一份（句柄）/ 全进程一份（库状态）","谁分配":"libc","谁能改":"程序自己","要不要进内核":"不用"}},"sig":{"label":"信号","sub":"处置共享，掩码私有","detail":"信号处置表 `sighand_struct` 存的是「忽略、默认、还是某个处理函数」，全组一份，一条线程用 `sigaction` 改了别的线程立刻看到。掩码和待处理队列不在这里，每条 task 各一份。","facts":{"归属":"处置全组、掩码每线程","谁分配":"内核","谁能改":"经 sigaction / sigprocmask","要不要进内核":"要"}},"files":{"label":"files_struct · fd 表","sub":"开着的文件、socket、管道","detail":"一张把整数 fd 映射到打开文件的表。线程 A `open()` 出来的 fd，线程 B 立刻能用，因为表只有一份；连文件读写偏移都共享——两条线程交替 `read` 同一个 fd，会各读各的片段。","facts":{"归属":"全进程共享","谁分配":"内核","谁能改":"经 open / dup / close","要不要进内核":"要"}},"walls":{"label":"凭证、命名空间与配额","sub":"能碰什么，能用多少","detail":"这一组决定进程的边界：uid / gid 决定文件权限和能不能给别人发信号；namespace 决定它看得见哪些进程、网卡、挂载点；IPC 命名空间管着共享内存和消息队列；cgroup 与 rlimit 决定能用多少资源。","facts":{"归属":"全进程共享","谁分配":"内核","谁能改":"只能经系统调用","要不要进内核":"要"}},"fs":{"label":"fs_struct · 目录","sub":"当前目录、根目录、umask","detail":"它记的是相对路径从哪算起（cwd）、chroot 之后的根、以及新建文件的默认权限。一条线程 `chdir`，同组其余线程的 cwd 也跟着变，因为它们指向同一个 `fs_struct`。","facts":{"归属":"全进程共享","谁分配":"内核","谁能改":"经 chdir / chroot / umask","要不要进内核":"要"}},"mm":{"label":"mm_struct 与页表","sub":"地址空间的描述，不是内存本体","detail":"它记着各段 VMA 在哪、权限是什么，并指向页表；页表把虚拟地址翻译成物理帧。==用户空间里的代码、堆、栈都不在这个结构体里，这里只有描述。==","facts":{"归属":"每进程一份","谁分配":"内核","谁能改":"经 mmap / brk / munmap","要不要进内核":"要"}},"group":{"label":"线程组与父子关系","sub":"「进程」在内核里的落点","detail":"同一线程组的 task 共用一个 tgid，`getpid()` 返回它；`gettid()` 返回各自的 tid。父子关系记在 task 上，同组线程的 ppid 相同。","facts":{"归属":"每进程一份","谁分配":"内核","谁能改":"经 clone / exit","要不要进内核":"要"}},"task0":{"label":"task T0 · 主线程","sub":"进程里第一条执行流","detail":"一个 `task_struct`。它存 tid、调度状态、优先级、寄存器现场、信号掩码，以及指向 `mm` / `files` / `fs` / `sighand` 的指针。==资源不在它肚子里，它只是索引。==","facts":{"归属":"每条执行流一份","谁分配":"内核","谁能改":"调度器和系统调用","要不要进内核":"要"}},"task1":{"label":"task T1","sub":"pthread_create 造出来","detail":"线程库先在新线程的用户空间里备好栈和 TLS，再调 `clone()` 让内核造出这个 task。创建线程没有复制任何资源，只多了一个 task、一根内核栈和一份现场。","facts":{"归属":"每条执行流一份","谁分配":"内核（由 pthread 库触发）","谁能改":"调度器和系统调用","要不要进内核":"要"}},"task2":{"label":"task T2","sub":"同组，tid 不同","detail":"同一线程组的 task 共用 tgid。`ps -eLf` 的 LWP 列就是这些 tid。调度器逐条挑，所以三条 task 可以同时在三个核上跑。","facts":{"归属":"每条执行流一份","谁分配":"内核","谁能改":"调度器和系统调用","要不要进内核":"要"}},"pmem":{"label":"物理内存","sub":"翻译后的落点","detail":"页表既是翻译器也是隔离墙：两个进程的同一个虚拟地址，各自查表，落到不同的物理帧。写时复制就是让两份页表暂时指向同一帧，并把它标成只读。","facts":{"归属":"硬件","谁分配":"内核的页分配器","谁能改":"通过映射","要不要进内核":"要"}},"cpu":{"label":"CPU 核","sub":"task 轮流上","detail":"调度器在运行队列里挑 task，而不是挑进程。三条执行流各自排队、各自上核——这是并行的来源，也是线程切换比进程切换便宜的地方（同进程不用换页表）。","facts":{"归属":"硬件","谁分配":"调度器","谁能改":"不适用","要不要进内核":"要"}}}' data-tours='[{"id":"split","label":"两边各负责什么","steps":[{"at":["text","heap","mmap","ustack","libc"],"text":"上半是用户空间：程序自己取指令、读写变量、压栈出栈的地方，还有线程库自己的句柄。==这些内容程序直接访问，不需要进内核。=="},{"at":["mm","files","fs","walls","sig","group"],"text":"中间左边是内核替它记的账：地址空间怎么映射、开了哪些文件、站在哪个目录、能碰什么、信号怎么处理、这个组有几条线程。一份资源只有一份。"},{"at":["task0","task1","task2"],"text":"中间右边是每条执行流各自的 task —— 内核调度时看的就是它。三条平级，共用左边那六个对象。"},{"at":["pmem","cpu"],"text":"底下是硬件。==进程使用它们，但不拥有它们==：页表决定哪个虚拟地址落到哪一帧，调度器决定哪条 task 上哪个核。"}]},{"id":"one-thread","label":"一条线程在跑的时候","steps":[{"at":["ustack","task0"],"text":"用户栈和 task 是配对的：这根栈上压着 T0 的局部变量和返回地址，那个 task 里存着它此刻的 RIP 和 RSP。"},{"at":["task0","mm"],"text":"T0 读一个全局变量时，得由 `mm` 里的页表把地址翻译成物理帧。==翻译规则全组共用一份。=="},{"at":["task0","cpu"],"text":"轮到 T0 跑时，调度器把它的寄存器现场恢复到某个核上；换下来时再把现场存回去。切换只动 task 和栈，不动那六个共享对象。"}]}]' data-frames='[{"id":"user","boundary":3,"kind":"classification","label":"用户空间 · 低半地址","detail":"一块虚拟地址空间，从左到右依次是代码与全局数据、堆、映射区、用户栈。程序直接读写这里，不需要经过内核。","members":["text","heap","mmap","ustack","libc"],"depth":1},{"id":"kernel","boundary":0,"kind":"classification","label":"内核空间 · 高半地址","detail":"同一份内核内存，里面装着每个进程各自的一组对象。用户程序看不见它们，只能通过系统调用间接改。","members":["sig","files","walls","fs","mm","group","task0","task1","task2"],"depth":1},{"id":"perproc","boundary":1,"parent":"kernel","kind":"shared","label":"每进程一份 · 三条线程共用","detail":"这六个对象是「进程」这个名字在内核里的落点。三条线程的 task 里存着指向它们的指针，所以一份资源被三条执行流共用。","members":["sig","files","walls","fs","mm","group"],"depth":2},{"id":"perthread","boundary":2,"parent":"kernel","kind":"contains","label":"每条线程一份 · task_struct","detail":"内核调度的单位是 task。三条 task 平级，各自有 tid、调度状态、寄存器现场和内核栈；没有一条 task 包含另外两条。","members":["task0","task1","task2"],"depth":2},{"id":"hw","boundary":4,"kind":"classification","label":"硬件 · 两边都在用","detail":"CPU 执行 task，页表把用户虚拟地址翻译到物理帧。它们被进程使用，但不属于进程。","members":["pmem","cpu"],"depth":1}]'>
+      <div class="arch-boundary-ui">
+          <div class="arch-boundary-toolbar"><span class="arch-boundary-label">边界</span>
+            <button type="button" data-boundary-mode="nested" aria-pressed="true">多层归属框</button>
+            <button type="button" data-boundary-mode="flat" aria-pressed="false">只留一层分区</button>
+            <button type="button" data-arch-reset>恢复全图</button>
+          </div>
+          <div class="arch-address-box" aria-live="polite"><div data-arch-address>点一个零件，看完整归属路径；点一个区域标题，看这一层的含义。</div>
+            <div data-arch-frame-detail>最外框表示逻辑资源域，不表示所有对象在一块内存里。每层边界的标题说明分组依据。</div></div>
+        </div>
+      <div class="arch-canvas"><svg viewBox="0 0 1580 1600" role="img" aria-labelledby="ts-map-archify-diagram-title ts-map-archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
+        <title id="ts-map-archify-diagram-title">一个进程在两边的家当：用户空间放内容，内核放描述与执行流</title>
+        <desc id="ts-map-archify-diagram-description">同一件事的两侧：用户空间是程序真正读写的内存，内核里是描述它、调度它的对象</desc>
+        <!-- Definitions -->
+        <defs>
+          <marker id="ts-map-arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-default" />
+          </marker>
+          <marker id="ts-map-arrowhead-emphasis" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-emphasis" />
+          </marker>
+          <marker id="ts-map-arrowhead-security" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-security" />
+          </marker>
+          <marker id="ts-map-arrowhead-dashed" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-dashed" />
+          </marker>
+          <pattern id="ts-map-grid" width="40" height="40" patternUnits="userSpaceOnUse">
+            <path d="M 40 0 L 0 0 0 40" class="c-grid" stroke-width="0.5"/>
+          </pattern>
+        </defs>
+
+        <!-- Background Grid -->
+        <rect width="100%" height="100%" fill="url(#ts-map-grid)" />
+
+        <!-- Boundaries (behind everything) -->
+        <g class="arch-frame" data-frame="kernel" data-depth="1" data-frame-flat="false" data-frame-kind="classification" role="button" tabindex="0" aria-pressed="false" aria-label="内核空间 · 高半地址"><title>同一份内核内存，里面装着每个进程各自的一组对象。用户程序看不见它们，只能通过系统调用间接改。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="0" data-frame-members="sig files walls fs mm group task0 task1 task2" x="161.4" y="512" width="1221.3" height="706" rx="12" class="c-region" stroke-width="1"/>
+        <text x="169.4" y="530" class="t-cloud" font-size="9" font-weight="600">内核空间 · 高半地址</text></g>
+
+        <g class="arch-frame" data-frame="perproc" data-depth="2" data-frame-flat="false" data-frame-kind="shared" role="button" tabindex="0" aria-pressed="false" aria-label="每进程一份 · 三条线程共用"><title>这六个对象是「进程」这个名字在内核里的落点。三条线程的 task 里存着指向它们的指针，所以一份资源被三条执行流共用。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="1" data-frame-members="sig files walls fs mm group" x="199.4" y="550" width="666.5000000000001" height="630" rx="12" class="c-region" stroke-width="1"/>
+        <text x="207.4" y="568" class="t-cloud" font-size="9" font-weight="600">每进程一份 · 三条线程共用</text></g>
+
+        <g class="arch-frame" data-frame="perthread" data-depth="2" data-frame-flat="false" data-frame-kind="contains" role="button" tabindex="0" aria-pressed="false" aria-label="每条线程一份 · task_struct"><title>内核调度的单位是 task。三条 task 平级，各自有 tid、调度状态、寄存器现场和内核栈；没有一条 task 包含另外两条。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="2" data-frame-members="task0 task1 task2" x="905.6" y="550" width="439.1" height="625" rx="12" class="c-region" stroke-width="1"/>
+        <text x="913.6" y="568" class="t-cloud" font-size="9" font-weight="600">每条线程一份 · task_struct</text></g>
+
+        <g class="arch-frame" data-frame="user" data-depth="1" data-frame-flat="false" data-frame-kind="classification" role="button" tabindex="0" aria-pressed="false" aria-label="用户空间 · 低半地址"><title>一块虚拟地址空间，从左到右依次是代码与全局数据、堆、映射区、用户栈。程序直接读写这里，不需要经过内核。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="3" data-frame-members="text heap mmap ustack libc" x="43.8" y="100" width="1492.4" height="270" rx="12" class="c-region" stroke-width="1"/>
+        <text x="51.8" y="118" class="t-cloud" font-size="9" font-weight="600">用户空间 · 低半地址</text></g>
+
+        <g class="arch-frame" data-frame="hw" data-depth="1" data-frame-flat="false" data-frame-kind="classification" role="button" tabindex="0" aria-pressed="false" aria-label="硬件 · 两边都在用"><title>CPU 执行 task，页表把用户虚拟地址翻译到物理帧。它们被进程使用，但不属于进程。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="4" data-frame-members="pmem cpu" x="175.5" y="1320" width="1169.2" height="200" rx="12" class="c-region" stroke-width="1"/>
+        <text x="183.5" y="1338" class="t-cloud" font-size="9" font-weight="600">硬件 · 两边都在用</text></g>
+
+        <!-- Connection paths (before components for correct z-order) -->
+        <path data-edge-from="ustack" data-edge-to="task0" data-edge-label="同一根执行流" data-edge-key="0" data-edge-id="run-on" data-composition-points="1089.25,330;1089.25,460;1125.15,460;1125.15,590" d="M 1089.25 330 L 1089.25 452 Q 1089.25 460 1097.25 460 L 1117.15 460 Q 1125.15 460 1125.15 468 L 1125.15 590" class="a-emphasis" stroke-width="1.8" marker-end="url(#ts-map-arrowhead-emphasis)"/>
+        <path data-edge-from="task0" data-edge-to="files" data-edge-label="共享 fd 表" data-edge-key="1" data-edge-id="ref-files" data-composition-points="945.6,672.5;921.6,672.5;921.6,691;849.9000000000001,691;849.9000000000001,675;825.9000000000001,675" d="M 945.6 672.5 L 929.6 672.5 Q 921.6 672.5 921.6 680.5 L 921.6 683 Q 921.6 691 913.6 691 L 857.9000000000001 691 Q 849.9000000000001 691 849.9000000000001 683 L 849.9000000000001 683 Q 849.9000000000001 675 841.9000000000001 675 L 825.9000000000001 675" class="a-default" stroke-width="1.5" marker-end="url(#ts-map-arrowhead)"/>
+        <path data-edge-from="task1" data-edge-to="fs" data-edge-label="共享 cwd" data-edge-key="2" data-edge-id="ref-fs" data-composition-points="945.6,862.5;921.6,862.5;921.6,881;849.9000000000001,881;849.9000000000001,865;825.9000000000001,865" d="M 945.6 862.5 L 929.6 862.5 Q 921.6 862.5 921.6 870.5 L 921.6 873 Q 921.6 881 913.6 881 L 857.9000000000001 881 Q 849.9000000000001 881 849.9000000000001 873 L 849.9000000000001 873 Q 849.9000000000001 865 841.9000000000001 865 L 825.9000000000001 865" class="a-default" stroke-width="1.5" marker-end="url(#ts-map-arrowhead)"/>
+        <path data-edge-from="task2" data-edge-to="group" data-edge-label="同组" data-edge-key="3" data-edge-id="ref-group" data-composition-points="945.6,1052.5;921.6,1052.5;921.6,1071;849.9000000000001,1071;849.9000000000001,1055;825.9000000000001,1055" d="M 945.6 1052.5 L 929.6 1052.5 Q 921.6 1052.5 921.6 1060.5 L 921.6 1063 Q 921.6 1071 913.6 1071 L 857.9000000000001 1071 Q 849.9000000000001 1071 849.9000000000001 1063 L 849.9000000000001 1063 Q 849.9000000000001 1055 841.9000000000001 1055 L 825.9000000000001 1055" class="a-default" stroke-width="1.5" marker-end="url(#ts-map-arrowhead)"/>
+        <path data-edge-from="mm" data-edge-to="pmem" data-edge-label="页表：VA → 物理帧" data-edge-key="4" data-edge-id="translate" data-composition-points="377.05,1140;377.05,1164;393.05,1164;393.05,1336;371.1,1336;371.1,1360" d="M 377.05 1140 L 377.05 1156 Q 377.05 1164 385.05 1164 L 385.05 1164 Q 393.05 1164 393.05 1172 L 393.05 1328 Q 393.05 1336 385.05 1336 L 379.1 1336 Q 371.1 1336 371.1 1344 L 371.1 1360" class="a-default" stroke-width="1.5" marker-end="url(#ts-map-arrowhead)"/>
+        <path data-edge-from="task2" data-edge-to="cpu" data-edge-label="调度：挑一条上核" data-edge-key="5" data-edge-id="schedule" data-composition-points="1125.15,1135;1125.15,1360" d="M 1125.15 1135 L 1125.15 1360" class="a-default" stroke-width="1.5" marker-end="url(#ts-map-arrowhead)"/>
+
+        <!-- Components -->
+        <g id="ts-map-node-text" data-nb="1" data-node-id="text" data-node-label="代码与全局数据" tabindex="0" role="button" aria-label="Focus 代码与全局数据, r-x 的 .text / rw- 的 .data .bss, 用户空间 · 低半地址（从左到右，地址递增）" aria-pressed="false" data-node-kind="backend" data-node-sublabel="r-x 的 .text / rw- 的 .data .bss" data-node-context="用户空间 · 低半地址（从左到右，地址递增）">
+          <title>代码与全局数据 · r-x 的 .text / rw- 的 .data .bss · 用户空间 · 低半地址（从左到右，地址递增）</title>
+          <rect x="83.8" y="140" width="275.3" height="190" rx="6" class="c-mask"/>
+          <rect x="83.8" y="140" width="275.3" height="190" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(89.8 146) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <rect class="nb-badge" x="287.1" y="148" width="60.0" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="317.1" y="159" font-size="8" text-anchor="middle">① 程序本体</text>
+          <text class="nb-title" x="117.8" y="161" font-size="10.5" font-weight="600">代码与全局数据</text>
+          <line class="nb-hr" x1="91.8" y1="168" x2="351.1" y2="168"/>
+          <text class="nb-k" x="95.8" y="226" font-size="9">谁写进来</text><text class="nb-v" x="148.0" y="226" font-size="9">加载器按 ELF 的段映射</text>
+          <text class="nb-k" x="95.8" y="240" font-size="9">谁能改</text><text class="nb-v" x="148.0" y="240" font-size="9">全局变量任何线程直接写</text>
+          <rect class="nb-seg" x="95.8" y="250" width="123.7" height="17" rx="3"/><text class="nb-seg-t" x="158.6" y="262" font-size="8" text-anchor="middle">.text 指令</text>
+          <rect class="nb-seg" x="221.4" y="250" width="60.8" height="17" rx="3"/><text class="nb-seg-t" x="252.9" y="262" font-size="8" text-anchor="middle">.data 初值</text>
+          <rect class="nb-seg" data-tone="idle" x="284.3" y="250" width="60.8" height="17" rx="3"/><text class="nb-seg-t" data-tone="idle" x="315.7" y="262" font-size="8" text-anchor="middle">.bss 补零</text>
+          <text class="nb-note" x="95.8" y="322" font-size="8">代码段只读；同一个程序跑多份可共享同一批代码页</text>
+        </g>
+
+        <g id="ts-map-node-heap" data-nb="1" data-node-id="heap" data-node-label="堆" tabindex="0" role="button" aria-label="Focus 堆, malloc / new 从这里长, 用户空间 · 低半地址（从左到右，地址递增）" aria-pressed="false" data-node-kind="backend" data-node-sublabel="malloc / new 从这里长" data-node-context="用户空间 · 低半地址（从左到右，地址递增）">
+          <title>堆 · malloc / new 从这里长 · 用户空间 · 低半地址（从左到右，地址递增）</title>
+          <rect x="383" y="140" width="251.4" height="190" rx="6" class="c-mask"/>
+          <rect x="383" y="140" width="251.4" height="190" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(389 146) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <rect class="nb-badge" x="562.4" y="148" width="60.0" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="592.4" y="159" font-size="8" text-anchor="middle">① 全组共享</text>
+          <text class="nb-title" x="417" y="161" font-size="10.5" font-weight="600">堆</text>
+          <line class="nb-hr" x1="391" y1="168" x2="626.4" y2="168"/>
+          <text class="nb-k" x="395" y="231" font-size="9">谁管</text><text class="nb-v" x="436.4" y="231" font-size="9">malloc / free（用户态分配器）</text>
+          <text class="nb-k" x="395" y="245" font-size="9">怎么长</text><text class="nb-v" x="436.4" y="245" font-size="9">brk / mmap 向内核要</text>
+          <text class="nb-k" x="395" y="259" font-size="9">谁能改</text><text class="nb-v" x="436.4" y="259" font-size="9">任何线程，指针直接读写</text>
+          <text class="nb-note" x="395" y="322" font-size="8">free 不保证把空间还给内核</text>
+        </g>
+
+        <g id="ts-map-node-mmap" data-nb="1" data-node-id="mmap" data-node-label="映射区" tabindex="0" role="button" aria-label="Focus 映射区, 动态库、mmap 的文件, 用户空间 · 低半地址（从左到右，地址递增）" aria-pressed="false" data-node-kind="backend" data-node-sublabel="动态库、mmap 的文件" data-node-context="用户空间 · 低半地址（从左到右，地址递增）">
+          <title>映射区 · 动态库、mmap 的文件 · 用户空间 · 低半地址（从左到右，地址递增）</title>
+          <rect x="658.3" y="140" width="275.3" height="190" rx="6" class="c-mask"/>
+          <rect x="658.3" y="140" width="275.3" height="190" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(664.3 146) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <rect class="nb-badge" x="861.6" y="148" width="60.0" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="891.6" y="159" font-size="8" text-anchor="middle">① 全组共享</text>
+          <text class="nb-title" x="692.3" y="161" font-size="10.5" font-weight="600">映射区</text>
+          <line class="nb-hr" x1="666.3" y1="168" x2="925.5999999999999" y2="168"/>
+          <text class="nb-k" x="670.3" y="231" font-size="9">谁映射</text><text class="nb-v" x="733.3" y="231" font-size="9">动态加载器 / mmap(2)</text>
+          <text class="nb-k" x="670.3" y="245" font-size="9">装什么</text><text class="nb-v" x="733.3" y="245" font-size="9">.so 代码、文件页、线程的用户栈</text>
+          <text class="nb-k" x="670.3" y="259" font-size="9">文件改了呢</text><text class="nb-v" x="733.3" y="259" font-size="9">共享映射跟着变</text>
+          <text class="nb-note" x="670.3" y="322" font-size="8">线程的用户栈也从这块划出来，创建后大小固定</text>
+        </g>
+
+        <g id="ts-map-node-ustack" data-nb="1" data-node-id="ustack" data-node-label="用户栈 ×3 + TLS" tabindex="0" role="button" aria-label="Focus 用户栈 ×3 + TLS, 地址最高，每条线程一组, 用户空间 · 低半地址（从左到右，地址递增）" aria-pressed="false" data-node-kind="backend" data-node-sublabel="地址最高，每条线程一组" data-node-context="用户空间 · 低半地址（从左到右，地址递增）">
+          <title>用户栈 ×3 + TLS · 地址最高，每条线程一组 · 用户空间 · 低半地址（从左到右，地址递增）</title>
+          <rect x="957.6" y="140" width="263.3" height="190" rx="6" class="c-mask"/>
+          <rect x="957.6" y="140" width="263.3" height="190" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(963.6 146) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <rect class="nb-badge" x="1148.9" y="148" width="60.0" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="1178.9" y="159" font-size="8" text-anchor="middle">每线程一组</text>
+          <text class="nb-title" x="991.6" y="161" font-size="10.5" font-weight="600">用户栈 ×3 + TLS</text>
+          <line class="nb-hr" x1="965.6" y1="168" x2="1212.9" y2="168"/>
+          <text class="nb-k" x="969.6" y="211.5" font-size="9">装什么</text><text class="nb-v" x="1021.8" y="211.5" font-size="9">用户栈 + TLS（thread_local）</text>
+          <text class="nb-k" x="969.6" y="225.5" font-size="9">找 TLS</text><text class="nb-v" x="1021.8" y="225.5" font-size="9">fs 基址指向本线程那块</text>
+          <text class="nb-k" x="969.6" y="239.5" font-size="9">栈顶上方</text><text class="nb-v" x="1021.8" y="239.5" font-size="9">启动时压进来的 argv / envp</text>
+          <g class="nb-spot" data-nb-spot="1" tabindex="0" role="button" data-nb-link="task0"><rect class="nb-cell" x="969.6" y="249.5" width="75.8" height="32" rx="4"/><text class="nb-cell-t" x="1007.5" y="262.5" font-size="9" text-anchor="middle">T0</text><text class="nb-cell-s" x="1007.5" y="273.5" font-size="7.5" text-anchor="middle">tid 1025</text></g>
+          <g class="nb-spot" data-nb-spot="1" tabindex="0" role="button" data-nb-link="task1"><rect class="nb-cell" x="1051.4" y="249.5" width="75.8" height="32" rx="4"/><text class="nb-cell-t" x="1089.3" y="262.5" font-size="9" text-anchor="middle">T1</text><text class="nb-cell-s" x="1089.3" y="273.5" font-size="7.5" text-anchor="middle">1026</text></g>
+          <g class="nb-spot" data-nb-spot="1" tabindex="0" role="button" data-nb-link="task2"><rect class="nb-cell" x="1133.1" y="249.5" width="75.8" height="32" rx="4"/><text class="nb-cell-t" x="1171.0" y="262.5" font-size="9" text-anchor="middle">T2</text><text class="nb-cell-s" x="1171.0" y="273.5" font-size="7.5" text-anchor="middle">1027</text></g>
+          <text class="nb-note" x="969.6" y="322" font-size="8">三根栈在同一块地址空间里，没有硬件隔离</text>
+        </g>
+
+        <g id="ts-map-node-libc" data-nb="1" data-node-id="libc" data-node-label="libc 与线程库" tabindex="0" role="button" aria-label="Focus libc 与线程库, pthread_t、取消、join 状态, 用户空间 · 低半地址（从左到右，地址递增）" aria-pressed="false" data-node-kind="backend" data-node-sublabel="pthread_t、取消、join 状态" data-node-context="用户空间 · 低半地址（从左到右，地址递增）">
+          <title>libc 与线程库 · pthread_t、取消、join 状态 · 用户空间 · 低半地址（从左到右，地址递增）</title>
+          <rect x="1244.8" y="140" width="251.4" height="190" rx="6" class="c-mask"/>
+          <rect x="1244.8" y="140" width="251.4" height="190" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(1250.8 146) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <rect class="nb-badge" x="1424.2" y="148" width="60.0" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="1454.2" y="159" font-size="8" text-anchor="middle">内核不认识</text>
+          <text class="nb-title" x="1278.8" y="161" font-size="10.5" font-weight="600">libc 与线程库</text>
+          <line class="nb-hr" x1="1252.8" y1="168" x2="1488.2" y2="168"/>
+          <text class="nb-k" x="1256.8" y="231" font-size="9">装什么</text><text class="nb-v" x="1309.0" y="231" font-size="9">pthread_t、取消状态、join 状态</text>
+          <text class="nb-k" x="1256.8" y="245" font-size="9">TLS 在哪</text><text class="nb-v" x="1309.0" y="245" font-size="9">就挂在线程库的结构里</text>
+          <text class="nb-k" x="1256.8" y="259" font-size="9">谁维护</text><text class="nb-v" x="1309.0" y="259" font-size="9">libc 自己，全程在用户态</text>
+          <text class="nb-note" x="1256.8" y="322" font-size="8">内核只认识 task，不认识这些结构</text>
+        </g>
+
+        <g id="ts-map-node-sig" data-nb="1" data-node-id="sig" data-node-label="信号：处置 / 掩码" tabindex="0" role="button" aria-label="Focus 信号：处置 / 掩码, 处置全组一份，掩码每人一份, 内核空间 · 高半地址（同一个内核，每个进程各有一份对象） › 每进程一份 · 三条线程共用的资源与身份" aria-pressed="false" data-node-kind="database" data-node-sublabel="处置全组一份，掩码每人一份" data-node-context="内核空间 · 高半地址（同一个内核，每个进程各有一份对象） › 每进程一份 · 三条线程共用的资源与身份">
+          <title>信号：处置 / 掩码 · 处置全组一份，掩码每人一份 · 内核空间 · 高半地址（同一个内核，每个进程各有一份对象） › 每进程一份 · 三条线程共用的资源与身份</title>
+          <rect x="239.4" y="590" width="275.3" height="170" rx="6" class="c-mask"/>
+          <rect x="239.4" y="590" width="275.3" height="170" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(245.4 596) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <rect class="nb-badge" x="442.7" y="598" width="60.0" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="472.7" y="609" font-size="8" text-anchor="middle">② 拆成两半</text>
+          <text class="nb-title" x="273.4" y="611" font-size="10.5" font-weight="600">信号：处置 / 掩码</text>
+          <line class="nb-hr" x1="247.4" y1="618" x2="506.70000000000005" y2="618"/>
+          <text class="nb-k" x="251.4" y="671" font-size="9">处置表</text><text class="nb-v" x="314.4" y="671" font-size="9">全组一份（sighand_struct）</text>
+          <g class="nb-spot" data-nb-spot="1" tabindex="0" role="button" data-nb-link="task1"><rect class="nb-hit" x="246.4" y="674" width="261.3" height="14"/><text class="nb-k" x="251.4" y="685" font-size="9">掩码</text><text class="nb-v" x="314.4" y="685" font-size="9">每条 task 各一份</text></g>
+          <text class="nb-k" x="251.4" y="699" font-size="9">待处理信号</text><text class="nb-v" x="314.4" y="699" font-size="9">每条 task 各自排队</text>
+          <text class="nb-note" x="251.4" y="752" font-size="8">处置共享、掩码私有，所以「谁先收到」要看各自的掩码</text>
+        </g>
+
+        <g id="ts-map-node-files" data-nb="1" data-node-id="files" data-node-label="files_struct · fd 表" tabindex="0" role="button" aria-label="Focus files_struct · fd 表, 开着的文件、socket、管道, 内核空间 · 高半地址（同一个内核，每个进程各有一份对象） › 每进程一份 · 三条线程共用的资源与身份" aria-pressed="false" data-node-kind="database" data-node-sublabel="开着的文件、socket、管道" data-node-context="内核空间 · 高半地址（同一个内核，每个进程各有一份对象） › 每进程一份 · 三条线程共用的资源与身份">
+          <title>files_struct · fd 表 · 开着的文件、socket、管道 · 内核空间 · 高半地址（同一个内核，每个进程各有一份对象） › 每进程一份 · 三条线程共用的资源与身份</title>
+          <rect x="550.6" y="590" width="275.3" height="170" rx="6" class="c-mask"/>
+          <rect x="550.6" y="590" width="275.3" height="170" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(556.6 596) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <rect class="nb-badge" x="753.9" y="598" width="60.0" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="783.9" y="609" font-size="8" text-anchor="middle">② 全组共享</text>
+          <text class="nb-title" x="584.6" y="611" font-size="10.5" font-weight="600">files_struct · fd 表</text>
+          <line class="nb-hr" x1="558.6" y1="618" x2="817.9000000000001" y2="618"/>
+          <text class="nb-k" x="562.6" y="678" font-size="9">fd 0–2</text><text class="nb-v" x="604.0" y="678" font-size="9">标准输入、输出、错误</text>
+          <text class="nb-k" x="562.6" y="692" font-size="9">fd 3…</text><text class="nb-v" x="604.0" y="692" font-size="9">打开的文件、socket、管道</text>
+          <text class="nb-note" x="562.6" y="752" font-size="8">A 线程 open 的 fd，B 立刻能用；连读写偏移都是同一份</text>
+        </g>
+
+        <g id="ts-map-node-walls" data-nb="1" data-node-id="walls" data-node-label="凭证 / 命名空间" tabindex="0" role="button" aria-label="Focus 凭证 / 命名空间, uid、ns、IPC、cgroup 配额, 内核空间 · 高半地址（同一个内核，每个进程各有一份对象） › 每进程一份 · 三条线程共用的资源与身份" aria-pressed="false" data-node-kind="database" data-node-sublabel="uid、ns、IPC、cgroup 配额" data-node-context="内核空间 · 高半地址（同一个内核，每个进程各有一份对象） › 每进程一份 · 三条线程共用的资源与身份">
+          <title>凭证 / 命名空间 · uid、ns、IPC、cgroup 配额 · 内核空间 · 高半地址（同一个内核，每个进程各有一份对象） › 每进程一份 · 三条线程共用的资源与身份</title>
+          <rect x="239.4" y="780" width="275.3" height="170" rx="6" class="c-mask"/>
+          <rect x="239.4" y="780" width="275.3" height="170" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(245.4 786) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <rect class="nb-badge" x="442.7" y="788" width="60.0" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="472.7" y="799" font-size="8" text-anchor="middle">② 全组共享</text>
+          <text class="nb-title" x="273.4" y="801" font-size="10.5" font-weight="600">凭证 / 命名空间</text>
+          <line class="nb-hr" x1="247.4" y1="808" x2="506.70000000000005" y2="808"/>
+          <text class="nb-k" x="251.4" y="854" font-size="9">uid / gid</text><text class="nb-v" x="341.4" y="854" font-size="9">能开谁的文件、能不能杀别人</text>
+          <text class="nb-k" x="251.4" y="868" font-size="9">namespace</text><text class="nb-v" x="341.4" y="868" font-size="9">看得见哪些进程、网卡、挂载点</text>
+          <text class="nb-k" x="251.4" y="882" font-size="9">IPC</text><text class="nb-v" x="341.4" y="882" font-size="9">共享内存、消息队列、信号量</text>
+          <text class="nb-k" x="251.4" y="896" font-size="9">cgroup / rlimit</text><text class="nb-v" x="341.4" y="896" font-size="9">能用多少 CPU、内存、fd</text>
+          <text class="nb-note" x="251.4" y="942" font-size="8">都只能由内核改，程序只能申请</text>
+        </g>
+
+        <g id="ts-map-node-fs" data-nb="1" data-node-id="fs" data-node-label="fs_struct · 目录" tabindex="0" role="button" aria-label="Focus fs_struct · 目录, cwd / root / umask, 内核空间 · 高半地址（同一个内核，每个进程各有一份对象） › 每进程一份 · 三条线程共用的资源与身份" aria-pressed="false" data-node-kind="database" data-node-sublabel="cwd / root / umask" data-node-context="内核空间 · 高半地址（同一个内核，每个进程各有一份对象） › 每进程一份 · 三条线程共用的资源与身份">
+          <title>fs_struct · 目录 · cwd / root / umask · 内核空间 · 高半地址（同一个内核，每个进程各有一份对象） › 每进程一份 · 三条线程共用的资源与身份</title>
+          <rect x="550.6" y="780" width="275.3" height="170" rx="6" class="c-mask"/>
+          <rect x="550.6" y="780" width="275.3" height="170" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(556.6 786) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <rect class="nb-badge" x="753.9" y="788" width="60.0" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="783.9" y="799" font-size="8" text-anchor="middle">② 全组共享</text>
+          <text class="nb-title" x="584.6" y="801" font-size="10.5" font-weight="600">fs_struct · 目录</text>
+          <line class="nb-hr" x1="558.6" y1="808" x2="817.9000000000001" y2="808"/>
+          <text class="nb-k" x="562.6" y="861" font-size="9">cwd</text><text class="nb-v" x="598.6" y="861" font-size="9">相对路径的起点</text>
+          <text class="nb-k" x="562.6" y="875" font-size="9">root</text><text class="nb-v" x="598.6" y="875" font-size="9">chroot 之后的根</text>
+          <text class="nb-k" x="562.6" y="889" font-size="9">umask</text><text class="nb-v" x="598.6" y="889" font-size="9">新建文件的默认权限</text>
+          <text class="nb-note" x="562.6" y="942" font-size="8">一条线程 chdir，全组的工作目录都变</text>
+        </g>
+
+        <g id="ts-map-node-mm" data-nb="1" data-node-id="mm" data-node-label="mm_struct + 页表" tabindex="0" role="button" aria-label="Focus mm_struct + 页表, 描述上面那块地址空间, 内核空间 · 高半地址（同一个内核，每个进程各有一份对象） › 每进程一份 · 三条线程共用的资源与身份" aria-pressed="false" data-node-kind="database" data-node-sublabel="描述上面那块地址空间" data-node-context="内核空间 · 高半地址（同一个内核，每个进程各有一份对象） › 每进程一份 · 三条线程共用的资源与身份">
+          <title>mm_struct + 页表 · 描述上面那块地址空间 · 内核空间 · 高半地址（同一个内核，每个进程各有一份对象） › 每进程一份 · 三条线程共用的资源与身份</title>
+          <rect x="239.4" y="970" width="275.3" height="170" rx="6" class="c-mask"/>
+          <rect x="239.4" y="970" width="275.3" height="170" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(245.4 976) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <rect class="nb-badge" x="433.1" y="978" width="69.6" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="467.9" y="989" font-size="8" text-anchor="middle">② 每进程一份</text>
+          <text class="nb-title" x="273.4" y="991" font-size="10.5" font-weight="600">mm_struct + 页表</text>
+          <line class="nb-hr" x1="247.4" y1="998" x2="506.70000000000005" y2="998"/>
+          <g class="nb-spot" data-nb-spot="1" tabindex="0" role="button" data-nb-link="ustack"><rect class="nb-seg" x="251.4" y="1013" width="251.3" height="12" rx="3"/><text class="nb-seg-t" x="258.4" y="1022" font-size="8">用户栈</text><text class="nb-note" x="495.70000000000005" y="1022" font-size="7.5" text-anchor="end">0x7fff…</text></g>
+          <g class="nb-spot" data-nb-spot="1" tabindex="0" role="button" data-nb-link="mmap"><rect class="nb-seg" x="251.4" y="1028" width="251.3" height="12" rx="3"/><text class="nb-seg-t" x="258.4" y="1037" font-size="8">mmap 区</text><text class="nb-note" x="495.70000000000005" y="1037" font-size="7.5" text-anchor="end">0x7f…</text></g>
+          <g class="nb-spot" data-nb-spot="1" tabindex="0" role="button" data-nb-link="heap"><rect class="nb-seg" x="251.4" y="1043" width="251.3" height="12" rx="3"/><text class="nb-seg-t" x="258.4" y="1052" font-size="8">堆</text><text class="nb-note" x="495.70000000000005" y="1052" font-size="7.5" text-anchor="end">0x55…</text></g>
+          <g class="nb-spot" data-nb-spot="1" tabindex="0" role="button" data-nb-link="text"><rect class="nb-seg" x="251.4" y="1058" width="251.3" height="12" rx="3"/><text class="nb-seg-t" x="258.4" y="1067" font-size="8">.data .bss</text></g>
+          <g class="nb-spot" data-nb-spot="1" tabindex="0" role="button" data-nb-link="text"><rect class="nb-seg" x="251.4" y="1073" width="251.3" height="12" rx="3"/><text class="nb-seg-t" x="258.4" y="1082" font-size="8">.text</text><text class="nb-note" x="495.70000000000005" y="1082" font-size="7.5" text-anchor="end">4194304</text></g>
+          <text class="nb-pair-from" x="251.4" y="1105" font-size="8.5">VA 0x601000</text><text class="nb-pair-arrow" x="362.0" y="1105" font-size="8.5">→</text><text class="nb-pair-to" x="382.1" y="1105" font-size="8.5">帧 42</text><text class="nb-note" x="502.70000000000005" y="1105" font-size="7.5" text-anchor="end">别的进程另一帧</text>
+          <text class="nb-note" x="251.4" y="1132" font-size="8">用户内存本体不在内核，这里只有描述与页表</text>
+        </g>
+
+        <g id="ts-map-node-group" data-nb="1" data-node-id="group" data-node-label="线程组与父子" tabindex="0" role="button" aria-label="Focus 线程组与父子, tgid / ppid / 线程列表, 内核空间 · 高半地址（同一个内核，每个进程各有一份对象） › 每进程一份 · 三条线程共用的资源与身份" aria-pressed="false" data-node-kind="database" data-node-sublabel="tgid / ppid / 线程列表" data-node-context="内核空间 · 高半地址（同一个内核，每个进程各有一份对象） › 每进程一份 · 三条线程共用的资源与身份">
+          <title>线程组与父子 · tgid / ppid / 线程列表 · 内核空间 · 高半地址（同一个内核，每个进程各有一份对象） › 每进程一份 · 三条线程共用的资源与身份</title>
+          <rect x="550.6" y="970" width="275.3" height="170" rx="6" class="c-mask"/>
+          <rect x="550.6" y="970" width="275.3" height="170" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(556.6 976) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <rect class="nb-badge" x="744.3" y="978" width="69.6" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="779.1" y="989" font-size="8" text-anchor="middle">② 每进程一份</text>
+          <text class="nb-title" x="584.6" y="991" font-size="10.5" font-weight="600">线程组与父子</text>
+          <line class="nb-hr" x1="558.6" y1="998" x2="817.9000000000001" y2="998"/>
+          <text class="nb-k" x="562.6" y="1044" font-size="9">tgid</text><text class="nb-v" x="636.4" y="1044" font-size="9">getpid() 三条都返回它</text>
+          <text class="nb-k" x="562.6" y="1058" font-size="9">ppid</text><text class="nb-v" x="636.4" y="1058" font-size="9">三条线程的父进程相同</text>
+          <text class="nb-k" x="562.6" y="1072" font-size="9">group_leader</text><text class="nb-v" x="636.4" y="1072" font-size="9">主线程那条 task</text>
+          <text class="nb-k" x="562.6" y="1086" font-size="9">线程列表</text><text class="nb-v" x="636.4" y="1086" font-size="9">同组的 task 挂在一起</text>
+          <text class="nb-note" x="562.6" y="1132" font-size="8">「进程」这个名字，在内核里就是这个组</text>
+        </g>
+
+        <g id="ts-map-node-task0" data-nb="1" data-node-id="task0" data-node-label="task T0 · 主线程" tabindex="0" role="button" aria-label="Focus task T0 · 主线程, tid 1025 / tgid 1024, 内核空间 · 高半地址（同一个内核，每个进程各有一份对象） › 每条线程一份 · task_struct" aria-pressed="false" data-node-kind="database" data-node-sublabel="tid 1025 / tgid 1024" data-node-context="内核空间 · 高半地址（同一个内核，每个进程各有一份对象） › 每条线程一份 · task_struct">
+          <title>task T0 · 主线程 · tid 1025 / tgid 1024 · 内核空间 · 高半地址（同一个内核，每个进程各有一份对象） › 每条线程一份 · task_struct</title>
+          <rect x="945.6" y="590" width="359.1" height="165" rx="6" class="c-mask"/>
+          <rect x="945.6" y="590" width="359.1" height="165" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(951.6 596) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <rect class="nb-badge" x="1251.9" y="598" width="40.8" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="1272.3" y="609" font-size="8" text-anchor="middle">主线程</text>
+          <text class="nb-title" x="979.6" y="611" font-size="10.5" font-weight="600">task T0 · 主线程</text>
+          <line class="nb-hr" x1="953.6" y1="618" x2="1296.7" y2="618"/>
+          <text class="nb-k" x="957.6" y="661.5" font-size="9">调度状态</text><text class="nb-v" x="1009.8" y="661.5" font-size="9">运行 / 可运行 / 睡眠 / 停止</text>
+          <text class="nb-k" x="957.6" y="675.5" font-size="9">现场</text><text class="nb-v" x="1009.8" y="675.5" font-size="9">RIP / RSP / 通用寄存器</text>
+          <text class="nb-k" x="957.6" y="689.5" font-size="9">内核栈</text><text class="nb-v" x="1009.8" y="689.5" font-size="9">16 KiB，进内核才用</text>
+          <g class="nb-spot" data-nb-spot="1" tabindex="0" role="button" data-nb-link="mm"><rect class="nb-hit" x="952.6" y="692.5" width="345.1" height="14"/><text class="nb-k" x="957.6" y="703.5" font-size="9">指向</text><text class="nb-v" x="1009.8" y="703.5" font-size="9">mm / files / fs / sighand</text></g>
+          <text class="nb-note" x="957.6" y="747" font-size="8">task 是索引，资源不在它肚子里</text>
+        </g>
+
+        <g id="ts-map-node-task1" data-nb="1" data-node-id="task1" data-node-label="task T1" tabindex="0" role="button" aria-label="Focus task T1, pthread_create 造出来, 内核空间 · 高半地址（同一个内核，每个进程各有一份对象） › 每条线程一份 · task_struct" aria-pressed="false" data-node-kind="database" data-node-sublabel="pthread_create 造出来" data-node-context="内核空间 · 高半地址（同一个内核，每个进程各有一份对象） › 每条线程一份 · task_struct">
+          <title>task T1 · pthread_create 造出来 · 内核空间 · 高半地址（同一个内核，每个进程各有一份对象） › 每条线程一份 · task_struct</title>
+          <rect x="945.6" y="780" width="359.1" height="165" rx="6" class="c-mask"/>
+          <rect x="945.6" y="780" width="359.1" height="165" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(951.6 786) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <rect class="nb-badge" x="1213.5" y="788" width="79.2" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="1253.1" y="799" font-size="8" text-anchor="middle">pthread_create</text>
+          <text class="nb-title" x="979.6" y="801" font-size="10.5" font-weight="600">task T1</text>
+          <line class="nb-hr" x1="953.6" y1="808" x2="1296.7" y2="808"/>
+          <text class="nb-k" x="957.6" y="849" font-size="9">tid</text><text class="nb-v" x="1009.8" y="849" font-size="9">1026，tgid 还是 1024</text>
+          <text class="nb-k" x="957.6" y="863" font-size="9">新分配的</text><text class="nb-v" x="1009.8" y="863" font-size="9">内核栈 + 用户栈 + TLS</text>
+          <g class="nb-spot" data-nb-spot="1" tabindex="0" role="button" data-nb-link="files"><rect class="nb-hit" x="952.6" y="866" width="345.1" height="14"/><text class="nb-k" x="957.6" y="877" font-size="9">照抄的</text><text class="nb-v" x="1009.8" y="877" font-size="9">mm / files / fs / sighand</text></g>
+          <text class="nb-code" x="957.6" y="896" font-size="7.5">clone(CLONE_VM | CLONE_FILES | ...)</text>
+          <text class="nb-note" x="957.6" y="937" font-size="8">一份资源没复制，所以线程便宜</text>
+        </g>
+
+        <g id="ts-map-node-task2" data-nb="1" data-node-id="task2" data-node-label="task T2" tabindex="0" role="button" aria-label="Focus task T2, 同组，tid 不同, 内核空间 · 高半地址（同一个内核，每个进程各有一份对象） › 每条线程一份 · task_struct" aria-pressed="false" data-node-kind="database" data-node-sublabel="同组，tid 不同" data-node-context="内核空间 · 高半地址（同一个内核，每个进程各有一份对象） › 每条线程一份 · task_struct">
+          <title>task T2 · 同组，tid 不同 · 内核空间 · 高半地址（同一个内核，每个进程各有一份对象） › 每条线程一份 · task_struct</title>
+          <rect x="945.6" y="970" width="359.1" height="165" rx="6" class="c-mask"/>
+          <rect x="945.6" y="970" width="359.1" height="165" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(951.6 976) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <rect class="nb-badge" x="1261.5" y="978" width="31.2" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="1277.1" y="989" font-size="8" text-anchor="middle">同组</text>
+          <text class="nb-title" x="979.6" y="991" font-size="10.5" font-weight="600">task T2</text>
+          <line class="nb-hr" x1="953.6" y1="998" x2="1296.7" y2="998"/>
+          <text class="nb-k" x="957.6" y="1041.5" font-size="9">tid</text><text class="nb-v" x="1009.8" y="1041.5" font-size="9">1027</text>
+          <text class="nb-k" x="957.6" y="1055.5" font-size="9">优先级</text><text class="nb-v" x="1009.8" y="1055.5" font-size="9">nice 值、vruntime</text>
+          <text class="nb-k" x="957.6" y="1069.5" font-size="9">CPU 亲和</text><text class="nb-v" x="1009.8" y="1069.5" font-size="9">允许上哪些核</text>
+          <text class="nb-k" x="957.6" y="1083.5" font-size="9">统计</text><text class="nb-v" x="1009.8" y="1083.5" font-size="9">用户/内核态耗时、切换次数</text>
+          <text class="nb-note" x="957.6" y="1127" font-size="8">三条 task 平级，没有一条包含另外两条</text>
+        </g>
+
+        <g id="ts-map-node-pmem" data-nb="1" data-node-id="pmem" data-node-label="物理内存" tabindex="0" role="button" aria-label="Focus 物理内存, 4 KiB 一页，全局只有一条, 硬件 · 两边都在用，不归任何一方" aria-pressed="false" data-node-kind="cloud" data-node-sublabel="4 KiB 一页，全局只有一条" data-node-context="硬件 · 两边都在用，不归任何一方">
+          <title>物理内存 · 4 KiB 一页，全局只有一条 · 硬件 · 两边都在用，不归任何一方</title>
+          <rect x="215.5" y="1360" width="311.2" height="120" rx="6" class="c-mask"/>
+          <rect x="215.5" y="1360" width="311.2" height="120" rx="6" class="c-cloud" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="cloud" class="semantic-sigil s-cloud" transform="translate(221.5 1366) scale(0.6875)">
+            <path d="M4.3 12.5h7.3a2.4 2.4 0 0 0 .2-4.8 4 4 0 0 0-7.5-1.3A3.1 3.1 0 0 0 4.3 12.5Z"/>
+          </g>
+          <rect class="nb-badge" x="454.7" y="1368" width="60.0" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="484.7" y="1379" font-size="8" text-anchor="middle">4 KiB 一页</text>
+          <text class="nb-title" x="249.5" y="1381" font-size="10.5" font-weight="600">物理内存</text>
+          <line class="nb-hr" x1="223.5" y1="1388" x2="518.7" y2="1388"/>
+          <rect class="nb-cell" x="227.5" y="1410" width="104.0" height="32" rx="4"/><text class="nb-cell-t" x="279.5" y="1423" font-size="9" text-anchor="middle">帧 42</text><text class="nb-cell-s" x="279.5" y="1434" font-size="7.5" text-anchor="middle">进程 A 的 x = 1</text>
+          <rect class="nb-cell" x="337.5" y="1410" width="104.0" height="32" rx="4"/><text class="nb-cell-t" x="389.5" y="1423" font-size="9" text-anchor="middle">帧 87</text><text class="nb-cell-s" x="389.5" y="1434" font-size="7.5" text-anchor="middle">进程 B 的 x = 2</text>
+          <text class="nb-note" x="227.5" y="1472" font-size="8">哪个虚拟地址落到哪一帧，由各自的页表决定</text>
+        </g>
+
+        <g id="ts-map-node-cpu" data-nb="1" data-node-id="cpu" data-node-label="CPU 核 ×4" tabindex="0" role="button" aria-label="Focus CPU 核 ×4, task 轮流上核, 硬件 · 两边都在用，不归任何一方" aria-pressed="false" data-node-kind="cloud" data-node-sublabel="task 轮流上核" data-node-context="硬件 · 两边都在用，不归任何一方">
+          <title>CPU 核 ×4 · task 轮流上核 · 硬件 · 两边都在用，不归任何一方</title>
+          <rect x="945.6" y="1360" width="359.1" height="120" rx="6" class="c-mask"/>
+          <rect x="945.6" y="1360" width="359.1" height="120" rx="6" class="c-cloud" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="cloud" class="semantic-sigil s-cloud" transform="translate(951.6 1366) scale(0.6875)">
+            <path d="M4.3 12.5h7.3a2.4 2.4 0 0 0 .2-4.8 4 4 0 0 0-7.5-1.3A3.1 3.1 0 0 0 4.3 12.5Z"/>
+          </g>
+          <rect class="nb-badge" x="1256.7" y="1368" width="36.0" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="1274.7" y="1379" font-size="8" text-anchor="middle">核 ×4</text>
+          <text class="nb-title" x="979.6" y="1381" font-size="10.5" font-weight="600">CPU 核 ×4</text>
+          <line class="nb-hr" x1="953.6" y1="1388" x2="1296.7" y2="1388"/>
+          <g class="nb-spot" data-nb-spot="1" tabindex="0" role="button" data-nb-link="task0"><rect class="nb-cell" x="957.6" y="1410" width="79.3" height="32" rx="4"/><text class="nb-cell-t" x="997.2" y="1423" font-size="9" text-anchor="middle">T0</text><text class="nb-cell-s" x="997.2" y="1434" font-size="7.5" text-anchor="middle">在跑</text></g>
+          <g class="nb-spot" data-nb-spot="1" tabindex="0" role="button" data-nb-link="task1"><rect class="nb-cell" x="1042.9" y="1410" width="79.3" height="32" rx="4"/><text class="nb-cell-t" x="1082.5" y="1423" font-size="9" text-anchor="middle">T1</text><text class="nb-cell-s" x="1082.5" y="1434" font-size="7.5" text-anchor="middle">在跑</text></g>
+          <g class="nb-spot" data-nb-spot="1" tabindex="0" role="button" data-nb-link="task2"><rect class="nb-cell" x="1128.2" y="1410" width="79.3" height="32" rx="4"/><text class="nb-cell-t" x="1167.8" y="1423" font-size="9" text-anchor="middle">T2</text><text class="nb-cell-s" x="1167.8" y="1434" font-size="7.5" text-anchor="middle">在跑</text></g>
+          <rect class="nb-cell" data-tone="idle" x="1213.4" y="1410" width="79.3" height="32" rx="4"/><text class="nb-cell-t" data-tone="idle" x="1253.1" y="1423" font-size="9" text-anchor="middle">空闲</text><text class="nb-cell-s" x="1253.1" y="1434" font-size="7.5" text-anchor="middle">没人排上</text>
+          <text class="nb-note" x="957.6" y="1472" font-size="8">调度器面前只有 task，它不认识「进程」</text>
+        </g>
+
+        <!-- Connection labels -->
+        <g data-detail="context" data-edge-from="ustack" data-edge-to="task0" data-edge-label="同一根执行流" data-edge-key="0" data-edge-id="run-on">
+          <rect x="1073.4" y="440" width="67.6" height="14" rx="3" class="c-mask"/>
+          <text x="1107.2" y="450" class="t-backend" font-size="8" text-anchor="middle">同一根执行流</text>
+        </g>
+        <g data-detail="context" data-edge-from="task0" data-edge-to="files" data-edge-label="共享 fd 表" data-edge-key="1" data-edge-id="ref-files">
+          <rect x="856.8" y="662" width="58" height="14" rx="3" class="c-mask"/>
+          <text x="885.8" y="672" class="t-muted" font-size="8" text-anchor="middle">共享 fd 表</text>
+        </g>
+        <g data-detail="context" data-edge-from="task1" data-edge-to="fs" data-edge-label="共享 cwd" data-edge-key="2" data-edge-id="ref-fs">
+          <rect x="861.5999999999999" y="852" width="48.4" height="14" rx="3" class="c-mask"/>
+          <text x="885.8" y="862" class="t-muted" font-size="8" text-anchor="middle">共享 cwd</text>
+        </g>
+        <g data-detail="context" data-edge-from="task2" data-edge-to="group" data-edge-label="同组" data-edge-key="3" data-edge-id="ref-group">
+          <rect x="870.8" y="1042" width="30" height="14" rx="3" class="c-mask"/>
+          <text x="885.8" y="1052" class="t-muted" font-size="8" text-anchor="middle">同组</text>
+        </g>
+        <g data-detail="context" data-edge-from="mm" data-edge-to="pmem" data-edge-label="页表：VA → 物理帧" data-edge-key="4" data-edge-id="translate">
+          <rect x="331.2" y="1290" width="91.6" height="14" rx="3" class="c-mask"/>
+          <text x="377" y="1300" class="t-muted" font-size="8" text-anchor="middle">页表：VA → 物理帧</text>
+        </g>
+        <g data-detail="context" data-edge-from="task2" data-edge-to="cpu" data-edge-label="调度：挑一条上核" data-edge-key="5" data-edge-id="schedule">
+          <rect x="1081.8" y="1240" width="86.8" height="14" rx="3" class="c-mask"/>
+          <text x="1125.2" y="1250" class="t-muted" font-size="8" text-anchor="middle">调度：挑一条上核</text>
+        </g>
+
+        <!-- Legend -->
+        <g data-legend data-legend-bridge>
+          <text x="40" y="1564" class="t-primary" font-size="12" font-weight="650">Legend</text>
+          <g data-legend-semantic-kind="backend" data-legend-kind="backend" data-legend-label="Backend" data-legend-x="40" data-legend-baseline="1584" data-legend-width="78">
+            <rect x="40" y="1575" width="16" height="10" rx="2.5" class="c-backend" stroke-width="1"/>
+            <text x="62" y="1584" class="t-muted" font-size="10" font-weight="500">Backend</text>
+          </g>
+          <g data-legend-semantic-kind="database" data-legend-kind="database" data-legend-label="Database" data-legend-x="140" data-legend-baseline="1584" data-legend-width="83">
+            <rect x="140" y="1575" width="16" height="10" rx="2.5" class="c-database" stroke-width="1"/>
+            <text x="162" y="1584" class="t-muted" font-size="10" font-weight="500">Database</text>
+          </g>
+          <g data-legend-semantic-kind="cloud" data-legend-kind="cloud" data-legend-label="Cloud" data-legend-x="245" data-legend-baseline="1584" data-legend-width="68">
+            <rect x="245" y="1575" width="16" height="10" rx="2.5" class="c-cloud" stroke-width="1"/>
+            <text x="267" y="1584" class="t-muted" font-size="10" font-weight="500">Cloud</text>
+          </g>
+        </g>
+      </svg></div>
+      <figcaption>上半用户空间、中间内核、底下硬件。点零件看它装了什么、被谁引用；用「导览」按问题走一遍。图里只画了三条代表性的引用线，实际上每条 task 都引用全部六个共享对象。</figcaption>
+      <div class="pano-ui"></div>
+      <p class="arch-hint"><span class="idle">点头上的任意一个框看它的关系，点区域标题看分组含义，点零件看完整归属路径；框里的每一行 / 每个格子都能点，跳到它指向的零件；用「对比两个零件」出一张对照表</span><span class="focused">再点一次空白处取消</span></p>
+    </figure><p>这张图要记住两句话：<strong>用户空间是内容，内核是描述加执行流</strong>；<strong>一份资源只画一份，三条 task 用指针引用它</strong>。</p>
+<p>两侧各自负责什么，可以并排看：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>这一侧</th><th>装什么</th><th>谁能改</th><th>性质</th></tr></thead><tbody><tr><th>用户空间</th><td data-label="装什么">程序真正读写的内容：指令、全局变量、堆、映射区、每线程的栈和 TLS、线程库的句柄</td><td data-label="谁能改">程序自己直接读写，不需要进内核</td><td data-label="性质">内容本身，程序想怎么改就怎么改</td></tr><tr><th>内核里</th><td data-label="装什么">描述与调度：mm 与页表、fd 表、目录、凭证、命名空间、信号处置、线程组、每条线程的 task 与内核栈</td><td data-label="谁能改">只能经系统调用改，用户程序看不见</td><td data-label="性质">账本与规则，程序只能申请，不能直接写</td></tr></tbody></table></div><p>改动内核里那些对象要走哪扇门，看几个常见调用：<code>open()</code> 改 fd 表、<code>mmap()</code> 改 VMA 和页表、<code>clone()</code> 造 task、<code>sigaction()</code> 改处置表、<code>chdir()</code> 改 fs_struct。<mark class="mk-blue">用户程序能碰的只有这扇门，这也是「用户态进内核态」在现实里的样子。</mark></p>
+<p>一条判据说清了什么东西该放哪边：<strong>这份东西，一条线程改了，另一条线程要不要立刻看见？</strong> 要，就放内核里全组一份（fd 表、cwd、信号处置）；不要，就每线程一份（用户栈、TLS、调度状态）。</p>
+<h2 id="一条线程的完整上下文散在三个地方"><span class="num">03</span>一条线程的完整上下文，散在三个地方</h2>
+<p>线程被换下、过一会儿再换回来，得能接着往下跑。凡是「下次从哪继续」需要的信息，都算它的<strong>上下文</strong>。这些信息不在一个地方：</p>
+<ul>
+<li><strong>用户空间里</strong>：用户栈、TLS 块、线程库的句柄</li>
+<li><strong>CPU 寄存器里</strong>：PC、SP、通用寄存器、浮点与 SIMD 寄存器——跑的时候在核里</li>
+<li><strong>内核里</strong>：<code>task_struct</code>（线程控制结构）的几组字段，加上一根内核栈</li>
+</ul>
+<p>这张图把三处摊在一条线上，读法是从上往下：用户在跑 → 进内核 → 换下时现场停在哪。</p>
+<figure class="archfig" data-arch style="--arch-max-width:1580px" data-boundaries="nested" data-pano data-parts='{"libc":{"label":"线程库的句柄","sub":"pthread_t 指向的用户态结构","detail":"句柄 `pthread_t` 的值通常就是一个指向 `struct pthread` 的指针，取消状态、join 状态、清理函数都挂在那块结构上。==它属于用户空间，内核完全不知道。==","facts":{"归属":"每条线程一份","谁维护":"libc","换线程时要不要动":"不动（跟着线程走）"}},"tls":{"label":"TLS 块","sub":"thread_local 与 errno 的家","detail":"每个线程一块，用 `fs` 基址定位（x86-64 上 `fsbase` 存在 task 里）。`errno` 就是 TLS 变量，所以两个线程同时出错不会互相覆盖。","facts":{"归属":"每条线程一块","谁分配":"线程库","换线程时要不要动":"要换 fsbase"}},"ustack":{"label":"用户栈","sub":"函数调用用的那根栈","detail":"存局部变量、返回地址和栈帧。它和 task 里的 RSP 是一对：SP 一变，这条线程「执行到哪」就变了。","facts":{"归属":"每条线程一根","谁分配":"内核给主线程，pthread 库给其余线程","换线程时要不要动":"要换 SP"}},"ident":{"label":"身份","sub":"tid 与 tgid","detail":"同一线程组的 task 共用 tgid，各自有自己的 tid。==`getpid()` 返回 tgid，`gettid()` 返回 tid。==","facts":{"归属":"每条 task 各一份字段","谁分配":"内核","换线程时要不要动":"不动（身份不随调度变）"}},"saved":{"label":"换下时的寄存器","sub":"thread_struct 里的少数几个字段","detail":"切换时内核只把 callee-saved 寄存器和栈指针写进 `thread_struct`；用户态的完整现场则在进入内核那一刻就压在内核栈的 `pt_regs` 里了。==恢复点不在这里，在内核栈上。==","facts":{"归属":"每条 task 一份","谁写":"内核的切换代码","换线程时要不要动":"要换"}},"sched":{"label":"调度信息","sub":"状态、优先级、亲和","detail":"状态决定调度器要不要换人：运行中的 task 被抢占或主动让出后变成可运行或睡眠。优先级和 CPU 亲和决定它排在哪个队列、能上哪些核。","facts":{"归属":"每条 task 一份","谁写":"调度器与系统调用","换线程时要不要动":"随线程走"}},"sigf":{"label":"信号状态","sub":"掩码与待处理队列","detail":"掩码和待处理队列都是每条线程一份；处置表（忽略 / 默认 / 处理函数）是全组共享的。所以同一个信号发给不同线程，可能一个被挡住、一个立刻处理。","facts":{"归属":"掩码与队列每线程一份","谁写":"内核与 sigprocmask","换线程时要不要动":"随线程走"}},"stats":{"label":"统计","sub":"内核记的账","detail":"用户态和内核态各花了多少时间、被换下过几次、触发过几次页错误。`/proc/<pid>/stat` 和 `/proc/<pid>/task/<tid>/stat` 里的字段就是它们。","facts":{"归属":"每条 task 一份","谁写":"内核","换线程时要不要动":"随线程走"}},"kstack":{"label":"内核栈","sub":"系统调用执行到哪","detail":"每条线程一根 16 KiB 的栈。进入内核时，CPU 换成这根栈的栈顶，用户现场作为 `pt_regs` 压在上面；内核自己的调用链也长在这上面。==线程在用户态跑的时候，这根栈基本是空的。==","facts":{"归属":"每条线程一根","谁分配":"内核","换线程时要不要动":"要换栈指针"}},"cpu":{"label":"CPU 核与寄存器","sub":"线程真正在跑的地方","detail":"线程正在跑的时候，PC、SP 和通用寄存器在 CPU 里；被换下时内核把它们写进 task 和内核栈。==「保存上下文」保存的就是这几样东西。==","facts":{"归属":"硬件","谁写":"CPU 与切换代码","换线程时要不要动":"要换"}}}' data-tours='[{"id":"places","label":"上下文分布在哪三处","steps":[{"at":["libc","tls","ustack"],"text":"用户空间这一层是线程自己的内容：栈、TLS、线程库的句柄。==内核一份都不知道==，它们由用户态代码维护。"},{"at":["ident","sched","sigf","stats"],"text":"内核这一层是线程的账：它是谁、什么状态、优先级多少、哪些信号先挡着、花了多少时间。这些都在同一个 task_struct 里。"},{"at":["saved","kstack"],"text":"线程被换下时，寄存器写进 `thread_struct`，而完整的用户现场躺在内核栈的 `pt_regs` 里。==下次从这里接着跑。=="},{"at":["cpu"],"text":"换上时，内核把现场读回寄存器，线程继续在核上跑。"}]},{"id":"switch","label":"被换下时搬了什么","steps":[{"at":["cpu","saved"],"text":"第一步是存：callee-saved 寄存器写进 task，栈指针写进 `thread.sp`。"},{"at":["saved","kstack"],"text":"字段 `thread.sp` 指向的那根内核栈上，还压着进入内核时的用户现场和内核调用链。==恢复点就在这根栈上。=="},{"at":["sched","ident"],"text":"同时改状态和记账：这条 task 变成可运行或睡眠，统计里多一次切换。"},{"at":["tls","ustack"],"text":"换到另一条线程时，`fsbase` 和 SP 都跟着换成那条线程的，所以 TLS 和用户栈自然就换了。"}]}]' data-frames='[{"id":"user","boundary":3,"kind":"classification","label":"用户空间 · 这条线程自己的内容","detail":"线程库的句柄、TLS 块、用户栈。这三样内核都不认识，它们全部由用户态代码维护。","members":["libc","tls","ustack"],"depth":1},{"id":"kernel","boundary":0,"kind":"classification","label":"内核空间 · 这条线程的内核侧状态","detail":"身份、换下时的寄存器、调度信息、信号状态、统计，都在同一个 task_struct 里；系统调用执行到哪，则记在它自己的内核栈上。","members":["ident","saved","sched","sigf","stats","kstack"],"depth":1},{"id":"taskframe","boundary":1,"parent":"kernel","kind":"contains","label":"task_struct · 一个结构体里的几组字段","detail":"这五块不是五个对象，而是同一个 task_struct 里的五组字段。分开画只是为了每块能写清楚。","members":["ident","saved","sched","sigf","stats"],"depth":2},{"id":"kstackframe","boundary":2,"parent":"kernel","kind":"contains","label":"内核栈 · 系统调用执行到哪","detail":"一条线程一根，16 KiB。系统调用进来时，用户现场压在这根栈上，内核自己的调用链也长在这根栈上。","members":["kstack"],"depth":2},{"id":"hw","boundary":4,"kind":"classification","label":"硬件 · 线程在跑时现场在核里","detail":"PC、SP、通用寄存器、浮点寄存器物理上就在 CPU 里。线程被换下时，它们的值被写进内核；换回来时再读出来。","members":["cpu"],"depth":1}]'>
+      <div class="arch-boundary-ui">
+          <div class="arch-boundary-toolbar"><span class="arch-boundary-label">边界</span>
+            <button type="button" data-boundary-mode="nested" aria-pressed="true">多层归属框</button>
+            <button type="button" data-boundary-mode="flat" aria-pressed="false">只留一层分区</button>
+            <button type="button" data-arch-reset>恢复全图</button>
+          </div>
+          <div class="arch-address-box" aria-live="polite"><div data-arch-address>点一个零件，看完整归属路径；点一个区域标题，看这一层的含义。</div>
+            <div data-arch-frame-detail>最外框表示逻辑资源域，不表示所有对象在一块内存里。每层边界的标题说明分组依据。</div></div>
+        </div>
+      <div class="arch-canvas"><svg viewBox="0 0 1580 1560" role="img" aria-labelledby="ts-context-archify-diagram-title ts-context-archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
+        <title id="ts-context-archify-diagram-title">一条线程的完整上下文：用户侧的内容 + 内核里的控制结构和两本账</title>
+        <desc id="ts-context-archify-diagram-description">线程 = 线程库的句柄 + 用户栈与 TLS + 内核的 task_struct + 一根内核栈；被换下时现场存进后两者</desc>
+        <!-- Definitions -->
+        <defs>
+          <marker id="ts-context-arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-default" />
+          </marker>
+          <marker id="ts-context-arrowhead-emphasis" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-emphasis" />
+          </marker>
+          <marker id="ts-context-arrowhead-security" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-security" />
+          </marker>
+          <marker id="ts-context-arrowhead-dashed" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-dashed" />
+          </marker>
+          <pattern id="ts-context-grid" width="40" height="40" patternUnits="userSpaceOnUse">
+            <path d="M 40 0 L 0 0 0 40" class="c-grid" stroke-width="0.5"/>
+          </pattern>
+        </defs>
+
+        <!-- Background Grid -->
+        <rect width="100%" height="100%" fill="url(#ts-context-grid)" />
+
+        <!-- Boundaries (behind everything) -->
+        <g class="arch-frame" data-frame="kernel" data-depth="1" data-frame-flat="false" data-frame-kind="classification" role="button" tabindex="0" aria-pressed="false" aria-label="内核空间 · 这条线程的内核侧状态"><title>身份、换下时的寄存器、调度信息、信号状态、统计，都在同一个 task_struct 里；系统调用执行到哪，则记在它自己的内核栈上。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="0" data-frame-members="ident saved sched sigf stats kstack" x="154.4" y="522" width="1271.2999999999997" height="696" rx="12" class="c-region" stroke-width="1"/>
+        <text x="162.4" y="540" class="t-cloud" font-size="9" font-weight="600">内核空间 · 这条线程的内核侧状态</text></g>
+
+        <g class="arch-frame" data-frame="taskframe" data-depth="2" data-frame-flat="false" data-frame-kind="contains" role="button" tabindex="0" aria-pressed="false" aria-label="task_struct · 一个结构体里的几组字段"><title>这五块不是五个对象，而是同一个 task_struct 里的五组字段。分开画只是为了每块能写清楚。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="1" data-frame-members="ident saved sched sigf stats" x="192.4" y="560" width="672.4" height="620" rx="12" class="c-region" stroke-width="1"/>
+        <text x="200.4" y="578" class="t-cloud" font-size="9" font-weight="600">task_struct · 一个结构体里的几组字段</text></g>
+
+        <g class="arch-frame" data-frame="kstackframe" data-depth="2" data-frame-flat="false" data-frame-kind="contains" role="button" tabindex="0" aria-pressed="false" aria-label="内核栈 · 系统调用执行到哪"><title>一条线程一根，16 KiB。系统调用进来时，用户现场压在这根栈上，内核自己的调用链也长在这根栈上。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="2" data-frame-members="kstack" x="924.3" y="560" width="463.39999999999986" height="320" rx="12" class="c-region" stroke-width="1"/>
+        <text x="932.3" y="578" class="t-cloud" font-size="9" font-weight="600">内核栈 · 系统调用执行到哪</text></g>
+
+        <g class="arch-frame" data-frame="user" data-depth="1" data-frame-flat="false" data-frame-kind="classification" role="button" tabindex="0" aria-pressed="false" aria-label="用户空间 · 这条线程自己的内容"><title>线程库的句柄、TLS 块、用户栈。这三样内核都不认识，它们全部由用户态代码维护。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="3" data-frame-members="libc tls ustack" x="122.6" y="100" width="1323.1" height="270" rx="12" class="c-region" stroke-width="1"/>
+        <text x="130.6" y="118" class="t-cloud" font-size="9" font-weight="600">用户空间 · 这条线程自己的内容</text></g>
+
+        <g class="arch-frame" data-frame="hw" data-depth="1" data-frame-flat="false" data-frame-kind="classification" role="button" tabindex="0" aria-pressed="false" aria-label="硬件 · 线程在跑时现场在核里"><title>PC、SP、通用寄存器、浮点寄存器物理上就在 CPU 里。线程被换下时，它们的值被写进内核；换回来时再读出来。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="4" data-frame-members="cpu" x="924.3" y="1250" width="463.39999999999986" height="240" rx="12" class="c-region" stroke-width="1"/>
+        <text x="932.3" y="1268" class="t-cloud" font-size="9" font-weight="600">硬件 · 线程在跑时现场在核里</text></g>
+
+        <!-- Connection paths (before components for correct z-order) -->
+        <path data-edge-from="libc" data-edge-to="tls" data-edge-label="TLS 就在里面" data-edge-key="0" data-edge-id="tls-in" data-composition-points="429.79999999999995,235;546,235" d="M 429.79999999999995 235 L 546 235" class="a-default" stroke-width="1.5" marker-end="url(#ts-context-arrowhead)"/>
+        <path data-edge-from="tls" data-edge-to="saved" data-edge-label="fsbase 指向它" data-edge-key="1" data-edge-id="fsbase" data-composition-points="679.6,330;679.6,354;707.2,354;707.2,576;691.2,576;691.2,600" d="M 679.6 330 L 679.6 346 Q 679.6 354 687.6 354 L 699.2 354 Q 707.2 354 707.2 362 L 707.2 568 Q 707.2 576 699.2 576 L 699.2 576 Q 691.2 576 691.2 584 L 691.2 600" class="a-default" stroke-width="1.5" marker-end="url(#ts-context-arrowhead)"/>
+        <path data-edge-from="saved" data-edge-to="kstack" data-edge-label="thread.sp" data-edge-key="2" data-edge-id="sp" data-composition-points="824.8,680;894.55,680;894.55,720;964.3,720" d="M 824.8 680 L 886.55 680 Q 894.55 680 894.55 688 L 894.55 712 Q 894.55 720 902.55 720 L 964.3 720" class="a-default" stroke-width="1.5" marker-end="url(#ts-context-arrowhead)"/>
+        <path data-edge-from="cpu" data-edge-to="kstack" data-edge-label="换下压现场 / 换上从这里恢复" data-edge-key="3" data-edge-id="resume" data-composition-points="1156,1290;1156,840" d="M 1156 1290 L 1156 840" class="a-default" stroke-width="1.5" marker-end="url(#ts-context-arrowhead)"/>
+        <path data-edge-from="kstack" data-edge-to="ustack" data-edge-label="pt_regs 里存着用户 SP" data-edge-key="4" data-edge-id="user-sp" data-composition-points="1156,600;1156,465;1260.5,465;1260.5,330" d="M 1156 600 L 1156 473 Q 1156 465 1164 465 L 1252.5 465 Q 1260.5 465 1260.5 457 L 1260.5 330" class="a-default" stroke-width="1.5" marker-end="url(#ts-context-arrowhead)"/>
+
+        <!-- Components -->
+        <g id="ts-context-node-libc" data-nb="1" data-node-id="libc" data-node-label="线程库的句柄" tabindex="0" role="button" aria-label="Focus 线程库的句柄, pthread_t、取消、join, 用户空间 · 这条线程自己的内容" aria-pressed="false" data-node-kind="backend" data-node-sublabel="pthread_t、取消、join" data-node-context="用户空间 · 这条线程自己的内容">
+          <title>线程库的句柄 · pthread_t、取消、join · 用户空间 · 这条线程自己的内容</title>
+          <rect x="162.6" y="140" width="267.2" height="190" rx="6" class="c-mask"/>
+          <rect x="162.6" y="140" width="267.2" height="190" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(168.6 146) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <rect class="nb-badge" x="377.0" y="148" width="40.8" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="397.4" y="159" font-size="8" text-anchor="middle">用户态</text>
+          <text class="nb-title" x="196.6" y="161" font-size="10.5" font-weight="600">线程库的句柄</text>
+          <line class="nb-hr" x1="170.6" y1="168" x2="421.79999999999995" y2="168"/>
+          <text class="nb-k" x="174.6" y="231" font-size="9">pthread_t</text><text class="nb-v" x="243.0" y="231" font-size="9">线程库的句柄</text>
+          <text class="nb-k" x="174.6" y="245" font-size="9">取消 / join</text><text class="nb-v" x="243.0" y="245" font-size="9">线程库自己维护的状态</text>
+          <text class="nb-k" x="174.6" y="259" font-size="9">谁用</text><text class="nb-v" x="243.0" y="259" font-size="9">pthread_join 之类的调用</text>
+          <text class="nb-note" x="174.6" y="322" font-size="8">内核完全不知道这个结构</text>
+        </g>
+
+        <g id="ts-context-node-tls" data-nb="1" data-node-id="tls" data-node-label="TLS 块" tabindex="0" role="button" aria-label="Focus TLS 块, thread_local / errno, 用户空间 · 这条线程自己的内容" aria-pressed="false" data-node-kind="backend" data-node-sublabel="thread_local / errno" data-node-context="用户空间 · 这条线程自己的内容">
+          <title>TLS 块 · thread_local / errno · 用户空间 · 这条线程自己的内容</title>
+          <rect x="546" y="140" width="267.2" height="190" rx="6" class="c-mask"/>
+          <rect x="546" y="140" width="267.2" height="190" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(552 146) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <rect class="nb-badge" x="741.2" y="148" width="60.0" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="771.2" y="159" font-size="8" text-anchor="middle">每线程一块</text>
+          <text class="nb-title" x="580" y="161" font-size="10.5" font-weight="600">TLS 块</text>
+          <line class="nb-hr" x1="554" y1="168" x2="805.2" y2="168"/>
+          <text class="nb-k" x="558" y="238" font-size="9">装什么</text><text class="nb-v" x="599.4" y="238" font-size="9">thread_local 变量、errno</text>
+          <text class="nb-k" x="558" y="252" font-size="9">怎么找</text><text class="nb-v" x="599.4" y="252" font-size="9">fs 基址指向它</text>
+          <text class="nb-note" x="558" y="322" font-size="8">换线程时这个基址也要换</text>
+        </g>
+
+        <g id="ts-context-node-ustack" data-nb="1" data-node-id="ustack" data-node-label="用户栈" tabindex="0" role="button" aria-label="Focus 用户栈, 局部变量、返回地址, 用户空间 · 这条线程自己的内容" aria-pressed="false" data-node-kind="backend" data-node-sublabel="局部变量、返回地址" data-node-context="用户空间 · 这条线程自己的内容">
+          <title>用户栈 · 局部变量、返回地址 · 用户空间 · 这条线程自己的内容</title>
+          <rect x="1115.3" y="140" width="290.4" height="190" rx="6" class="c-mask"/>
+          <rect x="1115.3" y="140" width="290.4" height="190" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(1121.3 146) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <rect class="nb-badge" x="1333.7" y="148" width="60.0" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="1363.7" y="159" font-size="8" text-anchor="middle">每线程一根</text>
+          <text class="nb-title" x="1149.3" y="161" font-size="10.5" font-weight="600">用户栈</text>
+          <line class="nb-hr" x1="1123.3" y1="168" x2="1397.6999999999998" y2="168"/>
+          <rect class="nb-seg" x="1127.3" y="218.5" width="266.4" height="12" rx="3"/><text class="nb-seg-t" x="1134.3" y="227.5" font-size="8">调用者的栈帧</text>
+          <rect class="nb-seg" x="1127.3" y="233.5" width="266.4" height="12" rx="3"/><text class="nb-seg-t" x="1134.3" y="242.5" font-size="8">局部变量</text>
+          <rect class="nb-seg" x="1127.3" y="248.5" width="266.4" height="12" rx="3"/><text class="nb-seg-t" x="1134.3" y="257.5" font-size="8">返回地址</text><text class="nb-note" x="1386.6999999999998" y="257.5" font-size="7.5" text-anchor="end">← SP</text>
+          <text class="nb-note" x="1127.3" y="322" font-size="8">向下长，SP 指在当前栈顶</text>
+        </g>
+
+        <g id="ts-context-node-ident" data-nb="1" data-node-id="ident" data-node-label="身份" tabindex="0" role="button" aria-label="Focus 身份, tid / tgid, 内核空间 · 这条线程的内核侧状态 › task_struct · 一个结构体里的几组字段" aria-pressed="false" data-node-kind="database" data-node-sublabel="tid / tgid" data-node-context="内核空间 · 这条线程的内核侧状态 › task_struct · 一个结构体里的几组字段">
+          <title>身份 · tid / tgid · 内核空间 · 这条线程的内核侧状态 › task_struct · 一个结构体里的几组字段</title>
+          <rect x="232.4" y="600" width="267.2" height="160" rx="6" class="c-mask"/>
+          <rect x="232.4" y="600" width="267.2" height="160" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(238.4 606) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <rect class="nb-badge" x="456.4" y="608" width="31.2" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="472.0" y="619" font-size="8" text-anchor="middle">身份</text>
+          <text class="nb-title" x="266.4" y="621" font-size="10.5" font-weight="600">身份</text>
+          <line class="nb-hr" x1="240.4" y1="628" x2="491.6" y2="628"/>
+          <text class="nb-k" x="244.4" y="676" font-size="9">tid</text><text class="nb-v" x="285.8" y="676" font-size="9">1026</text>
+          <text class="nb-k" x="244.4" y="690" font-size="9">tgid</text><text class="nb-v" x="285.8" y="690" font-size="9">1024，三条一样</text>
+          <text class="nb-k" x="244.4" y="704" font-size="9">谁给的</text><text class="nb-v" x="285.8" y="704" font-size="9">clone 时内核分配</text>
+          <text class="nb-note" x="244.4" y="752" font-size="8">gettid 各不相同，getpid 返回 tgid</text>
+        </g>
+
+        <g id="ts-context-node-saved" data-nb="1" data-node-id="saved" data-node-label="换下时的寄存器" tabindex="0" role="button" aria-label="Focus 换下时的寄存器, thread.sp / fsbase, 内核空间 · 这条线程的内核侧状态 › task_struct · 一个结构体里的几组字段" aria-pressed="false" data-node-kind="database" data-node-sublabel="thread.sp / fsbase" data-node-context="内核空间 · 这条线程的内核侧状态 › task_struct · 一个结构体里的几组字段">
+          <title>换下时的寄存器 · thread.sp / fsbase · 内核空间 · 这条线程的内核侧状态 › task_struct · 一个结构体里的几组字段</title>
+          <rect x="557.6" y="600" width="267.2" height="160" rx="6" class="c-mask"/>
+          <rect x="557.6" y="600" width="267.2" height="160" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(563.6 606) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <rect class="nb-badge" x="743.2" y="608" width="69.6" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="778.0" y="619" font-size="8" text-anchor="middle">换下时存这里</text>
+          <text class="nb-title" x="591.6" y="621" font-size="10.5" font-weight="600">换下时的寄存器</text>
+          <line class="nb-hr" x1="565.6" y1="628" x2="816.8" y2="628"/>
+          <g class="nb-spot" data-nb-spot="1" tabindex="0" role="button" data-nb-link="kstack"><rect class="nb-hit" x="564.6" y="658" width="253.2" height="14"/><text class="nb-k" x="569.6" y="669" font-size="9">thread.sp</text><text class="nb-v" x="627.2" y="669" font-size="9">内核栈的位置</text></g>
+          <g class="nb-spot" data-nb-spot="1" tabindex="0" role="button" data-nb-link="tls"><rect class="nb-hit" x="564.6" y="672" width="253.2" height="14"/><text class="nb-k" x="569.6" y="683" font-size="9">fsbase</text><text class="nb-v" x="627.2" y="683" font-size="9">TLS 的位置</text></g>
+          <text class="nb-k" x="569.6" y="697" font-size="9">其余</text><text class="nb-v" x="627.2" y="697" font-size="9">少数 callee-saved 寄存器</text>
+          <g class="nb-spot" data-nb-spot="1" tabindex="0" role="button" data-nb-link="kstack"><rect class="nb-hit" x="564.6" y="700" width="253.2" height="14"/><text class="nb-k" x="569.6" y="711" font-size="9">恢复点</text><text class="nb-v" x="627.2" y="711" font-size="9">在旁边那根内核栈上</text></g>
+          <text class="nb-note" x="569.6" y="752" font-size="8">换线程时，这两个字段都换成另一条 task 的</text>
+        </g>
+
+        <g id="ts-context-node-sched" data-nb="1" data-node-id="sched" data-node-label="调度信息" tabindex="0" role="button" aria-label="Focus 调度信息, 状态 / 优先级 / 亲和, 内核空间 · 这条线程的内核侧状态 › task_struct · 一个结构体里的几组字段" aria-pressed="false" data-node-kind="database" data-node-sublabel="状态 / 优先级 / 亲和" data-node-context="内核空间 · 这条线程的内核侧状态 › task_struct · 一个结构体里的几组字段">
+          <title>调度信息 · 状态 / 优先级 / 亲和 · 内核空间 · 这条线程的内核侧状态 › task_struct · 一个结构体里的几组字段</title>
+          <rect x="232.4" y="800" width="267.2" height="160" rx="6" class="c-mask"/>
+          <rect x="232.4" y="800" width="267.2" height="160" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(238.4 806) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <rect class="nb-badge" x="427.6" y="808" width="60.0" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="457.6" y="819" font-size="8" text-anchor="middle">调度器看的</text>
+          <text class="nb-title" x="266.4" y="821" font-size="10.5" font-weight="600">调度信息</text>
+          <line class="nb-hr" x1="240.4" y1="828" x2="491.6" y2="828"/>
+          <text class="nb-k" x="244.4" y="861" font-size="9">优先级</text><text class="nb-v" x="296.6" y="861" font-size="9">nice 值、vruntime</text>
+          <text class="nb-k" x="244.4" y="875" font-size="9">时间片</text><text class="nb-v" x="296.6" y="875" font-size="9">由调度类决定</text>
+          <text class="nb-k" x="244.4" y="889" font-size="9">CPU 亲和</text><text class="nb-v" x="296.6" y="889" font-size="9">允许上哪些核</text>
+          <rect class="nb-cell" x="244.4" y="899" width="56.3" height="23" rx="4"/><text class="nb-cell-t" x="272.6" y="914" font-size="9" text-anchor="middle">运行</text>
+          <rect class="nb-cell" x="306.7" y="899" width="56.3" height="23" rx="4"/><text class="nb-cell-t" x="334.8" y="914" font-size="9" text-anchor="middle">可运行</text>
+          <rect class="nb-cell" x="369.0" y="899" width="56.3" height="23" rx="4"/><text class="nb-cell-t" x="397.1" y="914" font-size="9" text-anchor="middle">睡眠</text>
+          <rect class="nb-cell" x="431.3" y="899" width="56.3" height="23" rx="4"/><text class="nb-cell-t" x="459.4" y="914" font-size="9" text-anchor="middle">停止</text>
+          <text class="nb-note" x="244.4" y="952" font-size="8">状态一变，调度器就可能换人</text>
+        </g>
+
+        <g id="ts-context-node-sigf" data-nb="1" data-node-id="sigf" data-node-label="信号状态" tabindex="0" role="button" aria-label="Focus 信号状态, 掩码 / 待处理队列, 内核空间 · 这条线程的内核侧状态 › task_struct · 一个结构体里的几组字段" aria-pressed="false" data-node-kind="database" data-node-sublabel="掩码 / 待处理队列" data-node-context="内核空间 · 这条线程的内核侧状态 › task_struct · 一个结构体里的几组字段">
+          <title>信号状态 · 掩码 / 待处理队列 · 内核空间 · 这条线程的内核侧状态 › task_struct · 一个结构体里的几组字段</title>
+          <rect x="557.6" y="800" width="267.2" height="160" rx="6" class="c-mask"/>
+          <rect x="557.6" y="800" width="267.2" height="160" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(563.6 806) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <rect class="nb-badge" x="762.4" y="808" width="50.4" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="787.6" y="819" font-size="8" text-anchor="middle">信号状态</text>
+          <text class="nb-title" x="591.6" y="821" font-size="10.5" font-weight="600">信号状态</text>
+          <line class="nb-hr" x1="565.6" y1="828" x2="816.8" y2="828"/>
+          <text class="nb-k" x="569.6" y="876" font-size="9">掩码</text><text class="nb-v" x="611.0" y="876" font-size="9">哪些信号先挡着</text>
+          <text class="nb-k" x="569.6" y="890" font-size="9">待处理</text><text class="nb-v" x="611.0" y="890" font-size="9">这条线程自己的队列</text>
+          <text class="nb-k" x="569.6" y="904" font-size="9">处置表</text><text class="nb-v" x="611.0" y="904" font-size="9">不在这里，全组共享</text>
+          <text class="nb-note" x="569.6" y="952" font-size="8">「发给进程」的信号，谁先处理看各自的掩码</text>
+        </g>
+
+        <g id="ts-context-node-stats" data-nb="1" data-node-id="stats" data-node-label="统计" tabindex="0" role="button" aria-label="Focus 统计, 耗时 / 切换次数 / 页错误, 内核空间 · 这条线程的内核侧状态 › task_struct · 一个结构体里的几组字段" aria-pressed="false" data-node-kind="database" data-node-sublabel="耗时 / 切换次数 / 页错误" data-node-context="内核空间 · 这条线程的内核侧状态 › task_struct · 一个结构体里的几组字段">
+          <title>统计 · 耗时 / 切换次数 / 页错误 · 内核空间 · 这条线程的内核侧状态 › task_struct · 一个结构体里的几组字段</title>
+          <rect x="232.4" y="1000" width="267.2" height="140" rx="6" class="c-mask"/>
+          <rect x="232.4" y="1000" width="267.2" height="140" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(238.4 1006) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <rect class="nb-badge" x="456.4" y="1008" width="31.2" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="472.0" y="1019" font-size="8" text-anchor="middle">账本</text>
+          <text class="nb-title" x="266.4" y="1021" font-size="10.5" font-weight="600">统计</text>
+          <line class="nb-hr" x1="240.4" y1="1028" x2="491.6" y2="1028"/>
+          <text class="nb-k" x="244.4" y="1066" font-size="9">耗时</text><text class="nb-v" x="285.8" y="1066" font-size="9">用户态 / 内核态各多少</text>
+          <text class="nb-k" x="244.4" y="1080" font-size="9">切换</text><text class="nb-v" x="285.8" y="1080" font-size="9">被换下过几次</text>
+          <text class="nb-k" x="244.4" y="1094" font-size="9">页错误</text><text class="nb-v" x="285.8" y="1094" font-size="9">触发过几次</text>
+          <text class="nb-note" x="244.4" y="1132" font-size="8">读 /proc 时看到的就是这些</text>
+        </g>
+
+        <g id="ts-context-node-kstack" data-nb="1" data-node-id="kstack" data-node-label="内核栈" tabindex="0" role="button" aria-label="Focus 内核栈, 16 KiB，进内核才用, 内核空间 · 这条线程的内核侧状态 › 内核栈 · 系统调用执行到哪" aria-pressed="false" data-node-kind="database" data-node-sublabel="16 KiB，进内核才用" data-node-context="内核空间 · 这条线程的内核侧状态 › 内核栈 · 系统调用执行到哪">
+          <title>内核栈 · 16 KiB，进内核才用 · 内核空间 · 这条线程的内核侧状态 › 内核栈 · 系统调用执行到哪</title>
+          <rect x="964.3" y="600" width="383.4" height="240" rx="6" class="c-mask"/>
+          <rect x="964.3" y="600" width="383.4" height="240" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(970.3 606) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <rect class="nb-badge" x="1294.9" y="608" width="40.8" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="1315.3" y="619" font-size="8" text-anchor="middle">16 KiB</text>
+          <text class="nb-title" x="998.3" y="621" font-size="10.5" font-weight="600">内核栈</text>
+          <line class="nb-hr" x1="972.3" y1="628" x2="1339.6999999999998" y2="628"/>
+          <rect class="nb-seg" x="976.3" y="703.5" width="359.4" height="12" rx="3"/><text class="nb-seg-t" x="983.3" y="712.5" font-size="8">pt_regs · 用户现场</text><text class="nb-note" x="1328.6999999999998" y="712.5" font-size="7.5" text-anchor="end">SP / RIP / CS</text>
+          <rect class="nb-seg" x="976.3" y="718.5" width="359.4" height="12" rx="3"/><text class="nb-seg-t" x="983.3" y="727.5" font-size="8">内核函数栈帧</text>
+          <rect class="nb-seg" data-tone="idle" x="976.3" y="733.5" width="359.4" height="12" rx="3"/><text class="nb-seg-t" data-tone="idle" x="983.3" y="742.5" font-size="8">阻塞在哪一行</text>
+          <text class="nb-note" x="976.3" y="832" font-size="8">在用户态跑的时候，这根栈基本是空的</text>
+        </g>
+
+        <g id="ts-context-node-cpu" data-nb="1" data-node-id="cpu" data-node-label="CPU 核 + 寄存器" tabindex="0" role="button" aria-label="Focus CPU 核 + 寄存器, PC / SP / 通用 / 浮点, 硬件 · 线程在跑时现场在核里" aria-pressed="false" data-node-kind="cloud" data-node-sublabel="PC / SP / 通用 / 浮点" data-node-context="硬件 · 线程在跑时现场在核里">
+          <title>CPU 核 + 寄存器 · PC / SP / 通用 / 浮点 · 硬件 · 线程在跑时现场在核里</title>
+          <rect x="964.3" y="1290" width="383.4" height="160" rx="6" class="c-mask"/>
+          <rect x="964.3" y="1290" width="383.4" height="160" rx="6" class="c-cloud" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="cloud" class="semantic-sigil s-cloud" transform="translate(970.3 1296) scale(0.6875)">
+            <path d="M4.3 12.5h7.3a2.4 2.4 0 0 0 .2-4.8 4 4 0 0 0-7.5-1.3A3.1 3.1 0 0 0 4.3 12.5Z"/>
+          </g>
+          <rect class="nb-badge" x="1294.9" y="1298" width="40.8" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="1315.3" y="1309" font-size="8" text-anchor="middle">运行时</text>
+          <text class="nb-title" x="998.3" y="1311" font-size="10.5" font-weight="600">CPU 核 + 寄存器</text>
+          <line class="nb-hr" x1="972.3" y1="1318" x2="1339.6999999999998" y2="1318"/>
+          <rect class="nb-cell" x="976.3" y="1364.5" width="85.3" height="23" rx="4"/><text class="nb-cell-t" x="1019.0" y="1379.5" font-size="9" text-anchor="middle">PC</text>
+          <rect class="nb-cell" x="1067.6" y="1364.5" width="85.3" height="23" rx="4"/><text class="nb-cell-t" x="1110.3" y="1379.5" font-size="9" text-anchor="middle">SP</text>
+          <rect class="nb-cell" x="1159.0" y="1364.5" width="85.3" height="23" rx="4"/><text class="nb-cell-t" x="1201.7" y="1379.5" font-size="9" text-anchor="middle">通用</text>
+          <rect class="nb-cell" x="1250.3" y="1364.5" width="85.3" height="23" rx="4"/><text class="nb-cell-t" x="1293.0" y="1379.5" font-size="9" text-anchor="middle">浮点</text>
+          <text class="nb-note" x="976.3" y="1442" font-size="8">换下时写进 task，换上时从这里恢复</text>
+        </g>
+
+        <!-- Connection labels -->
+        <g data-detail="context" data-edge-from="libc" data-edge-to="tls" data-edge-label="TLS 就在里面" data-edge-key="0" data-edge-id="tls-in">
+          <rect x="454.09999999999997" y="225" width="67.6" height="14" rx="3" class="c-mask"/>
+          <text x="487.9" y="235" class="t-muted" font-size="8" text-anchor="middle">TLS 就在里面</text>
+        </g>
+        <g data-detail="context" data-edge-from="tls" data-edge-to="saved" data-edge-label="fsbase 指向它" data-edge-key="1" data-edge-id="fsbase">
+          <rect x="643.4" y="420" width="72.4" height="14" rx="3" class="c-mask"/>
+          <text x="679.6" y="430" class="t-muted" font-size="8" text-anchor="middle">fsbase 指向它</text>
+        </g>
+        <g data-detail="context" data-edge-from="saved" data-edge-to="kstack" data-edge-label="thread.sp" data-edge-key="2" data-edge-id="sp">
+          <rect x="870.3" y="670" width="53.199999999999996" height="14" rx="3" class="c-mask"/>
+          <text x="896.9" y="680" class="t-muted" font-size="8" text-anchor="middle">thread.sp</text>
+        </g>
+        <g data-detail="context" data-edge-from="cpu" data-edge-to="kstack" data-edge-label="换下压现场 / 换上从这里恢复" data-edge-key="3" data-edge-id="resume">
+          <rect x="1086.2" y="1150" width="139.6" height="14" rx="3" class="c-mask"/>
+          <text x="1156" y="1160" class="t-muted" font-size="8" text-anchor="middle">换下压现场 / 换上从这里恢复</text>
+        </g>
+        <g data-detail="context" data-edge-from="kstack" data-edge-to="ustack" data-edge-label="pt_regs 里存着用户 SP" data-edge-key="4" data-edge-id="user-sp">
+          <rect x="1158.6" y="450" width="110.8" height="14" rx="3" class="c-mask"/>
+          <text x="1214" y="460" class="t-muted" font-size="8" text-anchor="middle">pt_regs 里存着用户 SP</text>
+        </g>
+
+        <!-- Legend -->
+        <g data-legend data-legend-bridge>
+          <text x="40" y="1524" class="t-primary" font-size="12" font-weight="650">Legend</text>
+          <g data-legend-semantic-kind="backend" data-legend-kind="backend" data-legend-label="Backend" data-legend-x="40" data-legend-baseline="1544" data-legend-width="78">
+            <rect x="40" y="1535" width="16" height="10" rx="2.5" class="c-backend" stroke-width="1"/>
+            <text x="62" y="1544" class="t-muted" font-size="10" font-weight="500">Backend</text>
+          </g>
+          <g data-legend-semantic-kind="database" data-legend-kind="database" data-legend-label="Database" data-legend-x="140" data-legend-baseline="1544" data-legend-width="83">
+            <rect x="140" y="1535" width="16" height="10" rx="2.5" class="c-database" stroke-width="1"/>
+            <text x="162" y="1544" class="t-muted" font-size="10" font-weight="500">Database</text>
+          </g>
+          <g data-legend-semantic-kind="cloud" data-legend-kind="cloud" data-legend-label="Cloud" data-legend-x="245" data-legend-baseline="1544" data-legend-width="68">
+            <rect x="245" y="1535" width="16" height="10" rx="2.5" class="c-cloud" stroke-width="1"/>
+            <text x="267" y="1544" class="t-muted" font-size="10" font-weight="500">Cloud</text>
+          </g>
+        </g>
+      </svg></div>
+      <figcaption>从上往下三条线：线程库的句柄与 TLS 在用户空间，寄存器在核里，被换下时存进 task 和内核栈。中间那个框是同一个 task_struct 里的几组字段。</figcaption>
+      <div class="pano-ui"></div>
+      <p class="arch-hint"><span class="idle">点头上的任意一个框看它的关系，点区域标题看分组含义，点零件看完整归属路径；框里的每一行 / 每个格子都能点，跳到它指向的零件；用「对比两个零件」出一张对照表</span><span class="focused">再点一次空白处取消</span></p>
+    </figure><p><mark class="mk-blue">所以「完整线程上下文」不是一个东西，而是四处状态的集合</mark>：CPU 寄存器（运行时在核里）、内核栈（进内核后的执行现场）、<code>task_struct</code> 里的那几组字段、以及用户空间的栈与 TLS。表里是按项对照：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>上下文项</th><th>存在哪</th><th>谁维护</th><th>什么时候被读</th></tr></thead><tbody><tr><th>PC、SP、通用寄存器</th><td data-label="存在哪">CPU 里；被换下时写进 task 与内核栈</td><td data-label="谁维护">CPU 与内核的切换代码</td><td data-label="什么时候被读">恢复上核时</td></tr><tr><th>浮点 / SIMD 寄存器</th><td data-label="存在哪">同上（这部分是惰性保存的）</td><td data-label="谁维护">内核</td><td data-label="什么时候被读">新线程用到浮点时</td></tr><tr><th>调度状态</th><td data-label="存在哪">task_struct</td><td data-label="谁维护">调度器</td><td data-label="什么时候被读">挑下一条时</td></tr><tr><th>优先级 / 时间片 / CPU 亲和</th><td data-label="存在哪">task_struct</td><td data-label="谁维护">调度器</td><td data-label="什么时候被读">排队与抢占时</td></tr><tr><th>信号掩码 / 待处理信号</th><td data-label="存在哪">task_struct</td><td data-label="谁维护">内核与 sigprocmask</td><td data-label="什么时候被读">投递信号时</td></tr><tr><th>内核栈</th><td data-label="存在哪">一块独立的内核内存，16 KiB</td><td data-label="谁维护">内核</td><td data-label="什么时候被读">进内核、切出、恢复</td></tr><tr><th>TLS</th><td data-label="存在哪">用户空间；fsbase 记住位置</td><td data-label="谁维护">线程库分配，内核记基址</td><td data-label="什么时候被读">每次访问 thread_local</td></tr><tr><th>线程库的句柄 / 取消 / join</th><td data-label="存在哪">用户空间</td><td data-label="谁维护">libc</td><td data-label="什么时候被读">pthread_join 之类的调用</td></tr><tr><th>统计</th><td data-label="存在哪">task_struct</td><td data-label="谁维护">内核</td><td data-label="什么时候被读">读 /proc 时</td></tr></tbody></table></div><h2 id="两套栈进内核时-sp-换到哪"><span class="num">04</span>两套栈：进内核时 SP 换到哪</h2>
+<p>一条线程至少有两根栈。用户态跑的时候用自己那根用户栈；进内核以后，SP 换成这个 task 的内核栈。</p>
+<figure class="archfig" data-arch style="--arch-max-width:1580px" data-boundaries="nested" data-pano data-parts='{"code":{"label":"代码段 · RIP 在这儿","sub":"执行到 syscall 就进门","detail":"用户态执行时 RIP 指向代码段里的下一条指令。`syscall` 本身也是一条指令：执行到它，CPU 才切权限级。","facts":{"位置":"用户空间（低半）","谁在用":"线程自己","需要内核吗":"不用"}},"ustack":{"label":"用户栈","sub":"SP 指向这里","detail":"函数调用、局部变量、返回地址都在这一根栈上。SP 变，说明线程执行的位置变了。","facts":{"位置":"用户空间（高地址）","谁在用":"线程自己","需要内核吗":"不用"}},"entry":{"label":"进门","sub":"系统调用、缺页、异常、中断","detail":"系统调用是主动的，缺页和异常是被动的，中断来自硬件。它们共同的效果是：CPU 换了权限级，SP 换成内核栈，原来的用户现场被压进 `pt_regs`。==task 一直是同一个。==","facts":{"位置":"边界","谁触发":"线程自己或硬件","需要内核吗":"就是进内核"}},"task":{"label":"task T1","sub":"内核记着这条执行流","detail":"字段 `thread_struct.sp` 指向这条线程自己的内核栈。切换线程时，这个字段换成另一条 task 的值，栈也就跟着换了。","facts":{"位置":"内核空间","谁在用":"调度器","需要内核吗":"是"}},"kstack":{"label":"内核栈","sub":"16 KiB，一条线程一根","detail":"系统调用进来后，内核在这根栈上跑。用户现场（SP、RIP、CS、RFLAGS、通用寄存器）作为 `pt_regs` 压在最上面，返回时从这里恢复。==线程在用户态跑时，这根栈基本是空的。==","facts":{"位置":"内核空间","谁分配":"内核","大小":"THREAD_SIZE，x86-64 上是 4 页 = 16 KiB"}},"irqstack":{"label":"中断栈","sub":"每 CPU 一根","detail":"外部硬件中断默认不借用当前线程的栈：第一次外部中断时，内核切到该 CPU 自己的中断栈。这样中断处理不会挤占某条线程那 16 KiB。","facts":{"位置":"内核空间","谁分配":"内核（每 CPU）","需要内核吗":"是"}}}' data-tours='[{"id":"roundtrip","label":"进门再回来这一趟","steps":[{"at":["code","ustack"],"text":"用户态跑着：RIP 指在代码段，SP 指在这条线程的用户栈上。"},{"at":["entry"],"text":"执行到 syscall（或触发缺页），CPU 从 ring 3 进 ring 0。==task 没变，变的是权限级和栈。=="},{"at":["kstack","task"],"text":"SP 换成这根内核栈的栈顶，用户现场压成 `pt_regs`；`thread.sp` 记着这根栈的位置。"},{"at":["kstack","ustack"],"text":"处理完返回，内核从 `pt_regs` 里恢复用户 SP 和 RIP，栈又换回用户栈。"}]}]' data-frames='[{"id":"user","boundary":0,"kind":"classification","label":"用户空间 · 程序自己的内存","detail":"代码段和用户栈都在这里。执行到一条 syscall 指令，才谈得上进内核。","members":["code","ustack"],"depth":1},{"id":"kernel","boundary":1,"kind":"classification","label":"内核空间 · 内核的内存","detail":"task 和内核栈在这里。中断栈也在内核里，但它属于某个 CPU，不属于某条线程。","members":["task","kstack","irqstack"],"depth":1}]'>
+      <div class="arch-boundary-ui">
+          <div class="arch-boundary-toolbar"><span class="arch-boundary-label">边界</span>
+            <button type="button" data-boundary-mode="nested" aria-pressed="true">多层归属框</button>
+            <button type="button" data-boundary-mode="flat" aria-pressed="false">只留一层分区</button>
+            <button type="button" data-arch-reset>恢复全图</button>
+          </div>
+          <div class="arch-address-box" aria-live="polite"><div data-arch-address>点一个零件，看完整归属路径；点一个区域标题，看这一层的含义。</div>
+            <div data-arch-frame-detail>最外框表示逻辑资源域，不表示所有对象在一块内存里。每层边界的标题说明分组依据。</div></div>
+        </div>
+      <div class="arch-canvas"><svg viewBox="0 0 1580 1060" role="img" aria-labelledby="ts-stacks-archify-diagram-title ts-stacks-archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
+        <title id="ts-stacks-archify-diagram-title">一条线程的两根栈：进内核时 SP 指向哪</title>
+        <desc id="ts-stacks-archify-diagram-description">同一条执行流、同一个 task，进内核只换权限级和栈指针</desc>
+        <!-- Definitions -->
+        <defs>
+          <marker id="ts-stacks-arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-default" />
+          </marker>
+          <marker id="ts-stacks-arrowhead-emphasis" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-emphasis" />
+          </marker>
+          <marker id="ts-stacks-arrowhead-security" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-security" />
+          </marker>
+          <marker id="ts-stacks-arrowhead-dashed" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-dashed" />
+          </marker>
+          <pattern id="ts-stacks-grid" width="40" height="40" patternUnits="userSpaceOnUse">
+            <path d="M 40 0 L 0 0 0 40" class="c-grid" stroke-width="0.5"/>
+          </pattern>
+        </defs>
+
+        <!-- Background Grid -->
+        <rect width="100%" height="100%" fill="url(#ts-stacks-grid)" />
+
+        <!-- Boundaries (behind everything) -->
+        <g class="arch-frame" data-frame="user" data-depth="1" data-frame-flat="false" data-frame-kind="classification" role="button" tabindex="0" aria-pressed="false" aria-label="用户空间 · 程序自己的内存"><title>代码段和用户栈都在这里。执行到一条 syscall 指令，才谈得上进内核。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="0" data-frame-members="code ustack" x="66.1" y="60" width="893.6" height="260" rx="12" class="c-region" stroke-width="1"/>
+        <text x="74.1" y="78" class="t-cloud" font-size="9" font-weight="600">用户空间 · 程序自己的内存</text></g>
+
+        <g class="arch-frame" data-frame="kernel" data-depth="1" data-frame-flat="false" data-frame-kind="classification" role="button" tabindex="0" aria-pressed="false" aria-label="内核空间 · 内核的内存"><title>task 和内核栈在这里。中断栈也在内核里，但它属于某个 CPU，不属于某条线程。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="1" data-frame-members="task kstack irqstack" x="66.1" y="560" width="1353.4" height="370" rx="12" class="c-region" stroke-width="1"/>
+        <text x="74.1" y="578" class="t-cloud" font-size="9" font-weight="600">内核空间 · 内核的内存</text></g>
+
+        <!-- Connection paths (before components for correct z-order) -->
+        <path data-edge-from="code" data-edge-to="entry" data-edge-label="执行到 syscall 指令" data-edge-key="0" data-edge-id="to-entry" data-composition-points="282.95,280;282.95,460;530.6,460" d="M 282.95 280 L 282.95 452 Q 282.95 460 290.95 460 L 530.6 460" class="a-default" stroke-width="1.5" marker-end="url(#ts-stacks-arrowhead)"/>
+        <path data-edge-from="entry" data-edge-to="kstack" data-edge-label="换栈" data-edge-key="1" data-edge-id="switch" data-composition-points="725.1500000000001,520;725.1500000000001,600" d="M 725.1500000000001 520 L 725.1500000000001 600" class="a-emphasis" stroke-width="1.8" marker-end="url(#ts-stacks-arrowhead-emphasis)"/>
+        <path data-edge-from="task" data-edge-to="kstack" data-edge-label="thread.sp" data-edge-key="2" data-edge-id="sp" data-composition-points="424.5,705;530.6,705" d="M 424.5 705 L 530.6 705" class="a-default" stroke-width="1.5" marker-end="url(#ts-stacks-arrowhead)"/>
+        <path data-edge-from="kstack" data-edge-to="ustack" data-edge-label="返回：从 pt_regs 恢复 SP" data-edge-key="3" data-edge-id="back" data-composition-points="919.7,705;1462.1,705;1462.1,190;919.7,190" d="M 919.7 705 L 1454.1 705 Q 1462.1 705 1462.1 697 L 1462.1 198 Q 1462.1 190 1454.1 190 L 919.7 190" class="a-default" stroke-width="1.5" marker-end="url(#ts-stacks-arrowhead)"/>
+
+        <!-- Components -->
+        <g id="ts-stacks-node-code" data-nb="1" data-node-id="code" data-node-label="代码段 · RIP 在这儿" tabindex="0" role="button" aria-label="Focus 代码段 · RIP 在这儿, 执行到下一条指令, 用户空间 · 程序自己的内存" aria-pressed="false" data-node-kind="backend" data-node-sublabel="执行到下一条指令" data-node-context="用户空间 · 程序自己的内存">
+          <title>代码段 · RIP 在这儿 · 执行到下一条指令 · 用户空间 · 程序自己的内存</title>
+          <rect x="106.1" y="100" width="353.7" height="180" rx="6" class="c-mask"/>
+          <rect x="106.1" y="100" width="353.7" height="180" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(112.1 106) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <rect class="nb-badge" x="387.8" y="108" width="60.0" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="417.8" y="119" font-size="8" text-anchor="middle">用户态执行</text>
+          <text class="nb-title" x="140.1" y="121" font-size="10.5" font-weight="600">代码段 · RIP 在这儿</text>
+          <line class="nb-hr" x1="114.1" y1="128" x2="451.79999999999995" y2="128"/>
+          <text class="nb-k" x="118.1" y="186" font-size="9">RIP</text><text class="nb-v" x="170.3" y="186" font-size="9">指在下一条指令上</text>
+          <text class="nb-k" x="118.1" y="200" font-size="9">其中一条</text><text class="nb-v" x="170.3" y="200" font-size="9">syscall 指令</text>
+          <text class="nb-k" x="118.1" y="214" font-size="9">取指</text><text class="nb-v" x="170.3" y="214" font-size="9">不需要内核</text>
+          <text class="nb-note" x="118.1" y="272" font-size="8">代码段只读，执行它只用用户态权限</text>
+        </g>
+
+        <g id="ts-stacks-node-ustack" data-nb="1" data-node-id="ustack" data-node-label="用户栈 · SP 在这儿" tabindex="0" role="button" aria-label="Focus 用户栈 · SP 在这儿, 这条线程的函数调用, 用户空间 · 程序自己的内存" aria-pressed="false" data-node-kind="backend" data-node-sublabel="这条线程的函数调用" data-node-context="用户空间 · 程序自己的内存">
+          <title>用户栈 · SP 在这儿 · 这条线程的函数调用 · 用户空间 · 程序自己的内存</title>
+          <rect x="530.6" y="100" width="389.1" height="180" rx="6" class="c-mask"/>
+          <rect x="530.6" y="100" width="389.1" height="180" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(536.6 106) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <rect class="nb-badge" x="847.7" y="108" width="60.0" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="877.7" y="119" font-size="8" text-anchor="middle">每线程一根</text>
+          <text class="nb-title" x="564.6" y="121" font-size="10.5" font-weight="600">用户栈 · SP 在这儿</text>
+          <line class="nb-hr" x1="538.6" y1="128" x2="911.7" y2="128"/>
+          <rect class="nb-seg" x="542.6" y="173.5" width="365.1" height="12" rx="3"/><text class="nb-seg-t" x="549.6" y="182.5" font-size="8">调用者的栈帧</text>
+          <rect class="nb-seg" x="542.6" y="188.5" width="365.1" height="12" rx="3"/><text class="nb-seg-t" x="549.6" y="197.5" font-size="8">局部变量</text>
+          <rect class="nb-seg" x="542.6" y="203.5" width="365.1" height="12" rx="3"/><text class="nb-seg-t" x="549.6" y="212.5" font-size="8">返回地址</text><text class="nb-note" x="900.7" y="212.5" font-size="7.5" text-anchor="end">← SP</text>
+          <text class="nb-note" x="542.6" y="272" font-size="8">向下长；SP 指在当前栈顶</text>
+        </g>
+
+        <g id="ts-stacks-node-entry" data-nb="1" data-node-id="entry" data-node-label="进门：syscall / 缺页" tabindex="0" role="button" aria-label="Focus 进门：syscall / 缺页, 权限级 3 → 0，换栈，压现场, Architecture component" aria-pressed="false" data-node-kind="security" data-node-sublabel="权限级 3 → 0，换栈，压现场" data-node-context="Architecture component">
+          <title>进门：syscall / 缺页 · 权限级 3 → 0，换栈，压现场 · Architecture component</title>
+          <rect x="530.6" y="400" width="389.1" height="120" rx="6" class="c-mask"/>
+          <rect x="530.6" y="400" width="389.1" height="120" rx="6" class="c-security" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="security" class="semantic-sigil s-security" transform="translate(536.6 406) scale(0.6875)">
+            <path d="M8 2.2 13 4v3.5c0 3.1-1.8 5.4-5 6.5-3.2-1.1-5-3.4-5-6.5V4Z"/>
+            <path d="m5.8 8 1.5 1.5 3-3"/>
+          </g>
+          <rect class="nb-badge" x="838.1" y="408" width="69.6" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="872.9" y="419" font-size="8" text-anchor="middle">权限级 3 → 0</text>
+          <text class="nb-title" x="564.6" y="421" font-size="10.5" font-weight="600">进门：syscall / 缺页</text>
+          <line class="nb-hr" x1="538.6" y1="428" x2="911.7" y2="428"/>
+          <text class="nb-k" x="542.6" y="456" font-size="9">谁进来</text><text class="nb-v" x="594.8" y="456" font-size="9">syscall / 缺页 / 异常 / 中断</text>
+          <text class="nb-k" x="542.6" y="470" font-size="9">换了什么</text><text class="nb-v" x="594.8" y="470" font-size="9">权限级、SP、GS 基址</text>
+          <g class="nb-spot" data-nb-spot="1" tabindex="0" role="button" data-nb-link="task"><rect class="nb-hit" x="537.6" y="473" width="375.1" height="14"/><text class="nb-k" x="542.6" y="484" font-size="9">没换什么</text><text class="nb-v" x="594.8" y="484" font-size="9">task、地址空间、tid</text></g>
+          <text class="nb-note" x="542.6" y="512" font-size="8">同一条执行流，只是换了权限和栈</text>
+        </g>
+
+        <g id="ts-stacks-node-task" data-nb="1" data-node-id="task" data-node-label="task T1" tabindex="0" role="button" aria-label="Focus task T1, 内核记着这条执行流, 内核空间 · 内核的内存" aria-pressed="false" data-node-kind="database" data-node-sublabel="内核记着这条执行流" data-node-context="内核空间 · 内核的内存">
+          <title>task T1 · 内核记着这条执行流 · 内核空间 · 内核的内存</title>
+          <rect x="106.1" y="600" width="318.4" height="210" rx="6" class="c-mask"/>
+          <rect x="106.1" y="600" width="318.4" height="210" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(112.1 606) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <rect class="nb-badge" x="362.1" y="608" width="50.4" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="387.3" y="619" font-size="8" text-anchor="middle">现场的家</text>
+          <text class="nb-title" x="140.1" y="621" font-size="10.5" font-weight="600">task T1</text>
+          <line class="nb-hr" x1="114.1" y1="628" x2="416.5" y2="628"/>
+          <g class="nb-spot" data-nb-spot="1" tabindex="0" role="button" data-nb-link="kstack"><rect class="nb-hit" x="113.1" y="690" width="304.4" height="14"/><text class="nb-k" x="118.1" y="701" font-size="9">thread.sp</text><text class="nb-v" x="175.7" y="701" font-size="9">内核栈的位置</text></g>
+          <text class="nb-k" x="118.1" y="715" font-size="9">fsbase</text><text class="nb-v" x="175.7" y="715" font-size="9">用户态 TLS 的基址</text>
+          <text class="nb-k" x="118.1" y="729" font-size="9">换线程</text><text class="nb-v" x="175.7" y="729" font-size="9">换成另一条 task 的 sp</text>
+          <text class="nb-note" x="118.1" y="802" font-size="8">一个 task 一根内核栈，一一对应</text>
+        </g>
+
+        <g id="ts-stacks-node-kstack" data-nb="1" data-node-id="kstack" data-node-label="内核栈 · SP 换到这儿" tabindex="0" role="button" aria-label="Focus 内核栈 · SP 换到这儿, 16 KiB，每条线程一根, 内核空间 · 内核的内存" aria-pressed="false" data-node-kind="database" data-node-sublabel="16 KiB，每条线程一根" data-node-context="内核空间 · 内核的内存">
+          <title>内核栈 · SP 换到这儿 · 16 KiB，每条线程一根 · 内核空间 · 内核的内存</title>
+          <rect x="530.6" y="600" width="389.1" height="210" rx="6" class="c-mask"/>
+          <rect x="530.6" y="600" width="389.1" height="210" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(536.6 606) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <rect class="nb-badge" x="804.5" y="608" width="103.2" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="856.1" y="619" font-size="8" text-anchor="middle">16 KiB · 每线程一根</text>
+          <text class="nb-title" x="564.6" y="621" font-size="10.5" font-weight="600">内核栈 · SP 换到这儿</text>
+          <line class="nb-hr" x1="538.6" y1="628" x2="911.7" y2="628"/>
+          <rect class="nb-seg" x="542.6" y="688.5" width="365.1" height="12" rx="3"/><text class="nb-seg-t" x="549.6" y="697.5" font-size="8">pt_regs · 用户现场</text><text class="nb-note" x="900.7" y="697.5" font-size="7.5" text-anchor="end">SP / RIP / CS</text>
+          <rect class="nb-seg" x="542.6" y="703.5" width="365.1" height="12" rx="3"/><text class="nb-seg-t" x="549.6" y="712.5" font-size="8">内核函数栈帧</text>
+          <rect class="nb-seg" data-tone="idle" x="542.6" y="718.5" width="365.1" height="12" rx="3"/><text class="nb-seg-t" data-tone="idle" x="549.6" y="727.5" font-size="8">空着的部分</text>
+          <text class="nb-note" x="542.6" y="802" font-size="8">在用户态跑时基本是空的</text>
+        </g>
+
+        <g id="ts-stacks-node-irqstack" data-nb="1" data-node-id="irqstack" data-node-label="中断栈 · 例外" tabindex="0" role="button" aria-label="Focus 中断栈 · 例外, 每 CPU 一根，不属某条线程, 内核空间 · 内核的内存" aria-pressed="false" data-node-kind="database" data-node-sublabel="每 CPU 一根，不属某条线程" data-node-context="内核空间 · 内核的内存">
+          <title>中断栈 · 例外 · 每 CPU 一根，不属某条线程 · 内核空间 · 内核的内存</title>
+          <rect x="1025.8" y="750" width="353.7" height="140" rx="6" class="c-mask"/>
+          <rect x="1025.8" y="750" width="353.7" height="140" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(1031.8 756) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <rect class="nb-badge" x="1302.7" y="758" width="64.8" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="1335.1" y="769" font-size="8" text-anchor="middle">每 CPU 一根</text>
+          <text class="nb-title" x="1059.8" y="771" font-size="10.5" font-weight="600">中断栈 · 例外</text>
+          <line class="nb-hr" x1="1033.8" y1="778" x2="1371.5" y2="778"/>
+          <text class="nb-k" x="1037.8" y="816" font-size="9">什么时候</text><text class="nb-v" x="1090.0" y="816" font-size="9">第一次外部硬件中断</text>
+          <text class="nb-k" x="1037.8" y="830" font-size="9">为什么</text><text class="nb-v" x="1090.0" y="830" font-size="9">不占用某条线程的 16 KiB</text>
+          <text class="nb-k" x="1037.8" y="844" font-size="9">归属</text><text class="nb-v" x="1090.0" y="844" font-size="9">不属于任何一条线程</text>
+          <text class="nb-note" x="1037.8" y="882" font-size="8">中断处理不代表某条线程在跑</text>
+        </g>
+
+        <!-- Connection labels -->
+        <g data-detail="context" data-edge-from="code" data-edge-to="entry" data-edge-label="执行到 syscall 指令" data-edge-key="0" data-edge-id="to-entry">
+          <rect x="356.17499999999995" y="440" width="101.2" height="14" rx="3" class="c-mask"/>
+          <text x="406.775" y="450" class="t-muted" font-size="8" text-anchor="middle">执行到 syscall 指令</text>
+        </g>
+        <g data-detail="context" data-edge-from="entry" data-edge-to="kstack" data-edge-label="换栈" data-edge-key="1" data-edge-id="switch">
+          <rect x="710.1" y="556" width="30" height="14" rx="3" class="c-mask"/>
+          <text x="725.1" y="566" class="t-backend" font-size="8" text-anchor="middle">换栈</text>
+        </g>
+        <g data-detail="context" data-edge-from="task" data-edge-to="kstack" data-edge-label="thread.sp" data-edge-key="2" data-edge-id="sp">
+          <rect x="450.95" y="685" width="53.199999999999996" height="14" rx="3" class="c-mask"/>
+          <text x="477.55" y="695" class="t-muted" font-size="8" text-anchor="middle">thread.sp</text>
+        </g>
+        <g data-detail="context" data-edge-from="kstack" data-edge-to="ustack" data-edge-label="返回：从 pt_regs 恢复 SP" data-edge-key="3" data-edge-id="back">
+          <rect x="1399.5" y="427.5" width="125.19999999999999" height="14" rx="3" class="c-mask"/>
+          <text x="1462.1" y="437.5" class="t-muted" font-size="8" text-anchor="middle">返回：从 pt_regs 恢复 SP</text>
+        </g>
+
+        <!-- Legend -->
+        <g data-legend data-legend-bridge>
+          <text x="40" y="1024" class="t-primary" font-size="12" font-weight="650">Legend</text>
+          <g data-legend-semantic-kind="backend" data-legend-kind="backend" data-legend-label="Backend" data-legend-x="40" data-legend-baseline="1044" data-legend-width="78">
+            <rect x="40" y="1035" width="16" height="10" rx="2.5" class="c-backend" stroke-width="1"/>
+            <text x="62" y="1044" class="t-muted" font-size="10" font-weight="500">Backend</text>
+          </g>
+          <g data-legend-semantic-kind="database" data-legend-kind="database" data-legend-label="Database" data-legend-x="140" data-legend-baseline="1044" data-legend-width="83">
+            <rect x="140" y="1035" width="16" height="10" rx="2.5" class="c-database" stroke-width="1"/>
+            <text x="162" y="1044" class="t-muted" font-size="10" font-weight="500">Database</text>
+          </g>
+          <g data-legend-semantic-kind="security" data-legend-kind="security" data-legend-label="Security" data-legend-x="245" data-legend-baseline="1044" data-legend-width="83">
+            <rect x="245" y="1035" width="16" height="10" rx="2.5" class="c-security" stroke-width="1"/>
+            <text x="267" y="1044" class="t-muted" font-size="10" font-weight="500">Security</text>
+          </g>
+        </g>
+      </svg></div>
+      <figcaption>从代码段那条线进去，看一件事：进门那一刻栈指针换了，task 没换。右边那条长线是回来的路。中断栈是例外，它不属于任何一条线程。</figcaption>
+      <div class="pano-ui"></div>
+      <p class="arch-hint"><span class="idle">点头上的任意一个框看它的关系，点区域标题看分组含义，点零件看完整归属路径；框里的每一行 / 每个格子都能点，跳到它指向的零件；用「对比两个零件」出一张对照表</span><span class="focused">再点一次空白处取消</span></p>
+    </figure><p>为什么要单独一根内核栈，而不是接着用用户栈？内核不能相信用户给的 SP：它可能指向一块随时会被换掉的页，也可能是故意构造的地址。栈一坏，内核自己就崩了。</p>
+<p>x86-64 上这根栈有多大，内核文档写得很直接：<mark class="mk-blue">「x86_64 has a kernel stack for every active thread. These thread stacks are THREAD_SIZE (4*PAGE_SIZE) big.」</mark> 4 KiB 一页，四页就是 16 KiB。同一份文档还写了一句容易被忽略的话：线程在用户空间跑的时候，只有栈底留着一点信息，其余是空的——<strong>内核栈是进内核才用的，不是常驻的工作区</strong>。</p>
+<p>外部硬件中断是例外：它默认切到该 CPU 自己的中断栈（<code>IRQ_STACK_SIZE</code>），而不是当前线程那根。所以「进内核就用这条线程的内核栈」这句话，严格来说只对系统调用、缺页和异常成立。</p>
+<h2 id="创建时两边各发生了什么"><span class="num">05</span>创建时，两边各发生了什么</h2>
+<p><code>fork()</code> 和 <code>pthread_create()</code> 都让内核多造一个可调度的对象，但两边做的工作完全不同：一个在用户空间复刻内容，一个只多一条执行流。</p>
+<figure class="archfig" data-arch style="--arch-max-width:1580px" data-boundaries="nested" data-pano data-parts='{"p_user":{"label":"父进程的用户空间内容","sub":"代码、全局、堆、栈","detail":"fork 之前它就是程序本身的样子。子进程会拿到一份「看起来一样」的地址空间。","facts":{"归属":"父进程","fork 之后":"子进程有一份副本","物理页":"写时复制"}},"p_files":{"label":"父进程的 fd 表","sub":"指向打开文件","detail":"fork 时这张表被复制一份，但表项指向同一批 `struct file`，引用计数加一。所以父子进程的读写偏移仍然共享。","facts":{"归属":"父进程","fork 之后":"子进程有一张复制的表","打开文件":"共用"}},"p_task":{"label":"父进程的 task","sub":"pid 1024","detail":"里面存着调度状态、现场、以及指向 mm / files / fs / sighand 的指针。","facts":{"归属":"父进程","fork 之后":"子进程有自己的 task","共享":"无"}},"p_mm":{"label":"父进程的 mm 与页表","sub":"地址空间的描述","detail":"fork 会复制一份 `mm_struct` 和一套新页表。复制时把父子双方的页表项都改成只读，这样谁写谁触发缺页。","facts":{"归属":"父进程","fork 之后":"子进程有新的 mm 与页表","共享":"物理页先共用"}},"c_user":{"label":"子进程的用户空间","sub":"和父进程一模一样的内容","detail":"代码、全局变量、堆、栈在子进程里都能读到同样的值，因为页表指向同一批物理页。但两份页表是独立的，任何一方写入都会先复制一页。","facts":{"归属":"子进程","谁复制的":"内核（fork）","物理页":"写时复制"}},"c_files":{"label":"子进程的 fd 表","sub":"复制一张表","detail":"表是新的，表项指向同一批打开文件。子进程 `close` 自己的 fd 不影响父进程，但两边读到的是同一个文件偏移。","facts":{"归属":"子进程","谁复制的":"内核（fork）","打开文件":"共用"}},"c_task":{"label":"子进程的 task","sub":"新 PID","detail":"内核建了一个新 task，分配新 PID，把父子关系记在 task 上，并给它一根新的内核栈和一个新的调度上下文。之后它和父进程抢同一个 CPU。","facts":{"归属":"子进程","谁创建的":"内核","新分配":"内核栈、调度上下文"}},"c_mm":{"label":"子进程的 mm 与页表","sub":"新的，但物理页先共用","detail":"页表是新的，里面的页表项暂时指向父进程正在用的那些物理帧，全部标成只读。写时复制就发生在这里。","facts":{"归属":"子进程","谁复制的":"内核（fork）","物理页":"只读，写时复制"}},"libc":{"label":"线程库（用户态）","sub":"pthread_create 的前半段","detail":"线程库先在用户空间把新线程要用的东西备好：一根用户栈、一块 TLS、一个 `struct pthread`，以及入口函数和参数。然后才调 `clone()`。","facts":{"归属":"用户空间","谁做":"libc","需要内核吗":"前四步不用"}},"t_task":{"label":"新线程的 task","sub":"tid 1026，tgid 还是 1024","detail":"内核给它一个新的 task、新的 tid、一根新的内核栈和一个调度上下文，然后用 `clone` 的开关决定哪些资源共享。多线程进程用的开关是：地址空间、fd 表、信号处置全部共享。","facts":{"归属":"新线程","谁创建的":"内核（clone）","共享":"mm / files / fs / sighand"}},"t_ustack":{"label":"新线程的用户栈","sub":"线程库 mmap 出来的","detail":"这块栈在创建时就定好大小，之后不增长（主线程的栈才受 `ulimit -s` 管）。它落在映射区里，和三根线程栈互不相邻也无所谓。","facts":{"归属":"新线程","谁分配的":"pthread 库","位置":"映射区"}},"t_tls":{"label":"新线程的 TLS","sub":"用 fsbase 定位","detail":"TLS 块通常就放在线程库结构旁边，由 `CLONE_SETTLS` 把 `fsbase` 设过去。之后这条线程访问 `thread_local` 和 `errno` 都走这块。","facts":{"归属":"新线程","谁分配的":"pthread 库","谁记住位置":"task.fsbase"}}}' data-tours='[{"id":"two-paths","label":"两条创建路径差在哪","steps":[{"at":["p_user","p_mm","p_task","p_files"],"text":"起点是同一个父进程：一份用户空间内容、一份 mm 与页表、一个 task、一张 fd 表。"},{"at":["c_user","c_mm","c_task","c_files"],"text":"fork 这一路，==每一样都复制了一份==：新页表、新 task、新 PID、复制的 fd 表。物理页先共用，写时才复制。"},{"at":["libc","t_task","t_ustack","t_tls"],"text":"pthread_create 这一路，线程库先在用户态备好栈和 TLS，内核只多造一个 task。==mm、fd 表、fs、信号处置全是同一批指针。=="}]}]' data-frames='[{"id":"parent","boundary":0,"kind":"classification","label":"父进程 P · 现在","detail":"创建之前的样子：一份用户空间内容、一张 fd 表、一个 task、一份 mm。","members":["p_user","p_files","p_task","p_mm"],"depth":1},{"id":"forked","boundary":1,"kind":"classification","label":"fork() 之后 · 子进程 C","detail":"每样都有自己的一份：新的页表、复制出来的 fd 表、新的 task。但物理页暂时共用，写入时才复制。","members":["c_user","c_files","c_task","c_mm"],"depth":1},{"id":"thread","boundary":2,"kind":"classification","label":"pthread_create() 之后 · 新线程 T1","detail":"只有执行流是新的：一个新的 task、一根新用户栈、一块新 TLS。资源一个都没复制，task 里存的是同一批指针。","members":["t_task","t_ustack","t_tls"],"depth":1},{"id":"libcframe","boundary":3,"kind":"classification","label":"用户态的那一半","detail":"线程库先在自己这侧备好用户栈和 TLS，再调 clone() 让内核造 task。fork() 没有这一半，它直接就是一个系统调用。","members":["libc"],"depth":1}]'>
+      <div class="arch-boundary-ui">
+          <div class="arch-boundary-toolbar"><span class="arch-boundary-label">边界</span>
+            <button type="button" data-boundary-mode="nested" aria-pressed="true">多层归属框</button>
+            <button type="button" data-boundary-mode="flat" aria-pressed="false">只留一层分区</button>
+            <button type="button" data-arch-reset>恢复全图</button>
+          </div>
+          <div class="arch-address-box" aria-live="polite"><div data-arch-address>点一个零件，看完整归属路径；点一个区域标题，看这一层的含义。</div>
+            <div data-arch-frame-detail>最外框表示逻辑资源域，不表示所有对象在一块内存里。每层边界的标题说明分组依据。</div></div>
+        </div>
+      <div class="arch-canvas"><svg viewBox="0 0 1580 1100" role="img" aria-labelledby="ts-create-archify-diagram-title ts-create-archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
+        <title id="ts-create-archify-diagram-title">创建时的两边：fork 复制一份，pthread_create 只多一条执行流</title>
+        <desc id="ts-create-archify-diagram-description">同一对操作：一边在用户空间复刻内容，一边在内核里造新的描述对象；线程走的是「指针照抄」那条路</desc>
+        <!-- Definitions -->
+        <defs>
+          <marker id="ts-create-arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-default" />
+          </marker>
+          <marker id="ts-create-arrowhead-emphasis" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-emphasis" />
+          </marker>
+          <marker id="ts-create-arrowhead-security" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-security" />
+          </marker>
+          <marker id="ts-create-arrowhead-dashed" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-dashed" />
+          </marker>
+          <pattern id="ts-create-grid" width="40" height="40" patternUnits="userSpaceOnUse">
+            <path d="M 40 0 L 0 0 0 40" class="c-grid" stroke-width="0.5"/>
+          </pattern>
+        </defs>
+
+        <!-- Background Grid -->
+        <rect width="100%" height="100%" fill="url(#ts-create-grid)" />
+
+        <!-- Boundaries (behind everything) -->
+        <g class="arch-frame" data-frame="parent" data-depth="1" data-frame-flat="false" data-frame-kind="classification" role="button" tabindex="0" aria-pressed="false" aria-label="父进程 P · 现在"><title>创建之前的样子：一份用户空间内容、一张 fd 表、一个 task、一份 mm。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="0" data-frame-members="p_user p_files p_task p_mm" x="613.1" y="110" width="427.6" height="730" rx="12" class="c-region" stroke-width="1"/>
+        <text x="621.1" y="128" class="t-cloud" font-size="9" font-weight="600">父进程 P · 现在</text></g>
+
+        <g class="arch-frame" data-frame="forked" data-depth="1" data-frame-flat="false" data-frame-kind="classification" role="button" tabindex="0" aria-pressed="false" aria-label="fork() 之后 · 子进程 C"><title>每样都有自己的一份：新的页表、复制出来的 fd 表、新的 task。但物理页暂时共用，写入时才复制。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="1" data-frame-members="c_user c_files c_task c_mm" x="1108.1" y="110" width="427.5999999999999" height="730" rx="12" class="c-region" stroke-width="1"/>
+        <text x="1116.1" y="128" class="t-cloud" font-size="9" font-weight="600">fork() 之后 · 子进程 C</text></g>
+
+        <g class="arch-frame" data-frame="thread" data-depth="1" data-frame-flat="false" data-frame-kind="classification" role="button" tabindex="0" aria-pressed="false" aria-label="pthread_create() 之后 · 新线程 T1"><title>只有执行流是新的：一个新的 task、一根新用户栈、一块新 TLS。资源一个都没复制，task 里存的是同一批指针。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="2" data-frame-members="t_task t_ustack t_tls" x="23.200000000000003" y="390" width="427.6" height="610" rx="12" class="c-region" stroke-width="1"/>
+        <text x="31.200000000000003" y="408" class="t-cloud" font-size="9" font-weight="600">pthread_create() 之后 · 新线程 T1</text></g>
+
+        <g class="arch-frame" data-frame="libcframe" data-depth="1" data-frame-flat="false" data-frame-kind="classification" role="button" tabindex="0" aria-pressed="false" aria-label="用户态的那一半"><title>线程库先在自己这侧备好用户栈和 TLS，再调 clone() 让内核造 task。fork() 没有这一半，它直接就是一个系统调用。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="3" data-frame-members="libc" x="23.200000000000003" y="110" width="353.9" height="230" rx="12" class="c-region" stroke-width="1"/>
+        <text x="31.200000000000003" y="128" class="t-cloud" font-size="9" font-weight="600">用户态的那一半</text></g>
+
+        <!-- Connection paths (before components for correct z-order) -->
+        <path data-edge-from="p_user" data-edge-to="c_user" data-edge-label="复制一份地址空间" data-edge-key="0" data-edge-id="copy-user" data-composition-points="1000.7,220;1148.1,220" d="M 1000.7 220 L 1148.1 220" class="a-default" stroke-width="1.5" marker-end="url(#ts-create-arrowhead)"/>
+        <path data-edge-from="p_files" data-edge-to="c_files" data-edge-label="复制 fd 表" data-edge-key="1" data-edge-id="copy-files" data-composition-points="1000.7,390;1148.1,390" d="M 1000.7 390 L 1148.1 390" class="a-default" stroke-width="1.5" marker-end="url(#ts-create-arrowhead)"/>
+        <path data-edge-from="p_task" data-edge-to="c_task" data-edge-label="新 task、新 PID" data-edge-key="2" data-edge-id="new-task" data-composition-points="1000.7,560;1148.1,560" d="M 1000.7 560 L 1148.1 560" class="a-default" stroke-width="1.5" marker-end="url(#ts-create-arrowhead)"/>
+        <path data-edge-from="p_mm" data-edge-to="c_mm" data-edge-label="新页表，页先共用" data-edge-key="3" data-edge-id="copy-mm" data-composition-points="1000.7,730;1148.1,730" d="M 1000.7 730 L 1148.1 730" class="a-default" stroke-width="1.5" marker-end="url(#ts-create-arrowhead)"/>
+        <path data-edge-from="t_task" data-edge-to="p_mm" data-edge-label="mm 指针照抄" data-edge-key="4" data-edge-id="share-mm" data-composition-points="410.8,505;531.95,505;531.95,730;653.1,730" d="M 410.8 505 L 523.95 505 Q 531.95 505 531.95 513 L 531.95 722 Q 531.95 730 539.95 730 L 653.1 730" class="a-emphasis" stroke-width="1.8" marker-end="url(#ts-create-arrowhead-emphasis)"/>
+        <path data-edge-from="libc" data-edge-to="t_task" data-edge-label="先备好，再 clone" data-edge-key="5" data-edge-id="prepare" data-composition-points="200.14999999999998,300;200.14999999999998,365;237,365;237,430" d="M 200.14999999999998 300 L 200.14999999999998 357 Q 200.14999999999998 365 208.14999999999998 365 L 229 365 Q 237 365 237 373 L 237 430" class="a-default" stroke-width="1.5" marker-end="url(#ts-create-arrowhead)"/>
+
+        <!-- Components -->
+        <g id="ts-create-node-p_user" data-nb="1" data-node-id="p_user" data-node-label="用户空间内容" tabindex="0" role="button" aria-label="Focus 用户空间内容, 代码 / 全局 / 堆 / 栈, 父进程 P · 现在" aria-pressed="false" data-node-kind="backend" data-node-sublabel="代码 / 全局 / 堆 / 栈" data-node-context="父进程 P · 现在">
+          <title>用户空间内容 · 代码 / 全局 / 堆 / 栈 · 父进程 P · 现在</title>
+          <rect x="653.1" y="150" width="347.6" height="140" rx="6" class="c-mask"/>
+          <rect x="653.1" y="150" width="347.6" height="140" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(659.1 156) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <rect class="nb-badge" x="947.9" y="158" width="40.8" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="968.3" y="169" font-size="8" text-anchor="middle">父进程</text>
+          <text class="nb-title" x="687.1" y="171" font-size="10.5" font-weight="600">用户空间内容</text>
+          <line class="nb-hr" x1="661.1" y1="178" x2="992.7" y2="178"/>
+          <rect class="nb-cell" x="665.1" y="214.5" width="103.9" height="23" rx="4"/><text class="nb-cell-t" x="717.0" y="229.5" font-size="9" text-anchor="middle">代码</text>
+          <rect class="nb-cell" x="775.0" y="214.5" width="103.9" height="23" rx="4"/><text class="nb-cell-t" x="826.9" y="229.5" font-size="9" text-anchor="middle">堆</text>
+          <rect class="nb-cell" x="884.8" y="214.5" width="103.9" height="23" rx="4"/><text class="nb-cell-t" x="936.8" y="229.5" font-size="9" text-anchor="middle">栈</text>
+          <text class="nb-note" x="665.1" y="282" font-size="8">程序直接读写，不需要内核</text>
+        </g>
+
+        <g id="ts-create-node-p_files" data-nb="1" data-node-id="p_files" data-node-label="fd 表" tabindex="0" role="button" aria-label="Focus fd 表, 开着的文件, 父进程 P · 现在" aria-pressed="false" data-node-kind="database" data-node-sublabel="开着的文件" data-node-context="父进程 P · 现在">
+          <title>fd 表 · 开着的文件 · 父进程 P · 现在</title>
+          <rect x="653.1" y="320" width="347.6" height="140" rx="6" class="c-mask"/>
+          <rect x="653.1" y="320" width="347.6" height="140" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(659.1 326) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <rect class="nb-badge" x="938.3" y="328" width="50.4" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="963.5" y="339" font-size="8" text-anchor="middle">全组共享</text>
+          <text class="nb-title" x="687.1" y="341" font-size="10.5" font-weight="600">fd 表</text>
+          <line class="nb-hr" x1="661.1" y1="348" x2="992.7" y2="348"/>
+          <text class="nb-k" x="665.1" y="393" font-size="9">fd 0–2</text><text class="nb-v" x="706.5" y="393" font-size="9">标准输入输出错误</text>
+          <text class="nb-k" x="665.1" y="407" font-size="9">fd 3…</text><text class="nb-v" x="706.5" y="407" font-size="9">文件、socket</text>
+          <text class="nb-note" x="665.1" y="452" font-size="8">一张表，指向若干打开文件</text>
+        </g>
+
+        <g id="ts-create-node-p_task" data-nb="1" data-node-id="p_task" data-node-label="task · pid 1024" tabindex="0" role="button" aria-label="Focus task · pid 1024, pid / tgid / 现场, 父进程 P · 现在" aria-pressed="false" data-node-kind="database" data-node-sublabel="pid / tgid / 现场" data-node-context="父进程 P · 现在">
+          <title>task · pid 1024 · pid / tgid / 现场 · 父进程 P · 现在</title>
+          <rect x="653.1" y="490" width="347.6" height="140" rx="6" class="c-mask"/>
+          <rect x="653.1" y="490" width="347.6" height="140" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(659.1 496) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <rect class="nb-badge" x="938.3" y="498" width="50.4" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="963.5" y="509" font-size="8" text-anchor="middle">pid 1024</text>
+          <text class="nb-title" x="687.1" y="511" font-size="10.5" font-weight="600">task · pid 1024</text>
+          <line class="nb-hr" x1="661.1" y1="518" x2="992.7" y2="518"/>
+          <text class="nb-k" x="665.1" y="563" font-size="9">pid / tgid</text><text class="nb-v" x="728.1" y="563" font-size="9">1024 / 1024</text>
+          <text class="nb-k" x="665.1" y="577" font-size="9">现场</text><text class="nb-v" x="728.1" y="577" font-size="9">寄存器 + 内核栈</text>
+          <text class="nb-note" x="665.1" y="622" font-size="8">主线程的那条 task</text>
+        </g>
+
+        <g id="ts-create-node-p_mm" data-nb="1" data-node-id="p_mm" data-node-label="mm + 页表" tabindex="0" role="button" aria-label="Focus mm + 页表, 地址空间的描述, 父进程 P · 现在" aria-pressed="false" data-node-kind="database" data-node-sublabel="地址空间的描述" data-node-context="父进程 P · 现在">
+          <title>mm + 页表 · 地址空间的描述 · 父进程 P · 现在</title>
+          <rect x="653.1" y="660" width="347.6" height="140" rx="6" class="c-mask"/>
+          <rect x="653.1" y="660" width="347.6" height="140" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(659.1 666) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <rect class="nb-badge" x="957.5" y="668" width="31.2" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="973.1" y="679" font-size="8" text-anchor="middle">一份</text>
+          <text class="nb-title" x="687.1" y="681" font-size="10.5" font-weight="600">mm + 页表</text>
+          <line class="nb-hr" x1="661.1" y1="688" x2="992.7" y2="688"/>
+          <rect class="nb-seg" x="665.1" y="713.5" width="323.6" height="12" rx="3"/><text class="nb-seg-t" x="672.1" y="722.5" font-size="8">用户栈</text>
+          <rect class="nb-seg" x="665.1" y="728.5" width="323.6" height="12" rx="3"/><text class="nb-seg-t" x="672.1" y="737.5" font-size="8">堆</text>
+          <rect class="nb-seg" x="665.1" y="743.5" width="323.6" height="12" rx="3"/><text class="nb-seg-t" x="672.1" y="752.5" font-size="8">代码段</text>
+          <text class="nb-note" x="665.1" y="792" font-size="8">页表把这几段映射到物理帧</text>
+        </g>
+
+        <g id="ts-create-node-c_user" data-nb="1" data-node-id="c_user" data-node-label="用户空间副本" tabindex="0" role="button" aria-label="Focus 用户空间副本, 看起来和父进程一样, fork() 之后 · 子进程 C：每样都有自己的一份" aria-pressed="false" data-node-kind="backend" data-node-sublabel="看起来和父进程一样" data-node-context="fork() 之后 · 子进程 C：每样都有自己的一份">
+          <title>用户空间副本 · 看起来和父进程一样 · fork() 之后 · 子进程 C：每样都有自己的一份</title>
+          <rect x="1148.1" y="150" width="347.6" height="140" rx="6" class="c-mask"/>
+          <rect x="1148.1" y="150" width="347.6" height="140" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(1154.1 156) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <rect class="nb-badge" x="1423.7" y="158" width="60.0" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="1453.7" y="169" font-size="8" text-anchor="middle">看起来一样</text>
+          <text class="nb-title" x="1182.1" y="171" font-size="10.5" font-weight="600">用户空间副本</text>
+          <line class="nb-hr" x1="1156.1" y1="178" x2="1487.6999999999998" y2="178"/>
+          <text class="nb-k" x="1160.1" y="216" font-size="9">复制了什么</text><text class="nb-v" x="1223.1" y="216" font-size="9">各段的映射关系</text>
+          <text class="nb-k" x="1160.1" y="230" font-size="9">物理页</text><text class="nb-v" x="1223.1" y="230" font-size="9">先共用，写时才复制</text>
+          <text class="nb-k" x="1160.1" y="244" font-size="9">地址</text><text class="nb-v" x="1223.1" y="244" font-size="9">两份页表各自独立</text>
+          <text class="nb-note" x="1160.1" y="282" font-size="8">子进程看到的地址值和父进程一样</text>
+        </g>
+
+        <g id="ts-create-node-c_files" data-nb="1" data-node-id="c_files" data-node-label="复制出的 fd 表" tabindex="0" role="button" aria-label="Focus 复制出的 fd 表, 指向同一批打开文件, fork() 之后 · 子进程 C：每样都有自己的一份" aria-pressed="false" data-node-kind="database" data-node-sublabel="指向同一批打开文件" data-node-context="fork() 之后 · 子进程 C：每样都有自己的一份">
+          <title>复制出的 fd 表 · 指向同一批打开文件 · fork() 之后 · 子进程 C：每样都有自己的一份</title>
+          <rect x="1148.1" y="320" width="347.6" height="140" rx="6" class="c-mask"/>
+          <rect x="1148.1" y="320" width="347.6" height="140" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(1154.1 326) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <rect class="nb-badge" x="1404.5" y="328" width="79.2" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="1444.1" y="339" font-size="8" text-anchor="middle">复制但共用文件</text>
+          <text class="nb-title" x="1182.1" y="341" font-size="10.5" font-weight="600">复制出的 fd 表</text>
+          <line class="nb-hr" x1="1156.1" y1="348" x2="1487.6999999999998" y2="348"/>
+          <text class="nb-k" x="1160.1" y="386" font-size="9">表</text><text class="nb-v" x="1190.7" y="386" font-size="9">新的 fd 表</text>
+          <text class="nb-k" x="1160.1" y="400" font-size="9">表项</text><text class="nb-v" x="1190.7" y="400" font-size="9">指向同一批打开文件</text>
+          <text class="nb-k" x="1160.1" y="414" font-size="9">偏移</text><text class="nb-v" x="1190.7" y="414" font-size="9">还是共享的</text>
+          <text class="nb-note" x="1160.1" y="452" font-size="8">关掉自己的 fd 不影响父进程</text>
+        </g>
+
+        <g id="ts-create-node-c_task" data-nb="1" data-node-id="c_task" data-node-label="新 task · pid 1030" tabindex="0" role="button" aria-label="Focus 新 task · pid 1030, 新 PID，父进程改成 P, fork() 之后 · 子进程 C：每样都有自己的一份" aria-pressed="false" data-node-kind="database" data-node-sublabel="新 PID，父进程改成 P" data-node-context="fork() 之后 · 子进程 C：每样都有自己的一份">
+          <title>新 task · pid 1030 · 新 PID，父进程改成 P · fork() 之后 · 子进程 C：每样都有自己的一份</title>
+          <rect x="1148.1" y="490" width="347.6" height="140" rx="6" class="c-mask"/>
+          <rect x="1148.1" y="490" width="347.6" height="140" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(1154.1 496) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <rect class="nb-badge" x="1442.9" y="498" width="40.8" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="1463.3" y="509" font-size="8" text-anchor="middle">新 PID</text>
+          <text class="nb-title" x="1182.1" y="511" font-size="10.5" font-weight="600">新 task · pid 1030</text>
+          <line class="nb-hr" x1="1156.1" y1="518" x2="1487.6999999999998" y2="518"/>
+          <text class="nb-k" x="1160.1" y="556" font-size="9">pid</text><text class="nb-v" x="1190.7" y="556" font-size="9">1030（示例，内核分配）</text>
+          <text class="nb-k" x="1160.1" y="570" font-size="9">ppid</text><text class="nb-v" x="1190.7" y="570" font-size="9">指回 P</text>
+          <text class="nb-k" x="1160.1" y="584" font-size="9">调度</text><text class="nb-v" x="1190.7" y="584" font-size="9">新内核栈 + 新调度上下文</text>
+          <text class="nb-note" x="1160.1" y="622" font-size="8">一创建就进了运行队列</text>
+        </g>
+
+        <g id="ts-create-node-c_mm" data-nb="1" data-node-id="c_mm" data-node-label="新 mm + 新页表" tabindex="0" role="button" aria-label="Focus 新 mm + 新页表, 物理页先共用，写时才复制, fork() 之后 · 子进程 C：每样都有自己的一份" aria-pressed="false" data-node-kind="database" data-node-sublabel="物理页先共用，写时才复制" data-node-context="fork() 之后 · 子进程 C：每样都有自己的一份">
+          <title>新 mm + 新页表 · 物理页先共用，写时才复制 · fork() 之后 · 子进程 C：每样都有自己的一份</title>
+          <rect x="1148.1" y="660" width="347.6" height="140" rx="6" class="c-mask"/>
+          <rect x="1148.1" y="660" width="347.6" height="140" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(1154.1 666) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <rect class="nb-badge" x="1442.9" y="668" width="40.8" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="1463.3" y="679" font-size="8" text-anchor="middle">新页表</text>
+          <text class="nb-title" x="1182.1" y="681" font-size="10.5" font-weight="600">新 mm + 新页表</text>
+          <line class="nb-hr" x1="1156.1" y1="688" x2="1487.6999999999998" y2="688"/>
+          <text class="nb-k" x="1160.1" y="726" font-size="9">描述</text><text class="nb-v" x="1201.5" y="726" font-size="9">复制一份</text>
+          <text class="nb-k" x="1160.1" y="740" font-size="9">页表</text><text class="nb-v" x="1201.5" y="740" font-size="9">新的</text>
+          <text class="nb-k" x="1160.1" y="754" font-size="9">物理页</text><text class="nb-v" x="1201.5" y="754" font-size="9">标只读，谁写谁复制</text>
+          <text class="nb-note" x="1160.1" y="792" font-size="8">这就是写时复制</text>
+        </g>
+
+        <g id="ts-create-node-t_task" data-nb="1" data-node-id="t_task" data-node-label="新 task · tid 1026" tabindex="0" role="button" aria-label="Focus 新 task · tid 1026, clone 造出来，tgid 还是 1024, pthread_create() 之后 · 新线程 T1：只有执行流是新的" aria-pressed="false" data-node-kind="database" data-node-sublabel="clone 造出来，tgid 还是 1024" data-node-context="pthread_create() 之后 · 新线程 T1：只有执行流是新的">
+          <title>新 task · tid 1026 · clone 造出来，tgid 还是 1024 · pthread_create() 之后 · 新线程 T1：只有执行流是新的</title>
+          <rect x="63.2" y="430" width="347.6" height="150" rx="6" class="c-mask"/>
+          <rect x="63.2" y="430" width="347.6" height="150" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(69.2 436) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <rect class="nb-badge" x="348.4" y="438" width="50.4" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="373.6" y="449" font-size="8" text-anchor="middle">tid 1026</text>
+          <text class="nb-title" x="97.2" y="451" font-size="10.5" font-weight="600">新 task · tid 1026</text>
+          <line class="nb-hr" x1="71.2" y1="458" x2="402.8" y2="458"/>
+          <text class="nb-k" x="75.2" y="491.5" font-size="9">新给的</text><text class="nb-v" x="127.4" y="491.5" font-size="9">内核栈、调度上下文、初始寄存器</text>
+          <text class="nb-k" x="75.2" y="505.5" font-size="9">照抄的</text><text class="nb-v" x="127.4" y="505.5" font-size="9">mm / files / fs / sighand 指针</text>
+          <text class="nb-k" x="75.2" y="519.5" font-size="9">一创建就</text><text class="nb-v" x="127.4" y="519.5" font-size="9">可运行，等调度器挑</text>
+          <text class="nb-code" x="75.2" y="538.5" font-size="7.5">clone(CLONE_VM | CLONE_FILES | CLONE_SIGHAND | ...)</text>
+          <text class="nb-note" x="75.2" y="572" font-size="8">资源一个都没复制</text>
+        </g>
+
+        <g id="ts-create-node-t_ustack" data-nb="1" data-node-id="t_ustack" data-node-label="新用户栈" tabindex="0" role="button" aria-label="Focus 新用户栈, 线程库先 mmap 出来, pthread_create() 之后 · 新线程 T1：只有执行流是新的" aria-pressed="false" data-node-kind="backend" data-node-sublabel="线程库先 mmap 出来" data-node-context="pthread_create() 之后 · 新线程 T1：只有执行流是新的">
+          <title>新用户栈 · 线程库先 mmap 出来 · pthread_create() 之后 · 新线程 T1：只有执行流是新的</title>
+          <rect x="63.2" y="630" width="347.6" height="140" rx="6" class="c-mask"/>
+          <rect x="63.2" y="630" width="347.6" height="140" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(69.2 636) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <rect class="nb-badge" x="358.0" y="638" width="40.8" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="378.4" y="649" font-size="8" text-anchor="middle">新分配</text>
+          <text class="nb-title" x="97.2" y="651" font-size="10.5" font-weight="600">新用户栈</text>
+          <line class="nb-hr" x1="71.2" y1="658" x2="402.8" y2="658"/>
+          <text class="nb-k" x="75.2" y="703" font-size="9">谁给的</text><text class="nb-v" x="116.6" y="703" font-size="9">pthread 库，用户态 mmap</text>
+          <text class="nb-k" x="75.2" y="717" font-size="9">大小</text><text class="nb-v" x="116.6" y="717" font-size="9">创建时定死，不随用随长</text>
+          <text class="nb-note" x="75.2" y="762" font-size="8">主线程的栈才受 ulimit -s 管</text>
+        </g>
+
+        <g id="ts-create-node-t_tls" data-nb="1" data-node-id="t_tls" data-node-label="新 TLS 块" tabindex="0" role="button" aria-label="Focus 新 TLS 块, fsbase 指向它, pthread_create() 之后 · 新线程 T1：只有执行流是新的" aria-pressed="false" data-node-kind="backend" data-node-sublabel="fsbase 指向它" data-node-context="pthread_create() 之后 · 新线程 T1：只有执行流是新的">
+          <title>新 TLS 块 · fsbase 指向它 · pthread_create() 之后 · 新线程 T1：只有执行流是新的</title>
+          <rect x="63.2" y="820" width="347.6" height="140" rx="6" class="c-mask"/>
+          <rect x="63.2" y="820" width="347.6" height="140" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(69.2 826) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <rect class="nb-badge" x="358.0" y="828" width="40.8" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="378.4" y="839" font-size="8" text-anchor="middle">新分配</text>
+          <text class="nb-title" x="97.2" y="841" font-size="10.5" font-weight="600">新 TLS 块</text>
+          <line class="nb-hr" x1="71.2" y1="848" x2="402.8" y2="848"/>
+          <text class="nb-k" x="75.2" y="893" font-size="9">装什么</text><text class="nb-v" x="127.4" y="893" font-size="9">thread_local、errno</text>
+          <text class="nb-k" x="75.2" y="907" font-size="9">谁指向它</text><text class="nb-v" x="127.4" y="907" font-size="9">fsbase</text>
+          <text class="nb-note" x="75.2" y="952" font-size="8">换线程时这个基址也要换</text>
+        </g>
+
+        <g id="ts-create-node-libc" data-nb="1" data-node-id="libc" data-node-label="pthread_create 的用户态部分" tabindex="0" role="button" aria-label="Focus pthread_create 的用户态部分, 备好栈和 TLS，再 clone, 用户态的那一半 · 线程库先做事" aria-pressed="false" data-node-kind="backend" data-node-sublabel="备好栈和 TLS，再 clone" data-node-context="用户态的那一半 · 线程库先做事">
+          <title>pthread_create 的用户态部分 · 备好栈和 TLS，再 clone · 用户态的那一半 · 线程库先做事</title>
+          <rect x="63.2" y="150" width="273.9" height="150" rx="6" class="c-mask"/>
+          <rect x="63.2" y="150" width="273.9" height="150" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(69.2 156) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <rect class="nb-badge" x="265.1" y="158" width="60.0" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="295.1" y="169" font-size="8" text-anchor="middle">用户态先做</text>
+          <text class="nb-title" x="97.2" y="171" font-size="9.9" font-weight="600">pthread_create 的用户态部分</text>
+          <line class="nb-hr" x1="71.2" y1="178" x2="329.09999999999997" y2="178"/>
+          <text class="nb-k" x="75.2" y="214" font-size="9">①</text><text class="nb-v" x="89.6" y="214" font-size="9">mmap 出用户栈</text>
+          <text class="nb-k" x="75.2" y="228" font-size="9">②</text><text class="nb-v" x="89.6" y="228" font-size="9">备好 TLS 与线程库结构</text>
+          <text class="nb-k" x="75.2" y="242" font-size="9">③</text><text class="nb-v" x="89.6" y="242" font-size="9">准备入口函数和参数</text>
+          <text class="nb-k" x="75.2" y="256" font-size="9">④</text><text class="nb-v" x="89.6" y="256" font-size="9">调 clone 让内核造 task</text>
+          <text class="nb-note" x="75.2" y="292" font-size="8">这四步全在用户态</text>
+        </g>
+
+        <!-- Connection labels -->
+        <g data-detail="context" data-edge-from="p_user" data-edge-to="c_user" data-edge-label="复制一份地址空间" data-edge-key="0" data-edge-id="copy-user">
+          <rect x="1031" y="200" width="86.8" height="14" rx="3" class="c-mask"/>
+          <text x="1074.4" y="210" class="t-muted" font-size="8" text-anchor="middle">复制一份地址空间</text>
+        </g>
+        <g data-detail="context" data-edge-from="p_files" data-edge-to="c_files" data-edge-label="复制 fd 表" data-edge-key="1" data-edge-id="copy-files">
+          <rect x="1045.4" y="370" width="58" height="14" rx="3" class="c-mask"/>
+          <text x="1074.4" y="380" class="t-muted" font-size="8" text-anchor="middle">复制 fd 表</text>
+        </g>
+        <g data-detail="context" data-edge-from="p_task" data-edge-to="c_task" data-edge-label="新 task、新 PID" data-edge-key="2" data-edge-id="new-task">
+          <rect x="1033.4" y="540" width="82" height="14" rx="3" class="c-mask"/>
+          <text x="1074.4" y="550" class="t-muted" font-size="8" text-anchor="middle">新 task、新 PID</text>
+        </g>
+        <g data-detail="context" data-edge-from="p_mm" data-edge-to="c_mm" data-edge-label="新页表，页先共用" data-edge-key="3" data-edge-id="copy-mm">
+          <rect x="1031" y="710" width="86.8" height="14" rx="3" class="c-mask"/>
+          <text x="1074.4" y="720" class="t-muted" font-size="8" text-anchor="middle">新页表，页先共用</text>
+        </g>
+        <g data-detail="context" data-edge-from="t_task" data-edge-to="p_mm" data-edge-label="mm 指针照抄" data-edge-key="4" data-edge-id="share-mm">
+          <rect x="500.5" y="500" width="62.8" height="14" rx="3" class="c-mask"/>
+          <text x="531.9" y="510" class="t-backend" font-size="8" text-anchor="middle">mm 指针照抄</text>
+        </g>
+        <g data-detail="context" data-edge-from="libc" data-edge-to="t_task" data-edge-label="先备好，再 clone" data-edge-key="5" data-edge-id="prepare">
+          <rect x="193.6" y="360" width="86.8" height="14" rx="3" class="c-mask"/>
+          <text x="237" y="370" class="t-muted" font-size="8" text-anchor="middle">先备好，再 clone</text>
+        </g>
+
+        <!-- Legend -->
+        <g data-legend data-legend-bridge>
+          <text x="40" y="1064" class="t-primary" font-size="12" font-weight="650">Legend</text>
+          <g data-legend-semantic-kind="backend" data-legend-kind="backend" data-legend-label="Backend" data-legend-x="40" data-legend-baseline="1084" data-legend-width="78">
+            <rect x="40" y="1075" width="16" height="10" rx="2.5" class="c-backend" stroke-width="1"/>
+            <text x="62" y="1084" class="t-muted" font-size="10" font-weight="500">Backend</text>
+          </g>
+          <g data-legend-semantic-kind="database" data-legend-kind="database" data-legend-label="Database" data-legend-x="140" data-legend-baseline="1084" data-legend-width="83">
+            <rect x="140" y="1075" width="16" height="10" rx="2.5" class="c-database" stroke-width="1"/>
+            <text x="162" y="1084" class="t-muted" font-size="10" font-weight="500">Database</text>
+          </g>
+        </g>
+      </svg></div>
+      <figcaption>中间是父进程，右边是 fork 出来的子进程（每样都有自己的一份），左边一列是 pthread_create 出来的新线程（只有 task、用户栈和 TLS 是新的），最上面那格是线程库在用户态先做的事。</figcaption>
+      <div class="pano-ui"></div>
+      <p class="arch-hint"><span class="idle">点头上的任意一个框看它的关系，点区域标题看分组含义，点零件看完整归属路径；用「对比两个零件」出一张对照表</span><span class="focused">再点一次空白处取消</span></p>
+    </figure><p>写时复制（copy-on-write）值得单独看一遍，因为它解释了「看起来复制了，其实没有」：</p>
+<div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;fork&quot;,&quot;to&quot;:&quot;read&quot;,&quot;label&quot;:&quot;没写&quot;},{&quot;from&quot;:&quot;fork&quot;,&quot;to&quot;:&quot;write&quot;,&quot;label&quot;:&quot;写了&quot;},{&quot;from&quot;:&quot;write&quot;,&quot;to&quot;:&quot;copy&quot;,&quot;label&quot;:&quot;缺页处理&quot;}]" style="--flow-marker:url(#fa-1)">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa-1" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-violet" data-id="fork">
+              
+              
+              <b>fork 返回</b>
+              <small>父子两份页表都指向同一帧，两边都改成只读</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="read">
+              
+              
+              <b>只是读</b>
+              <small>按页表读，什么都不发生</small>
+            </div><div class="fnode tone-amber" data-id="write">
+              
+              
+              <b>有一方要写</b>
+              <small>页表项是只读的 → 触发缺页异常</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-blue" data-id="copy">
+              
+              
+              <b>内核复制这一页</b>
+              <small>只给要写的那一方换一帧新的，改成可写</small>
+            </div></div></div>
+      
+    </div><p>创建路径逐项对照：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>项目</th><th>fork 出的子进程</th><th>pthread_create 出的线程</th></tr></thead><tbody><tr><th>用户空间内容</th><td data-label="fork 出的子进程">复制一份（先把物理页标只读共用）</td><td data-label="pthread_create 出的线程">不复制，就是同一份</td></tr><tr><th>mm / 页表</th><td data-label="fork 出的子进程">新 mm + 新页表</td><td data-label="pthread_create 出的线程">同一个 mm、同一张页表</td></tr><tr><th>fd 表</th><td data-label="fork 出的子进程">复制一张表，表项指向同一批打开文件</td><td data-label="pthread_create 出的线程">同一张表</td></tr><tr><th>cwd / 凭证 / 命名空间 / 信号处置</th><td data-label="fork 出的子进程">复制一份</td><td data-label="pthread_create 出的线程">同一批引用</td></tr><tr><th>task 与内核栈</th><td data-label="fork 出的子进程">新的 task、新的内核栈</td><td data-label="pthread_create 出的线程">新的 task、新的内核栈</td></tr><tr><th>编号</th><td data-label="fork 出的子进程">新 PID（tgid 也是新的）</td><td data-label="pthread_create 出的线程">新 tid，tgid 不变</td></tr><tr><th>用户栈 / TLS</th><td data-label="fork 出的子进程">复制调用 fork 的那条线程的栈与 TLS</td><td data-label="pthread_create 出的线程">新划一根栈、新的一块 TLS</td></tr><tr><th>之后能不能换映像</th><td data-label="fork 出的子进程">可以，子进程通常接着 <code>execve</code></td><td data-label="pthread_create 出的线程">不能，线程不单独 exec</td></tr><tr><th>代价</th><td data-label="fork 出的子进程">建页表、复制表、改只读标记，重</td><td data-label="pthread_create 出的线程">只多一个 task 和一根栈，轻</td></tr></tbody></table></div><p><code>fork</code> 之后常见的下一步是 <code>execve</code>：它把当前进程的用户地址空间整个换掉，装载新程序，但 <mark class="mk-blue">PID 不变、task 不变</mark>。它换的是「用户空间里的内容」，不是「这条执行流」。所以 <code>fork</code> + <code>execve</code> 是两件事：前者造一个新进程，后者给这个进程换一副身体。</p>
+<h2 id="切走时保存的到底是什么"><span class="num">06</span>切走时，保存的到底是什么</h2>
+<p>线程切换常被说成「保存上下文、恢复上下文」。看完 §03 那张图，这句话可以拆得更具体：保存的是<strong>寄存器</strong>，加上<strong>栈指针</strong>和<strong>地址空间标识</strong>。</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>换掉的东西</th><th>同进程两条线程之间</th><th>两个进程之间</th></tr></thead><tbody><tr><th>通用寄存器 / PC / SP</th><td data-label="同进程两条线程之间">要换</td><td data-label="两个进程之间">要换</td></tr><tr><th>浮点 / SIMD 寄存器</th><td data-label="同进程两条线程之间">要换（用到才存）</td><td data-label="两个进程之间">要换</td></tr><tr><th>内核栈指针</th><td data-label="同进程两条线程之间">要换，换成另一条 task 的</td><td data-label="两个进程之间">要换</td></tr><tr><th>调度状态 / 优先级</th><td data-label="同进程两条线程之间">随线程走，本来就是分开的</td><td data-label="两个进程之间">随线程走</td></tr><tr><th>用户栈与 TLS（fsbase）</th><td data-label="同进程两条线程之间">要换</td><td data-label="两个进程之间">要换</td></tr><tr><th>地址空间（mm / 页表）</th><td data-label="同进程两条线程之间">不换，三条线程同一份</td><td data-label="两个进程之间">要换，换成另一个进程的页表</td></tr><tr><th>TLB</th><td data-label="同进程两条线程之间">通常不清</td><td data-label="两个进程之间">要清或打标记（PCID 可以只打标签）</td></tr><tr><th>内核栈上的现场</th><td data-label="同进程两条线程之间">各自一份，切过去就是另一根栈</td><td data-label="两个进程之间">各自一份</td></tr></tbody></table></div><p><mark class="mk-blue">分界线在「地址空间换不换」这一条上。</mark> 同进程的两条线程用同一张页表，切换时只要换寄存器和栈；换进程要连页表一起换，代价更大。不过现代 CPU 有 PCID 之类的机制，加上各种安全缓解措施，实际开销和「线程一定比进程便宜很多」这句口诀并不完全对得上。</p>
+<h2 id="有些线程内核根本不知道"><span class="num">07</span>有些「线程」，内核根本不知道</h2>
+<p>前面说的都是 Linux 的 1:1 模型：一个用户线程对应一个内核 task。但「线程」这个词被用得更宽，至少有三种东西都被叫成线程。</p>
+<figure class="archfig" data-arch style="--arch-max-width:1580px" data-boundaries="nested" data-pano data-parts='{"t_stacks":{"label":"1:1 · 内核级线程","sub":"每条用户线程一个内核 task","detail":"Linux 的 pthread 就是这种：每条线程有自己的用户栈、TLS，以及一个独立的 task 和内核栈。==内核能单独调度、单独阻塞每一条。==","facts":{"用户空间":"每条一套栈和 TLS","内核里":"每条一个 task","一条阻塞":"其余照跑"}},"c_stacks":{"label":"N:1 · 用户态线程","sub":"协程、绿色线程","detail":"语言运行时在用户态自己管一批执行流，每个有自己的栈和保存的寄存器。它们共用一个（或少数几个）内核 task，切换全在用户态完成，不用进内核。","facts":{"用户空间":"运行时管的多条栈","内核里":"一个 task","一条阻塞":"整个进程停"}},"t_tasks":{"label":"3 个 task","sub":"内核能分别调度","detail":"三个 task 各自排队、各自上核，谁阻塞谁让出，互不牵连。","facts":{"用户空间":"三条执行流","内核里":"三个 task","一条阻塞":"其余照跑"}},"c_task":{"label":"1 个 task","sub":"三条协程的家","detail":"内核只看到一个 task，它阻塞时这三条协程都跑不了。所以运行时必须把阻塞调用换成「注册事件 + 让出」。","facts":{"用户空间":"三条协程","内核里":"一个 task","一条阻塞":"整个进程停"}},"k_thread":{"label":"内核线程","sub":"kworker、kswapd","detail":"内核自己造的 task，没有用户地址空间（`mm` 为空），只跑内核代码。它也有自己的 task_struct 和内核栈，也由调度器挑。","facts":{"用户空间":"没有","内核里":"一个 task，一根内核栈","一条阻塞":"不涉及用户态"}},"t_ok":{"label":"一条阻塞，其余照跑","sub":"1:1 的结果","detail":"因为每条线程是一个独立的调度实体，一条等 I/O 时别的照样上核。"},"c_block":{"label":"一条阻塞，整个进程停","sub":"N:1 的代价","detail":"协程的阻塞发生在内核里（一次 `read`），内核把整个 task 挂起，运行时就再也没机会切到别的协程。"},"k_none":{"label":"不涉及用户态","sub":"内核线程的后果","detail":"内核线程只跑内核代码，没有用户态可言，也不存在「用户态阻塞」。"}}' data-tours='[{"id":"three","label":"三种模型对内看","steps":[{"at":["t_stacks","t_tasks"],"text":"1:1 是 Linux 的做法：用户空间三条栈，内核里三个 task，一对一。"},{"at":["c_stacks","c_task"],"text":"N:1 是协程的做法：用户空间三条栈，内核里只有一个 task。==切换在用户态完成，内核完全不知道。=="},{"at":["k_thread"],"text":"反过来还有内核线程：没有用户空间，只有一个 task。这一列的上面是空的，就是这个意思。"},{"at":["t_ok","c_block","k_none"],"text":"后果从这里看得出来：同样一条执行流阻塞，1:1 只停它自己，N:1 会拖住整个进程。"}]}]' data-frames='[{"id":"userspace","boundary":0,"kind":"classification","label":"用户空间 · 这里的执行流内核不一定知道","detail":"左边和中间两列都有用户空间的栈；右上角是空的，因为内核线程不执行用户代码。","members":["t_stacks","c_stacks"],"depth":1},{"id":"kernelspace","boundary":1,"kind":"classification","label":"内核空间 · 内核真正调度的那几条","detail":"内核只认识 task。用户空间有几条执行流，和内核里有几条 task，可以是一对一、多对一，也可以没有用户空间。","members":["t_tasks","c_task","k_thread"],"depth":1},{"id":"outcome","boundary":2,"kind":"classification","label":"后果 · 一条执行流阻塞时","detail":"阻塞发生在哪一层，决定了它会不会拖住别人。协程在用户态阻塞，内核看不到，整个 task 一起等。","members":["t_ok","c_block","k_none"],"depth":1}]'>
+      <div class="arch-boundary-ui">
+          <div class="arch-boundary-toolbar"><span class="arch-boundary-label">边界</span>
+            <button type="button" data-boundary-mode="nested" aria-pressed="true">多层归属框</button>
+            <button type="button" data-boundary-mode="flat" aria-pressed="false">只留一层分区</button>
+            <button type="button" data-arch-reset>恢复全图</button>
+          </div>
+          <div class="arch-address-box" aria-live="polite"><div data-arch-address>点一个零件，看完整归属路径；点一个区域标题，看这一层的含义。</div>
+            <div data-arch-frame-detail>最外框表示逻辑资源域，不表示所有对象在一块内存里。每层边界的标题说明分组依据。</div></div>
+        </div>
+      <div class="arch-canvas"><svg viewBox="0 0 1580 1180" role="img" aria-labelledby="ts-models-archify-diagram-title ts-models-archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
+        <title id="ts-models-archify-diagram-title">三种「线程」：内核看得见几条执行流</title>
+        <desc id="ts-models-archify-diagram-description">用户空间里的执行流数量和内核里的 task 数量，可以是一对一、多对一，也可以根本没有用户空间</desc>
+        <!-- Definitions -->
+        <defs>
+          <marker id="ts-models-arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-default" />
+          </marker>
+          <marker id="ts-models-arrowhead-emphasis" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-emphasis" />
+          </marker>
+          <marker id="ts-models-arrowhead-security" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-security" />
+          </marker>
+          <marker id="ts-models-arrowhead-dashed" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-dashed" />
+          </marker>
+          <pattern id="ts-models-grid" width="40" height="40" patternUnits="userSpaceOnUse">
+            <path d="M 40 0 L 0 0 0 40" class="c-grid" stroke-width="0.5"/>
+          </pattern>
+        </defs>
+
+        <!-- Background Grid -->
+        <rect width="100%" height="100%" fill="url(#ts-models-grid)" />
+
+        <!-- Boundaries (behind everything) -->
+        <g class="arch-frame" data-frame="userspace" data-depth="1" data-frame-flat="false" data-frame-kind="classification" role="button" tabindex="0" aria-pressed="false" aria-label="用户空间 · 这里的执行流内核不一定知道"><title>左边和中间两列都有用户空间的栈；右上角是空的，因为内核线程不执行用户代码。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="0" data-frame-members="t_stacks c_stacks" x="50.3" y="130" width="1005.4000000000001" height="260" rx="12" class="c-region" stroke-width="1"/>
+        <text x="58.3" y="148" class="t-cloud" font-size="9" font-weight="600">用户空间 · 这里的执行流内核不一定知道</text></g>
+
+        <g class="arch-frame" data-frame="kernelspace" data-depth="1" data-frame-flat="false" data-frame-kind="classification" role="button" tabindex="0" aria-pressed="false" aria-label="内核空间 · 内核真正调度的那几条"><title>内核只认识 task。用户空间有几条执行流，和内核里有几条 task，可以是一对一、多对一，也可以没有用户空间。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="1" data-frame-members="t_tasks c_task k_thread" x="50.3" y="460" width="1490.7" height="260" rx="12" class="c-region" stroke-width="1"/>
+        <text x="58.3" y="478" class="t-cloud" font-size="9" font-weight="600">内核空间 · 内核真正调度的那几条</text></g>
+
+        <g class="arch-frame" data-frame="outcome" data-depth="1" data-frame-flat="false" data-frame-kind="classification" role="button" tabindex="0" aria-pressed="false" aria-label="后果 · 一条执行流阻塞时"><title>阻塞发生在哪一层，决定了它会不会拖住别人。协程在用户态阻塞，内核看不到，整个 task 一起等。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="2" data-frame-members="t_ok c_block k_none" x="50.3" y="790" width="1490.7" height="240" rx="12" class="c-region" stroke-width="1"/>
+        <text x="58.3" y="808" class="t-cloud" font-size="9" font-weight="600">后果 · 一条执行流阻塞时</text></g>
+
+        <!-- Connection paths (before components for correct z-order) -->
+        <path data-edge-from="t_stacks" data-edge-to="t_tasks" data-edge-label="1 : 1" data-edge-key="0" data-edge-id="one-to-one" data-composition-points="310.35,350;310.35,500" d="M 310.35 350 L 310.35 500" class="a-default" stroke-width="1.5" marker-end="url(#ts-models-arrowhead)"/>
+        <path data-edge-from="c_stacks" data-edge-to="c_task" data-edge-label="N : 1" data-edge-key="1" data-edge-id="many-to-one" data-composition-points="795.6500000000001,350;795.6500000000001,500" d="M 795.6500000000001 350 L 795.6500000000001 500" class="a-default" stroke-width="1.5" marker-end="url(#ts-models-arrowhead)"/>
+        <path data-edge-from="t_tasks" data-edge-to="t_ok" data-edge-label="各自排队" data-edge-key="2" data-edge-id="sched-ok" data-composition-points="310.35,680;310.35,830" d="M 310.35 680 L 310.35 830" class="a-default" stroke-width="1.5" marker-end="url(#ts-models-arrowhead)"/>
+        <path data-edge-from="c_task" data-edge-to="c_block" data-edge-label="连坐" data-edge-key="3" data-edge-id="block-all" data-composition-points="795.6500000000001,680;795.6500000000001,830" d="M 795.6500000000001 680 L 795.6500000000001 830" class="a-default" stroke-width="1.5" marker-end="url(#ts-models-arrowhead)"/>
+        <path data-edge-from="k_thread" data-edge-to="k_none" data-edge-label="不跑用户代码" data-edge-key="4" data-edge-id="kernel-only" data-composition-points="1280.95,680;1280.95,830" d="M 1280.95 680 L 1280.95 830" class="a-default" stroke-width="1.5" marker-end="url(#ts-models-arrowhead)"/>
+
+        <!-- Components -->
+        <g id="ts-models-node-t_stacks" data-nb="1" data-node-id="t_stacks" data-node-label="3 条线程的用户栈" tabindex="0" role="button" aria-label="Focus 3 条线程的用户栈, pthread_create · 每条一套栈和 TLS, 用户空间 · 这里的执行流内核不一定知道" aria-pressed="false" data-node-kind="backend" data-node-sublabel="pthread_create · 每条一套栈和 TLS" data-node-context="用户空间 · 这里的执行流内核不一定知道">
+          <title>3 条线程的用户栈 · pthread_create · 每条一套栈和 TLS · 用户空间 · 这里的执行流内核不一定知道</title>
+          <rect x="90.3" y="170" width="440.1" height="180" rx="6" class="c-mask"/>
+          <rect x="90.3" y="170" width="440.1" height="180" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(96.3 176) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <rect class="nb-badge" x="453.6" y="178" width="64.8" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="486.0" y="189" font-size="8" text-anchor="middle">1:1 · Linux</text>
+          <text class="nb-title" x="124.3" y="191" font-size="10.5" font-weight="600">3 条线程的用户栈</text>
+          <line class="nb-hr" x1="98.3" y1="198" x2="522.4" y2="198"/>
+          <rect class="nb-cell" x="102.3" y="250" width="104.0" height="32" rx="4"/><text class="nb-cell-t" x="154.3" y="263" font-size="9" text-anchor="middle">T0</text><text class="nb-cell-s" x="154.3" y="274" font-size="7.5" text-anchor="middle">栈 + TLS</text>
+          <rect class="nb-cell" x="212.3" y="250" width="104.0" height="32" rx="4"/><text class="nb-cell-t" x="264.3" y="263" font-size="9" text-anchor="middle">T1</text><text class="nb-cell-s" x="264.3" y="274" font-size="7.5" text-anchor="middle">栈 + TLS</text>
+          <rect class="nb-cell" x="322.3" y="250" width="104.0" height="32" rx="4"/><text class="nb-cell-t" x="374.3" y="263" font-size="9" text-anchor="middle">T2</text><text class="nb-cell-s" x="374.3" y="274" font-size="7.5" text-anchor="middle">栈 + TLS</text>
+          <text class="nb-note" x="102.3" y="342" font-size="8">pthread_create 建的，每条一套</text>
+        </g>
+
+        <g id="ts-models-node-c_stacks" data-nb="1" data-node-id="c_stacks" data-node-label="3 条协程的用户栈" tabindex="0" role="button" aria-label="Focus 3 条协程的用户栈, 语言运行时自己管，用户态切换, 用户空间 · 这里的执行流内核不一定知道" aria-pressed="false" data-node-kind="backend" data-node-sublabel="语言运行时自己管，用户态切换" data-node-context="用户空间 · 这里的执行流内核不一定知道">
+          <title>3 条协程的用户栈 · 语言运行时自己管，用户态切换 · 用户空间 · 这里的执行流内核不一定知道</title>
+          <rect x="575.6" y="170" width="440.1" height="180" rx="6" class="c-mask"/>
+          <rect x="575.6" y="170" width="440.1" height="180" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(581.6 176) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <rect class="nb-badge" x="924.5" y="178" width="79.2" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="964.1" y="189" font-size="8" text-anchor="middle">N:1 · 绿色线程</text>
+          <text class="nb-title" x="609.6" y="191" font-size="10.5" font-weight="600">3 条协程的用户栈</text>
+          <line class="nb-hr" x1="583.6" y1="198" x2="1007.7" y2="198"/>
+          <text class="nb-k" x="587.6" y="248" font-size="9">谁切换</text><text class="nb-v" x="639.8" y="248" font-size="9">语言运行时，在用户态切</text>
+          <text class="nb-k" x="587.6" y="262" font-size="9">保存什么</text><text class="nb-v" x="639.8" y="262" font-size="9">少量寄存器 + 自己的栈</text>
+          <rect class="nb-cell" x="587.6" y="272" width="104.0" height="23" rx="4"/><text class="nb-cell-t" x="639.6" y="287" font-size="9" text-anchor="middle">协程 A</text>
+          <rect class="nb-cell" x="697.6" y="272" width="104.0" height="23" rx="4"/><text class="nb-cell-t" x="749.6" y="287" font-size="9" text-anchor="middle">B</text>
+          <rect class="nb-cell" x="807.6" y="272" width="104.0" height="23" rx="4"/><text class="nb-cell-t" x="859.6" y="287" font-size="9" text-anchor="middle">C</text>
+          <text class="nb-note" x="587.6" y="342" font-size="8">内核不知道这三条的存在</text>
+        </g>
+
+        <g id="ts-models-node-t_tasks" data-nb="1" data-node-id="t_tasks" data-node-label="3 个 task" tabindex="0" role="button" aria-label="Focus 3 个 task, 1:1 · 每条都是一个调度实体, 内核空间 · 内核真正调度的那几条" aria-pressed="false" data-node-kind="database" data-node-sublabel="1:1 · 每条都是一个调度实体" data-node-context="内核空间 · 内核真正调度的那几条">
+          <title>3 个 task · 1:1 · 每条都是一个调度实体 · 内核空间 · 内核真正调度的那几条</title>
+          <rect x="90.3" y="500" width="440.1" height="180" rx="6" class="c-mask"/>
+          <rect x="90.3" y="500" width="440.1" height="180" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(96.3 506) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <rect class="nb-badge" x="434.4" y="508" width="84.0" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="476.4" y="519" font-size="8" text-anchor="middle">内核看得见 3 条</text>
+          <text class="nb-title" x="124.3" y="521" font-size="10.5" font-weight="600">3 个 task</text>
+          <line class="nb-hr" x1="98.3" y1="528" x2="522.4" y2="528"/>
+          <rect class="nb-cell" x="102.3" y="584.5" width="104.0" height="23" rx="4"/><text class="nb-cell-t" x="154.3" y="599.5" font-size="9" text-anchor="middle">task</text>
+          <rect class="nb-cell" x="212.3" y="584.5" width="104.0" height="23" rx="4"/><text class="nb-cell-t" x="264.3" y="599.5" font-size="9" text-anchor="middle">task</text>
+          <rect class="nb-cell" x="322.3" y="584.5" width="104.0" height="23" rx="4"/><text class="nb-cell-t" x="374.3" y="599.5" font-size="9" text-anchor="middle">task</text>
+          <text class="nb-note" x="102.3" y="672" font-size="8">每条有自己的内核栈和调度状态</text>
+        </g>
+
+        <g id="ts-models-node-c_task" data-nb="1" data-node-id="c_task" data-node-label="1 个 task" tabindex="0" role="button" aria-label="Focus 1 个 task, N:1 · 三条协程压在同一根内核栈上, 内核空间 · 内核真正调度的那几条" aria-pressed="false" data-node-kind="database" data-node-sublabel="N:1 · 三条协程压在同一根内核栈上" data-node-context="内核空间 · 内核真正调度的那几条">
+          <title>1 个 task · N:1 · 三条协程压在同一根内核栈上 · 内核空间 · 内核真正调度的那几条</title>
+          <rect x="575.6" y="500" width="440.1" height="180" rx="6" class="c-mask"/>
+          <rect x="575.6" y="500" width="440.1" height="180" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(581.6 506) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <rect class="nb-badge" x="910.1" y="508" width="93.6" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="956.9" y="519" font-size="8" text-anchor="middle">内核只看得见 1 条</text>
+          <text class="nb-title" x="609.6" y="521" font-size="10.5" font-weight="600">1 个 task</text>
+          <line class="nb-hr" x1="583.6" y1="528" x2="1007.7" y2="528"/>
+          <text class="nb-k" x="587.6" y="586" font-size="9">tid</text><text class="nb-v" x="629.0" y="586" font-size="9">一个</text>
+          <text class="nb-k" x="587.6" y="600" font-size="9">内核栈</text><text class="nb-v" x="629.0" y="600" font-size="9">一根，三条协程共用</text>
+          <text class="nb-k" x="587.6" y="614" font-size="9">阻塞</text><text class="nb-v" x="629.0" y="614" font-size="9">一条协程卡住，整个 task 一起等</text>
+          <text class="nb-note" x="587.6" y="672" font-size="8">内核按 task 记账，不按协程</text>
+        </g>
+
+        <g id="ts-models-node-k_thread" data-nb="1" data-node-id="k_thread" data-node-label="1 个 task · 没有用户空间" tabindex="0" role="button" aria-label="Focus 1 个 task · 没有用户空间, 内核线程，例如 kworker, 内核空间 · 内核真正调度的那几条" aria-pressed="false" data-node-kind="database" data-node-sublabel="内核线程，例如 kworker" data-node-context="内核空间 · 内核真正调度的那几条">
+          <title>1 个 task · 没有用户空间 · 内核线程，例如 kworker · 内核空间 · 内核真正调度的那几条</title>
+          <rect x="1060.9" y="500" width="440.1" height="180" rx="6" class="c-mask"/>
+          <rect x="1060.9" y="500" width="440.1" height="180" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(1066.9 506) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <rect class="nb-badge" x="1438.6" y="508" width="50.4" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="1463.8" y="519" font-size="8" text-anchor="middle">内核线程</text>
+          <text class="nb-title" x="1094.9" y="521" font-size="10.5" font-weight="600">1 个 task · 没有用户空间</text>
+          <line class="nb-hr" x1="1068.9" y1="528" x2="1493" y2="528"/>
+          <text class="nb-k" x="1072.9" y="586" font-size="9">用户地址空间</text><text class="nb-v" x="1146.7" y="586" font-size="9">没有（mm 为空）</text>
+          <text class="nb-k" x="1072.9" y="600" font-size="9">内核栈</text><text class="nb-v" x="1146.7" y="600" font-size="9">有一根</text>
+          <text class="nb-k" x="1072.9" y="614" font-size="9">跑什么</text><text class="nb-v" x="1146.7" y="614" font-size="9">只有内核代码</text>
+          <text class="nb-note" x="1072.9" y="672" font-size="8">kworker、kswapd 之类</text>
+        </g>
+
+        <g id="ts-models-node-t_ok" data-nb="1" data-node-id="t_ok" data-node-label="一条阻塞，其余照跑" tabindex="0" role="button" aria-label="Focus 一条阻塞，其余照跑, 内核逐条挑, 后果 · 一条执行流阻塞时会发生什么" aria-pressed="false" data-node-kind="external" data-node-sublabel="内核逐条挑" data-node-context="后果 · 一条执行流阻塞时会发生什么">
+          <title>一条阻塞，其余照跑 · 内核逐条挑 · 后果 · 一条执行流阻塞时会发生什么</title>
+          <rect x="90.3" y="830" width="440.1" height="160" rx="6" class="c-mask"/>
+          <rect x="90.3" y="830" width="440.1" height="160" rx="6" class="c-external" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="external" class="semantic-sigil s-external" transform="translate(96.3 836) scale(0.6875)">
+            <rect x="2.5" y="5" width="8.5" height="8" rx="1.5"/>
+            <path d="M8 2.5h5.5V8M13.5 2.5 7.5 8.5"/>
+          </g>
+          <rect class="nb-badge" x="487.2" y="838" width="31.2" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="502.8" y="849" font-size="8" text-anchor="middle">后果</text>
+          <text class="nb-title" x="124.3" y="851" font-size="10.5" font-weight="600">一条阻塞，其余照跑</text>
+          <line class="nb-hr" x1="98.3" y1="858" x2="522.4" y2="858"/>
+          <text class="nb-k" x="102.3" y="913" font-size="9">一条阻塞</text><text class="nb-v" x="154.5" y="913" font-size="9">其余两条照跑</text>
+          <text class="nb-k" x="102.3" y="927" font-size="9">调度</text><text class="nb-v" x="154.5" y="927" font-size="9">内核逐条挑</text>
+          <text class="nb-note" x="102.3" y="982" font-size="8">这是「多线程能并发」的根据</text>
+        </g>
+
+        <g id="ts-models-node-c_block" data-nb="1" data-node-id="c_block" data-node-label="一条阻塞，整个进程停" tabindex="0" role="button" aria-label="Focus 一条阻塞，整个进程停, 内核不知道还有别的协程, 后果 · 一条执行流阻塞时会发生什么" aria-pressed="false" data-node-kind="external" data-node-sublabel="内核不知道还有别的协程" data-node-context="后果 · 一条执行流阻塞时会发生什么">
+          <title>一条阻塞，整个进程停 · 内核不知道还有别的协程 · 后果 · 一条执行流阻塞时会发生什么</title>
+          <rect x="575.6" y="830" width="440.1" height="160" rx="6" class="c-mask"/>
+          <rect x="575.6" y="830" width="440.1" height="160" rx="6" class="c-external" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="external" class="semantic-sigil s-external" transform="translate(581.6 836) scale(0.6875)">
+            <rect x="2.5" y="5" width="8.5" height="8" rx="1.5"/>
+            <path d="M8 2.5h5.5V8M13.5 2.5 7.5 8.5"/>
+          </g>
+          <rect class="nb-badge" x="972.5" y="838" width="31.2" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="988.1" y="849" font-size="8" text-anchor="middle">后果</text>
+          <text class="nb-title" x="609.6" y="851" font-size="10.5" font-weight="600">一条阻塞，整个进程停</text>
+          <line class="nb-hr" x1="583.6" y1="858" x2="1007.7" y2="858"/>
+          <text class="nb-k" x="587.6" y="913" font-size="9">一条阻塞</text><text class="nb-v" x="639.8" y="913" font-size="9">整个进程一起停</text>
+          <text class="nb-k" x="587.6" y="927" font-size="9">为什么</text><text class="nb-v" x="639.8" y="927" font-size="9">内核不知道还有别的协程</text>
+          <text class="nb-note" x="587.6" y="982" font-size="8">所有阻塞调用都要换成非阻塞 + 事件循环</text>
+        </g>
+
+        <g id="ts-models-node-k_none" data-nb="1" data-node-id="k_none" data-node-label="不涉及用户态" tabindex="0" role="button" aria-label="Focus 不涉及用户态, 只在内核里干活, 后果 · 一条执行流阻塞时会发生什么" aria-pressed="false" data-node-kind="external" data-node-sublabel="只在内核里干活" data-node-context="后果 · 一条执行流阻塞时会发生什么">
+          <title>不涉及用户态 · 只在内核里干活 · 后果 · 一条执行流阻塞时会发生什么</title>
+          <rect x="1060.9" y="830" width="440.1" height="160" rx="6" class="c-mask"/>
+          <rect x="1060.9" y="830" width="440.1" height="160" rx="6" class="c-external" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="external" class="semantic-sigil s-external" transform="translate(1066.9 836) scale(0.6875)">
+            <rect x="2.5" y="5" width="8.5" height="8" rx="1.5"/>
+            <path d="M8 2.5h5.5V8M13.5 2.5 7.5 8.5"/>
+          </g>
+          <rect class="nb-badge" x="1457.8" y="838" width="31.2" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="1473.4" y="849" font-size="8" text-anchor="middle">后果</text>
+          <text class="nb-title" x="1094.9" y="851" font-size="10.5" font-weight="600">不涉及用户态</text>
+          <line class="nb-hr" x1="1068.9" y1="858" x2="1493" y2="858"/>
+          <text class="nb-k" x="1072.9" y="913" font-size="9">不涉及</text><text class="nb-v" x="1125.1" y="913" font-size="9">没有用户态可阻塞</text>
+          <text class="nb-k" x="1072.9" y="927" font-size="9">典型工作</text><text class="nb-v" x="1125.1" y="927" font-size="9">回收内存、刷脏页</text>
+          <text class="nb-note" x="1072.9" y="982" font-size="8">只在内核里干活</text>
+        </g>
+
+        <!-- Connection labels -->
+        <g data-detail="context" data-edge-from="t_stacks" data-edge-to="t_tasks" data-edge-label="1 : 1" data-edge-key="0" data-edge-id="one-to-one">
+          <rect x="293.4" y="415" width="34" height="14" rx="3" class="c-mask"/>
+          <text x="310.4" y="425" class="t-muted" font-size="8" text-anchor="middle">1 : 1</text>
+        </g>
+        <g data-detail="context" data-edge-from="c_stacks" data-edge-to="c_task" data-edge-label="N : 1" data-edge-key="1" data-edge-id="many-to-one">
+          <rect x="778.6" y="415" width="34" height="14" rx="3" class="c-mask"/>
+          <text x="795.6" y="425" class="t-muted" font-size="8" text-anchor="middle">N : 1</text>
+        </g>
+        <g data-detail="context" data-edge-from="t_tasks" data-edge-to="t_ok" data-edge-label="各自排队" data-edge-key="2" data-edge-id="sched-ok">
+          <rect x="286.2" y="745" width="48.4" height="14" rx="3" class="c-mask"/>
+          <text x="310.4" y="755" class="t-muted" font-size="8" text-anchor="middle">各自排队</text>
+        </g>
+        <g data-detail="context" data-edge-from="c_task" data-edge-to="c_block" data-edge-label="连坐" data-edge-key="3" data-edge-id="block-all">
+          <rect x="780.6" y="745" width="30" height="14" rx="3" class="c-mask"/>
+          <text x="795.6" y="755" class="t-muted" font-size="8" text-anchor="middle">连坐</text>
+        </g>
+        <g data-detail="context" data-edge-from="k_thread" data-edge-to="k_none" data-edge-label="不跑用户代码" data-edge-key="4" data-edge-id="kernel-only">
+          <rect x="1247.1000000000001" y="745" width="67.6" height="14" rx="3" class="c-mask"/>
+          <text x="1280.9" y="755" class="t-muted" font-size="8" text-anchor="middle">不跑用户代码</text>
+        </g>
+
+        <!-- Legend -->
+        <g data-legend data-legend-bridge>
+          <text x="40" y="1144" class="t-primary" font-size="12" font-weight="650">Legend</text>
+          <g data-legend-semantic-kind="backend" data-legend-kind="backend" data-legend-label="Backend" data-legend-x="40" data-legend-baseline="1164" data-legend-width="78">
+            <rect x="40" y="1155" width="16" height="10" rx="2.5" class="c-backend" stroke-width="1"/>
+            <text x="62" y="1164" class="t-muted" font-size="10" font-weight="500">Backend</text>
+          </g>
+          <g data-legend-semantic-kind="database" data-legend-kind="database" data-legend-label="Database" data-legend-x="140" data-legend-baseline="1164" data-legend-width="83">
+            <rect x="140" y="1155" width="16" height="10" rx="2.5" class="c-database" stroke-width="1"/>
+            <text x="162" y="1164" class="t-muted" font-size="10" font-weight="500">Database</text>
+          </g>
+          <g data-legend-semantic-kind="external" data-legend-kind="external" data-legend-label="External" data-legend-x="245" data-legend-baseline="1164" data-legend-width="83">
+            <rect x="245" y="1155" width="16" height="10" rx="2.5" class="c-external" stroke-width="1"/>
+            <text x="267" y="1164" class="t-muted" font-size="10" font-weight="500">External</text>
+          </g>
+        </g>
+      </svg></div>
+      <figcaption>三列是三种模型，三行分别是用户空间有什么、内核看得见几条、一条阻塞会怎样。右上角那片空白是有意的：内核线程没有用户空间。</figcaption>
+      <div class="pano-ui"></div>
+      <p class="arch-hint"><span class="idle">点头上的任意一个框看它的关系，点区域标题看分组含义，点零件看完整归属路径；用「对比两个零件」出一张对照表</span><span class="focused">再点一次空白处取消</span></p>
+    </figure><p>补一个介于两者之间的：Go 的 G-M 模型属于 M:N —— 用户态有 N 个 goroutine，内核里有 M 个线程，M 由 <code>GOMAXPROCS</code> 和运行时决定。它拿到的是「协程便宜」和「能并行」两样好处，代价是调度器要自己重写一遍。</p>
+<h2 id="速查每个名词在哪张图上"><span class="num">08</span>速查：每个名词在哪张图上</h2>
+<p>前面五张图加起来覆盖了这些概念。下表按名词查，别按图查：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>名词</th><th>在哪张图上</th><th>它在图上是什么</th></tr></thead><tbody><tr><th>代码段 / 全局变量 / 堆</th><td data-label="在哪张图上">§02（家当）</td><td data-label="它在图上是什么">「代码与全局数据」「堆」两个零件</td></tr><tr><th>动态库 / mmap 文件 / 线程用户栈</th><td data-label="在哪张图上">§02</td><td data-label="它在图上是什么">「映射区」零件</td></tr><tr><th>用户栈 / 局部变量 / 返回地址</th><td data-label="在哪张图上">§02、§03、§04</td><td data-label="它在图上是什么">§02「用户栈 ×3 + TLS」；§03 / §04 里的栈段</td></tr><tr><th>TLS / thread_local / errno</th><td data-label="在哪张图上">§02、§03</td><td data-label="它在图上是什么">TLS 块；「找 TLS：fs 基址」</td></tr><tr><th>pthread_t / 取消状态 / join 状态</th><td data-label="在哪张图上">§02、§03</td><td data-label="它在图上是什么">「libc 与线程库」「线程库的句柄」</td></tr><tr><th>命令行参数 / 环境变量</th><td data-label="在哪张图上">§02</td><td data-label="它在图上是什么">「用户栈 ×3 + TLS」的说明（启动时压在主线程栈顶）</td></tr><tr><th>mm_struct / VMA / 页表</th><td data-label="在哪张图上">§02</td><td data-label="它在图上是什么">「mm_struct + 页表」</td></tr><tr><th>fd 表 / 打开的文件</th><td data-label="在哪张图上">§02、§05</td><td data-label="它在图上是什么">「files_struct · fd 表」</td></tr><tr><th>cwd / root / umask</th><td data-label="在哪张图上">§02</td><td data-label="它在图上是什么">「fs_struct · 目录」</td></tr><tr><th>uid / gid / 权限</th><td data-label="在哪张图上">§02</td><td data-label="它在图上是什么">「凭证 / 命名空间」里的 uid、gid</td></tr><tr><th>IPC / 命名空间 / cgroup / rlimit</th><td data-label="在哪张图上">§02</td><td data-label="它在图上是什么">「凭证 / 命名空间」的四行</td></tr><tr><th>信号处置 / 掩码 / 待处理信号</th><td data-label="在哪张图上">§02、§03</td><td data-label="它在图上是什么">「信号」零件；§03 的「信号状态」</td></tr><tr><th>PID / TGID / 父子关系 / 线程列表</th><td data-label="在哪张图上">§02</td><td data-label="它在图上是什么">「线程组与父子」</td></tr><tr><th>task_struct（线程控制结构）</th><td data-label="在哪张图上">§02、§03、§07</td><td data-label="它在图上是什么">三个 task 零件；§03 的 task_struct 框</td></tr><tr><th>tid</th><td data-label="在哪张图上">§02、§03</td><td data-label="它在图上是什么">task 的 badge；§03 的「身份」</td></tr><tr><th>调度状态 / 优先级 / 时间片 / CPU 亲和</th><td data-label="在哪张图上">§03、§07</td><td data-label="它在图上是什么">「调度信息」组件；§07 的「3 个 task」</td></tr><tr><th>寄存器现场（PC / SP / 通用 / 浮点）</th><td data-label="在哪张图上">§03、§04</td><td data-label="它在图上是什么">「换下时的寄存器」；§04 的 CPU 零件</td></tr><tr><th>内核栈</th><td data-label="在哪张图上">§02、§03、§04</td><td data-label="它在图上是什么">task 的「内核栈」一行；§03 与 §04 的内核栈零件</td></tr><tr><th>系统调用执行现场（pt_regs）</th><td data-label="在哪张图上">§03、§04</td><td data-label="它在图上是什么">「内核栈」里的 pt_regs 段</td></tr><tr><th>中断栈</th><td data-label="在哪张图上">§04</td><td data-label="它在图上是什么">右边那个「中断栈 · 例外」</td></tr><tr><th>指向共享资源的引用</th><td data-label="在哪张图上">§02、§05</td><td data-label="它在图上是什么">task 到六个对象的连线</td></tr><tr><th>COW / 写时复制</th><td data-label="在哪张图上">§05 的图 + 流程</td><td data-label="它在图上是什么">「新 mm + 新页表」；流程图四步</td></tr><tr><th>execve</th><td data-label="在哪张图上">§05 末尾</td><td data-label="它在图上是什么">不在图上（它换映像，不建对象）</td></tr><tr><th>clone 的共享开关</th><td data-label="在哪张图上">§05</td><td data-label="它在图上是什么">新 task 零件里的那行代码</td></tr><tr><th>1:1 / N:1 / 内核线程</th><td data-label="在哪张图上">§07</td><td data-label="它在图上是什么">三列</td></tr><tr><th>线程上下文 / 上下文切换</th><td data-label="在哪张图上">§03、§06</td><td data-label="它在图上是什么">§03 的上下文表；§06 的「换掉的东西」表</td></tr></tbody></table></div><p>最后两句话收尾：</p>
+<ul>
+<li><strong>进程</strong>回答「拥有什么」：一份地址空间的内容，加上内核里那批描述资源的对象。</li>
+<li><strong>线程</strong>回答「从哪里继续执行」：一条用户栈、一块 TLS、一个 task、一根内核栈，以及那句「下次接着跑」需要的全部寄存器。</li>
+</ul>
+<div class="quiz"><details>
+        <summary>一个线程进入内核态时，它还是同一个线程吗？哪三样东西变了？</summary>
+        <div class="a"><p>还是同一个 task。变的是：CPU 的权限级（ring 3 → ring 0）、栈指针（换成这个 task 的内核栈）、以及 GS 基址之类的内核侧寻址。tid、地址空间和引用的资源都没变。</p>
+</div>
+      </details><details>
+        <summary>内核栈平时是空的吗？为什么它必须和用户栈分开？</summary>
+        <div class="a"><p>是。线程在用户态跑的时候，内核栈基本空着（只剩栈底一点信息），进内核才用。
+分开是因为内核不能相信用户给的 SP：那个地址可能指向随时会被换掉的页，也可能是故意构造出来的。栈一坏，整台机器跟着崩。</p>
+</div>
+      </details><details>
+        <summary>pthread_create 创建一条线程时，哪两样东西是新建的，哪些是照抄的？</summary>
+        <div class="a"><p>新建的是 task（连同它的内核栈、调度上下文、初始寄存器）、用户栈、TLS。
+照抄的是指针：mm、fd 表、fs、信号处置，一条都没复制，所以线程比进程轻。</p>
+</div>
+      </details><details>
+        <summary>协程（N:1 绿色线程）里一条执行流阻塞了，为什么整个进程会停？</summary>
+        <div class="a"><p>因为三条协程共用一根内核栈和一个 task。阻塞发生在内核里（例如一次 read），内核看到的是「这个 task 要等」，于是把整个 task 挂起，用户态运行时也就没机会切到别的协程。</p>
+</div>
+      </details></div><p>想接着往下看：进程和线程在资源域 / 执行流这把尺子上的位置，见 <a href="../resource-domain-and-flow/">一把尺子：资源域 × 执行流</a>；内核里为什么只有一种结构、<code>clone</code> 那一串开关怎么逐项生效，见 <a href="../kernel-task-model/">内核里没有「进程对象」</a>。</p>
+
+
+    <footer>
+      <span>两套空间：进程和线程各在两个空间里放着什么</span>
+      <span>最后更新 2026-10-20 · 单文件可离线打开</span>
+    </footer>
+  </main>
+</div>
+
+<script src="../../assets/app.js?v=757eed9a2d"></script>
+</body>
+</html>
