@@ -460,7 +460,138 @@ after join
 
 三件事从这段输出里能直接看出来：局部变量每次调用都重新构造；`thread_local` 每条线程只构造一次；主线程的 `thread_local` 析构被推迟到进程退出，而不是 `main` 返回时。
 
-## 07 · 容量与代价
+## 07 · 线程池里，柜子会串号
+
+把「柜子」放进线程池，就会碰到它最危险的一面：柜子是按**线程**存的，而线程池里的线程会被反复借用。
+
+下面这张时序图里，请求 A 用完 T1 就走了，A 的 `request_id` 和用户身份留在柜子里；T1 被池子收回去，紧接着服务请求 B。
+
+```seq
+grid: true
+participants:
+  - { id: ra, label: "请求 A · 张三", tone: blue }
+  - { id: rb, label: "请求 B · 李四", tone: blue }
+  - { id: t1, label: "线程 T1（池里复用）", tone: violet }
+  - { id: tls, label: "TLS：request_id / user", tone: amber }
+  - { id: log, label: 日志, tone: muted }
+segments:
+  - { from: 1, to: 4, label: 请求 A 处理中 }
+  - { from: 7, to: 9, label: 李四的请求，读到张三的身份 }
+messages:
+  - { from: ra, to: t1, label: 提交下单任务, kind: sync, note: 1 }
+  - { from: t1, to: tls, label: "写入 A / 张三", kind: sync, note: 2 }
+  - { from: t1, to: log, label: "A 下单成功", kind: sync, note: 3 }
+  - { from: t1, to: ra, label: 200 OK, kind: reply, note: 4 }
+  - { from: t1, to: t1, label: 没清柜子, kind: self, tone: red, note: 5 }
+  - { from: rb, to: t1, label: 提交查询任务, kind: sync, note: 6 }
+  - { from: t1, to: tls, label: "读 request_id", kind: sync, note: 7 }
+  - { from: tls, to: t1, label: "A（张三）", kind: reply, tone: red, note: 8 }
+  - { from: t1, to: log, label: "A 查询完成", kind: sync, tone: red, note: 9 }
+  - { from: t1, to: rb, label: "200 OK（串了）", kind: reply, tone: red, note: 10 }
+```
+
+==第 5 步什么也没发生，那才是问题。== 线程归还池子时，柜子不会自动清空；下一个任务进来，读到的还是上一个人的东西。
+
+这不是「代码写得不小心」这么简单。日志库的手册直接把这句话写在文档里：
+
+> Since MDC manages data on a *per thread* basis, a server that recycles threads might lead to false information contained in the MDC.
+
+（Logback 手册，MDC 一节。MDC 就是 Java 里那个典型的「TLS 存 request_id」实现。）
+
+同一条路上还有三种走法会出错：
+
+- **异步、跨线程**：主线程把任务丢给另一个线程，TLS 是另一份，值是空的。
+- **协程 / 虚拟线程**：切换不换线程，多条任务共用一份柜子，后一个覆盖前一个。
+- **忘了删**：柜子里的值活到线程退出。JDK 的 ScopedValue 提案里把这条的后果写得很直白：数据比需要的活得久，线程池里「values can leak into unrelated tasks」，还可能造成长期的内存泄漏。
+
+### 换一种传法：把上下文当参数
+
+同一件事，改成显式传一个 `Context`，就没有「谁的柜子」这个问题了：谁需要，谁拿到；跨线程时一起传过去。
+
+```seq
+grid: true
+participants:
+  - { id: req, label: 请求, tone: blue }
+  - { id: t1, label: "线程 T1", tone: violet }
+  - { id: ctx, label: "Context（显式传）", tone: green }
+  - { id: t2, label: "线程 T2 / 异步任务", tone: violet }
+  - { id: log, label: 日志, tone: muted }
+messages:
+  - { from: req, to: t1, label: "处理(ctx)", kind: sync, note: 1 }
+  - { from: t1, to: ctx, label: 读 ctx.requestId, kind: sync, note: 2 }
+  - { from: ctx, to: t1, label: A, kind: reply, note: 3 }
+  - { from: t1, to: t2, label: "派发(ctx 一起传)", kind: async, note: 4 }
+  - { from: t2, to: log, label: 用传进来的 ctx, kind: sync, note: 5 }
+  - { from: t2, to: t1, label: 完成, kind: reply, note: 6 }
+  - { from: t1, to: req, label: 200 OK, kind: reply, note: 7 }
+```
+
+代价是每个函数多一个参数。这就是为什么语言和框架会在这上面做取舍：
+
+- **Go 干脆不给隐式的柜子**。提案 [#21355](https://github.com/golang/go/issues/21355)「用 goroutine-local storage 替代 Context」被否了，官方立场是显式传 `context.Context`。
+- **Java 把柜子改成有作用域的**：`ScopedValue`（JDK 25 正式，JEP 506）不可变、生命周期只在 `run()` 期间，子任务不用复制一份。
+- **Python 把柜子改成按任务隔离的**：`contextvars`（PEP 567）。提案里的原话是「Thread-local variables are insufficient for asynchronous tasks that execute concurrently in the same OS thread」，asyncio 每个 Task 创建时复制一份 context。
+- **.NET 把柜子挂到执行流上**：`AsyncLocal<T>` 跟着 `ExecutionContext` 跨 `await` 流动，而 `ThreadLocal<T>` 在 `await` 之后就读不到了。
+
+### 那什么时候还能用 TLS
+
+把上面这些收成一张判断表：
+
+```compare
+first: 场景
+head: [能不能用 TLS, 该怎么做]
+rows:
+  - 请求从进到出都在同一条线程，没有异步:
+      - 能
+      - 入口写、出口删（filter / finally），别让值活过请求
+  - 线程池处理请求（Tomcat、自建池、协程池）:
+      - 能，但风险高
+      - 每个任务开头重置、结尾清理；漏一次就串号
+  - 起线程 / 线程池跑子任务:
+      - 不能，TLS 不跟
+      - 显式传 context，或用框架的传播机制
+  - 协程、虚拟线程（N:1 / M:N）:
+      - 不能，TLS 是线程级
+      - 运行时 context：contextvars / ScopedValue / ExecutionContext
+  - 跨进程、跨服务（trace、租户）:
+      - 不能
+      - 放进请求头或消息体，用 OTel 的 Context 传播
+  - 只是「每线程一个小状态」（计数器、随机数引擎）:
+      - 正好合适
+      - 不用清也不会串：它本来就不带请求身份
+```
+
+各语言里「线程级的老办法」和「任务级的正解」对照一下：
+
+```compare
+first: 语言 / 生态
+head: [线程级的老办法, 任务级的正解, 关键差别]
+rows:
+  - Java:
+      - "`ThreadLocal` / `InheritableThreadLocal`、SLF4J MDC"
+      - "`ScopedValue`（JDK 25）、`MDC.getCopyOfContextMap()` + `setContextMap()` 手动传"
+      - 值留到线程退出 vs 只在作用域内有效
+  - .NET:
+      - "`ThreadLocal<T>`"
+      - "`AsyncLocal<T>`（随 `ExecutionContext` 流动）"
+      - "`await` 之后 ThreadLocal 丢掉，AsyncLocal 还在"
+  - Python:
+      - "`threading.local()`"
+      - "`contextvars`（PEP 567）"
+      - asyncio 每个 Task 复制一份 context
+  - Go:
+      - 没有 goroutine-local（提案被否）
+      - "`context.Context` 显式传"
+      - 语言层面就不提供隐式柜子
+  - C / C++:
+      - "`thread_local`"
+      - 显式传结构体或参数
+      - 语言不提供跨线程传播
+```
+
+一句话：**TLS 适合放「和线程绑定」的状态，不适合放「和请求绑定」的状态。** 前者天然不会串，后者一旦线程被复用、任务被搬走，就一定会串——只是早晚。
+
+## 08 · 容量与代价
 
 栈和 TLS 都会「每条线程一份」，但一份的大小和增长方式不同。
 
@@ -498,7 +629,7 @@ RSS after = 21 MiB   （只碰了 TLS，没别的分配）
 
 ==每个线程都保留完整的 1 MiB，所以这笔账要按线程数乘。== 真正把它们写满时，100 条线程就是 100 MiB —— 这就是为什么柜子适合放「小而长期」的东西，不适合放缓存。
 
-## 08 · 速查
+## 09 · 速查
 
 | 问题 | 答案 |
 |---|---|
