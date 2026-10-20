@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-has-toc="1">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>在这里写标题</title>
+<meta name="description" content="一句话说清这篇笔记解决什么问题。" />
+<link rel="stylesheet" href="../../assets/theme.css?v=b918ec5c83" />
+  <link rel="stylesheet" href="../../assets/blocks.css?v=69ac1ff279" />
+  <link rel="stylesheet" href="../../assets/archify-embed.css?v=68fec0b81b" />
+</head>
+<body>
+<div id="progress"></div>
+<div id="tocScrim"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
+    <a class="brand" href="../../index.html"><span class="dot"></span>知识笔记</a>
+    
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="toc" id="toc">
+      <p class="toc-title">目录</p>
+      <a href="../../index.html" class="sub">← 全部笔记</a>
+      <a href="#停在这一行">停在这一行</a>
+      <a href="#fd-只是下标连接在内核里长这样">fd 只是下标，连接在内核里长这样</a>
+      <a href="#睡下之前内核做了三件事">睡下之前，内核做了三件事</a>
+      <a href="#一条数据从网卡到线程">一条数据从网卡到线程</a>
+      <a href="#被叫醒不等于拿到数据">被叫醒不等于拿到数据</a>
+      <a href="#这一刻什么被占住了">这一刻，什么被占住了</a>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow">● 知识笔记</span>
+      <h1>在这里写标题</h1>
+      <p class="lede">一句话说清这篇笔记解决什么问题。</p>
+    </div>
+
+
+    <div class="provenance"><span><b>生成</b> 2026-10-19</span><span><b>模型</b> deepseek-v4.1-flash-1017</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">待分类</span></span></div>
+
+<blockquote>
+<p>一个 TCP 服务，<code>accept()</code> 拿到连接后马上就 <code>read()</code>。客户端还没来得及发数据，这一行就停住了。</p>
+<p>进程没有退出，CPU 也没有烧起来。它去了哪里？这一篇只回答这一件事，因为后面所有方案都建立在它上面。</p>
+</blockquote>
+<h2 id="停在这一行"><span class="num">01</span>停在这一行</h2>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-c">int fd = accept(listen_fd, NULL, NULL);
+
+char buf[1024];
+ssize_t n = read(fd, buf, sizeof buf);   /* 客户端还没发数据，停在这里 */
+</code></pre></div>
+<p>「停在这里」不是比喻。这条线程确实不再执行下一条指令了，但它也没有消失：</p>
+<ul>
+<li>它的栈还在，<code>buf</code> 还在栈上；</li>
+<li>它的 task 结构还在内核里，进程表里还能查到它；</li>
+<li>它只是不在 CPU 的运行队列上了。</li>
+</ul>
+<p>要理解它去了哪，先得看清 <code>fd</code> 背后是什么。fd 到打开文件表这一段，<a href="../fs-vfs-layers/">VFS 与文件的使用</a> 里已经拆过，这里只取结论。</p>
+<h2 id="fd-只是下标连接在内核里长这样"><span class="num">02</span>fd 只是下标，连接在内核里长这样</h2>
+<p><code>accept()</code> 还给你的只是一个整数。这个整数是进程 fd 表里的下标，顺着它才能找到内核里那条连接：</p>
+<div class="tree" data-tree><ul class="tlist"><li class="has-kids">
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>进程的 fd 表</b>
+              <code>files_struct</code>
+              <span class="tnote">fd 是这张表的下标，不是连接本身</span>
+            </div>
+            <ul class="tlist"><li class="has-kids">
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>fd 4</b>
+              <code>指向一个打开文件</code>
+              
+            </div>
+            <ul class="tlist"><li class="has-kids">
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>struct file</b>
+              
+              <span class="tnote">打开文件的描述，多个 fd 可以指向同一份</span>
+            </div>
+            <ul class="tlist"><li class="has-kids">
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>struct socket / struct sock</b>
+              
+              <span class="tnote">这条连接在内核里的本体</span>
+            </div>
+            <ul class="tlist"><li class="has-kids">
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>接收队列 sk_receive_queue</b>
+              
+              <span class="tnote">对端发来的数据先排在这里</span>
+            </div>
+            <ul class="tlist"><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>skb</b>
+              
+              <span class="tnote">一个包。队列空的时候，read 没有东西可拷</span>
+            </div>
+            
+          </li></ul>
+          </li><li class="has-kids">
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>等待队列 sk_wq</b>
+              
+              <span class="tnote">等这条连接的人挂在这里</span>
+            </div>
+            <ul class="tlist"><li class="has-kids">
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>wait_queue_entry</b>
+              <code>{ func, private, entry }</code>
+              <span class="tnote">阻塞 read 挂上去的那一份</span>
+            </div>
+            <ul class="tlist"><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>func</b>
+              <code>woken_wake_function</code>
+              <span class="tnote">唤醒时内核调用它 —— 这个位置可以换成别的函数</span>
+            </div>
+            
+          </li><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>private</b>
+              <code>task</code>
+              <span class="tnote">指向谁 —— 阻塞 read 指向自己</span>
+            </div>
+            
+          </li></ul>
+          </li></ul>
+          </li></ul>
+          </li></ul>
+          </li></ul>
+          </li></ul>
+          </li></ul></div><p>这两个队列分工很明确：</p>
+<ul>
+<li><strong>接收队列</strong>装的是「数据已经到了，还没被取走」；</li>
+<li><strong>等待队列</strong>装的是「有人想取，但现在没有」。</li>
+</ul>
+<p><code>read()</code> 卡住的时候，接收队列是空的。线程要做的第一件事，是把自己登记到等待队列上。</p>
+<h2 id="睡下之前内核做了三件事"><span class="num">03</span>睡下之前，内核做了三件事</h2>
+<p>顺序很重要，三步都在 <code>sk_wait_data()</code> 这条路径里：</p>
+<div class="cards" data-cols="3"><div class="ccard tone-blue">
+          <span class="tag tone-blue">add_wait_queue</span>
+          <h4>先挂上</h4>
+          <p>把自己的 wait 条目加进 socket 的等待队列。</p>
+          
+          <pre>add_wait_queue(sk_sleep(sk), &amp;wait);
+</pre>
+        </div><div class="ccard tone-amber">
+          <span class="tag tone-amber">条件</span>
+          <h4>再检查一次</h4>
+          <p>挂好之后才看接收队列。如果这时已经有数据，就不用睡了。</p>
+          
+          <pre>sk_wait_event(sk, &amp;timeo,
+  skb_peek_tail(&amp;sk-&gt;sk_receive_queue) != skb, &amp;wait);
+</pre>
+        </div><div class="ccard tone-violet">
+          <span class="tag tone-violet">schedule</span>
+          <h4>最后让出 CPU</h4>
+          <p>状态改成 TASK_INTERRUPTIBLE（可被信号打断），然后调度走人。</p>
+          
+          <pre>wait_woken(wait, TASK_INTERRUPTIBLE, timeo);
+</pre>
+        </div></div><p>为什么必须先挂上、再检查？</p>
+<p>因为「检查」和「睡下」之间有一个空档。如果先检查发现没数据，再去挂队列，那么在这两步之间到达的数据会找不到任何等待者 —— 它敲门的时候屋里还没人。等线程挂好再睡下，这两步之间到达的数据也能看见队列里的等待者，不会丢掉那次唤醒。</p>
+<p>先挂、后查，让这两步之间到达的数据一定能看见队列里的条目。</p>
+<div class="callout tone-amber">
+      <span class="ic">⚠</span>
+      <div><p>这个顺序是「不丢唤醒」的全部要害。自己写等待逻辑时，顺序反过来会出现偶发的挂死 —— 概率低到测不出来。</p>
+</div>
+    </div><h2 id="一条数据从网卡到线程"><span class="num">04</span>一条数据从网卡到线程</h2>
+<p>下面这张时序图把一次完整的 <code>read()</code> 画完。中间的空白是线程睡着的那段时间，可能是几毫秒，也可能是几十秒。</p>
+<div class="seqd has-grid" data-seq data-n="3"
+      style="--seq-fill:url(#s-fill-1);--seq-open:url(#s-fill-1-open)">
+      <svg class="seqd-svg" aria-hidden="true">
+        <defs>
+          <marker id="s-fill-1" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+          <marker id="s-fill-1-open" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10" fill="none" stroke="currentColor" stroke-width="1.4"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="seqd-head"><div class="scell"><div class="spart tone-green has-icon" data-id="app">
+          <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5L3 8l3 4.5M10 3.5L13 8l-3 4.5"/></svg><b>你的线程</b><small>read(fd, buf, 1024)</small>
+        </div></div><div class="scell"><div class="spart tone-violet has-icon" data-id="sock">
+          <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="8" cy="4.2" rx="5" ry="1.9"/><path d="M3 4.2v7.6c0 1.05 2.24 1.9 5 1.9s5-.85 5-1.9V4.2"/></svg><b>socket</b><small>接收队列 + 等待队列</small>
+        </div></div><div class="scell"><div class="spart tone-amber has-icon" data-id="nic">
+          <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M4.8 12.2a2.6 2.6 0 0 1 .2-5.18 3.6 3.6 0 0 1 6.9-.8 2.5 2.5 0 0 1-.4 5.98z"/></svg><b>网卡与协议栈</b><small>硬中断 → 软中断</small>
+        </div></div></div>
+      <div class="seqd-body"><div class="smsg" data-from="app" data-to="sock" data-kind="sync" data-i="1" data-note="1"><span class="snote">1</span><span class="slabel">read(fd, buf, 1024)</span></div><div class="smsg is-self" data-from="sock" data-to="sock" data-kind="self" data-i="2" data-note="2"><span class="snote">2</span><span class="slabel">看接收队列：空</span></div><div class="smsg is-self" data-from="sock" data-to="sock" data-kind="self" data-i="3" data-note="3"><span class="snote">3</span><span class="slabel">把自己的 wait 条目挂进等待队列</span></div><div class="smsg is-self" data-from="app" data-to="app" data-kind="self" data-i="4" data-note="4"><span class="snote">4</span><span class="slabel">状态置 TASK_INTERRUPTIBLE，schedule() 让出 CPU</span></div><div class="smsg" data-from="nic" data-to="sock" data-kind="async" data-i="5" data-note="5" style="margin-top:72px"><span class="snote">5</span><span class="slabel">包到了：协议栈把它放进接收队列</span></div><div class="smsg is-self" data-from="sock" data-to="sock" data-kind="self" data-i="6" data-note="6"><span class="snote">6</span><span class="slabel">sk_data_ready() → wake_up(等待队列)</span></div><div class="smsg" data-from="sock" data-to="app" data-kind="async" data-i="7" data-note="7"><span class="snote">7</span><span class="slabel">遍历队列调 func：task 改回 RUNNING</span></div><div class="smsg" data-from="app" data-to="sock" data-kind="sync" data-i="8" data-note="8"><span class="snote">8</span><span class="slabel">回到 read：从接收队列拷 1024 字节到 buf</span></div><div class="smsg" data-from="sock" data-to="app" data-kind="reply" data-i="9" data-note="9"><span class="snote">9</span><span class="slabel">返回 1024</span></div></div>
+    </div><p>几个容易看漏的点：</p>
+<ul>
+<li>第 ⑤ 步之前，接收队列一直是空的，线程一直在睡。<strong>等待期间没有任何线程在检查这条连接。</strong></li>
+<li>第 ⑥ 步是 socket 自己的方法 <code>sk_data_ready</code>，TCP 默认指向 <code>sock_def_readable</code>。协议栈把数据放进队列后调用它。</li>
+<li>第 ⑦ 步才回到你的线程。内核遍历等待队列，对每个条目调它的 <code>func</code>。阻塞 read 的 <code>func</code> 是 <code>woken_wake_function</code>，它做的是把 <code>private</code> 指向的 task 改回可运行状态，挂回运行队列。</li>
+<li>第 ⑧ 步是真正的数据搬运：从内核的接收队列拷进你的 <code>buf</code>。<strong>数据不是唤醒时到你手里的</strong>，唤醒只是告诉你「现在可以读了」。</li>
+</ul>
+<h2 id="被叫醒不等于拿到数据"><span class="num">05</span>被叫醒不等于拿到数据</h2>
+<p>这里值得停一下。<code>wake_up</code> 做的事情里，没有一件和你的缓冲区有关：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>时刻</th><th>内核里发生了什么</th><th>你的 buf 里有什么</th></tr></thead><tbody><tr><th>数据到达</th><td data-label="内核里发生了什么">协议栈分配 skb，挂进接收队列；唤醒等待队列</td><td data-label="你的 buf 里有什么">还是空的。一个字节都没进来</td></tr><tr><th>线程被唤醒</th><td data-label="内核里发生了什么">task 回到运行队列。等调度器挑中它</td><td data-label="你的 buf 里有什么">还是空的</td></tr><tr><th>read 继续执行</th><td data-label="内核里发生了什么">重新检查接收队列，把 skb 里的数据拷进用户缓冲区</td><td data-label="你的 buf 里有什么">这时才有数据</td></tr><tr><th>read 返回</th><td data-label="内核里发生了什么">拷贝完成，可能还有没读完的数据留在接收队列里</td><td data-label="你的 buf 里有什么">拿到了 n 个字节</td></tr></tbody></table></div><p>最后一行埋着下一篇的一个伏笔：<strong>接收队列里可能还留着数据</strong>。「就绪」的判断和怎么处理这点残留，是 LT 与 ET 全部分歧的来源。</p>
+<h2 id="这一刻什么被占住了"><span class="num">06</span>这一刻，什么被占住了</h2>
+<p>线程睡下之后，CPU 是自由的，但下面这些东西仍被这条连接占着：</p>
+<div class="cards" data-cols="4"><div class="ccard tone-muted">
+          <span class="tag tone-muted">task_struct</span>
+          <h4>一个 task</h4>
+          <p>内核里的任务描述，大小随内核配置变化，通常在几 KB 到十几 KB 量级。</p>
+          
+          
+        </div><div class="ccard tone-muted">
+          <span class="tag tone-muted">16 KB · x86-64</span>
+          <h4>一个内核栈</h4>
+          <p>线程在内核态执行时需要自己的栈。Linux 在 x86-64 上给它四页。</p>
+          
+          
+        </div><div class="ccard tone-muted">
+          <span class="tag tone-muted">按需分配</span>
+          <h4>一片用户栈</h4>
+          <p>pthread 默认预留 8MB 虚拟地址空间，但只有真正碰到的页才占物理内存。</p>
+          
+          
+        </div><div class="ccard tone-muted">
+          <span class="tag tone-muted">最贵的一项</span>
+          <h4>一个执行现场</h4>
+          <p>read 还没有返回，这条线程就不能去服务别的连接。它被这一条连接绑住了。</p>
+          
+          
+        </div></div><p>前三项是内存。第四项不是。</p>
+<p>一个线程的栈再小，只要它停在 <code>read()</code> 里，它就不能同时替另一条连接等。所以「一连接一线程」的真正上限，不是内存条有多长，而是<strong>你愿意为「等待」维持多少个执行单位</strong>。</p>
+<p>下一篇把这笔账算细。这里先记一个观察：</p>
+<div class="callout tone-violet quote">
+      <span class="ic">💡</span>
+      <div><p>看等待队列上的那个条目：<code>{ func, private }</code>。</p>
+<p>内核唤醒它的时候，只是调用 <code>func</code>。它并不关心里面装的是什么。
+阻塞 read 让 <code>private</code> 指向一个 task，所以唤醒的代价是「唤醒一个线程」。</p>
+<p><mark class="mk-blue">换个 <code>func</code>，等待就可以由一段函数来承载。</mark></p>
+</div>
+    </div><p>这不是空想。数据到达时，内核能做的其实只有两件小事：把某个条目放进一个链表、叫醒可能在等的线程。如果 <code>func</code> 做的就是这两件事，那么「等」的载体就不需要是一个 task —— 没有栈，也不需要被调度。</p>
+<p>epoll 的全部设计，就建立在这个位置上。下一篇先看没有它的时候，账是怎么算的。</p>
+<div class="quiz"><details>
+        <summary>阻塞 read 的线程，在等待期间处于什么状态？它还在运行队列上吗？</summary>
+        <div class="a"><p>它被置为 <code>TASK_INTERRUPTIBLE</code>，从运行队列上摘下来，挂进了 socket 的等待队列。
+它不占 CPU，但 task 结构、内核栈和用户栈都还在。</p>
+</div>
+      </details><details>
+        <summary>为什么必须先把自己挂进等待队列，再检查有没有数据？</summary>
+        <div class="a"><p>否则「检查完、还没睡下」这段空档里到达的数据找不到等待者，唤醒会丢。
+先挂后查，保证这期间到达的数据一定能在队列里看到你的条目。</p>
+</div>
+      </details><details>
+        <summary>read 返回时，数据是从哪里拷过来的？</summary>
+        <div class="a"><p>从 socket 的接收队列（内核内存）拷进你的用户缓冲区。
+数据到达时先入接收队列，唤醒只表示「现在读不会阻塞」。</p>
+</div>
+      </details></div>
+
+    <footer>
+      <span>在这里写标题</span>
+      <span>最后更新 2026-10-19 · 单文件可离线打开</span>
+    </footer>
+  </main>
+</div>
+
+<script src="../../assets/app.js?v=0285b13817"></script>
+</body>
+</html>
