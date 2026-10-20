@@ -498,6 +498,8 @@ messages:
 
 （Logback 手册，MDC 一节。MDC 就是 Java 里那个典型的「TLS 存 request_id」实现。）
 
+同一份手册还写了另一半：子线程**不会**自动继承父线程的 MDC，线程池下要自己把 `MDC.getCopyOfContextMap()` 取出来、在新线程里 `setContextMap()` 装回去。==这其实就是在手工传上下文==——只是把「传 context 对象」换成了「搬一份 map」。
+
 同一条路上还有三种走法会出错：
 
 - **异步、跨线程**：主线程把任务丢给另一个线程，TLS 是另一份，值是空的。
