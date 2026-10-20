@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-has-toc="1">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>call / push / ret / leave：把指令拆成微步</title>
+<meta name="description" content="这四条指令看着各干一件事，拆开都是「改指针 + 读写那一格」。用 micro-op 控件逐步走，再看实测的 RSP/RIP 前后值，就能解释清楚为什么先减指针、为什么 leave 之后正好接着 ret。" />
+<link rel="stylesheet" href="../../assets/theme.css?v=b918ec5c83" />
+  <link rel="stylesheet" href="../../assets/blocks.css?v=d4c8bdd279" />
+  <link rel="stylesheet" href="../../assets/archify-embed.css?v=68fec0b81b" />
+</head>
+<body>
+<div id="progress"></div>
+<div id="tocScrim"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
+    <a class="brand" href="../../index.html"><span class="dot"></span>知识笔记</a>
+    
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="toc" id="toc">
+      <p class="toc-title">目录</p>
+      <a href="../../index.html" class="sub">← 全部笔记</a>
+      <a href="#四条指令拆成同一组原子动作">四条指令，拆成同一组原子动作</a>
+      <a href="#push先减指针再写内存">push：先减指针，再写内存</a>
+      <a href="#call压下一条然后跳">call：压「下一条」，然后跳</a>
+      <a href="#ret读栈顶抬指针跳过去">ret：读栈顶、抬指针、跳过去</a>
+      <a href="#leave把-rsp-拉回-rbp再弹-rbp">leave：把 RSP 拉回 RBP，再弹 RBP</a>
+      <a href="#放一起看谁动了什么">放一起看：谁动了什么</a>
+      <a href="#一句话" class="sub">一句话</a>
+      <a href="#速查容易记反的六件事">速查：容易记反的六件事</a>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow">● 计算机基础 · 函数调用 ③</span>
+      <h1>call / push / ret / leave：把指令拆成微步</h1>
+      <p class="lede">这四条指令看着各干一件事，拆开都是「改指针 + 读写那一格」。用 micro-op 控件逐步走，再看实测的 RSP/RIP 前后值，就能解释清楚为什么先减指针、为什么 leave 之后正好接着 ret。</p>
+    </div>
+
+<aside class="needs">
+      <p class="needs-title">读这篇之前，你需要先知道</p>
+      <a class="need" href="../stack-call-return/">← <b>1. 函数调用时，栈上到底放了什么</b><span>返回地址不是返回值；call 只压地址 + 跳转；栈帧里装了什么；递归与栈上限；AArch64 的 LR</span></a><a class="need" href="../frame-pointer/">← <b>2. 栈帧基址：RBP 钉住的到底是什么</b><span>以 RBP 为原点看一帧；序言三条指令怎么钉下原点；[RBP] 链怎么走回 main；什么时候真的需要它</span></a>
+    </aside>
+    <div class="provenance"><span><b>来源</b> Intel SDM · CALL https://www.felixcloutier.com/x86/call —— 近调用把 CALL 之后那条指令的地址压栈，然后跳转 · Intel SDM · PUSH https://www.felixcloutier.com/x86/push —— RSP := RSP − 8; Memory[SS:RSP] := SRC · Intel SDM · RET https://www.felixcloutier.com/x86/ret —— RIP := Pop()；带立即数时再 RSP := RSP + SRC；阴影栈校验（#CP NEAR_RET） · Intel SDM · LEAVE https://www.felixcloutier.com/x86/leave —— RSP := RBP，然后 RBP := Pop() · 本机实测（macOS arm64 · Apple clang 21 · x86_64 经 Rosetta）：lldb 单步 callq/addq/popq/retq，逐条读 rip/rsp/rbp</span><span><b>生成</b> 2026-10-20</span><span><b>模型</b> deepseek-v4.1-flash-1017</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">汇编</span> <span class="tag tone-muted">call</span> <span class="tag tone-muted">ret</span> <span class="tag tone-muted">leave</span> <span class="tag tone-muted">栈指针</span></span></div>
+
+<h2 id="四条指令拆成同一组原子动作"><span class="num">01</span>四条指令，拆成同一组原子动作</h2>
+<p>前两篇停在「一条指令做什么」这一层。这一篇往下走一层：<strong>每条指令拆成几个微步</strong>。</p>
+<p>先约定一件事：下面的微步都从「取指之后」开始。这时 <code>RIP</code> 已经指向<strong>下一条</strong>指令 —— x86 取指后 <code>RIP</code> 就自增了。这一点决定了三件事：<code>call</code> 压的是什么、<code>ret</code> 跳去哪里、<code>leave</code> 之后为什么刚好能接上 <code>ret</code>。</p>
+<p>四条指令拆开，只剩三种动作：<strong>改指针</strong>、<strong>读写指针指向的那一格</strong>、<strong>改 <code>RIP</code></strong>。</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>指令</th><th>第一步</th><th>第二步</th><th>第三步</th></tr></thead><tbody><tr><th><code>push</code> 源</th><td data-label="第一步">RSP ← RSP − 8</td><td data-label="第二步"><code>[RSP] ← 源</code></td><td data-label="第三步">—（不跳）</td></tr><tr><th><code>call</code> 目标</th><td data-label="第一步">RSP ← RSP − 8</td><td data-label="第二步"><code>[RSP] ← 下一条地址</code></td><td data-label="第三步">RIP ← 目标</td></tr><tr><th><code>ret</code></th><td data-label="第一步">读 <code>[RSP]</code> 得到目标</td><td data-label="第二步">RSP ← RSP + 8</td><td data-label="第三步">RIP ← 目标</td></tr><tr><th><code>leave</code></th><td data-label="第一步">RSP ← RBP</td><td data-label="第二步">RBP ← <code>[RSP]</code></td><td data-label="第三步">RSP ← RSP + 8</td></tr></tbody></table></div><p><code>ret</code> 和 <code>leave</code> 都是「先读、再抬指针」；<code>push</code> 和 <code>call</code> 都是「先降指针、再写」。这个顺序不是排版问题，下面逐条说。</p>
+<div class="demo" data-widget="micro-op-lab">
+      <div class="demo-head">
+        <span class="title">四条指令的微步</span>
+        <span class="status" data-status></span>
+        <span class="spacer"></span>
+        
+      </div>
+      <div class="demo-body"></div>
+    </div><p>切上面四个页签，一条一条走。走的时候注意两件事：<strong><code>RSP</code> 什么时候动</strong>，以及<strong>动的是指针还是那一格内存</strong>。</p>
+<h2 id="push先减指针再写内存"><span class="num">02</span>push：先减指针，再写内存</h2>
+<p>Intel 手册的伪代码就两行：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">IF OperandSize = 64 THEN
+    RSP := RSP − 8;
+    Memory[SS:RSP] := SRC;
+</code></pre></div>
+<p>顺序反了会怎样？如果先写 <code>[RSP]</code> 再减 8，写进去的就是<strong>当前栈顶</strong>那一格 —— 而那一格往往正是上一个函数留下的东西，比如刚压进来的返回地址。先把指针降下去，新格子才真正属于这一次压栈。</p>
+<div class="callout tone-amber">
+      <span class="ic">⚠</span>
+      <div><p><mark class="mk-blue"><code>push</code> 是「先减再加」里的「先减」，<code>pop</code> 是它的镜像：先读、再加。</mark></p>
+<p><code>pop</code> 的顺序同样不能反：先 <code>RSP += 8</code> 再读，读到的就是上面那一格，
+也就是别人还没取走的数据。</p>
+</div>
+    </div><p><code>push</code> 也可以展开成 <code>sub rsp, 8</code> + <code>mov [rsp], 源</code> 两条。效果一样，但生产代码里用 <code>push</code>：</p>
+<ul>
+<li>一条指令，不会被中断拆开，也不会在中途被信号处理看到「指针已经动、内容还没写」的状态；</li>
+<li>编码更短；</li>
+<li>不需要额外的临时寄存器。</li>
+</ul>
+<h2 id="call压下一条然后跳"><span class="num">03</span>call：压「下一条」，然后跳</h2>
+<p>手册对近调用的描述是明确的一句：</p>
+<div class="callout tone-muted quote">
+      <span class="ic">📖</span>
+      <div><p>When executing a near call, the processor pushes the value of the EIP register
+(which contains the offset of the instruction following the CALL instruction)
+on the stack ... The processor then branches to the address in the current code
+segment specified by the target operand.</p>
+</div>
+    </div><p>伪代码里压的是 <code>RIP</code> 这个寄存器本身：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">tempRIP := RIP + tempDEST;      (* 目标地址：RIP 已经指向下一条 *)
+Push(RIP);                      (* 压的就是这个「下一条」 *)
+RIP := tempRIP;
+</code></pre></div>
+<p>本机那份 <code>calc</code> 是活例子：<code>callq _add</code> 在 <code>0x100000373</code>，它的下一条是 <code>0x100000378</code>，被调函数 <code>_add</code> 在 <code>0x100000328</code>。位移是 <code>0x328 − 0x378 = −0x50</code> —— <strong>从下一条算，不是从 <code>call</code> 自己算</strong>。这正好解释了为什么压进去的值，天然就等于「回来接着执行的那条」。</p>
+<p><code>call</code> 是<strong>一条</strong>指令，不是「<code>push</code> + <code>jmp</code> 两条」。效果上可以那样理解，但有区别：</p>
+<ul>
+<li>两条指令之间有一个可以被中断、被观察的缝；<code>call</code> 没有。</li>
+<li>回溯和调试把 <code>call</code> 当作调用边界：栈回溯信息（CFI / <code>.eh_frame</code>）、调试器的「上一层」、采样剖析，都按它切帧。</li>
+<li>开着 CET 的机器上，硬件还会在 <code>call</code> / <code>ret</code> 时维护一份影子栈。手写的 <code>push</code> + <code>jmp</code> 不会更新它。</li>
+</ul>
+<h2 id="ret读栈顶抬指针跳过去"><span class="num">04</span>ret：读栈顶、抬指针、跳过去</h2>
+<p>手册只有一句：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">RIP := Pop();            (* 近返回 *)
+</code></pre></div>
+<p>拆成微步是三步，而且<strong>读在最前面</strong>：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">读 [RSP] → 目标           ; 指针还没动
+RSP := RSP + 8           ; 抬起一格
+RIP := 目标               ; 跳过去
+</code></pre></div>
+<p>本机实测这一条：<code>0x100000385 retq</code> 执行完，<code>RIP</code> 变成 <code>0x1000003a9</code>（<code>main</code> 里 <code>callq _calc</code> 的下一条），<code>RSP</code> 从 <code>0x…fa8</code> 抬到 <code>0x…fb0</code>。</p>
+<p><code>ret</code> 还有一个带立即数的形式 <code>ret 16</code>：弹出返回地址之后，再 <code>RSP += 16</code>。这是 32 位时代 <code>stdcall</code> 让<strong>被调者</strong>顺手清掉参数的做法；x86-64 的 System V 用寄存器传参，这种写法基本见不到了。</p>
+<div class="callout tone-violet">
+      <span class="ic">💡</span>
+      <div><p>返回地址不是特殊数据，它就是栈上普通的一格 —— 谁改了它，谁就改了控制流。</p>
+<p>手册的伪代码里因此多了一道检查：开了影子栈（CET）时，<code>ret</code> 会拿栈上的返回地址
+和影子栈里的副本比对，不一致就报 <code>#CP(NEAR_RET)</code>。<mark class="mk-blue">这道检查存在的理由，
+就是「返回地址可以被改写」这件事本身。</mark></p>
+</div>
+    </div><h2 id="leave把-rsp-拉回-rbp再弹-rbp"><span class="num">05</span>leave：把 RSP 拉回 RBP，再弹 RBP</h2>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">RSP := RBP;              (* 第一步：指针回到帧底 *)
+RBP := Pop();            (* 第二步：弹出旧帧底，RSP 顺带 +8 *)
+</code></pre></div>
+<p>手册的描述也是一句「Set RSP to RBP, then pop RBP」。三步展开就是：<code>RSP ← RBP</code> → <code>RBP ← [RSP]</code> → <code>RSP ← RSP + 8</code>。</p>
+<p>顺序同样不能反。先 <code>pop</code> 再改 <code>RSP</code>，弹的就是栈顶的局部变量，<code>RBP</code> 会被写成一个垃圾值 —— 而这个垃圾值马上会被下一层函数当成自己的「上一帧」。</p>
+<p><code>leave</code> 走完，<code>RSP</code> 停在哪？停在<strong>返回地址那一格</strong>。所以它后面紧跟一条 <code>ret</code> 就能直接接上：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">leave        ; RSP 回到返回地址
+ret          ; 弹出它，跳走
+</code></pre></div>
+<p>这两条是一条固定搭配，编译器把它们排在函数末尾不是随手写的。</p>
+<p>最后，<code>leave</code> 只在<strong>有帧指针</strong>时成立。省略帧指针时，编译器不知道帧底在哪，只能写死「加回多少」：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">addq $0x10, %rsp   ; 帧大小是编译期常量，直接加回去
+popq %rbp          ; 这一步和 leave 的后半条一样
+</code></pre></div>
+<p>本机 <code>clang -O0</code> 编出来的 <code>calc</code> 就是这三条（<code>addq</code> / <code>popq</code> / <code>retq</code>），效果和 <code>leave; ret</code> 完全一致。</p>
+<h2 id="放一起看谁动了什么"><span class="num">06</span>放一起看：谁动了什么</h2>
+<p>同一次 lldb 单步，四条指令前后各读一次寄存器：</p>
+<table>
+<thead>
+<tr>
+<th>指令</th>
+<th>RSP</th>
+<th>RIP</th>
+<th>其他</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>callq _add</code></td>
+<td><code>0x…f90</code> → <code>0x…f88</code></td>
+<td><code>0x…373</code> → <code>0x…340</code></td>
+<td>压入 <code>0x100000378</code></td>
+</tr>
+<tr>
+<td><code>addq $0x10, %rsp</code></td>
+<td><code>0x…f90</code> → <code>0x…fa0</code></td>
+<td><code>0x…380</code> → <code>0x…384</code></td>
+<td>—</td>
+</tr>
+<tr>
+<td><code>popq %rbp</code></td>
+<td><code>0x…fa0</code> → <code>0x…fa8</code></td>
+<td><code>0x…384</code> → <code>0x…385</code></td>
+<td><code>RBP</code>：<code>0x…fa0</code> → <code>0x…fc0</code></td>
+</tr>
+<tr>
+<td><code>retq</code></td>
+<td><code>0x…fa8</code> → <code>0x…fb0</code></td>
+<td><code>0x…385</code> → <code>0x…3a9</code></td>
+<td>跳到 <code>main + 25</code></td>
+</tr>
+</tbody>
+</table>
+<p>四条指令的动作可以归成两对加一个合并：</p>
+<ul>
+<li><strong><code>push</code> / <code>pop</code></strong>：一对镜像。一个降指针再写，一个读再抬指针。</li>
+<li><strong><code>call</code> / <code>ret</code></strong>：一对镜像。一个压「下一条」再跳，一个读出来再跳回去。</li>
+<li><strong><code>leave</code></strong>：尾声的合并写法，把「<code>RSP</code> 回到帧底」和「弹旧帧指针」压成一条。</li>
+</ul>
+<div class="summary">
+      <h3 id="一句话">一句话</h3>
+      <p>栈上的指令没有魔法：都在动 <code>RSP</code>，都在读写 <code>RSP</code> 指的那一格，需要跳的时候再动 <code>RIP</code>。
+顺序只有两条规矩：<strong>写之前先降指针，读之后才抬指针</strong>。</p>
+
+    </div><h2 id="速查容易记反的六件事"><span class="num">07</span>速查：容易记反的六件事</h2>
+<ul class="check cross"><li><code>push</code> 先写内存，再把 RSP 减 8。—— 反了会覆盖当前栈顶那一格。</li><li><code>pop</code> 先把 RSP 加 8，再读。—— 反了读到的是上面一格。</li><li><code>call</code> 压的是 <code>call</code> 自己的地址。—— 压的是它的下一条。</li><li><code>ret</code> 会检查返回值再决定跳哪。—— <code>ret</code> 只看栈顶那个地址，不碰返回值。</li><li><code>leave</code> 先 pop RBP，再改 RSP。—— 先 <code>RSP ← RBP</code>，再 pop。</li><li><code>leave</code> 之后还得手动把 RSP 抬到返回地址。—— 它走完就已经在返回地址上了。</li></ul><div class="quiz"><details>
+        <summary>为什么 push 必须先减指针、再写内存？</summary>
+        <div class="a"><p>因为 <code>[RSP]</code> 指向的是<strong>当前栈顶</strong>那一格，里面可能正躺着上一个函数留下的数据（比如刚压进来的返回地址）。
+先把指针降下去，写进去的才是这一次压栈自己的格子。</p>
+</div>
+      </details><details>
+        <summary>call 压进栈的地址，是从哪条指令算出来的？</summary>
+        <div class="a"><p>从「下一条」算。x86 取指后 RIP 就已指向下一条，所以 <code>call</code> 的位移是相对下一条算的，
+压进去的也正是这个值 —— 这样返回时才等于「接着往下走」。</p>
+</div>
+      </details><details>
+        <summary>leave 执行完，RSP 停在哪一格？</summary>
+        <div class="a"><p>停在返回地址那一格。<code>RSP ← RBP</code> 回到帧底（旧 RBP 那格），<code>pop</code> 之后 <code>RSP</code> 再加 8，
+正好落到保存的返回地址上 —— 所以后面紧跟一条 <code>ret</code> 就能接上。</p>
+</div>
+      </details><details>
+        <summary>既然 push + jmp 能替代 call，为什么还要用 call？</summary>
+        <div class="a"><p>效果一样，但 <code>call</code> 是一条指令：中间没有可以被中断的缝；回溯信息和调试器按它切调用边界；
+硬件的影子栈（CET）也只在 <code>call</code> / <code>ret</code> 上维护。手写替代会把这些都绕过去。</p>
+</div>
+      </details></div>
+
+    <footer>
+      <span>call / push / ret / leave：把指令拆成微步</span>
+      <span>最后更新 2026-10-20 · 单文件可离线打开</span>
+    </footer>
+  </main>
+</div>
+
+<script src="../../assets/app.js?v=bed0799fda"></script>
+</body>
+</html>

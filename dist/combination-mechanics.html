@@ -6451,6 +6451,42 @@ html[data-theme="dark"] .rb-lab { --rb-dark: #55647d; --rb-dark-line: #93a3bd; -
 .fa-reg.is-sp b { color: var(--blue); }
 .fa-reg.is-bp b { color: var(--violet); }
 
+/* ---------- micro-op-lab：一条指令拆成几个微步 ---------- */
+.mo { display: grid; gap: 12px; min-width: 0; max-width: 1240px; }
+.mo-tabs { display: flex; flex-wrap: wrap; gap: 6px; }
+.mo-tab {
+  font: 500 12px/1.4 var(--mono); color: var(--text-2); background: var(--surface);
+  border: 1px solid var(--border-strong); border-radius: 7px; padding: 5px 11px; cursor: pointer;
+}
+.mo-tab:hover { border-color: var(--blue); }
+.mo-tab.is-on { border-color: var(--blue); background: var(--blue-soft); color: var(--blue); font-weight: 650; }
+.mo-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px; }
+.mo-ins { font: 650 13px/1.5 var(--mono); color: var(--text); }
+.mo-at { font: 400 11px/1.5 var(--mono); color: var(--muted); }
+.mo-eq { font: 400 12px/1.6 var(--sans); color: var(--text-2); }
+.mo-body { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); gap: 13px; align-items: start; }
+@media (max-width: 820px) { .mo-body { grid-template-columns: 1fr; } }
+.mo-ops { display: grid; gap: 6px; }
+.mo-op {
+  display: grid; grid-template-columns: 20px minmax(0, 1fr); gap: 8px; align-items: start;
+  padding: 7px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface);
+}
+.mo-op .idx { font: 700 11px/1.7 var(--mono); color: var(--muted); }
+.mo-op .tx { display: grid; gap: 1px; }
+.mo-op .t { font: 650 12px/1.6 var(--mono); color: var(--text); }
+.mo-op .r { font: 400 11px/1.6 var(--mono); color: var(--muted); }
+.mo-op.is-done { opacity: .5; }
+.mo-op.is-now { border-color: var(--blue); background: var(--blue-soft); }
+.mo-op.is-now .t { color: var(--blue); }
+.mo-op.is-now .r { color: var(--blue); opacity: .8; }
+.mo-side { display: grid; gap: 8px; }
+.mo-regs { display: flex; flex-wrap: wrap; gap: 8px; }
+.fa-reg.is-rip b { color: var(--green); }
+.fa-cell.is-touch { border-color: var(--amber); box-shadow: 0 0 0 2px var(--amber-soft); }
+.fa-cell.is-read { border-color: var(--blue); box-shadow: 0 0 0 2px var(--blue-soft); }
+.mo-tail { min-height: 1.2em; font: 400 12px/1.8 var(--sans); color: var(--text-2); }
+.mo-tail:empty { display: none; }
+
 </style>
   <style>
 /* ==========================================================
@@ -18847,6 +18883,299 @@ WIDGETS['mysql-2pc-crash'] = (root) => {
     prev.addEventListener('click', () => { if (k > 0) { k--; render(); } });
     next.addEventListener('click', () => { if (k < STEPS.length - 1) { k++; render(); } });
     reset.addEventListener('click', () => { k = 0; render(); });
+    render();
+  };
+
+
+  /* ============================================================
+     控件：micro-op-lab —— 一条指令拆成几个微步
+     ------------------------------------------------------------
+     四条指令（push / call / ret / leave）各有一串「原子动作」：
+     改指针、读写指针指向的那一格、改 RIP。
+     所有微步都从「取指之后」开始 —— 这时 RIP 已经指向下一条。
+     ============================================================ */
+  WIDGETS['micro-op-lab'] = (root) => {
+    const box = mountOf(root);
+    const statusEl = root.querySelector('[data-status]');
+
+    const el = (tag, cls, text) => {
+      const n = document.createElement(tag);
+      if (cls) n.className = cls;
+      if (text !== undefined) n.textContent = text;
+      return n;
+    };
+
+    const SLOTS = [
+      '0x30413cfb0', '0x30413cfa8', '0x30413cfa0', '0x30413cf98',
+      '0x30413cf90', '0x30413cf88', '0x30413cf80',
+    ];
+    const OLD_BP = '0x30413cfc0';
+    const RET_MAIN = '0x1000003a9';
+    const RET_ADD = '0x100000378';
+    const RET_CELL = { v: RET_MAIN, label: '返回地址 → main', tone: 'ret' };
+    const SAVED = { v: OLD_BP, label: '旧 RBP', tone: 'saved' };
+    const LOCALS = { v: 'x · s', label: '局部变量', tone: 'local' };
+
+    const MODES = [
+      {
+        id: 'push',
+        ins: 'pushq  %rbp',
+        at: '0x100000360',
+        eq: 'RSP ← RSP − 8，再把 RBP 写到新格子',
+        start: { rip: '0x100000361', sp: '0x30413cfa8', bp: OLD_BP, cells: { '0x30413cfa8': RET_CELL } },
+        ops: [
+          {
+            t: 'RSP ← RSP − 8', r: '0x…fa8 → 0x…fa0', sp: '0x30413cfa0',
+            cells: { '0x30413cfa8': RET_CELL },
+            note: '先把指针降下去。新格子还没写，里面是上一轮留下的垃圾。',
+          },
+          {
+            t: '[RSP] ← RBP', r: '[0x…fa0] ← 0x30413cfc0', sp: '0x30413cfa0', touch: '0x30413cfa0',
+            cells: { '0x30413cfa8': RET_CELL, '0x30413cfa0': SAVED },
+            note: '再写内容。==顺序反过来，就会覆盖当前栈顶那一格==。',
+          },
+        ],
+        tail: '两步做完，`RIP` 已经在下一条 `0x100000361` —— 这条指令不跳。',
+      },
+      {
+        id: 'call',
+        ins: 'callq  _add',
+        at: '0x100000373',
+        eq: 'RSP ← RSP − 8，把下一条地址写进去，然后跳',
+        start: {
+          rip: RET_ADD, sp: '0x30413cf90', bp: '0x30413cfa0',
+          cells: { '0x30413cfa8': RET_CELL, '0x30413cfa0': SAVED, '0x30413cf98': LOCALS },
+        },
+        ops: [
+          {
+            t: '目标 ← RIP + 位移', r: '0x100000378 − 0x50 = 0x100000328', sp: '0x30413cf90',
+            cells: { '0x30413cfa8': RET_CELL, '0x30413cfa0': SAVED, '0x30413cf98': LOCALS },
+            note: '`RIP` 此时已经指向下一条 —— 所以相对位移是从 `0x…378` 算，不是从 `0x…373`。',
+          },
+          {
+            t: 'RSP ← RSP − 8', r: '0x…f90 → 0x…f88', sp: '0x30413cf88',
+            cells: { '0x30413cfa8': RET_CELL, '0x30413cfa0': SAVED, '0x30413cf98': LOCALS },
+            note: '给返回地址腾格子。',
+          },
+          {
+            t: '[RSP] ← RIP', r: '[0x…f88] ← 0x100000378', sp: '0x30413cf88', touch: '0x30413cf88',
+            cells: {
+              '0x30413cfa8': RET_CELL, '0x30413cfa0': SAVED, '0x30413cf98': LOCALS,
+              '0x30413cf88': { v: RET_ADD, label: '返回地址 → calc', tone: 'ret' },
+            },
+            note: '写进去的就是「下一条」。到这一步，`call` 的两件事已经做完一件。',
+          },
+          {
+            t: 'RIP ← 目标', r: 'RIP ← 0x100000328', sp: '0x30413cf88', rip: '0x100000328',
+            cells: {
+              '0x30413cfa8': RET_CELL, '0x30413cfa0': SAVED, '0x30413cf98': LOCALS,
+              '0x30413cf88': { v: RET_ADD, label: '返回地址 → calc', tone: 'ret' },
+            },
+            note: '跳走。`RSP` 就停在这格，直到被调函数自己往下动。',
+          },
+        ],
+        tail: '压的是 `RIP` 当时的值 —— 也就是「下一条」。CPU 手册的伪代码就这两步。',
+      },
+      {
+        id: 'ret',
+        ins: 'retq',
+        at: '0x100000385',
+        eq: '读出栈顶的地址，抬起指针，跳过去',
+        start: {
+          rip: '0x100000386', sp: '0x30413cfa8', bp: OLD_BP,
+          cells: { '0x30413cfa8': RET_CELL, '0x30413cfa0': SAVED, '0x30413cf98': LOCALS },
+        },
+        ops: [
+          {
+            t: '读 [RSP]', r: '读到 0x1000003a9', sp: '0x30413cfa8', touch: '0x30413cfa8', read: true,
+            cells: { '0x30413cfa8': RET_CELL, '0x30413cfa0': SAVED, '0x30413cf98': LOCALS },
+            note: '先读，指针还没动。读到的值暂时攥在 CPU 手里。',
+          },
+          {
+            t: 'RSP ← RSP + 8', r: '0x…fa8 → 0x…fb0', sp: '0x30413cfb0',
+            cells: { '0x30413cfa8': RET_CELL, '0x30413cfa0': SAVED, '0x30413cf98': LOCALS },
+            note: '指针抬起来 —— 返回地址那格就算交还了，值还在，但没人认领。',
+          },
+          {
+            t: 'RIP ← 读到的值', r: 'RIP ← 0x1000003a9', sp: '0x30413cfb0', rip: '0x1000003a9',
+            cells: { '0x30413cfa8': RET_CELL, '0x30413cfa0': SAVED, '0x30413cf98': LOCALS },
+            note: '跳回 `main`。`ret` 本身不区分「返回到哪」，它只认栈顶那个值。',
+          },
+        ],
+        tail: '手册的写法就一句 `RIP := Pop()` —— 读、抬起、跳，全在里面。',
+      },
+      {
+        id: 'leave',
+        ins: 'leave',
+        at: '0x100000380',
+        eq: 'RSP ← RBP，然后 RBP ← 弹出的一格',
+        start: {
+          rip: '0x100000381', sp: '0x30413cf90', bp: '0x30413cfa0',
+          cells: { '0x30413cfa8': RET_CELL, '0x30413cfa0': SAVED, '0x30413cf98': LOCALS },
+        },
+        ops: [
+          {
+            t: 'RSP ← RBP', r: '0x…f90 → 0x…fa0', sp: '0x30413cfa0',
+            cells: { '0x30413cfa8': RET_CELL, '0x30413cfa0': SAVED, '0x30413cf98': LOCALS },
+            note: '一句话把 `RSP` 拽回帧底 —— 中间那 16 字节局部变量瞬间「没人认领」。==内存没动，只改了指针。==',
+          },
+          {
+            t: 'RBP ← [RSP]', r: 'RBP ← 0x30413cfc0', sp: '0x30413cfa0', bp: OLD_BP, touch: '0x30413cfa0', read: true,
+            cells: { '0x30413cfa8': RET_CELL, '0x30413cfa0': SAVED, '0x30413cf98': LOCALS },
+            note: '用新的 `RSP` 读旧帧底。!!顺序反了（先 pop 再改 RSP）就会读到错的值!!。',
+          },
+          {
+            t: 'RSP ← RSP + 8', r: '0x…fa0 → 0x…fa8', sp: '0x30413cfa8',
+            cells: { '0x30413cfa8': RET_CELL, '0x30413cfa0': SAVED, '0x30413cf98': LOCALS },
+            note: '抬起一格，正好指着返回地址 —— 下一条 `ret` 就能直接接上。',
+          },
+        ],
+        tail: '三步做完，`RSP` 落在返回地址上，`RBP` 已经还原成调用者的帧底。',
+      },
+    ];
+
+    let mi = 0;
+    let k = 0;
+
+    const tabs = el('div', 'mo-tabs');
+    const head = el('div', 'mo-head');
+    const opsBox = el('div', 'mo-ops');
+    const regs = el('div', 'mo-regs');
+    const cellsBox = el('div', 'fa-cells');
+    const note = el('div', 'sl-note');
+    const ctrls = el('div', 'sl-ctrls');
+    const prev = el('button', 'btn ghost', '← 上一步');
+    const next = el('button', 'btn', '下一步 →');
+    const reset = el('button', 'btn ghost', '重置');
+    const counter = el('span', 'sl-counter', '');
+    ctrls.append(prev, next, reset, counter);
+
+    const cellEls = {};
+    SLOTS.forEach((addr) => {
+      const c = el('div', 'fa-cell');
+      const mid = el('span', 'mid');
+      mid.append(el('span', 'val', ''), el('span', 'lab', ''));
+      c.append(el('span', 'addr', addr), mid, el('span', 'fa-lane', ''), el('span', 'fa-lane', ''));
+      cellEls[addr] = { c, val: c.querySelector('.val'), lab: c.querySelector('.lab'), lanes: c.querySelectorAll('.fa-lane') };
+      cellsBox.append(c);
+    });
+
+    const laneHead = el('div', 'fa-lane-head');
+    laneHead.append(el('span', '', '地址'), el('span', '', '内容'), el('span', 'fa-lane-lab is-sp', 'RSP'), el('span', 'fa-lane-lab is-bp', 'RBP'));
+    const side = el('div', 'mo-side');
+    side.append(regs, laneHead, cellsBox);
+
+    const body = el('div', 'mo-body');
+    body.append(opsBox, side);
+
+    const wrap = el('div', 'mo');
+    wrap.append(tabs, head, body, note, ctrls);
+    box.append(wrap);
+
+    const tabEls = MODES.map((m, i) => {
+      const b = el('button', 'mo-tab', m.id);
+      b.addEventListener('click', () => { mi = i; k = 0; render(); });
+      tabs.append(b);
+      return b;
+    });
+
+    function state() {
+      const m = MODES[mi];
+      const st = { rip: m.start.rip, sp: m.start.sp, bp: m.start.bp, cells: m.start.cells, touch: '', read: false };
+      for (let i = 0; i < k; i++) {
+        const o = m.ops[i];
+        if (o.rip) st.rip = o.rip;
+        if (o.sp) st.sp = o.sp;
+        if (o.bp) st.bp = o.bp;
+        if (o.cells) st.cells = o.cells;
+        st.touch = o.touch || '';
+        st.read = !!o.read;
+      }
+      return st;
+    }
+
+    function render() {
+      const m = MODES[mi];
+      tabEls.forEach((b, i) => b.classList.toggle('is-on', i === mi));
+
+      head.textContent = '';
+      const h1 = el('span', 'mo-ins', m.ins);
+      const h2 = el('span', 'mo-at', m.at);
+      const h3 = el('span', 'mo-eq', m.eq);
+      head.append(h1, h2, h3);
+
+      opsBox.textContent = '';
+      m.ops.forEach((o, i) => {
+        const row = el('div', 'mo-op' + (i < k ? ' is-done' : '') + (i === k - 1 ? ' is-now' : ''));
+        const idx = el('span', 'idx', i + 1);
+        const tx = el('div', 'tx');
+        tx.append(el('span', 't', o.t), el('span', 'r', o.r));
+        row.append(idx, tx);
+        opsBox.append(row);
+      });
+      if (!m.ops.length) opsBox.append(el('div', 'mo-op', '这条指令没有附加动作'));
+
+      const st = state();
+      regs.textContent = '';
+      [['RIP', st.rip], ['RSP', st.sp], ['RBP', st.bp]].forEach(([n, v]) => {
+        const r = el('span', 'fa-reg');
+        r.append(el('b', '', n), el('span', 'num', v));
+        if (n === 'RIP') r.classList.add('is-rip');
+        if (n === 'RSP') r.classList.add('is-sp');
+        if (n === 'RBP') r.classList.add('is-bp');
+        regs.append(r);
+      });
+
+      SLOTS.forEach((addr) => {
+        const ref = cellEls[addr];
+        const cell = st.cells[addr];
+        ref.c.className = 'fa-cell';
+        if (cell) {
+          ref.c.classList.add('is-filled');
+          if (cell.tone) ref.c.classList.add('is-' + cell.tone);
+          ref.val.textContent = cell.v;
+          ref.lab.textContent = cell.label || '';
+        } else {
+          ref.c.classList.add('is-empty');
+          ref.val.textContent = '·';
+          ref.lab.textContent = '';
+        }
+        if (addr === st.touch) ref.c.classList.add(st.read ? 'is-read' : 'is-touch');
+        ref.lanes.forEach((l) => { l.textContent = ''; l.className = 'fa-lane'; });
+        if (addr === st.sp) {
+          ref.lanes[0].textContent = 'SP';
+          ref.lanes[0].classList.add('is-on', 'is-sp');
+        }
+        if (addr === st.bp) {
+          ref.lanes[1].textContent = 'BP';
+          ref.lanes[1].classList.add('is-on', 'is-bp');
+        }
+      });
+
+      note.textContent = '';
+      if (k === 0) {
+        richText(note, '`' + m.ins.trim() + '` 在 ' + m.at + '。点「下一步」看它拆成几个动作 —— 所有微步都从「取指之后」开始，这时 `RIP` 已经指向下一条。');
+      } else if (k <= m.ops.length) {
+        richText(note, m.ops[k - 1].note);
+      }
+      const tailEl = root.querySelector('.mo-tail');
+      if (tailEl) {
+        tailEl.textContent = '';
+        if (k === m.ops.length) richText(tailEl, m.tail);
+      }
+
+      counter.textContent = k + ' / ' + m.ops.length;
+      prev.disabled = k === 0;
+      next.disabled = k >= m.ops.length;
+      if (statusEl) statusEl.textContent = k === 0 ? '还没开始' : (k + ' 个微步');
+    }
+
+    prev.addEventListener('click', () => { if (k > 0) { k--; render(); } });
+    next.addEventListener('click', () => { if (k < MODES[mi].ops.length) { k++; render(); } });
+    reset.addEventListener('click', () => { k = 0; render(); });
+
+    const tail = el('div', 'mo-tail');
+    wrap.insertBefore(tail, ctrls);
     render();
   };
 
