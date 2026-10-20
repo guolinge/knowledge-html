@@ -1,0 +1,568 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-has-toc="1">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>程序怎么启动 · 第一条线程、M0 与 main G</title>
+<meta name="description" content="内核 exec 时只交出一条线程；rt0_go 把它登记成 M0 并造出 g0，schedinit 一次建齐 P，newproc 造出 main G，mstart 让它进调度循环。`go f()` 只造 G，不造线程；新线程只在没有空闲 M 且确实需要时，由 runtime 请求、内核 clone。" />
+<link rel="stylesheet" href="../../assets/theme.css?v=b918ec5c83" />
+  <link rel="stylesheet" href="../../assets/blocks.css?v=1af3923321" />
+  <link rel="stylesheet" href="../../assets/archify-embed.css?v=68fec0b81b" />
+</head>
+<body>
+<div id="progress"></div>
+<div id="tocScrim"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
+    <a class="brand" href="../../index.html"><span class="dot"></span>知识笔记</a>
+    
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="toc" id="toc">
+      <p class="toc-title">目录</p>
+      <a href="../../index.html" class="sub">← 全部笔记</a>
+      <a href="#三个动作分开看">三个动作分开看</a>
+      <a href="#启动前一条线程零个-goroutine">启动前：一条线程，零个 goroutine</a>
+      <a href="#rt0go把这条线程登记成-m0顺手造-g0">rt0_go：把这条线程登记成 M0，顺手造 g0</a>
+      <a href="#schedinitp-是一次建齐的">schedinit：P 是一次建齐的</a>
+      <a href="#main-gnewproc-造出来的普通-g">main G：newproc 造出来的普通 G</a>
+      <a href="#go-f把-g-放进队列仅此而已">go f()：把 G 放进队列，仅此而已</a>
+      <a href="#什么时候才会真的-clone-一条线程">什么时候才会真的 clone 一条线程</a>
+      <a href="#同样是等代价不一样" class="sub">同样是「等」，代价不一样</a>
+      <a href="#速查">速查</a>
+      <a href="#quiz">quiz</a>
+      <a href="#接着往下读">接着往下读</a>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow">● Go 协程 · 启动</span>
+      <h1>程序怎么启动 · 第一条线程、M0 与 main G</h1>
+      <p class="lede">内核 exec 时只交出一条线程；rt0_go 把它登记成 M0 并造出 g0，schedinit 一次建齐 P，newproc 造出 main G，mstart 让它进调度循环。`go f()` 只造 G，不造线程；新线程只在没有空闲 M 且确实需要时，由 runtime 请求、内核 clone。</p>
+    </div>
+
+<aside class="needs">
+      <p class="needs-title">读这篇之前，你需要先知道</p>
+      <a class="need" href="../goroutine-vs-thread/">← <b>1. goroutine 与线程 · 四个问题的答案</b><span>G 是 runtime 里的任务记录，M 是内核线程，P 是运行许可；换 G 只动三个寄存器，好处是敢开更多</span></a>
+    </aside>
+    <div class="provenance"><span><b>来源</b> Go 1.26.2 源码 /usr/local/go/src/runtime（asm_arm64.s 的 rt0_go、proc.go 的 schedinit / procresize / newproc / newm / startm / handoffp / retake / mstart、stack.go、os_linux.go、os_darwin.go、mprof.go），读于 2026-10-20 · go.dev/src/runtime/proc.go（官方源码浏览）https://go.dev/src/runtime/proc.go · runtime 包文档（NumGoroutine / GOMAXPROCS / ThreadCreateProfile）https://pkg.go.dev/runtime · Go 1.25 发布说明（GOMAXPROCS 容器感知）https://go.dev/doc/go1.25 · Internals for Interns: The Bootstrap https://internals-for-interns.com/posts/understanding-go-runtime · The Bootstrap Process · Golang Internals Part 5 https://www.altoros.com/blog/golang-internals-part-5-the-runtime-bootstrap-process · Scheduler Hand Offs in Go https://alexanderobregon.substack.com/p/scheduler-hand-offs-in-go · 本机实测 Apple M4 / macOS 26 / Go 1.26.2（2026-10-20）：GOMAXPROCS=10 空程序 schedtrace threads=5；GOMAXPROCS=1 时 threads=3；10 万个 G 停在 channel 上（P=1）线程数 3→3、（P=10）5→11；50 个 syscall.Pipe 阻塞 read 后 53 条线程</span><span><b>生成</b> 2026-10-20</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">Go</span> <span class="tag tone-muted">runtime</span> <span class="tag tone-muted">M0</span> <span class="tag tone-muted">GMP</span> <span class="tag tone-muted">线程创建</span></span></div>
+
+<h2 id="三个动作分开看"><span class="num">01</span>三个动作分开看</h2>
+<p>你的问题里其实混了三件事，先拆开：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>动作</th><th>谁决定</th><th>谁真正执行 / 什么时候</th></tr></thead><tbody><tr><th>得到第一条线程</th><td data-label="谁决定">操作系统。进程启动（exec）时就带着一条主线程</td><td data-label="谁真正执行 / 什么时候">内核。Go 的代码还没开始跑，线程已经在了</td></tr><tr><th>造 g0、P、main G</th><td data-label="谁决定">Go runtime。rt0_go → schedinit → newproc</td><td data-label="谁真正执行 / 什么时候">就在那条主线程上跑，不经过内核调度</td></tr><tr><th>再开一条新线程</th><td data-label="谁决定">Go runtime 决定（startm），内核执行（clone / pthread_create）</td><td data-label="谁真正执行 / 什么时候">有活要干、又没有空闲 M 时；或者某个 M 沉进了阻塞的系统调用</td></tr></tbody></table></div><div class="callout tone-violet">
+      <span class="ic">🧭</span>
+      <div><p><mark class="mk-blue">线程的创建权在内核，决定权在 runtime；G 的创建完全不经过内核。</mark></p>
+<p>所以「Go 运行时负责创建线程」这句话要改成：<strong>runtime 按需请求，内核真正 clone</strong>。</p>
+</div>
+    </div><h2 id="启动前一条线程零个-goroutine"><span class="num">02</span>启动前：一条线程，零个 goroutine</h2>
+<p>程序启动不是从 <code>main()</code> 开始的。内核把可执行文件 exec 起来，只会给进程一条主线程，栈指针指向内核准备好的那块栈。这时候进程里：</p>
+<ul>
+<li>没有 g、没有 P、没有调度器；</li>
+<li>入口是 <code>runtime·rt0_go</code>（汇编），不是 <code>main</code>；</li>
+<li>后面所有的对象，都是这条线程自己一步步搭出来的。</li>
+</ul>
+<p>先看 <code>main</code> 跑起来时，进程里已经站着谁，以及每个东西是哪一步造出来的：</p>
+<figure class="archfig" data-arch style="--arch-max-width:1560px" data-boundaries="nested" data-pano data-parts='{"kern":{"label":"内核","sub":"线程的出生地","detail":"内核在 exec 时创建进程的主线程，之后 Go 每次需要新线程都走 clone（Linux）或 pthread_create（Darwin）。内核不参与 G 的排队。"},"m0":{"label":"M0 · 初始线程","sub":"内核给的那一条","detail":"m0 是 BSS 里一个全零的 m 结构，不是 malloc 出来的。rt0_go 把 g0 和它互相指好，从此这条线程就有了 Go 的身份。"},"g0":{"label":"g0 · 调度用 G","sub":"不是零号任务","detail":"g0 有自己的 g 结构，但它不跑用户函数。调度器、栈扩容、gopark 这些需要在「干净栈」上跑的代码都用它。新 M 的 g0 在 Linux 上是 malg(16 KiB)，Darwin 上直接借 pthread 的栈。"},"rt":{"label":"Go runtime","sub":"启动阶段的总调度","detail":"rt0_go 之后依次是 args / osinit / schedinit；schedinit 里把栈池、堆、GC、P 都建好；最后 newproc 造 main G、mstart 进调度循环。"},"ps":{"label":"P0 … Pn","sub":"GOMAXPROCS 个","detail":"启动时当前 M 还没有 P，procresize 建完 P 后把 allp[0] 交给它。P 的数量决定「同时跑 Go 代码的 M 最多几条」，不决定线程总数。"},"maing":{"label":"main G","sub":"第一个被 newproc 造出来的 G","detail":"它的入口是 runtime.main。runtime.main 把最大栈设成 1 GB、标记 mainStarted、开 sysmon、锁住 M0，跑完所有包的 init 才进 main.main。"},"sysmon":{"label":"sysmon 的 M","sub":"没有 P 的监控线程","detail":"它不持有 P，所以不参与「同时跑 Go 代码」的并发度；它负责抢占跑太久的 G、从系统调用里收回 P、在没人 poll 网络时叫醒一条 M。"}}' data-tours='[{"id":"boot","label":"启动按什么顺序搭","steps":[{"at":["kern"],"text":"内核 exec：==只给一条主线程==，栈指针指向它的栈。"},{"at":["m0","g0"],"text":"rt0_go：把这条线程登记成 m0，把它的栈划给 g0，两者互相指好。"},{"at":["rt","ps"],"text":"schedinit：建栈池、堆、GC；`procresize(GOMAXPROCS)` 一次建齐 P，P0 交给 M0。"},{"at":["maing"],"text":"newproc(mainPC)：造出 main G，放进 P0 的 runnext。"},{"at":["sysmon"],"text":"mstart → schedule 取到 main G → runtime.main；它先 newm(sysmon)，==启动后第一条新线程==。"}]},{"id":"who","label":"谁创建了谁","steps":[{"at":["kern","m0"],"text":"内核 → M0：这是唯一不是 Go 创建的线程。"},{"at":["rt","g0"],"text":"runtime → g0：只是把 M0 的栈登记成 g0 的栈，没有分配新栈。"},{"at":["rt","ps"],"text":"runtime → P 池：一次建齐，之后不再按需新建。"},{"at":["rt","maing"],"text":"runtime → main G：和 `go f()` 同一条 newproc 路径。"},{"at":["rt","sysmon"],"text":"runtime → sysmon 的 M：这里才第一次向内核要新线程。"}]}]' data-frames='[{"id":"process","boundary":0,"kind":"contains","label":"一个 Go 进程 · 用户态","detail":"启动阶段造出来的东西都在这层：M0 是接管来的线程，g0 是它的调度栈，P 是一批许可，main G 是第一个任务。内核只在下面那一层。","members":["m0","rt","sysmon","g0","ps","maing"],"depth":1},{"id":"kernel","boundary":1,"kind":"classification","label":"内核态","detail":"内核只做两件事：exec 时给一条线程；之后按 runtime 的请求 clone 新线程。它不知道 G 和 P。","members":["kern"],"depth":1}]'>
+      <div class="arch-boundary-ui">
+          <div class="arch-boundary-toolbar"><span class="arch-boundary-label">边界</span>
+            <button type="button" data-boundary-mode="nested" aria-pressed="true">多层归属框</button>
+            <button type="button" data-boundary-mode="flat" aria-pressed="false">只留一层分区</button>
+            <button type="button" data-arch-reset>恢复全图</button>
+          </div>
+          <div class="arch-address-box" aria-live="polite"><div data-arch-address>点一个零件，看完整归属路径；点一个区域标题，看这一层的含义。</div>
+            <div data-arch-frame-detail>最外框表示逻辑资源域，不表示所有对象在一块内存里。每层边界的标题说明分组依据。</div></div>
+        </div>
+      <div class="arch-canvas"><svg viewBox="0 0 1200 690" role="img" aria-labelledby="go-boot-archify-diagram-title go-boot-archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
+        <title id="go-boot-archify-diagram-title">main 跑起来之前，进程里已经站着谁</title>
+        <desc id="go-boot-archify-diagram-description">内核只交出一条线程；M0、g0、P 池、main G 都是 runtime 在这条线程上顺手搭出来的</desc>
+        <!-- Definitions -->
+        <defs>
+          <marker id="go-boot-arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-default" />
+          </marker>
+          <marker id="go-boot-arrowhead-emphasis" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-emphasis" />
+          </marker>
+          <marker id="go-boot-arrowhead-security" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-security" />
+          </marker>
+          <marker id="go-boot-arrowhead-dashed" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-dashed" />
+          </marker>
+          <pattern id="go-boot-grid" width="40" height="40" patternUnits="userSpaceOnUse">
+            <path d="M 40 0 L 0 0 0 40" class="c-grid" stroke-width="0.5"/>
+          </pattern>
+        </defs>
+
+        <!-- Background Grid -->
+        <rect width="100%" height="100%" fill="url(#go-boot-grid)" />
+
+        <!-- Boundaries (behind everything) -->
+        <g class="arch-frame" data-frame="process" data-depth="1" data-frame-flat="false" data-frame-kind="contains" role="button" tabindex="0" aria-pressed="false" aria-label="一个 Go 进程 · 用户态"><title>启动阶段造出来的东西都在这层：M0 是接管来的线程，g0 是它的调度栈，P 是一批许可，main G 是第一个任务。内核只在下面那一层。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="0" data-frame-members="m0 rt sysmon g0 ps maing" x="10" y="200" width="1180" height="450" rx="12" class="c-region" stroke-width="1"/>
+        <text x="18" y="218" class="t-cloud" font-size="9" font-weight="600">一个 Go 进程 · 用户态</text></g>
+
+        <g class="arch-frame" data-frame="kernel" data-depth="1" data-frame-flat="false" data-frame-kind="classification" role="button" tabindex="0" aria-pressed="false" aria-label="内核态"><title>内核只做两件事：exec 时给一条线程；之后按 runtime 的请求 clone 新线程。它不知道 G 和 P。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="1" data-frame-members="kern" x="10" y="20" width="1180" height="160" rx="12" class="c-region" stroke-width="1"/>
+        <text x="18" y="38" class="t-cloud" font-size="9" font-weight="600">内核态</text></g>
+
+        <!-- Connection paths (before components for correct z-order) -->
+        <path data-edge-from="kern" data-edge-to="m0" data-edge-label="exec 交出的那条线程" data-edge-key="0" data-edge-id="kern-m0" data-composition-points="600,150;600,190;190,190;190,230" d="M 600 150 L 600 182 Q 600 190 592 190 L 198 190 Q 190 190 190 198 L 190 230" class="a-default" stroke-width="1.5" marker-end="url(#go-boot-arrowhead)"/>
+        <path data-edge-from="m0" data-edge-to="g0" data-edge-label="g0 用它的栈" data-edge-key="1" data-edge-id="m0-g0" data-composition-points="190,370;190,480" d="M 190 370 L 190 480" class="a-default" stroke-width="1.5" marker-end="url(#go-boot-arrowhead)"/>
+        <path data-edge-from="rt" data-edge-to="ps" data-edge-label="建 P 池" data-edge-key="2" data-edge-id="rt-ps" data-composition-points="623,370;623,425;570,425;570,480" d="M 623 370 L 623 417 Q 623 425 615 425 L 578 425 Q 570 425 570 433 L 570 480" class="a-default" stroke-width="1.5" marker-end="url(#go-boot-arrowhead)"/>
+        <path data-edge-from="rt" data-edge-to="maing" data-edge-label="newproc(mainPC)" data-edge-key="3" data-edge-id="rt-maing" data-composition-points="637,370;637,425;980,425;980,480" d="M 637 370 L 637 417 Q 637 425 645 425 L 972 425 Q 980 425 980 433 L 980 480" class="a-default" stroke-width="1.5" marker-end="url(#go-boot-arrowhead)"/>
+        <path data-edge-from="rt" data-edge-to="sysmon" data-edge-label="newm(sysmon)" data-edge-key="4" data-edge-id="rt-sysmon" data-composition-points="840,300;940,300" d="M 840 300 L 940 300" class="a-default" stroke-width="1.5" marker-end="url(#go-boot-arrowhead)"/>
+        <path data-edge-from="ps" data-edge-to="maing" data-edge-label="排进 runnext" data-edge-key="5" data-edge-id="ps-maing" data-composition-points="720,550;800,550" d="M 720 550 L 800 550" class="a-default" stroke-width="1.5" marker-end="url(#go-boot-arrowhead)"/>
+
+        <!-- Components -->
+        <g id="go-boot-node-kern" data-nb="1" data-node-id="kern" data-node-label="内核" tabindex="0" role="button" aria-label="Focus 内核, exec 给一条线程 · 之后按请求 clone, 内核态" aria-pressed="false" data-node-kind="cloud" data-node-sublabel="exec 给一条线程 · 之后按请求 clone" data-node-context="内核态">
+          <title>内核 · exec 给一条线程 · 之后按请求 clone · 内核态</title>
+          <rect x="40" y="50" width="1120" height="100" rx="6" class="c-mask"/>
+          <rect x="40" y="50" width="1120" height="100" rx="6" class="c-cloud" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="cloud" class="semantic-sigil s-cloud" transform="translate(46 56) scale(0.6875)">
+            <path d="M4.3 12.5h7.3a2.4 2.4 0 0 0 .2-4.8 4 4 0 0 0-7.5-1.3A3.1 3.1 0 0 0 4.3 12.5Z"/>
+          </g>
+          <rect class="nb-badge" x="1078.4" y="58" width="69.6" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="1113.2" y="69" font-size="8" text-anchor="middle">exec / clone</text>
+          <text class="nb-title" x="74" y="71" font-size="10.5" font-weight="600">内核</text>
+          <line class="nb-hr" x1="48" y1="78" x2="1152" y2="78"/>
+          <text class="nb-k" x="52" y="103" font-size="9">启动时</text><text class="nb-v" x="93.4" y="103" font-size="9">给进程一条主线程</text>
+          <text class="nb-k" x="52" y="117" font-size="9">之后</text><text class="nb-v" x="93.4" y="117" font-size="9">按请求 clone 新线程</text>
+          <text class="nb-note" x="52" y="142" font-size="8">它不认识 G 和 P；线程的创建在这里，什么时候要由 runtime 说。</text>
+        </g>
+
+        <g id="go-boot-node-m0" data-nb="1" data-node-id="m0" data-node-label="M0 · 初始线程" tabindex="0" role="button" aria-label="Focus M0 · 初始线程, runtime.m0 · 内核给的, 一个 Go 进程 · 用户态" aria-pressed="false" data-node-kind="backend" data-node-sublabel="runtime.m0 · 内核给的" data-node-context="一个 Go 进程 · 用户态">
+          <title>M0 · 初始线程 · runtime.m0 · 内核给的 · 一个 Go 进程 · 用户态</title>
+          <rect x="40" y="230" width="300" height="140" rx="6" class="c-mask"/>
+          <rect x="40" y="230" width="300" height="140" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(46 236) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <rect class="nb-badge" x="277.6" y="238" width="50.4" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="302.8" y="249" font-size="8" text-anchor="middle">接管来的</text>
+          <text class="nb-title" x="74" y="251" font-size="10.5" font-weight="600">M0 · 初始线程</text>
+          <line class="nb-hr" x1="48" y1="258" x2="332" y2="258"/>
+          <text class="nb-k" x="52" y="296" font-size="9">从哪来</text><text class="nb-v" x="104.2" y="296" font-size="9">进程的主线程</text>
+          <text class="nb-k" x="52" y="310" font-size="9">在 Go 里</text><text class="nb-v" x="104.2" y="310" font-size="9">runtime.m0，一个 m 结构</text>
+          <text class="nb-k" x="52" y="324" font-size="9">它跑什么</text><text class="nb-v" x="104.2" y="324" font-size="9">g0 上的启动代码</text>
+          <text class="nb-note" x="52" y="362" font-size="8">M0 不是 Go 创建的，Go 只是把它登记下来。</text>
+        </g>
+
+        <g id="go-boot-node-rt" data-nb="1" data-node-id="rt" data-node-label="Go runtime" tabindex="0" role="button" aria-label="Focus Go runtime, rt0_go → schedinit → procresize, 一个 Go 进程 · 用户态" aria-pressed="false" data-node-kind="backend" data-node-sublabel="rt0_go → schedinit → procresize" data-node-tag="启动代码" data-node-context="一个 Go 进程 · 用户态">
+          <title>Go runtime · rt0_go → schedinit → procresize · 一个 Go 进程 · 用户态 · 启动代码</title>
+          <rect x="420" y="230" width="420" height="140" rx="6" class="c-mask"/>
+          <rect x="420" y="230" width="420" height="140" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(426 236) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <rect class="nb-badge" x="777.6" y="238" width="50.4" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="802.8" y="249" font-size="8" text-anchor="middle">启动代码</text>
+          <text class="nb-title" x="454" y="251" font-size="10.5" font-weight="600">Go runtime</text>
+          <line class="nb-hr" x1="428" y1="258" x2="832" y2="258"/>
+          <text class="nb-k" x="432" y="296" font-size="9">启动时</text><text class="nb-v" x="473.4" y="296" font-size="9">rt0_go → schedinit → procresize</text>
+          <text class="nb-k" x="432" y="310" font-size="9">造什么</text><text class="nb-v" x="473.4" y="310" font-size="9">g0 绑定、P 池、main G</text>
+          <text class="nb-k" x="432" y="324" font-size="9">之后</text><text class="nb-v" x="473.4" y="324" font-size="9">newproc 造 G、startm 要线程</text>
+          <text class="nb-note" x="432" y="362" font-size="8">runtime 是链接进二进制的代码，不是独立进程。</text>
+        </g>
+
+        <g id="go-boot-node-sysmon" data-nb="1" data-node-id="sysmon" data-node-label="sysmon 的 M" tabindex="0" role="button" aria-label="Focus sysmon 的 M, 没有 P，只做监控, 一个 Go 进程 · 用户态" aria-pressed="false" data-node-kind="backend" data-node-sublabel="没有 P，只做监控" data-node-context="一个 Go 进程 · 用户态">
+          <title>sysmon 的 M · 没有 P，只做监控 · 一个 Go 进程 · 用户态</title>
+          <rect x="940" y="230" width="220" height="140" rx="6" class="c-mask"/>
+          <rect x="940" y="230" width="220" height="140" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(946 236) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <rect class="nb-badge" x="1078.4" y="238" width="69.6" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="1113.2" y="249" font-size="8" text-anchor="middle">第一条新线程</text>
+          <text class="nb-title" x="974" y="251" font-size="10.5" font-weight="600">sysmon 的 M</text>
+          <line class="nb-hr" x1="948" y1="258" x2="1152" y2="258"/>
+          <text class="nb-k" x="952" y="296" font-size="9">怎么来</text><text class="nb-v" x="993.4" y="296" font-size="9">runtime.main 里 newm</text>
+          <text class="nb-k" x="952" y="310" font-size="9">身份</text><text class="nb-v" x="993.4" y="310" font-size="9">一条没有 P 的 M</text>
+          <text class="nb-k" x="952" y="324" font-size="9">干什么</text><text class="nb-v" x="993.4" y="324" font-size="9">抢占、handoff、netpoll</text>
+          <text class="nb-note" x="952" y="362" font-size="8">启动过程中 GC 和清扫也会再要几条，不只有它。</text>
+        </g>
+
+        <g id="go-boot-node-g0" data-nb="1" data-node-id="g0" data-node-label="g0 · 调度用 G" tabindex="0" role="button" aria-label="Focus g0 · 调度用 G, 栈就是这条线程的栈, 一个 Go 进程 · 用户态" aria-pressed="false" data-node-kind="backend" data-node-sublabel="栈就是这条线程的栈" data-node-context="一个 Go 进程 · 用户态">
+          <title>g0 · 调度用 G · 栈就是这条线程的栈 · 一个 Go 进程 · 用户态</title>
+          <rect x="40" y="480" width="300" height="120" rx="6" class="c-mask"/>
+          <rect x="40" y="480" width="300" height="120" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(46 486) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <rect class="nb-badge" x="287.2" y="488" width="40.8" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="307.6" y="499" font-size="8" text-anchor="middle">调度栈</text>
+          <text class="nb-title" x="74" y="501" font-size="10.5" font-weight="600">g0 · 调度用 G</text>
+          <line class="nb-hr" x1="48" y1="508" x2="332" y2="508"/>
+          <text class="nb-k" x="52" y="536" font-size="9">是什么</text><text class="nb-v" x="93.4" y="536" font-size="9">一个 g 结构，栈就是线程的栈</text>
+          <text class="nb-k" x="52" y="550" font-size="9">干什么</text><text class="nb-v" x="93.4" y="550" font-size="9">schedule / gopark / morestack</text>
+          <text class="nb-k" x="52" y="564" font-size="9">和 M</text><text class="nb-v" x="93.4" y="564" font-size="9">每个 M 各有一条 g0</text>
+          <text class="nb-note" x="52" y="592" font-size="8">用户 G 的代码不会跑在 g0 上。</text>
+        </g>
+
+        <g id="go-boot-node-ps" data-nb="1" data-node-id="ps" data-node-label="P0 … Pn" tabindex="0" role="button" aria-label="Focus P0 … Pn, GOMAXPROCS 个，P0 给 M0, 一个 Go 进程 · 用户态" aria-pressed="false" data-node-kind="backend" data-node-sublabel="GOMAXPROCS 个，P0 给 M0" data-node-tag="一次建齐" data-node-context="一个 Go 进程 · 用户态">
+          <title>P0 … Pn · GOMAXPROCS 个，P0 给 M0 · 一个 Go 进程 · 用户态 · 一次建齐</title>
+          <rect x="420" y="480" width="300" height="140" rx="6" class="c-mask"/>
+          <rect x="420" y="480" width="300" height="140" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(426 486) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <rect class="nb-badge" x="657.6" y="488" width="50.4" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="682.8" y="499" font-size="8" text-anchor="middle">一次建齐</text>
+          <text class="nb-title" x="454" y="501" font-size="10.5" font-weight="600">P0 … Pn</text>
+          <line class="nb-hr" x1="428" y1="508" x2="712" y2="508"/>
+          <text class="nb-k" x="432" y="546" font-size="9">什么时候</text><text class="nb-v" x="484.2" y="546" font-size="9">schedinit 里一次建齐</text>
+          <text class="nb-k" x="432" y="560" font-size="9">数量</text><text class="nb-v" x="484.2" y="560" font-size="9">GOMAXPROCS 个</text>
+          <text class="nb-k" x="432" y="574" font-size="9">P0</text><text class="nb-v" x="484.2" y="574" font-size="9">分给正在跑的 M0</text>
+          <text class="nb-note" x="432" y="612" font-size="8">P 是许可和队列，自己不执行代码。</text>
+        </g>
+
+        <g id="go-boot-node-maing" data-nb="1" data-node-id="maing" data-node-label="main G" tabindex="0" role="button" aria-label="Focus main G, 2 KiB 栈 · 和普通 G 一样, 一个 Go 进程 · 用户态" aria-pressed="false" data-node-kind="backend" data-node-sublabel="2 KiB 栈 · 和普通 G 一样" data-node-context="一个 Go 进程 · 用户态">
+          <title>main G · 2 KiB 栈 · 和普通 G 一样 · 一个 Go 进程 · 用户态</title>
+          <rect x="800" y="480" width="360" height="140" rx="6" class="c-mask"/>
+          <rect x="800" y="480" width="360" height="140" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(806 486) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <rect class="nb-badge" x="1088.0" y="488" width="60.0" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="1118.0" y="499" font-size="8" text-anchor="middle">第一个任务</text>
+          <text class="nb-title" x="834" y="501" font-size="10.5" font-weight="600">main G</text>
+          <line class="nb-hr" x1="808" y1="508" x2="1152" y2="508"/>
+          <text class="nb-k" x="812" y="546" font-size="9">怎么来</text><text class="nb-v" x="853.4" y="546" font-size="9">newproc(mainPC) 造的普通 G</text>
+          <text class="nb-k" x="812" y="560" font-size="9">栈</text><text class="nb-v" x="853.4" y="560" font-size="9">2 KiB 起，和别的 G 一样</text>
+          <text class="nb-k" x="812" y="574" font-size="9">起点</text><text class="nb-v" x="853.4" y="574" font-size="9">runtime.main，再进 main.main</text>
+          <text class="nb-note" x="812" y="612" font-size="8">它和 `go f()` 造出来的 G 走同一条创建路径。</text>
+        </g>
+
+        <!-- Connection labels -->
+        <g data-detail="context" data-edge-from="kern" data-edge-to="m0" data-edge-label="exec 交出的那条线程" data-edge-key="0" data-edge-id="kern-m0">
+          <rect x="179.4" y="180" width="101.2" height="14" rx="3" class="c-mask"/>
+          <text x="230" y="190" class="t-muted" font-size="8" text-anchor="middle">exec 交出的那条线程</text>
+        </g>
+        <g data-detail="context" data-edge-from="m0" data-edge-to="g0" data-edge-label="g0 用它的栈" data-edge-key="1" data-edge-id="m0-g0">
+          <rect x="158.6" y="395" width="62.8" height="14" rx="3" class="c-mask"/>
+          <text x="190" y="405" class="t-muted" font-size="8" text-anchor="middle">g0 用它的栈</text>
+        </g>
+        <g data-detail="context" data-edge-from="rt" data-edge-to="ps" data-edge-label="建 P 池" data-edge-key="2" data-edge-id="rt-ps">
+          <rect x="574.7" y="405" width="43.6" height="14" rx="3" class="c-mask"/>
+          <text x="596.5" y="415" class="t-muted" font-size="8" text-anchor="middle">建 P 池</text>
+        </g>
+        <g data-detail="context" data-edge-from="rt" data-edge-to="maing" data-edge-label="newproc(mainPC)" data-edge-key="3" data-edge-id="rt-maing">
+          <rect x="767.5" y="405" width="82" height="14" rx="3" class="c-mask"/>
+          <text x="808.5" y="415" class="t-muted" font-size="8" text-anchor="middle">newproc(mainPC)</text>
+        </g>
+        <g data-detail="context" data-edge-from="rt" data-edge-to="sysmon" data-edge-label="newm(sysmon)" data-edge-key="4" data-edge-id="rt-sysmon">
+          <rect x="856.2" y="280" width="67.6" height="14" rx="3" class="c-mask"/>
+          <text x="890" y="290" class="t-muted" font-size="8" text-anchor="middle">newm(sysmon)</text>
+        </g>
+        <g data-detail="context" data-edge-from="ps" data-edge-to="maing" data-edge-label="排进 runnext" data-edge-key="5" data-edge-id="ps-maing">
+          <rect x="726.2" y="530" width="67.6" height="14" rx="3" class="c-mask"/>
+          <text x="760" y="540" class="t-muted" font-size="8" text-anchor="middle">排进 runnext</text>
+        </g>
+
+        <!-- Legend -->
+
+      </svg></div>
+      <figcaption>从「内核」进来：它只交出一条线程；M0、g0、P 池、main G 都是 runtime 在这条线程上顺手搭的。点 sysmon 看启动后第一条真正新开的线程。</figcaption>
+      <div class="pano-ui"></div>
+      <p class="arch-hint"><span class="idle">点头上的任意一个框看它的关系，点区域标题看分组含义，点零件看完整归属路径</span><span class="focused">再点一次空白处取消</span></p>
+    </figure><p>每个对象从哪一刻开始存在，可以按时间轴走一遍：</p>
+<div class="demo" data-widget="runtime-timeline" data-config="{&quot;tMax&quot;:8,&quot;procs&quot;:[{&quot;name&quot;:&quot;内核给的线程&quot;,&quot;sub&quot;:&quot;进程的主线程&quot;,&quot;spans&quot;:[[0,8]],&quot;note&quot;:&quot;exec 之后就在，Go 一进来就接管它&quot;},{&quot;name&quot;:&quot;M0&quot;,&quot;sub&quot;:&quot;runtime.m0&quot;,&quot;spans&quot;:[[0,8]],&quot;note&quot;:&quot;BSS 里的静态结构，rt0_go 把它和 g0 指好&quot;},{&quot;name&quot;:&quot;g0&quot;,&quot;sub&quot;:&quot;栈就是这条线程的栈&quot;,&quot;spans&quot;:[[1,8]],&quot;note&quot;:&quot;没有新分配栈，只是登记&quot;},{&quot;name&quot;:&quot;P0 … P9&quot;,&quot;sub&quot;:&quot;GOMAXPROCS 个&quot;,&quot;spans&quot;:[[3,8]],&quot;note&quot;:&quot;schedinit 里一次建齐，P0 归 M0&quot;},{&quot;name&quot;:&quot;main G&quot;,&quot;sub&quot;:&quot;2 KiB 栈&quot;,&quot;spans&quot;:[[4,8]],&quot;note&quot;:&quot;newproc 造出来的普通 G&quot;},{&quot;name&quot;:&quot;sysmon 的 M&quot;,&quot;sub&quot;:&quot;第一条新线程&quot;,&quot;spans&quot;:[[5,8]],&quot;note&quot;:&quot;runtime.main 里 newm 请求内核 clone&quot;}],&quot;steps&quot;:[{&quot;at&quot;:0,&quot;what&quot;:&quot;内核 exec：给进程一条主线程，栈指针指向它的栈&quot;},{&quot;at&quot;:1,&quot;what&quot;:&quot;rt0_go：把这条线程登记成 m0，把栈划给 g0&quot;},{&quot;at&quot;:2,&quot;what&quot;:&quot;schedinit：栈池、堆、GC、m0 的 gsignal 都在这一步准备好&quot;},{&quot;at&quot;:3,&quot;what&quot;:&quot;procresize(GOMAXPROCS)：一次建齐 P，P0 交给 M0&quot;},{&quot;at&quot;:4,&quot;what&quot;:&quot;newproc(mainPC)：造出 main G，进 P0 的 runnext&quot;},{&quot;at&quot;:5,&quot;what&quot;:&quot;mstart → schedule → runtime.main；先 newm(sysmon) 开第一条新线程&quot;},{&quot;at&quot;:6,&quot;what&quot;:&quot;doInit：跑所有包的 init，包括 main 包的&quot;},{&quot;at&quot;:7,&quot;what&quot;:&quot;main.main 开始跑；到这一步，M0 已经在调度循环里来回换 G 了&quot;},{&quot;at&quot;:8,&quot;what&quot;:&quot;之后每来一个 `go f()`，只是往某个 P 的队列里再放一个 G&quot;}]}">
+      <div class="demo-head">
+        <span class="title">启动过程中，每个对象从哪一刻开始存在</span>
+        <span class="status" data-status></span>
+        <span class="spacer"></span>
+        
+      </div>
+      <div class="demo-body custom" data-mount></div>
+    </div><h2 id="rt0go把这条线程登记成-m0顺手造-g0"><span class="num">03</span>rt0_go：把这条线程登记成 M0，顺手造 g0</h2>
+<p><code>m0</code> 和 <code>g0</code> 不是运行时 malloc 出来的对象，它们是 BSS 里两个全零的全局结构。<code>rt0_go</code> 做的是「登记」：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">// runtime/asm_arm64.s, rt0_go 的前几行
+MOVD  $runtime·g0(SB), g
+MOVD  RSP, R7
+MOVD  $(-64*1024)(R7), R0
+MOVD  R0, (g_stack+stack_lo)(g)      // g0 的栈底 = 当前 SP - 64 KiB
+MOVD  R7, (g_stack+stack_hi)(g)      // g0 的栈顶 = 当前 SP
+MOVD  $runtime·m0(SB), R0
+MOVD  g, m_g0(R0)                    // m0.g0 = g0
+MOVD  R0, g_m(g)                     // g0.m = m0
+</code></pre></div>
+<p>这段代码说明两件事：</p>
+<ul>
+<li><strong>g0 没有新栈</strong>。它借的就是内核给的那条线程的栈，只划了 64 KiB 出来。</li>
+<li><strong>M 和 g0 是一对</strong>。之后每条新 M 也都有一条自己的 g0：Linux（非 cgo）上是 <code>malg(16 KiB)</code>，Darwin 上直接借 pthread 给的栈。</li>
+</ul>
+<p><code>g0</code> 不是「零号 goroutine」那种任务。它没有用户函数要跑，只承载调度器的代码：<code>schedule</code>、<code>gopark</code>、栈扩容这些需要在「干净栈」上执行的动作，都在 g0 上。用户 G 的代码永远跑在它自己的栈上。</p>
+<p>每个 M 还有第三条 g：<code>gsignal</code>（Linux / Darwin 都是 32 KiB），专门给信号处理用。它在 <code>mcommoninit → mpreinit</code> 里建。</p>
+<h2 id="schedinitp-是一次建齐的"><span class="num">04</span>schedinit：P 是一次建齐的</h2>
+<p><code>rt0_go</code> 接着调 <code>args</code>、<code>osinit</code>、<code>schedinit</code>。<code>schedinit</code> 是启动阶段最长的一步，顺序大致是：</p>
+<ol>
+<li>初始化各种锁；</li>
+<li><code>stackinit</code> 建栈池，<code>mallocinit</code> 建堆，<code>randinit</code> 初始化随机数；</li>
+<li><code>mcommoninit(m0)</code> 给 M0 补上 id、<code>gsignal</code>、<code>allm</code> 链表；</li>
+<li><code>gcinit</code> 初始化 GC；</li>
+<li><code>procresize(GOMAXPROCS)</code> <strong>一次建齐所有 P</strong>。</li>
+</ol>
+<p><code>procresize</code> 建完 P 后会发现当前 M 还没有 P，于是 <code>acquirep(allp[0])</code>，P0 归 M0。这一步之后：</p>
+<ul>
+<li>P 的数量定死了，运行时不会为「多来几个 G」临时加 P；</li>
+<li>GOMAXPROCS 默认是 CPU 数（Go 1.25 起会看容器配额），也可以用环境变量或 <code>runtime.GOMAXPROCS</code> 改；</li>
+<li>每个 P 里装着 <code>runnext</code>（1 格）、<code>runq</code>（256 槽环形数组）、<code>mcache</code>；</li>
+<li>P 只是许可和队列，<strong>不执行代码</strong>。执行代码的永远是 M。</li>
+</ul>
+<h2 id="main-gnewproc-造出来的普通-g"><span class="num">05</span>main G：newproc 造出来的普通 G</h2>
+<p><code>rt0_go</code> 的最后两步是：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">MOVD $runtime·mainPC(SB), R0   // 入口是 runtime.main
+BL   runtime·newproc(SB)       // 造 main G，放进 P0 的 runnext
+BL   runtime·mstart(SB)        // 进入调度循环
+</code></pre></div>
+<p><code>newproc → newproc1</code> 对 main G 和 <code>go f()</code> 造的 G 是同一套流程：先从当前 P 的 gFree 池里拿一个空闲 g，没有就 <code>malg(2048)</code> 新建一块 2 KiB 的栈；然后设好入口和栈指针，状态从 <code>Gdead</code> 改成 <code>Grunnable</code>，放进 <code>runnext</code>。</p>
+<p>区别只有两个：main G 的入口是 <code>runtime.main</code>，而且是在 <code>mstart</code> 之前造好的。</p>
+<p><code>mstart → mstart1</code> 会把 g0 的「回来的位置」记成 <code>mstart0</code> 里的下一条指令，然后调 <code>schedule()</code>。<code>schedule</code> 从 P0 的 <code>runnext</code> 取到 main G，<code>execute</code> 把它挂到 M0 上，<code>gogo</code> 恢复它的 SP/PC 跳过去 —— 到这一刻，<code>runtime.main</code> 才开始跑。</p>
+<p><code>runtime.main</code> 做的第一件“额外”的事是：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">newm(sysmon, nil, -1)
+</code></pre></div>
+<p>这是启动后第一次向内核要新线程。sysmon 的 M 不持有 P，只做三件事：抢占跑太久的 G、从阻塞的系统调用里收回 P、在没人 poll 网络时叫醒一条 M。</p>
+<p>之后 <code>runtime.main</code> 才 <code>doInit</code>（跑所有包的 init）、<code>gcenable</code>，最后 <code>main.main</code>。</p>
+<div class="callout tone-amber">
+      <span class="ic">📏</span>
+      <div><p><strong>所以「到 main 时只有一条线程」是不对的。</strong> 本机空程序实测（<code>GODEBUG=schedtrace=1</code>）：
+GOMAXPROCS=10 时 <code>threads=5</code>，GOMAXPROCS=1 时 <code>threads=3</code>。
+多出来的那几条，是 sysmon 和 GC / 清扫这些后台工作要的；具体条数随版本、GOMAXPROCS 和负载变，不是固定值。</p>
+</div>
+    </div><h2 id="go-f把-g-放进队列仅此而已"><span class="num">06</span><code>go f()</code>：把 G 放进队列，仅此而已</h2>
+<p>一句 <code>go f()</code> 的运行时路径是：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">go f()
+ └─ runtime.newproc
+     ├─ newproc1：从 gFree 复用，或 malg(2048) 新建
+     ├─ 设入口、栈指针、状态 Gdead → Grunnable
+     ├─ runqput(pp, newg, true)：放进当前 P 的 runnext
+     └─ wakep()：如果有空闲 P、又没有 spinning 的 M，叫一条 M 来干活
+</code></pre></div>
+<p>注意最后那一步：<code>go</code> 语句本身<strong>不创建线程</strong>，但它会调 <code>wakep</code>。<code>wakep</code> 只做一件事 —— 如果「有可运行的 G、有空闲的 P、没有正在找活的 M」，就让 <code>startm</code> 去唤醒或创建一条 M。它不会为这一个 G 专门开线程，一条 M 服务的是整个 P 的队列。</p>
+<p>本机实测（Go 1.26.2，Apple M4，<code>ThreadCreateProfile</code> 数 M）：</p>
+<table>
+<thead>
+<tr>
+<th>场景</th>
+<th>线程（M）数</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>空程序，刚进 main，GOMAXPROCS=10</td>
+<td>5</td>
+</tr>
+<tr>
+<td>空程序，刚进 main，GOMAXPROCS=1</td>
+<td>3</td>
+</tr>
+<tr>
+<td>10 万个 G 停在 channel 上，GOMAXPROCS=10</td>
+<td>11</td>
+</tr>
+<tr>
+<td>10 万个 G 停在 channel 上，GOMAXPROCS=1</td>
+<td>3</td>
+</tr>
+<tr>
+<td>50 个 <code>syscall.Read</code> 真阻塞在管道上，GOMAXPROCS=10</td>
+<td>53</td>
+</tr>
+</tbody>
+</table>
+<p>两件事从这张表里能直接看出来：</p>
+<ul>
+<li><strong>G 多不等于线程多</strong>。P=1 时 10 万个 G 也没多出一条线程；P=10 时多出来的 6 条是为了把 10 个 P 填满，不是「每个 G 一条」。</li>
+<li><strong>真正拉高线程数的是阻塞的系统调用</strong>。50 个 G 卡在 <code>read</code> 上，每个都拖着一条 M 沉在内核里，线程数直接到 53。</li>
+</ul>
+<h2 id="什么时候才会真的-clone-一条线程"><span class="num">07</span>什么时候才会真的 clone 一条线程</h2>
+<p>新线程只有一条路：<code>startm</code> 找不到空闲 M，于是 <code>newm</code>。</p>
+<div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;call&quot;,&quot;to&quot;:&quot;sys&quot;},{&quot;from&quot;:&quot;sys&quot;,&quot;to&quot;:&quot;mon&quot;},{&quot;from&quot;:&quot;mon&quot;,&quot;to&quot;:&quot;ho&quot;},{&quot;from&quot;:&quot;ho&quot;,&quot;to&quot;:&quot;idle&quot;},{&quot;from&quot;:&quot;idle&quot;,&quot;to&quot;:&quot;wake&quot;,&quot;label&quot;:&quot;有&quot;},{&quot;from&quot;:&quot;idle&quot;,&quot;to&quot;:&quot;newm&quot;,&quot;label&quot;:&quot;没有&quot;}]" style="--flow-marker:url(#fa-1)">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa-1" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-green" data-id="call">
+              
+              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5L3 8l3 4.5M10 3.5L13 8l-3 4.5"/></svg>
+              <b>G 发起阻塞系统调用</b>
+              <small>read / fsync / …</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-amber" data-id="sys">
+              
+              
+              <b>M 沉进内核</b>
+              <small>P 变成 _Psyscall，队列里还有别的 G</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="mon">
+              
+              
+              <b>sysmon 发现</b>
+              <small>巡检间隔 20 µs 起，最长 10 ms</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="ho">
+              
+              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5L3 8l3 4.5M10 3.5L13 8l-3 4.5"/></svg>
+              <b>handoffp 把 P 交出去</b>
+              <small>交给一条能跑 Go 代码的 M</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-muted shape-note" data-id="idle">
+              
+              
+              <b>有 idle M？</b>
+              
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="wake">
+              
+              
+              <b>唤醒它</b>
+              <small>mget + notewakeup</small>
+            </div><div class="fnode tone-red" data-id="newm">
+              
+              
+              <b>newm → clone 新线程</b>
+              <small>allocm：新 M、新 g0</small>
+            </div></div></div>
+      
+    </div><p><code>startm</code> 的顺序是：先从 <code>sched.midle</code> 拿一条空闲 M（<code>mget</code>），有就唤醒它；没有才 <code>newm</code>：</p>
+<ul>
+<li><code>allocm</code> 为这条 M 建新的 g0（Linux 非 cgo 是 16 KiB，Darwin 借 pthread 的栈）和 gsignal；</li>
+<li><code>newosproc</code> 调 <code>clone</code>（Linux）或 <code>pthread_create</code>（Darwin），新线程从 <code>mstart</code> 开始跑；</li>
+<li>新 M 拿到交出来的 P，从队列里取 G 继续跑。</li>
+</ul>
+<p>什么时候会走到这条路上，常见四种：</p>
+<table>
+<thead>
+<tr>
+<th>触发</th>
+<th>谁发起</th>
+<th>条件</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>系统调用阻塞</td>
+<td>sysmon → <code>retake</code> → <code>handoffp</code> → <code>startm</code></td>
+<td>M 沉在内核里，P 交出去后队列里还有活</td>
+</tr>
+<tr>
+<td>有 G 可跑、P 空着</td>
+<td><code>newproc</code> / <code>ready</code> → <code>wakep</code></td>
+<td>没有 spinning M，且有 idle P</td>
+</tr>
+<tr>
+<td>后台任务要线程</td>
+<td><code>runtime.main</code> 的 <code>newm(sysmon)</code>、GC/清扫</td>
+<td>启动和后台工作需要不占 P 的 M</td>
+</tr>
+<tr>
+<td>cgo / 锁线程</td>
+<td><code>newm</code> / 模板线程</td>
+<td>调用了 C，或 <code>LockOSThread</code> 的线程不能直接 clone</td>
+</tr>
+</tbody>
+</table>
+<div class="callout tone-amber">
+      <span class="ic">⚖</span>
+      <div><p><strong>线程不是越多越好，运行时也一直在省。</strong> 空闲 M 会 park 在 <code>sched.midle</code> 上等着被复用，
+不会用完就销毁；<code>startm</code> 优先拿 idle M，拿不到才 clone。
+同时有上限：<code>sched.maxmcount = 10000</code>，超过会直接 fatal（<code>program exceeds 10000-thread limit</code>）。</p>
+</div>
+    </div><h3 id="同样是等代价不一样">同样是「等」，代价不一样</h3>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>阻塞在哪</th><th>G 的状态</th><th>线程会怎样</th></tr></thead><tbody><tr><th>channel / 锁 / timer</th><td data-label="G 的状态">Gwaiting，挂到等待队列上</td><td data-label="线程会怎样">M 转头跑别的 G，线程数不变</td></tr><tr><th>网络 I/O</th><td data-label="G 的状态">Gwaiting，fd 登记给 netpoller</td><td data-label="线程会怎样">事件到了把 G 放回某个 P 的 runnext，线程数不变</td></tr><tr><th>阻塞的系统调用（文件、部分设备）</th><td data-label="G 的状态">Gsyscall，M 陪着沉进内核</td><td data-label="线程会怎样">sysmon 把 P 交出去；没有 idle M 就 clone 一条，线程数跟着涨</td></tr></tbody></table></div><h2 id="速查"><span class="num">08</span>速查</h2>
+<table>
+<thead>
+<tr>
+<th>问题</th>
+<th>答案</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>第一条线程谁给的</td>
+<td>内核，exec 时给进程的主线程</td>
+</tr>
+<tr>
+<td>M0 是 Go 创建的吗</td>
+<td>不是。它是 BSS 里的静态 <code>m</code> 结构，rt0_go 把这条线程登记成 M0</td>
+</tr>
+<tr>
+<td>g0 的栈是哪来的</td>
+<td>借 M0 的栈，划出 64 KiB；新 M 的 g0 在 Linux 上是 16 KiB</td>
+</tr>
+<tr>
+<td>P 什么时候建</td>
+<td><code>schedinit → procresize(GOMAXPROCS)</code>，一次建齐，之后不按需加</td>
+</tr>
+<tr>
+<td>main G 什么时候建</td>
+<td><code>rt0_go</code> 最后调 <code>newproc(mainPC)</code>，进 P0 的 runnext</td>
+</tr>
+<tr>
+<td><code>go f()</code> 会创建线程吗</td>
+<td>不会。只造 G、进队列；只有 <code>wakep</code> 在「有活 + 空闲 P + 无 spinning M」时才会要线程</td>
+</tr>
+<tr>
+<td>什么时候真的 clone 线程</td>
+<td><code>startm</code> 没有 idle M 可复用时：系统调用 handoff、wakep、后台任务、cgo</td>
+</tr>
+<tr>
+<td>线程数有上限吗</td>
+<td>有，<code>maxmcount = 10000</code>，超过直接 fatal</td>
+</tr>
+</tbody>
+</table>
+<h2 id="quiz">quiz</h2>
+<div class="quiz"><details>
+        <summary>Go 程序启动时，第一条操作系统线程是谁创建的？</summary>
+        <div class="a"></div>
+      </details><details>
+        <summary>执行 <code>go f()</code> 之后，什么时候会新增一条操作系统线程？</summary>
+        <div class="a"></div>
+      </details><details>
+        <summary>P 的数量和 M 的数量是什么关系？</summary>
+        <div class="a"></div>
+      </details></div><h2 id="接着往下读">接着往下读</h2>
+<table>
+<thead>
+<tr>
+<th>想看什么</th>
+<th>去哪</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>G、M、P 各自是什么、怎么排队</td>
+<td><a href="../goroutine-vs-thread/">goroutine 与线程 · 四个问题的答案</a></td>
+</tr>
+<tr>
+<td>GMP 三件套与源码路径</td>
+<td><a href="../goroutine-gmp/">GMP · G 怎么挂回线程</a></td>
+</tr>
+<tr>
+<td>阻塞的两条路：netpoller 与 hand-off</td>
+<td><a href="../goroutine-poller/">阻塞了怎么办 · 两条路</a></td>
+</tr>
+<tr>
+<td>抢占、偷队列、runnext</td>
+<td><a href="../goroutine-scheduler/">调度器怎么挑 G</a></td>
+</tr>
+</tbody>
+</table>
+
+
+    <footer>
+      <span>程序怎么启动 · 第一条线程、M0 与 main G</span>
+      <span>最后更新 2026-10-20 · 单文件可离线打开</span>
+    </footer>
+  </main>
+</div>
+
+<script src="../../assets/app.js?v=757eed9a2d"></script>
+</body>
+</html>
