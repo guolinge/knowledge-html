@@ -261,14 +261,20 @@ export function blocksPlugin(md) {
       )
       .join('');
     // 三种形态：
-    //   panes  —— 双栏日志式（默认）
+    //   panes  —— 双栏日志式（有 panes 时）
     //   html   —— 作者手写标记，控件只负责接线
-    //   config —— 数据驱动，控件自己渲染整个 body（推荐给通用控件）
+    //   mount  —— 控件自己渲染整个 body（默认，含 config 驱动的通用控件）
+    //
+    // 判据是「有没有 panes」，不是「有没有 config」：
+    // 控件不写 config 时（call-stack-lab / frame-anchor-lab / micro-op-lab 都是）
+    // 旧写法会落到空的 `.demo-body` 上，而 `.custom` 才带 18px 内边距 ——
+    // 结果是控件内容紧贴卡片边缘，check 和 visual-check 都不报。
+    const hasPanes = Array.isArray(cfg.panes) && cfg.panes.length > 0;
     const bodyHtml = cfg.html
       ? `<div class="demo-body custom">${cfg.html}</div>`
-      : cfg.config
-        ? '<div class="demo-body custom" data-mount></div>'
-        : `<div class="demo-body">${panes}</div>`;
+      : hasPanes
+        ? `<div class="demo-body">${panes}</div>`
+        : '<div class="demo-body custom" data-mount></div>';
     return `<div class="demo" data-widget="${esc(cfg.widget)}"${
       cfg.config ? ` data-config="${esc(JSON.stringify(cfg.config))}"` : ''
     }>

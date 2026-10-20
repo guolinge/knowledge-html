@@ -770,6 +770,22 @@ WIDGETS['my-widget'] = (root) => {
 控件自己就带按钮（用 `config` 渲染整块 body）时，写上 `actions: false` —— 
 否则 demo 外壳还会多出一条「开始模拟 / 重置」工具栏，而它绑的 `[data-run]` 没人接，点了没反应。
 
+**body 的三种形态，按「有没有 `panes`」选**：有 `panes` → 双栏日志式；写了 `html` → 你的标记，控件只接线；都没有 → 一个带 18px 内边距的 `[data-mount]`，控件自己往里渲染。
+
+```callout
+tone: amber
+icon: ⚠
+text: |
+  ==控件不写 `config` 时，也要走第三种形态。==
+
+  早期实现按「有没有 `config`」判断，于是 `call-stack-lab` / `frame-anchor-lab` /
+  `micro-op-lab` 三个控件的 `demo` 块（只有 `widget:` 和 `actions: false`）落进了一个
+  空的 `.demo-body`：18px 内边距挂在 `.demo-body.custom` 上，没拿到，控件内容就紧贴卡片边缘。
+  `check` 和 `visual-check` 都是绿的 —— 只有截图看得出来。
+
+  ++现在渲染器按 `panes` 判断：只要没写 panes，就给 `.custom` + `data-mount`。++
+```
+
 **② 在 note.md 里声明外壳：**
 
 ```demo
