@@ -1,0 +1,523 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-has-toc="1">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>函数调用时，栈上到底放了什么</title>
+<meta name="description" content="返回地址不是返回值 —— 它是 call 的下一条指令。从一段内存加一根 SP 讲起，把 call / ret、栈帧、递归和 AArch64 的 LR 串起来，全部用本机真实反汇编和实测值对齐。" />
+<link rel="stylesheet" href="../../assets/theme.css?v=b918ec5c83" />
+  <link rel="stylesheet" href="../../assets/blocks.css?v=9f52d0c73f" />
+  <link rel="stylesheet" href="../../assets/archify-embed.css?v=68fec0b81b" />
+</head>
+<body>
+<div id="progress"></div>
+<div id="tocScrim"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
+    <a class="brand" href="../../index.html"><span class="dot"></span>知识笔记</a>
+    
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="toc" id="toc">
+      <p class="toc-title">目录</p>
+      <a href="../../index.html" class="sub">← 全部笔记</a>
+      <a href="#卡点两个返回根本不是一回事">卡点：两个「返回」根本不是一回事</a>
+      <a href="#栈一段内存加一根指针">栈：一段内存加一根指针</a>
+      <a href="#call-只做两件事压地址跳过去">call 只做两件事：压地址、跳过去</a>
+      <a href="#单步走一遍" class="sub">单步走一遍</a>
+      <a href="#在真机上验一次" class="sub">在真机上验一次</a>
+      <a href="#栈帧一次调用占的那一段">栈帧：一次调用占的那一段</a>
+      <a href="#为什么两个指针都要有" class="sub">为什么两个指针都要有</a>
+      <a href="#为什么必须存同一个函数会被从不同地方调用">为什么必须存：同一个函数会被从不同地方调用</a>
+      <a href="#栈有上限这是真的会崩" class="sub">栈有上限，这是真的会崩</a>
+      <a href="#aarch64-不一样返回地址先放寄存器">AArch64 不一样：返回地址先放寄存器</a>
+      <a href="#速查容易记反的六件事">速查：容易记反的六件事</a>
+      <a href="#一句话" class="sub">一句话</a>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow">● 计算机基础 · 函数调用</span>
+      <h1>函数调用时，栈上到底放了什么</h1>
+      <p class="lede">返回地址不是返回值 —— 它是 call 的下一条指令。从一段内存加一根 SP 讲起，把 call / ret、栈帧、递归和 AArch64 的 LR 串起来，全部用本机真实反汇编和实测值对齐。</p>
+    </div>
+
+
+    <div class="provenance"><span><b>来源</b> Intel SDM · CALL https://www.felixcloutier.com/x86/call —— 近调用把 CALL 之后那条指令的地址压栈 · Intel SDM · PUSH https://www.felixcloutier.com/x86/push —— RSP := RSP − 8; Memory[SS:RSP] := SRC · System V AMD64 ABI 0.99.6 · 3.2.2 The Stack Frame https://refspecs.linuxbase.org/elf/x86_64-abi-0.99.pdf —— 栈向低地址长；返回地址压入后 RSP 指向它，RSP+8 是 16 的倍数；红区 128 字节 · System V AMD64 ABI 0.99.6 · 3.2.1 寄存器用途 —— rdi/rsi/rdx/rcx/r8/r9 传参，rax 返回 · Procedure Call Standard for the Arm 64-bit Architecture (AAPCS64 2025Q4) https://github.com/ARM-software/abi-aa/ —— BL 把返回地址放进 LR(x30)；栈 full-descending 且 SP 16 字节对齐；r0-r7 传参与返回 · 本机实测（macOS 26.6.1 arm64 · Apple clang 21.0.0 · x86_64 经 Rosetta）：-O0 反汇编、lldb 读寄存器与栈内存、递归帧大小与崩溃深度</span><span><b>生成</b> 2026-10-20</span><span><b>模型</b> deepseek-v4.1-flash-1017</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">栈</span> <span class="tag tone-muted">函数调用</span> <span class="tag tone-muted">返回地址</span> <span class="tag tone-muted">汇编</span> <span class="tag tone-muted">调用约定</span></span></div>
+
+<h2 id="卡点两个返回根本不是一回事"><span class="num">01</span>卡点：两个「返回」根本不是一回事</h2>
+<p>原始说法是「调用函数前保存返回位置」。这句话里的「返回位置」很容易被读成「返回值放在哪」，但两者互不相干。</p>
+<p>拿一个能编译、能单步的函数对来分：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-c">int add(int a, int b) { return a + b; }
+int calc(int x)      { int s = add(x, 3); return s * 2; }
+</code></pre></div>
+<p><code>add</code> 执行完，CPU 要同时处理两件事：</p>
+<ul>
+<li>回到 <code>calc</code> 里继续执行。去哪个地址，由一个<strong>地址</strong>决定，这个地址叫<strong>返回地址</strong>。</li>
+<li>把算出来的 13 交给 <code>calc</code>。这个 13 叫<strong>返回值</strong>，x86-64 上放在 <code>eax</code>，AArch64 上放在 <code>x0</code>。</li>
+</ul>
+<p>本机实测（Apple clang 21，<code>-arch x86_64 -O0</code>）：<code>calc</code> 里的 <code>callq _add</code> 在 <code>0x100000373</code>，所以 <code>add</code> 看到的返回地址是 <code>0x100000378</code>；同一时刻它的返回值是 13。</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>看哪一面</th><th>返回地址 return address</th><th>返回值 return value</th></tr></thead><tbody><tr><th>一句话</th><td data-label="返回地址 return address">执行完去哪条指令继续</td><td data-label="返回值 return value">函数算出了什么</td></tr><tr><th>谁产生</th><td data-label="返回地址 return address">调用方的那条 <code>call</code> / <code>bl</code> 指令</td><td data-label="返回值 return value">被调用的函数自己算</td></tr><tr><th>长什么样</th><td data-label="返回地址 return address">一个指令地址，如 <code>0x100000378</code></td><td data-label="返回值 return value">一个数据值，如 <code>13</code></td></tr><tr><th>存在哪</th><td data-label="返回地址 return address">x86-64 压在栈顶；AArch64 先进 <code>x30</code></td><td data-label="返回值 return value">x86-64 在 <code>eax</code>；AArch64 在 <code>x0</code></td></tr><tr><th>谁来用</th><td data-label="返回地址 return address"><code>ret</code>：弹出它，跳过去</td><td data-label="返回值 return value">调用者的下一段代码</td></tr><tr><th>丢了会怎样</th><td data-label="返回地址 return address">回到错误的地址，程序跑飞</td><td data-label="返回值 return value">算出来的结果对不上</td></tr></tbody></table></div><p><code>ret</code> 不读返回值，也不改返回值。它只做一件事：从栈顶取一个地址，跳过去。<mark class="mk-blue">返回地址管「往哪走」，返回值管「算出什么」</mark>，两套机制各走各的路。</p>
+<p>把原句改写一下就没有歧义了：<mark class="mk-blue"><code>call</code> 在跳进去之前，先把「回来接着执行的那条指令地址」记下来</mark>。记的是地址，不是值。</p>
+<p>原始材料里「书签」的类比在这里是贴的：书签记的是<strong>页码</strong>（位置），不是你在附录里查到的那段<strong>内容</strong>（值）。两者都会「带回来」，但一个决定你翻回哪一页，一个被你抄进笔记。</p>
+<h2 id="栈一段内存加一根指针"><span class="num">02</span>栈：一段内存加一根指针</h2>
+<p>教材里的「栈」容易被讲成一个抽象容器。在真实机器上它简单得多：</p>
+<div class="cards" data-cols="2"><div class="ccard tone-blue">
+          
+          <h4>栈 = 一段连续内存</h4>
+          <p>进程地址空间里划出来的一块，地址从高到低。</p>
+          <div class="cbody"><p>函数调用的所有临时数据都写在这块内存里：返回地址、旧帧指针、局部变量。</p>
+<p>它没有类型、没有名字，就是一块可读可写的地址区间。</p>
+</div>
+          
+        </div><div class="ccard tone-violet">
+          
+          <h4>SP = 一个记位置的寄存器</h4>
+          <p>x86-64 叫 <code>RSP</code>，AArch64 叫 <code>SP</code>。</p>
+          <div class="cbody"><p>CPU 不知道「栈」是什么，它只知道有个寄存器里存着一个地址。</p>
+<p><mark class="mk-blue">「压栈」就是把这个地址改小，然后往新地址写东西</mark>；「弹栈」就是读出东西，再把地址改大。</p>
+</div>
+          
+        </div></div><figure class="memmap" data-memmap>
+      <figcaption class="mm-title">栈在这张地址地图的哪儿<span class="mm-cap-sub">Linux x86-64 的典型布局（macOS 的分段不同，栈同样在最上面）</span></figcaption>
+      <div class="mm-stack"><div class="mm-seg tone-muted" style="--mm-size:1">
+        <div class="mm-body">
+          <div class="mm-head"><b>内核空间</b></div>
+          <p class="mm-sub">用户态代码碰不到</p>
+        </div>
+        <div class="mm-side">
+              <span class="mm-addr">0xffff_8000…</span>
+              
+            </div>
+      </div><div class="mm-seg tone-blue" style="--mm-size:1.9">
+        <div class="mm-body">
+          <div class="mm-head"><b>栈</b><span class="mm-dir mm-down" title="向下增长">↓ 向下长</span></div>
+          <p class="mm-sub">返回地址、局部变量都在这；向低地址长</p>
+        </div>
+        <div class="mm-side">
+              
+              <span class="mm-mark">每个线程一份</span>
+            </div>
+      </div><div class="mm-seg tone-muted" style="--mm-size:1.1">
+        <div class="mm-body">
+          <div class="mm-head"><b>共享库 / mmap</b></div>
+          <p class="mm-sub">libc、动态库映射进来的区域</p>
+        </div>
+        <div class="mm-side">
+              
+              <span class="mm-mark">进程共享</span>
+            </div>
+      </div><div class="mm-seg tone-violet" style="--mm-size:2.2">
+        <div class="mm-body">
+          <div class="mm-head"><b>堆</b><span class="mm-dir mm-up" title="向上增长">↑ 向上长</span></div>
+          <p class="mm-sub">malloc / new，向高地址长</p>
+        </div>
+        <div class="mm-side">
+              
+              <span class="mm-mark">进程共享</span>
+            </div>
+      </div><div class="mm-seg tone-amber" style="--mm-size:1.1">
+        <div class="mm-body">
+          <div class="mm-head"><b>数据段</b></div>
+          <p class="mm-sub">全局变量、静态变量</p>
+        </div>
+        <div class="mm-side">
+              
+              <span class="mm-mark">进程共享</span>
+            </div>
+      </div><div class="mm-seg tone-green" style="--mm-size:1.6">
+        <div class="mm-body">
+          <div class="mm-head"><b>代码段</b></div>
+          <p class="mm-sub">指令本身，只读</p>
+        </div>
+        <div class="mm-side">
+              
+              <span class="mm-mark">可共享</span>
+            </div>
+      </div></div>
+      <div class="mm-ends">
+            <span class="mm-end">高地址 0x7fff_ffff_ffff</span>
+            <span class="mm-end">低地址 0x0000_0000_0000</span>
+          </div>
+      <p class="mm-note">一次函数调用只动最上面那一段：<strong>RSP 往下走，帧就压进去；RSP 回来，帧就没了</strong>。</p>
+    </figure><p>压栈的具体动作，Intel 手册的伪代码只有两行：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">IF OperandSize = 64 THEN
+    RSP := RSP − 8;
+    Memory[SS:RSP] := SRC;
+</code></pre></div>
+<p>这就是全部。所谓「栈指针往下走」，不是比喻，是 <code>RSP</code> 这个数值真的变小了。原始材料里 <code>SP = 1000 → 996</code> 那段示意图，说的是同一件事。</p>
+<p><mark class="mk-amber">「栈顶」在纸上要画在下面。</mark> 栈顶 = 当前最低的那个已用地址。所以画栈的时候，高地址在上、低地址在下，压栈的动作是<strong>向下</strong>长 —— 这跟「书堆越堆越高」的直觉正好相反，是最容易画反的一处。</p>
+<p>x86-64 的 ABI 还规定了两条与位置有关的约束：函数刚进门时，<code>RSP</code> 正指着返回地址，且 <code>RSP + 8</code> 是 16 的倍数；AArch64 要求 <code>SP</code> 始终 16 字节对齐。原因不在栈本身，而在 SSE / AVX 的一些指令要求操作数对齐，编译器靠这条约定保证局部变量和临时缓冲区落在对齐的地址上。这也是为什么 <code>sub rsp, 0x10</code> 里常有几字节根本没用上（见 04）。</p>
+<h2 id="call-只做两件事压地址跳过去"><span class="num">03</span>call 只做两件事：压地址、跳过去</h2>
+<p>Intel 手册对近调用（near call）的描述是明确的一句：</p>
+<div class="callout tone-muted quote">
+      <span class="ic">📖</span>
+      <div><p>When executing a near call, the processor pushes the value of the EIP register
+(which contains the offset of the instruction following the CALL instruction)
+on the stack (for use later as a return-instruction pointer). The processor then
+branches to the address in the current code segment specified by the target operand.</p>
+</div>
+    </div><p>也就是说：<code>call</code> 把「<code>call</code> 之后那条指令」的地址压进栈，然后跳到目标地址。</p>
+<p>伪代码同样是两步：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">tempRIP := RIP + tempDEST;      (* 目标地址 *)
+Push(RIP);                      (* 压的是「下一条指令」的地址 *)
+RIP := tempRIP;                 (* 跳过去 *)
+</code></pre></div>
+<p>注意压进去的是 <code>RIP</code>，而此时 <code>RIP</code> 已经指向 <code>call</code> 的<strong>下一条</strong>指令了。所以：</p>
+<ul>
+<li>存 <code>call</code> 自己的地址 → 返回时会再执行一次 <code>call</code>，死循环。</li>
+<li>存函数第一条指令的地址 → 返回时又从函数开头跑一遍，也死循环。</li>
+<li><mark class="mk-green">只有存「下一条」，返回才等于「接着往下走」。</mark></li>
+</ul>
+<p><mark class="mk-blue">原文说「可以粗略理解为 push 下一条地址 + jmp」，对近调用来说这不是近似 —— CPU 做的就是这两步。</mark></p>
+<h3 id="单步走一遍">单步走一遍</h3>
+<p>下面这个控件把 <code>main → calc → add</code> 三层的现场放在一屏里：左边是代码段（<code>▶</code> 是下一条要执行的指令），右边是栈。点「下一步」，看 <code>RSP</code> 怎么动、栈上多了什么。</p>
+<div class="demo" data-widget="call-stack-lab">
+      <div class="demo-head">
+        <span class="title">一次调用，栈上多了什么</span>
+        <span class="status" data-status></span>
+        <span class="spacer"></span>
+        
+      </div>
+      <div class="demo-body"></div>
+    </div><p>几个值得停下来看的位置：</p>
+<ul>
+<li><strong>第 2 步</strong>：<code>call calc</code> 之后，<code>0x100a</code> 出现在栈顶。这个值就是「返回地址」。</li>
+<li><strong>第 6 步</strong>：<code>call add</code> 之后，栈上同时有两个返回地址 —— 一个属于 <code>main → calc</code>，一个属于 <code>calc → add</code>。它们不会互相覆盖，因为压在不同的格子里。</li>
+<li><strong>第 7 步</strong>：<code>ret</code> 弹走 <code>0x2012</code>，<code>RSP</code> 涨回去，而 <code>eax</code> 里的 13 完全没受影响。返回地址和返回值在这一刻分道扬镳。</li>
+</ul>
+<h3 id="在真机上验一次">在真机上验一次</h3>
+<p>光看示意图容易将信将疑。下面这段代码（省略了全局变量和打印）在被调用函数的入口读两样东西：栈指针，以及栈顶那一格（x86-64）或 <code>x30</code>（AArch64）。因为加了 <code>-fomit-frame-pointer</code>，函数入口没有 <code>push rbp</code> 挡在栈顶前面。</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-c">__attribute__((noinline))
+void probe(void) {
+#if defined(__x86_64__)
+    __asm__ volatile(&quot;movq %%rsp, %0&quot;          : &quot;=r&quot;(sp_in_callee));
+    __asm__ volatile(&quot;movq (%%rsp), %0&quot;        : &quot;=r&quot;(ret_in_callee));
+#elif defined(__aarch64__)
+    __asm__ volatile(&quot;mov %0, sp&quot;              : &quot;=r&quot;(sp_in_callee));
+    __asm__ volatile(&quot;mov %0, x30&quot;             : &quot;=r&quot;(ret_in_callee));
+#endif
+}
+</code></pre></div>
+<p>两个架构各跑一次，再和反汇编里的地址对照：</p>
+<table>
+<thead>
+<tr>
+<th>架构</th>
+<th>探针读到的值</th>
+<th>反汇编里 <code>call</code> 的地址</th>
+<th>它的下一条</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>x86-64（Rosetta）</td>
+<td><code>0x104ffd58e</code></td>
+<td><code>0x100000589</code> <code>callq _probe</code></td>
+<td><code>0x10000058e</code></td>
+</tr>
+<tr>
+<td>AArch64（原生）</td>
+<td><code>0x104fcc584</code></td>
+<td><code>0x100000580</code> <code>bl _probe</code></td>
+<td><code>0x100000584</code></td>
+</tr>
+</tbody>
+</table>
+<p>两行都差了同一个加载偏移（ASLR 每次运行不同），把偏移减掉，探针读到的值和「<code>call</code> 的下一条」逐位相同。<mark class="mk-blue">返回地址就是调用指令后面那条指令的地址。</mark> 这句话到此不是比喻，是量出来的。</p>
+<h2 id="栈帧一次调用占的那一段"><span class="num">04</span>栈帧：一次调用占的那一段</h2>
+<p>一次调用在栈上占的那段，叫<strong>栈帧</strong>（stack frame）。<code>calc</code> 的真机反汇编（macOS x86-64，<code>clang -O0</code>，去掉 <code>.cfi_*</code> 与注释）：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">_calc:
+0x100000360  pushq  %rbp              ; 保存调用者的帧底
+0x100000361  movq   %rsp, %rbp        ; 给这一帧插桩
+0x100000364  subq   $0x10, %rsp       ; 给局部变量腾 16 字节
+0x100000368  movl   %edi, -0x4(%rbp)  ; 参数 x 落到本地
+0x10000036b  movl   -0x4(%rbp), %edi
+0x10000036e  movl   $0x3, %esi
+0x100000373  callq  _add              ; ← 返回地址 = 0x100000378
+0x100000378  movl   %eax, -0x8(%rbp)  ; 返回值 s 存回来
+0x10000037b  movl   -0x8(%rbp), %eax
+0x10000037e  shll   %eax              ; s * 2
+0x100000380  addq   $0x10, %rsp       ; 撤掉局部变量
+0x100000384  popq   %rbp              ; 还回旧帧底
+0x100000385  retq                     ; 弹出返回地址，跳回去
+</code></pre></div>
+<p>前三条是<strong>序言</strong>（prologue），后三条是<strong>尾声</strong>（epilogue）。框架是固定的：进门先占地方，出门前把自己的地方收拾干净、把调用者的状态还回去。</p>
+<p><code>call</code> 和 <code>ret</code> 也是成对的：<code>call</code> 压一个 8 字节地址进栈，<code>ret</code> 弹掉它。所以 <code>calc</code> 这一帧在栈上的实际高度是 <code>0x10 + 8 = 24</code> 字节，不是 <code>subq</code> 里写的 16。</p>
+<figure class="memmap" data-memmap>
+      <figcaption class="mm-title">一个栈帧里装了什么<span class="mm-cap-sub">x86-64 · calc() 的帧（clang -O0 反汇编对照）</span></figcaption>
+      <div class="mm-stack"><div class="mm-seg tone-muted" style="--mm-size:0.8">
+        <div class="mm-body">
+          <div class="mm-head"><b>调用者压进来的参数</b></div>
+          <p class="mm-sub">第 7 个及以后的整数参数才走栈，本例没有</p>
+        </div>
+        <div class="mm-side">
+              
+              <span class="mm-mark">RBP+16 起</span>
+            </div>
+      </div><div class="mm-seg tone-blue" style="--mm-size:1">
+        <div class="mm-body">
+          <div class="mm-head"><b>返回地址</b></div>
+          <p class="mm-sub">call 压的 8 字节：0x100000378</p>
+        </div>
+        <div class="mm-side">
+              
+              <span class="mm-mark">RBP+8 · ret 弹走它</span>
+            </div>
+      </div><div class="mm-seg tone-violet" style="--mm-size:1">
+        <div class="mm-body">
+          <div class="mm-head"><b>旧的 RBP</b></div>
+          <p class="mm-sub">push rbp 压的：调用者的帧底</p>
+        </div>
+        <div class="mm-side">
+              
+              <span class="mm-mark">RBP+0 · RBP 指这里</span>
+            </div>
+      </div><div class="mm-seg tone-amber" style="--mm-size:1.4">
+        <div class="mm-body">
+          <div class="mm-head"><b>局部变量</b></div>
+          <p class="mm-sub">int x 在 RBP-4，int s 在 RBP-8（同一格的上半部分）</p>
+        </div>
+        <div class="mm-side">
+              
+              <span class="mm-mark">RBP-8 附近</span>
+            </div>
+      </div><div class="mm-seg tone-muted" style="--mm-size:1">
+        <div class="mm-body">
+          <div class="mm-head"><b>没用上的 8 字节</b></div>
+          <p class="mm-sub">sub rsp, 0x10 腾了 16 字节，两个 int 只用掉 8</p>
+        </div>
+        <div class="mm-side">
+              
+              <span class="mm-mark">对齐的余量</span>
+            </div>
+      </div><div class="mm-seg tone-green" style="--mm-size:1">
+        <div class="mm-body">
+          <div class="mm-head"><b>红区（leaf 可用）</b></div>
+          <p class="mm-sub">RSP 以下 128 字节，信号处理不会碰，叶子函数可以白用</p>
+        </div>
+        <div class="mm-side">
+              
+              <span class="mm-mark">RSP 以下</span>
+            </div>
+      </div></div>
+      <div class="mm-ends">
+            <span class="mm-end">高地址 调用者的方向</span>
+            <span class="mm-end">低地址 RSP 的方向</span>
+          </div>
+      <p class="mm-note">帧底由 <strong>RBP</strong> 钉住，帧顶由 <strong>RSP</strong> 跟着调用走 —— 两个指针各管一件不同的事。</p>
+    </figure><h3 id="为什么两个指针都要有">为什么两个指针都要有</h3>
+<p><code>RBP</code> 在序言里被设成当时的 <code>RSP</code>，之后<strong>不动</strong>；<code>RSP</code> 还会继续变（<code>sub</code> 腾局部变量、<code>call</code> 又压返回地址）。有了这根桩：</p>
+<ul>
+<li>局部变量用固定偏移（<code>RBP-4</code>、<code>RBP-8</code>）就能找到，不随 <code>RSP</code> 的变化而漂移。</li>
+<li>调试器和异常处理靠它把一帧一帧串起来，还原调用链。</li>
+</ul>
+<p><code>RBP</code> 不是必须的。加上 <code>-fomit-frame-pointer</code>（<code>-O2</code> 通常默认打开）后，编译器改用 <code>RSP</code> 偏移寻址，省掉两条指令和一个寄存器；此时「帧」还在，只是没有那根桩，靠 <code>.eh_frame</code> 这类 unwind 信息来描述每一帧多大。03 节里的探针程序就是这么编的：栈顶第一格直接就是返回地址。</p>
+<p><mark class="mk-amber">「栈顶」和「这一帧的底」不是一个东西。</mark> 把 <code>SP</code> 直接当成「帧指针」用，是读汇编时最常见的错位来源。</p>
+<h2 id="为什么必须存同一个函数会被从不同地方调用"><span class="num">05</span>为什么必须存：同一个函数会被从不同地方调用</h2>
+<p><code>call</code> 每次都现场压返回地址，不是为了好看。<code>foo</code> 被两个地方调用时，它执行完该回哪，取决于<strong>这一次</strong>是谁调的：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-c">void main(void) {
+    foo();          // 返回地址 A
+    bar();
+    foo();          // 返回地址 B
+}
+</code></pre></div>
+<p><code>foo</code> 自己不知道调用者是谁，也没有地方记住上一次。所以每个 <code>call</code> 各压各的，谁调的、回谁那儿。</p>
+<p>嵌套调用也是同一件事。<code>main → calc → add</code> 三层同时活着，栈上就同时有三份「我在哪」：</p>
+<figure class="memmap" data-memmap>
+      <figcaption class="mm-title">三层同时活着，栈上就有三份「我在哪」<span class="mm-cap-sub">main → calc → add · 地址是示意值</span></figcaption>
+      <div class="mm-stack"><div class="mm-seg tone-muted" style="--mm-size:1.2">
+        <div class="mm-body">
+          <div class="mm-head"><b>main 的帧</b></div>
+          <p class="mm-sub">它自己的局部变量</p>
+        </div>
+        
+      </div><div class="mm-seg tone-blue" style="--mm-size:1.1">
+        <div class="mm-body">
+          <div class="mm-head"><b>返回地址 → main 的 0x100a</b></div>
+          <p class="mm-sub">calc 的 call 压进来的</p>
+        </div>
+        
+      </div><div class="mm-seg tone-amber" style="--mm-size:1.2">
+        <div class="mm-body">
+          <div class="mm-head"><b>calc 的帧</b></div>
+          <p class="mm-sub">旧 RBP + 它的局部变量</p>
+        </div>
+        
+      </div><div class="mm-seg tone-blue" style="--mm-size:1.1">
+        <div class="mm-body">
+          <div class="mm-head"><b>返回地址 → calc 的 0x2012</b></div>
+          <p class="mm-sub">add 的 call 压进来的</p>
+        </div>
+        
+      </div><div class="mm-seg tone-green" style="--mm-size:1.2">
+        <div class="mm-body">
+          <div class="mm-head"><b>add 的帧</b></div>
+          <p class="mm-sub">正在跑的这一层</p>
+        </div>
+        <div class="mm-side">
+              
+              <span class="mm-mark">RSP 在这里</span>
+            </div>
+      </div></div>
+      <div class="mm-ends">
+            <span class="mm-end">高地址 （main 进来时的方向）</span>
+            <span class="mm-end">低地址 （压栈的方向）</span>
+          </div>
+      <p class="mm-note">视觉上从上往下压，弹出的顺序正好反过来。</p>
+    </figure><p>后压的在下面，先弹。<code>add</code> 先返回，<code>calc</code> 后返回 —— 这个顺序刚好是「最后调用的最先结束」，也就是栈的 LIFO。<mark class="mk-blue">用栈不是因为栈这种数据结构优雅，是因为函数调用本身是嵌套的。</mark></p>
+<p>递归只是把这件事重复很多次。<code>fact(4)</code> 在 AArch64 上实测（同一次运行打印四层 <code>sp</code>）：</p>
+<figure class="memmap" data-memmap>
+      <figcaption class="mm-title">fact(4) 的四个帧<span class="mm-cap-sub">AArch64 · 本机实测 sp；反汇编里是 sub sp, sp, #0x40</span></figcaption>
+      <div class="mm-stack"><div class="mm-seg tone-blue" style="--mm-size:1">
+        <div class="mm-body">
+          <div class="mm-head"><b>fact(4)</b></div>
+          <p class="mm-sub">sp = 0x16ae4b0c0</p>
+        </div>
+        <div class="mm-side">
+              <span class="mm-addr">0x…b0c0</span>
+              
+            </div>
+      </div><div class="mm-seg tone-blue" style="--mm-size:1">
+        <div class="mm-body">
+          <div class="mm-head"><b>fact(3)</b></div>
+          <p class="mm-sub">sp = 0x16ae4b080 · 少了 0x40</p>
+        </div>
+        <div class="mm-side">
+              <span class="mm-addr">0x…b080</span>
+              
+            </div>
+      </div><div class="mm-seg tone-blue" style="--mm-size:1">
+        <div class="mm-body">
+          <div class="mm-head"><b>fact(2)</b></div>
+          <p class="mm-sub">sp = 0x16ae4b040 · 又少 0x40</p>
+        </div>
+        <div class="mm-side">
+              <span class="mm-addr">0x…b040</span>
+              
+            </div>
+      </div><div class="mm-seg tone-green" style="--mm-size:1">
+        <div class="mm-body">
+          <div class="mm-head"><b>fact(1)</b><span class="mm-dir mm-down" title="向下增长">↓ 向下长</span></div>
+          <p class="mm-sub">sp = 0x16ae4b000 · 到底了，开始往回走</p>
+        </div>
+        <div class="mm-side">
+              <span class="mm-addr">0x…b000</span>
+              <span class="mm-mark">栈顶</span>
+            </div>
+      </div></div>
+      <div class="mm-ends">
+            <span class="mm-end">高地址 0x16ae_4b0c0</span>
+            <span class="mm-end">低地址 0x16ae_4b000</span>
+          </div>
+      <p class="mm-note">每帧 0x40 字节是 <code>sub sp, sp, #0x40</code> 一次腾出来的；递归多深，栈就压多深。</p>
+    </figure><p>x86-64 上同一段程序每层是 <code>0x20</code> 字节（<code>subq $0x18</code> 加的 24，再加 <code>call</code> 压的 8）。两个架构帧大小不同，但规律一样：<strong>每层一帧，帧大小由编译器算好，固定不变</strong>。</p>
+<h3 id="栈有上限这是真的会崩">栈有上限，这是真的会崩</h3>
+<p>栈是进程地址空间里划出的一段，不是无限的。本机 <code>ulimit -s</code> 是 8176 KB，同一段递归程序（每帧只放 64 字节的数组）：</p>
+<table>
+<thead>
+<tr>
+<th>递归层数</th>
+<th>结果</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>10 000</td>
+<td>正常返回</td>
+</tr>
+<tr>
+<td>60 000</td>
+<td>正常返回</td>
+</tr>
+<tr>
+<td>100 000</td>
+<td><code>Segmentation fault: 11</code></td>
+</tr>
+</tbody>
+</table>
+<p>60 000 × 每帧约 140 字节 ≈ 8 MB，和 <code>ulimit -s</code> 对得上。<mark class="mk-amber">「递归太深会栈溢出」不是比喻</mark>：<code>RSP</code> 一路往下，走出了这段内存，下一次写就撞上别的页，操作系统直接给进程一个 SIGSEGV。</p>
+<h2 id="aarch64-不一样返回地址先放寄存器"><span class="num">06</span>AArch64 不一样：返回地址先放寄存器</h2>
+<p>x86 把返回地址压栈，AArch64 不是。AAPCS64 对 <code>BL</code> 的描述是：</p>
+<div class="callout tone-muted quote">
+      <span class="ic">📖</span>
+      <div><p>The effect of executing BL is to transfer the sequentially next value of the
+program counter — the return address — into the link register (LR) and the
+destination address into the program counter.</p>
+</div>
+    </div><p>也就是说：<code>bl</code> 把「顺序的下一条 PC」送进 <code>x30</code>，把目标地址送进 PC —— 返回地址先进寄存器，内存先不动。</p>
+<p><code>LR</code> 就是 <code>x30</code>。跳转时地址进寄存器，不进内存。那栈上的返回地址是哪来的？是被调用函数自己存进去的 —— 前提是它还会调用别人。真机对照：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">_calc:
+0x100000348  sub  sp, sp, #0x20          ; 腾 32 字节
+0x10000034c  stp  x29, x30, [sp, #0x10]  ; 旧帧指针 + 返回地址，一起存栈
+0x100000350  add  x29, sp, #0x10         ; 帧指针插桩
+…
+0x100000360  bl   0x100000328            ; 调用 add，x30 被覆盖成 0x100000364
+…
+0x100000370  ldp  x29, x30, [sp, #0x10]  ; 取回
+0x100000374  add  sp, sp, #0x20
+0x100000378  ret                          ; 跳到 x30
+
+_add:
+0x100000328  sub  sp, sp, #0x10
+0x10000032c  str  w0, [sp, #0xc]
+…                                        ; 没有 stp x29, x30 —— 它不再调别人
+0x100000344  ret
+</code></pre></div>
+<p><code>add</code> 是<strong>叶子函数</strong>（不再调用别人），<code>bl</code> 不会覆盖它的 <code>x30</code>，所以它一条也不用存。<code>calc</code> 不是叶子，一旦执行 <code>bl</code>，<code>x30</code> 里「回到 main」的地址就被冲掉了，只能提前存到栈上。</p>
+<p>用 lldb 停在 <code>calc</code> 的 <code>call</code> 之前，可以直接读出来：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">(lldb) register read x29 x30 sp
+      fp = 0x000000016fdfef50
+      lr = 0x0000000100000394   demo-arm64`main + 24
+      sp = 0x000000016fdfef40
+(lldb) memory read -s8 -c2 0x000000016fdfef50
+0x16fdfef50: 0x000000016fdfef70  0x0000000100000394
+</code></pre></div>
+<p>第二格 <code>0x1000000394</code> 就是 <code>main</code> 里 <code>bl _calc</code>（在 <code>0x100000390</code>）的下一条。它正躺在栈上、<code>sp + 0x10</code> 的位置 —— 和 <code>stp x29, x30, [sp, #0x10]</code> 对得上。</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>对比项</th><th>x86-64（System V）</th><th>AArch64（AAPCS64）</th></tr></thead><tbody><tr><th>返回地址放哪</th><td data-label="x86-64（System V）"><code>call</code> 直接压到栈顶</td><td data-label="AArch64（AAPCS64）"><code>bl</code> 写进 <code>x30</code>（LR）</td></tr><tr><th>谁负责存到栈上</th><td data-label="x86-64（System V）">CPU 在 <code>call</code> 里做</td><td data-label="AArch64（AAPCS64）">被调用函数自己，且只在它不是叶子时</td></tr><tr><th>帧指针</th><td data-label="x86-64（System V）"><code>RBP</code>（可选）</td><td data-label="AArch64（AAPCS64）"><code>x29</code>（可选）</td></tr><tr><th>栈对齐</th><td data-label="x86-64（System V）">进函数时 <code>RSP+8</code> 是 16 的倍数</td><td data-label="AArch64（AAPCS64）"><code>SP</code> 始终 16 的倍数</td></tr><tr><th>返回值</th><td data-label="x86-64（System V）"><code>rax</code>（第二个在 <code>rdx</code>）</td><td data-label="AArch64（AAPCS64）"><code>x0</code>（第二个在 <code>x1</code>）</td></tr><tr><th>前几个参数走寄存器</th><td data-label="x86-64（System V）"><code>rdi</code> <code>rsi</code> <code>rdx</code> <code>rcx</code> <code>r8</code> <code>r9</code></td><td data-label="AArch64（AAPCS64）"><code>x0</code>–<code>x7</code></td></tr></tbody></table></div><p><mark class="mk-blue">所以通用说法是「调用时要保存返回地址」，不是「必须压栈」。</mark> 存哪、谁存、什么时候存，由架构和 ABI 定。原始材料第 8 点说得对，这里只是把它落到两段真实汇编上。</p>
+<h2 id="速查容易记反的六件事"><span class="num">07</span>速查：容易记反的六件事</h2>
+<ul class="check cross"><li>「返回地址」等于函数的返回值。—— 一个是地址，一个是值，存在不同的地方。</li><li>返回地址是 <code>call</code> 自己那条指令的地址。—— 是它的<strong>下一条</strong>。</li><li>返回地址是函数的第一条指令。—— 那是入口地址，返回时跳过去就死循环了。</li><li><code>SP</code> 永远指向这一帧的底部。—— 帧底通常由 <code>RBP</code> / <code>x29</code> 钉住，<code>SP</code> 会随 <code>sub</code> 和 <code>call</code> 变。</li><li>栈在内存里向高地址增长。—— x86-64 和 AArch64 都是向低地址，所以「栈顶」画在下面。</li><li>所有函数的栈帧一样大。—— 每个函数的帧大小由编译器按它的局部变量算，函数之间可以差很多。</li></ul><div class="summary">
+      <h3 id="一句话">一句话</h3>
+      <p><code>call</code> 把「下一条指令的地址」压到栈顶，<code>ret</code> 把它弹出来跳回去；
+被调用函数在中间用 <code>SP</code> 往下要地方、用 <code>RBP</code> 钉住帧底。
+<mark class="mk-blue">返回地址是控制流的回程票，返回值是数据的结果，别混。</mark></p>
+
+    </div><div class="quiz"><details>
+        <summary>一个函数被 A 和 B 两处调用，它的返回地址是谁决定的？</summary>
+        <div class="a"><p>由<strong>每一次调用时的那条 <code>call</code></strong> 决定：压进栈的是 <code>call</code> 的下一条指令地址。
+函数本身不知道调用者是谁，也不保存「上一次」的返回地址 —— 所以每次调用各压一份。</p>
+</div>
+      </details><details>
+        <summary>为什么 x86-64 的 <code>sub rsp, 0x10</code> 里常常只用掉一半的字节？</summary>
+        <div class="a"><p>ABI 要求对齐：<code>call</code> 之前 <code>RSP</code> 要是 16 的倍数，SSE / AVX 的一些指令要求 16 字节对齐访问。
+编译器宁可多腾几个字节，也不让局部变量落在不对齐的地址上。</p>
+</div>
+      </details><details>
+        <summary>AArch64 上，为什么 <code>add</code> 没有 <code>stp x29, x30</code>，而 <code>calc</code> 有？</summary>
+        <div class="a"><p><code>add</code> 是叶子函数，不再执行 <code>bl</code>，<code>x30</code> 里的返回地址不会被覆盖，所以不用存。
+<code>calc</code> 要调 <code>add</code>，<code>bl</code> 会把 <code>x30</code> 冲掉，所以进函数时先把它存到栈上。</p>
+</div>
+      </details><details>
+        <summary>递归 10 万层崩掉，是算法写错了吗？</summary>
+        <div class="a"><p>不是。每层都要占一帧，帧叠起来就是栈的高度。栈是进程地址空间里一段有限的内存
+（本机 <code>ulimit -s</code> 约 8 MB），<code>RSP</code> 走出这段就是栈溢出，进程收到 SIGSEGV。</p>
+</div>
+      </details></div>
+
+    <footer>
+      <span>函数调用时，栈上到底放了什么</span>
+      <span>最后更新 2026-10-20 · 单文件可离线打开</span>
+    </footer>
+  </main>
+</div>
+
+<script src="../../assets/app.js?v=b56f5b8de0"></script>
+</body>
+</html>

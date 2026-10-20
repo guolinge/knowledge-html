@@ -6348,6 +6348,58 @@ html[data-theme="dark"] .rb-lab { --rb-dark: #55647d; --rb-dark-line: #93a3bd; -
 .rq-stats { margin-top: 6px; font-size: 12px; color: var(--muted); }
 @media (max-width: 760px) { .rq-row { grid-template-columns: 1fr auto auto; } .rq-mark { grid-column: 1 / -1; } }
 
+/* ---------- call-stack-lab：代码段 + 栈 + 寄存器（一次函数调用的现场） ---------- */
+.sl { display: grid; gap: 12px; min-width: 0; max-width: 1240px; }
+.sl-row { display: grid; grid-template-columns: minmax(0, 1.08fr) minmax(0, 1fr); gap: 13px; align-items: start; }
+@media (max-width: 820px) { .sl-row { grid-template-columns: 1fr; } }
+.sl-pane { border: 1px solid var(--border); border-radius: 12px; background: var(--surface); overflow: hidden; }
+.sl-pane-head { display: flex; align-items: baseline; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--border); font: 650 12.5px/1.35 var(--sans); }
+.sl-pane-head .sub { margin-left: auto; font: 500 11px/1.35 var(--sans); color: var(--muted); }
+.sl-code { padding: 5px 0 8px; }
+.sl-fn { padding: 7px 12px 2px; font: 650 11.5px/1.35 var(--mono); color: var(--muted); letter-spacing: .04em; }
+.sl-line { display: grid; grid-template-columns: 64px 13px minmax(0, 1fr); gap: 5px; padding: 2px 12px; font: 400 12.5px/1.62 var(--mono); color: var(--text); }
+.sl-line .addr { color: var(--muted); }
+.sl-line .mark { color: var(--blue); font-weight: 700; }
+.sl-line .txt { white-space: pre; }
+.sl-line.is-pc { background: var(--blue-soft); }
+.sl-line.is-pc .addr, .sl-line.is-pc .txt { color: var(--blue); font-weight: 650; }
+
+.sl-cells { display: flex; flex-direction: column; padding: 9px 12px 4px; }
+.sl-cell {
+  display: grid; grid-template-columns: 62px 74px minmax(0, 1fr) auto; gap: 8px; align-items: center;
+  min-height: 32px; padding: 3px 8px; margin-bottom: 4px; border: 1px solid var(--border);
+  border-radius: 8px; background: var(--surface); font: 400 12px/1.5 var(--mono);
+}
+.sl-cell .addr { color: var(--muted); }
+.sl-cell .val { color: var(--text); }
+.sl-cell .lab { font: 400 11px/1.4 var(--sans); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sl-cell.is-empty { border-style: dashed; background: transparent; }
+.sl-cell.is-empty .val { color: var(--muted); opacity: .55; }
+.sl-cell.is-ret { border-color: var(--blue); background: var(--blue-soft); }
+.sl-cell.is-ret .val { color: var(--blue); font-weight: 700; }
+.sl-cell.is-ret .lab { color: var(--blue); }
+.sl-cell.is-saved { border-color: var(--violet); background: var(--violet-soft); }
+.sl-cell.is-saved .val { color: var(--violet); font-weight: 700; }
+.sl-cell.is-saved .lab { color: var(--violet); }
+.sl-cell.is-local { border-color: var(--amber); background: var(--amber-soft); }
+.sl-cell.is-local .val { color: var(--amber); }
+.sl-cell.is-local .lab { color: var(--amber); }
+.sl-cell .ptrs { display: flex; gap: 4px; justify-self: end; }
+.sl-ptr { font: 700 10px/1.6 var(--mono); padding: 1px 5px; border-radius: 5px; white-space: nowrap; }
+.sl-ptr.is-sp { background: var(--blue); color: #fff; }
+.sl-ptr.is-rbp { background: var(--violet); color: #fff; }
+.sl-dir { padding: 0 12px 9px; font: 400 10.5px/1.5 var(--sans); color: var(--muted); }
+
+.sl-regs { display: flex; flex-wrap: wrap; gap: 8px; }
+.sl-reg { display: flex; align-items: baseline; gap: 6px; padding: 5px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
+.sl-reg b { font: 650 11px/1.4 var(--mono); color: var(--violet); }
+.sl-reg .num { font: 600 12px/1.4 var(--mono); color: var(--text); }
+.sl-reg .what { font: 400 10.5px/1.4 var(--sans); color: var(--muted); }
+.sl-note { padding: 10px 12px; border-radius: 9px; background: var(--surface-2); font: 400 12.5px/1.85 var(--sans); color: var(--text-2); min-height: 2.6em; }
+.sl-ctrls { display: flex; align-items: center; gap: 8px; }
+.sl-ctrls .btn[disabled] { opacity: .45; cursor: default; }
+.sl-counter { margin-left: auto; font: 500 12px/1.4 var(--mono); color: var(--muted); }
+
 </style>
   <style>
 /* ==========================================================
@@ -18420,6 +18472,247 @@ WIDGETS['mysql-2pc-crash'] = (root) => {
     render();
     let rt = null;
     window.addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(render, 160); });
+  };
+
+  /* ============================================================
+     控件：call-stack-lab —— 一条 call / ret 到底把什么放到了栈上
+     ------------------------------------------------------------
+     左：代码段（三个函数，带地址；PC 高亮 = 下一条要执行的）
+     右：栈（固定的地址窗口，高地址在上；SP / RBP 标在格子右边）
+     底：寄存器读数 + 这一步在讲什么
+     每一步 = 「已经执行完前 k 条指令」的状态。地址是示意值。
+     ============================================================ */
+  WIDGETS['call-stack-lab'] = (root) => {
+    const box = mountOf(root);
+    const statusEl = root.querySelector('[data-status]');
+
+    const el = (tag, cls, text) => {
+      const n = document.createElement(tag);
+      if (cls) n.className = cls;
+      if (text !== undefined) n.textContent = text;
+      return n;
+    };
+
+    const CODE = [
+      { fn: 'main', lines: [
+        ['0x1000', 'mov  edi, 10'],
+        ['0x1005', 'call calc'],
+        ['0x100a', 'add  eax, 1'],
+        ['0x100d', 'ret'],
+      ] },
+      { fn: 'calc', lines: [
+        ['0x2000', 'push rbp'],
+        ['0x2001', 'mov  rbp, rsp'],
+        ['0x2004', 'sub  rsp, 16'],
+        ['0x2008', 'mov  edi, 10'],
+        ['0x200d', 'call add'],
+        ['0x2012', 'add  eax, eax'],
+        ['0x2014', 'leave'],
+        ['0x2015', 'ret'],
+      ] },
+      { fn: 'add', lines: [
+        ['0x3000', 'mov  eax, edi'],
+        ['0x3002', 'add  eax, esi'],
+        ['0x3004', 'ret'],
+      ] },
+    ];
+
+    // 固定窗口：高地址在上。空着的格子也画出来，才看得见「栈在往下长」。
+    const SLOTS = ['0x7ff0', '0x7fe8', '0x7fe0', '0x7fd8', '0x7fd0', '0x7fc8', '0x7fc0'];
+
+    const STEPS = [
+      {
+        pc: '0x1005', sp: '0x7ff0', rbp: '—', eax: '—',
+        done: '还没开始',
+        cells: {},
+        note: 'RSP 指着栈的最高一格，还没有人往里放东西。下一条指令是 `call calc`。',
+      },
+      {
+        pc: '0x2000', sp: '0x7fe8', rbp: '—', eax: '—',
+        done: 'main：call calc',
+        cells: { '0x7fe8': { v: '0x100a', label: '返回地址 → main 的 0x100a', tone: 'ret' } },
+        note: '==call 只做两件事==：把「下一条指令」的地址 0x100a 压进栈，然后跳进 `calc`。RSP 少了 8。',
+      },
+      {
+        pc: '0x2001', sp: '0x7fe0', rbp: '—', eax: '—',
+        done: 'calc：push rbp',
+        cells: {
+          '0x7fe8': { v: '0x100a', label: '返回地址 → main 的 0x100a', tone: 'ret' },
+          '0x7fe0': { v: '0x7ff0', label: 'main 的帧底（旧 RBP）', tone: 'saved' },
+        },
+        note: '`push rbp` 把调用者的帧底也存下来 —— 待会儿要还回去，否则 main 就找不到自己的局部变量了。',
+      },
+      {
+        pc: '0x2004', sp: '0x7fe0', rbp: '0x7fe0', eax: '—',
+        done: 'calc：mov rbp, rsp',
+        cells: {
+          '0x7fe8': { v: '0x100a', label: '返回地址 → main 的 0x100a', tone: 'ret' },
+          '0x7fe0': { v: '0x7ff0', label: 'main 的帧底（旧 RBP）', tone: 'saved' },
+        },
+        note: 'RBP 从此**钉住不动**，等于给这一帧插了一根桩：局部变量在 `RBP-4` 一带，返回地址在 `RBP+8`。',
+      },
+      {
+        pc: '0x2008', sp: '0x7fd0', rbp: '0x7fe0', eax: '—',
+        done: 'calc：sub rsp, 16',
+        cells: {
+          '0x7fe8': { v: '0x100a', label: '返回地址 → main 的 0x100a', tone: 'ret' },
+          '0x7fe0': { v: '0x7ff0', label: 'main 的帧底（旧 RBP）', tone: 'saved' },
+          '0x7fd8': { v: '—', label: '局部变量：int s、int x', tone: 'local' },
+          '0x7fd0': { v: '—', label: '同一块里的另外 8 字节（没用上）', tone: 'local' },
+        },
+        note: '`sub rsp, 16` 给局部变量腾地方。!!RSP 动了，RBP 不动!! —— 这就是为什么两个指针都要有。',
+      },
+      {
+        pc: '0x3000', sp: '0x7fc8', rbp: '0x7fe0', eax: '—',
+        done: 'calc：call add',
+        cells: {
+          '0x7fe8': { v: '0x100a', label: '返回地址 → main 的 0x100a', tone: 'ret' },
+          '0x7fe0': { v: '0x7ff0', label: 'main 的帧底（旧 RBP）', tone: 'saved' },
+          '0x7fd8': { v: '—', label: '局部变量：int s、int x', tone: 'local' },
+          '0x7fd0': { v: '—', label: '同一块里的另外 8 字节（没用上）', tone: 'local' },
+          '0x7fc8': { v: '0x2012', label: '返回地址 → calc 的 0x2012', tone: 'ret' },
+        },
+        note: '又一次 `call`，又压一个返回地址。现在栈上**同时躺着两个返回地址**，各自属于一次调用。',
+      },
+      {
+        pc: '0x2012', sp: '0x7fd0', rbp: '0x7fe0', eax: '13',
+        done: 'add：ret',
+        cells: {
+          '0x7fe8': { v: '0x100a', label: '返回地址 → main 的 0x100a', tone: 'ret' },
+          '0x7fe0': { v: '0x7ff0', label: 'main 的帧底（旧 RBP）', tone: 'saved' },
+          '0x7fd8': { v: '—', label: '局部变量：int s、int x', tone: 'local' },
+          '0x7fd0': { v: '—', label: '同一块里的另外 8 字节（没用上）', tone: 'local' },
+        },
+        note: '`ret` 弹出栈顶的 0x2012，跳回 `calc`。返回值 13 走的是另一条路：它在 `eax` 里，跟栈无关。',
+      },
+      {
+        pc: '0x2015', sp: '0x7fe8', rbp: '0x7ff0', eax: '26',
+        done: 'calc：leave',
+        cells: {
+          '0x7fe8': { v: '0x100a', label: '返回地址 → main 的 0x100a', tone: 'ret' },
+        },
+        note: '`leave` 把整帧丢掉：RSP 直接跳回 RBP，再弹出旧 RBP。局部变量不用一个个清 —— 改指针就够了。',
+      },
+      {
+        pc: '0x100a', sp: '0x7ff0', rbp: '0x7ff0', eax: '26',
+        done: 'calc：ret',
+        cells: {},
+        note: '最后一个 `ret` 弹出 0x100a，回到 main。==RSP 和进来时一模一样== —— 栈自己把自己收拾干净了。',
+      },
+    ];
+
+    let k = 0;
+
+    const row = el('div', 'sl-row');
+
+    // ---- 代码段 ----
+    const codePane = el('div', 'sl-pane');
+    const cHead = el('div', 'sl-pane-head');
+    cHead.append(el('span', '', '代码段'), el('span', 'sub', '只读 · 全进程一份'));
+    codePane.append(cHead);
+    const codeBody = el('div', 'sl-code');
+    const lineEls = {};
+    CODE.forEach((f) => {
+      codeBody.append(el('div', 'sl-fn', f.fn));
+      f.lines.forEach(([addr, text]) => {
+        const ln = el('div', 'sl-line');
+        ln.append(el('span', 'addr', addr), el('span', 'mark', ''), el('span', 'txt', text));
+        lineEls[addr] = ln;
+        codeBody.append(ln);
+      });
+    });
+    codePane.append(codeBody);
+
+    // ---- 栈 ----
+    const stPane = el('div', 'sl-pane');
+    const sHead = el('div', 'sl-pane-head');
+    sHead.append(el('span', '', '栈'), el('span', 'sub', '每个线程一份 · 向低地址长'));
+    stPane.append(sHead);
+    const cellsBox = el('div', 'sl-cells');
+    const cellEls = {};
+    SLOTS.forEach((addr) => {
+      const c = el('div', 'sl-cell');
+      c.append(el('span', 'addr', addr), el('span', 'val', '·'), el('span', 'lab', ''));
+      const ptr = el('span', 'ptrs', '');
+      c.append(ptr);
+      cellEls[addr] = { c, val: c.querySelector('.val'), lab: c.querySelector('.lab'), ptr };
+      cellsBox.append(c);
+    });
+    stPane.append(cellsBox);
+    const dir = el('div', 'sl-dir');
+    richText(dir, '低地址 ↑ 压栈往这边走（图中向下）');
+    stPane.append(dir);
+
+    row.append(codePane, stPane);
+
+    // ---- 底部：寄存器 + 说明 ----
+    const regs = el('div', 'sl-regs');
+    const note = el('div', 'sl-note');
+    const ctrls = el('div', 'sl-ctrls');
+    const prev = el('button', 'btn ghost', '← 上一步');
+    const next = el('button', 'btn', '下一步 →');
+    const reset = el('button', 'btn ghost', '重置');
+    const counter = el('span', 'sl-counter', '');
+    ctrls.append(prev, next, reset, counter);
+
+    const wrap = el('div', 'sl');
+    wrap.append(row, regs, note, ctrls);
+    box.append(wrap);
+
+    function render() {
+      const s = STEPS[k];
+
+      Object.keys(lineEls).forEach((addr) => {
+        const ln = lineEls[addr];
+        const hot = addr === s.pc;
+        ln.classList.toggle('is-pc', hot);
+        ln.querySelector('.mark').textContent = hot ? '▶' : '';
+      });
+
+      SLOTS.forEach((addr) => {
+        const ref = cellEls[addr];
+        const cell = s.cells[addr];
+        ref.c.className = 'sl-cell';
+        if (cell) {
+          ref.c.classList.add('is-filled');
+          if (cell.tone) ref.c.classList.add('is-' + cell.tone);
+          ref.val.textContent = cell.v;
+          ref.lab.textContent = cell.label;
+        } else {
+          ref.c.classList.add('is-empty');
+          ref.val.textContent = '·';
+          ref.lab.textContent = '';
+        }
+        ref.ptr.textContent = '';
+        if (addr === s.sp) ref.ptr.append(el('span', 'sl-ptr is-sp', 'SP →'));
+        if (addr === s.rbp) ref.ptr.append(el('span', 'sl-ptr is-rbp', 'RBP'));
+      });
+
+      regs.textContent = '';
+      [
+        ['RIP', s.pc, '下一条指令'],
+        ['RSP', s.sp, '栈顶'],
+        ['RBP', s.rbp, '当前帧底'],
+        ['eax', s.eax, '返回值'],
+      ].forEach(([name, v, what]) => {
+        const r = el('span', 'sl-reg');
+        r.append(el('b', '', name), el('span', 'num', v), el('span', 'what', what));
+        regs.append(r);
+      });
+
+      note.textContent = '';
+      richText(note, s.note);
+
+      counter.textContent = (k + 1) + ' / ' + STEPS.length;
+      prev.disabled = k === 0;
+      next.disabled = k === STEPS.length - 1;
+      if (statusEl) statusEl.textContent = s.done;
+    }
+
+    prev.addEventListener('click', () => { if (k > 0) { k--; render(); } });
+    next.addEventListener('click', () => { if (k < STEPS.length - 1) { k++; render(); } });
+    reset.addEventListener('click', () => { k = 0; render(); });
+    render();
   };
 
   /* ---------- 挂载 ---------- */

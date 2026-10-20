@@ -911,6 +911,8 @@ text: |
 把 demo 之前的内容 `display: none` 掉（`display` 让它脱离文档流，demo 自然顶上来），
 不要用 `remove()` 删布局容器 —— 删错了会把正文列宽一起删没，截出一张 230px 宽的窄图。
 
+!!`display: none` 藏掉 grid 容器里的兄弟节点（比如目录 `aside.toc`）是同一个坑：==它一消失，`main` 会顶进目录那一列（240px）==，所有积木都被挤成窄版，看着像控件坏了。只从 `<main>` 内部往上藏，或顺手给 `.shell` 写上 `grid-template-columns: minmax(0, 1fr)`。!!
+
 
 ```js
 window.__errs = [];
@@ -1654,7 +1656,7 @@ text: |
 | `summary` | 小结 |
 | `raw` | 直接写 HTML |
 
-**交互控件 64 个**（在 `assets/app.js` 的 `WIDGETS` 里，供 `demo` 积木引用）：
+**交互控件 65 个**（在 `assets/app.js` 的 `WIDGETS` 里，供 `demo` 积木引用）：
 `polling-vs-cdc` `combination-count` `join-lab` `on-vs-where` `knex-chain`
 `stepper` `tuner` `diff` `stream-modes` `operator-lab` `hashring` `partition-prune`
 `dsl-lab` `null-lab` `config-to-ui` `field-lineage` `count-dedup-lab`
@@ -1668,7 +1670,7 @@ text: |
 `combination-control-lab` `combination-values-lab` `combination-build-lab` `cand-pipe-lab`
 `s3-list-lab` `ec-lab` `mysql-2pc-crash` `join-driver-lab` `i18n-lab` `i18n-lookup`
 `relation-negation-lab` `rn-compile-lab`
-`notin-lab` `times-readings-lab` `rbtree-lab`
+`notin-lab` `times-readings-lab` `rbtree-lab` `call-stack-lab`
 
 **已知缺口**（按优先级）：
 
