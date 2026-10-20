@@ -1,0 +1,1572 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-has-toc="1">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>从零推导 G、M、P · 每一步都是被逼出来的</title>
+<meta name="description" content="从一条连接一条线程开始，撞九次墙、加九个零件：G 是任务记录，M 是内核线程，P 是可转交的工位；本地队列、偷一半、g0、sysmon、netpoll、M0/main G 都只是因为上一级留下了一个具体问题才存在。" />
+<link rel="stylesheet" href="../../assets/theme.css?v=b918ec5c83" />
+  <link rel="stylesheet" href="../../assets/blocks.css?v=1af3923321" />
+  <link rel="stylesheet" href="../../assets/archify-embed.css?v=68fec0b81b" />
+</head>
+<body>
+<div id="progress"></div>
+<div id="tocScrim"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
+    <a class="brand" href="../../index.html"><span class="dot"></span>知识笔记</a>
+    
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="toc" id="toc">
+      <p class="toc-title">目录</p>
+      <a href="../../index.html" class="sub">← 全部笔记</a>
+      <a href="#先看终点这一刻四条-g-各在哪儿">先看终点：这一刻，四条 G 各在哪儿</a>
+      <a href="#推导的规矩目标先定零件被逼出来">推导的规矩：目标先定，零件被逼出来</a>
+      <a href="#起点一个任务一条线程先撞三堵墙">起点：一个任务一条线程，先撞三堵墙</a>
+      <a href="#第-1-级-只留下跟着执行流走的那点东西-g">第 1 级 · 只留下跟着执行流走的那点东西 → G</a>
+      <a href="#第-2-级-数据不会自己跑-m">第 2 级 · 数据不会自己跑 → M</a>
+      <a href="#第-3-级-一把锁把核全拦住-本地队列">第 3 级 · 一把锁把核全拦住 → 本地队列</a>
+      <a href="#第-4-级-本地队列长在-m-上m-一卡就全赔-p">第 4 级 · 本地队列长在 M 上，M 一卡就全赔 → P</a>
+      <a href="#第-5-级-有的-p-排满有的-p-空转-偷一半">第 5 级 · 有的 P 排满，有的 P 空转 → 偷一半</a>
+      <a href="#第-6-级-调度代码站哪儿-g0">第 6 级 · 调度代码站哪儿 → g0</a>
+      <a href="#第-7-级-g-不肯让系统还要人看着-sysmon">第 7 级 · G 不肯让，系统还要人看着 → sysmon</a>
+      <a href="#第-8-级-等数据不该占着线程-netpoll">第 8 级 · 等数据不该占着线程 → netpoll</a>
+      <a href="#第-9-级-开机那一刻这些零件从哪来-m0-与-main-g">第 9 级 · 开机那一刻，这些零件从哪来 → M0 与 main G</a>
+      <a href="#这套折中换来了什么代价在哪">这套折中换来了什么，代价在哪</a>
+      <a href="#用工厂记一遍">用工厂记一遍</a>
+      <a href="#一句话" class="sub">一句话</a>
+      <a href="#自测">自测</a>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow">● Go 协程 · 推导</span>
+      <h1>从零推导 G、M、P · 每一步都是被逼出来的</h1>
+      <p class="lede">从一条连接一条线程开始，撞九次墙、加九个零件：G 是任务记录，M 是内核线程，P 是可转交的工位；本地队列、偷一半、g0、sysmon、netpoll、M0/main G 都只是因为上一级留下了一个具体问题才存在。</p>
+    </div>
+
+
+    <div class="provenance"><span><b>来源</b> Go 源码 src/runtime/proc.go（master，2026-10-20 读）：newproc、runqgrab、findRunnable 的 61 次抽查、sysmon、retake、schedinit、runtime.main · Go 源码 src/runtime/runtime2.go：g 结构、p 结构（runnext、runq 256 槽、mcache） · Go 源码 src/runtime/stack.go：stackMin = 2048、newstack 里 newsize := oldsize * 2 · Go 源码 src/runtime/netpoll.go：netpoller 接口与 pollDesc 状态机 · Go 源码 src/runtime/signal_unix.go、preempt.go：sigPreempt = _SIGURG、异步抢占 · Go 源码 src/os/file_unix.go、src/internal/poll/fd_unix.go：普通文件注册不进 epoll/kqueue，退回阻塞模式 · Go 源码 src/runtime/asm_amd64.s：rt0_go 登记 M0/g0、schedinit、newproc(main)、mstart · Daniel Morsing《The Go scheduler》 https://morsmachine.dk/go-scheduler · Daniel Morsing《The Go netpoller》 https://morsmachine.dk/netpoller.html · rakyll《Go's work-stealing scheduler》 https://rakyll.org/scheduler/ · Scalable Go Scheduler Design Doc https://golang.org/s/go11sched · Go 1.14 Release Notes（goroutine 可异步抢占） https://go.dev/doc/go1.14 · pthread_create(3)（glibc 默认线程栈跟随 RLIMIT_STACK） https://man7.org/linux/man-pages/man3/pthread_create.3.html · Internals for Interns 三篇（The Scheduler / The System Monitor / The Network Poller）—— 二手线索，结论都回源码核对</span><span><b>生成</b> 2026-10-20</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">Go</span> <span class="tag tone-muted">GMP</span> <span class="tag tone-muted">调度器</span> <span class="tag tone-muted">推导</span></span></div>
+
+<div class="quiz"><details>
+        <summary>从 0 开始，一步步推导出这些结构，到底为了什么？（点开看这次的问答原文）</summary>
+        <div class="a"><blockquote>
+<p>下面是这次讨论的原文：一个问题和一份大白话推导。后面九级推导就是把它拆开、配上图和源码出处重排了一遍。</p>
+<p>原文里的一、二、三级标题在这里降成了小标题，其余没改。</p>
+</blockquote>
+<h4>问</h4>
+<p>从 0 开始，一步步推导出这些结构，就是为了什么，Go 设计了什么，然后发明了某些模块；我理解应该是为了某个目标，某种设计是好的，所以就这样干了。用大白话推导。</p>
+<h4>答</h4>
+<p>你的理解是对的：</p>
+<blockquote>
+<p>Go 不是先「凭空发明」G、M、P，然后再找用途。
+而是先确定目标，遇到一个个问题，再逐步加结构解决。</p>
+</blockquote>
+<p>可以从「什么都没有」开始推导。</p>
+<h4>一、Go 最初想解决什么问题？</h4>
+<p>假设我们要写一个服务器，同时处理十万个连接。</p>
+<p>最直观的代码是：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-go">for {
+    conn := accept()
+    handle(conn)
+}
+</code></pre></div>
+<p>问题是：前一个连接没处理完，后面的连接就只能等。</p>
+<p>于是我们想要：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-go">for {
+    conn := accept()
+    go handle(conn)
+}
+</code></pre></div>
+<p>理想目标是：</p>
+<ol>
+<li>每个任务都可以按正常的顺序代码来写；</li>
+<li>能同时存在几十万、几百万个任务；</li>
+<li>能利用多核 CPU；</li>
+<li>某个任务阻塞，不能拖住其他任务；</li>
+<li>调度成本不能太高；</li>
+<li>程序员最好不用自己管理线程。</li>
+</ol>
+<p>这就是后面所有结构的出发点。</p>
+<h4>二、第一步：操作系统已经有线程，直接一个任务一条线程行不行？</h4>
+<p>操作系统能真正调度的执行单位，主要是线程。</p>
+<p>那么最简单的设计就是：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">一个任务 = 一条操作系统线程
+</code></pre></div>
+<p>例如十万个连接，就创建十万条线程。</p>
+<h5>这样写代码确实很舒服</h5>
+<p>每条线程都可以写成：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-go">读取请求
+处理请求
+查询数据库
+返回结果
+</code></pre></div>
+<p>代码是顺序的，很容易理解。</p>
+<p>但问题也非常明显。</p>
+<h5>问题1：线程太重</h5>
+<p>创建和销毁线程需要进入操作系统。</p>
+<p>线程还需要：</p>
+<ul>
+<li>自己的栈；</li>
+<li>操作系统内核数据结构；</li>
+<li>寄存器状态；</li>
+<li>调度状态。</li>
+</ul>
+<p>十万个任务对应十万条线程，成本太高。</p>
+<h5>问题2：线程切换太贵</h5>
+<p>线程之间切换，需要操作系统内核参与。</p>
+<p>如果线程数量远远超过 CPU 核数，操作系统会花很多时间切换线程，而不是执行真正的业务。</p>
+<h5>问题3：并发量被线程数量限制</h5>
+<p>我们想要的是几十万个「等待中的任务」，但不代表真的需要几十万条线程同时执行。</p>
+<p>例如十万个网络连接里，大部分时间可能都在等待数据。</p>
+<h4>三、于是 Go 发明了更轻的「任务」：G</h4>
+<p>既然操作系统线程太重，那就在用户态做一个轻量任务。</p>
+<p>这个任务就是：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">G，也就是 goroutine
+</code></pre></div>
+<p>G 里面保存的主要是：</p>
+<ul>
+<li>要执行哪个函数；</li>
+<li>执行到哪里了；</li>
+<li>自己的栈；</li>
+<li>当前是运行、等待还是可运行状态；</li>
+<li>一些调度信息。</li>
+</ul>
+<p>现在，一个连接可以对应一个 G：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">连接1 → G1
+连接2 → G2
+连接3 → G3
+……
+</code></pre></div>
+<p>G 比操作系统线程轻得多，所以可以创建很多。</p>
+<h5>但 G 自己不能执行</h5>
+<p>CPU 和操作系统并不认识 G。</p>
+<p>操作系统只认识线程。</p>
+<p>所以 G 更像是一份「任务档案」：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">要执行什么
+执行到哪里
+使用哪块栈
+</code></pre></div>
+<p>它不能自己跑，必须找一条真正的操作系统线程来执行。</p>
+<h4>四、于是需要 M：真正干活的操作系统线程</h4>
+<p>Go runtime 把操作系统线程抽象成：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">M
+</code></pre></div>
+<p>M 可以理解成 Machine，实际对应操作系统线程。</p>
+<p>于是现在有：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">G：要执行的任务
+M：真正执行任务的线程
+</code></pre></div>
+<p>一个 M 可以这样工作：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">拿到 G1，执行一会儿
+G1 等待了
+换成 G2
+G2 执行完了
+再换成 G3
+</code></pre></div>
+<p>这样，少量 M 就可以执行大量 G。</p>
+<p>例如：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">10万个 G
+     ↓
+几十条 M
+     ↓
+8个 CPU 核心
+</code></pre></div>
+<p>这就是 Go 调度器最核心的方向：</p>
+<blockquote>
+<p>用少量操作系统线程，承载大量轻量 goroutine。</p>
+</blockquote>
+<p>这通常叫：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">M:N 调度
+</code></pre></div>
+<p>即 M 个 G 映射到 N 个操作系统线程。这里的字母和 Go 内部的 M 不要混淆，意思就是「多对多」。</p>
+<h4>五、有了 G 和 M，为什么还不够？</h4>
+<p>现在可以设计一个最简单的调度器：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">所有等待执行的 G
+        ↓
+一个全局队列
+        ↓
+多个 M 从里面拿 G
+</code></pre></div>
+<p>类似这样：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">        全局 G 队列
+       /    |    \
+     M1    M2    M3
+</code></pre></div>
+<p>这个设计能工作，但并不够好。</p>
+<h5>问题1：大家都抢同一把锁</h5>
+<p>多个 M 同时从全局队列拿 G，需要加锁。</p>
+<p>如果 CPU 核数很多，所有 M 都来抢同一个队列：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">M1：我要拿任务
+M2：我也要拿任务
+M3：我也要拿任务
+M4：我也要拿任务
+</code></pre></div>
+<p>全局队列就会成为性能瓶颈。</p>
+<h5>问题2：每条线程都需要一些运行资源</h5>
+<p>执行 Go 代码时，还需要很多配套资源，例如：</p>
+<ul>
+<li>可运行 G 的队列；</li>
+<li>内存分配缓存；</li>
+<li>调度状态；</li>
+<li>GC 相关状态；</li>
+<li>定时器等。</li>
+</ul>
+<p>如果所有资源都放在全局，大家就会频繁抢锁。</p>
+<p>一种自然的改进是：</p>
+<blockquote>
+<p>给每个工作线程一份本地队列和本地缓存。</p>
+</blockquote>
+<p>但如果直接把这些资源永久绑在 M 上，又会出现新问题。</p>
+<h4>六、如果把队列和资源直接绑在 M 上，会发生什么？</h4>
+<p>假设 M1 拿着：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">本地 G 队列
+内存缓存
+调度资源
+</code></pre></div>
+<p>然后 M1 执行了一个阻塞系统调用：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-go">读取文件
+</code></pre></div>
+<p>操作系统把 M1 卡住了。</p>
+<p>这时，如果那些资源永久属于 M1，那么它们也跟着 M1 一起被卡住：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">M1 被阻塞
+├── 本地队列里的其他 G 不能运行
+├── 本地缓存不能使用
+└── 一份执行能力被浪费
+</code></pre></div>
+<p>但实际上，被卡住的只是这条线程。</p>
+<p>它携带的其他可运行 G 并没有阻塞。</p>
+<p>因此 Go 需要把两个概念拆开：</p>
+<ol>
+<li><strong>操作系统线程</strong></li>
+<li><strong>执行 Go 代码需要的资源</strong></li>
+</ol>
+<p>于是有了 P。</p>
+<h4>七、于是 Go 设计了 P：可转交的「工位」</h4>
+<p>P 可以用大白话理解成：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">执行 Go 代码的工位
+</code></pre></div>
+<p>这个工位里面放着：</p>
+<ul>
+<li>本地可运行 G 队列；</li>
+<li>内存分配缓存；</li>
+<li>调度状态；</li>
+<li>GC 相关资源；</li>
+<li>其他执行 Go 代码需要的本地资源。</li>
+</ul>
+<p>现在关系变成：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">G：任务
+M：工人
+P：工位
+</code></pre></div>
+<p>只有工人坐到工位上，才能处理普通业务任务：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">M + P + G → 执行 Go 代码
+</code></pre></div>
+<p>例如：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">M1 拿着 P1 执行 G1
+M2 拿着 P2 执行 G2
+</code></pre></div>
+<h4>八、为什么把 P 单独拆出来是一个好设计？</h4>
+<p>因为：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">M 可能被操作系统阻塞
+P 不应该跟着被浪费
+</code></pre></div>
+<p>例如 M1 执行 G1：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">M1 + P1 → G1
+</code></pre></div>
+<p>G1 进入阻塞系统调用，M1 被内核卡住。</p>
+<p>这时 runtime 可以把 P1 交给另一条线程：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">原来：
+M1 + P1
+
+M1 阻塞后：
+M1 → 卡在系统调用中
+M2 + P1 → 继续执行其他 G
+</code></pre></div>
+<p>所以，P 的价值是：</p>
+<blockquote>
+<p>把「线程」与「执行 Go 代码所需的资源」分离。</p>
+</blockquote>
+<p>线程被卡住了，工位还可以交给其他线程继续使用。</p>
+<p>这类似于：</p>
+<ul>
+<li>M 是工人；</li>
+<li>P 是工位；</li>
+<li>G 是订单。</li>
+</ul>
+<p>某个工人出去等待货物，不应该把整套工位也锁死。工位可以交给另一个工人继续处理其他订单。</p>
+<h4>九、P 还顺便解决了「并行度控制」</h4>
+<p>假设机器有 8 个 CPU 核心。</p>
+<p>即使有十万个 G，同一时刻真正能并行执行的任务通常也只需要大约 8 个。</p>
+<p>如果无限制地创建 M，让所有 M 一起抢 CPU，会造成大量线程切换。</p>
+<p>Go 用 P 的数量控制并行度。</p>
+<p>例如：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">GOMAXPROCS = 8
+</code></pre></div>
+<p>通常就会有 8 个 P：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">P0 P1 P2 P3 P4 P5 P6 P7
+</code></pre></div>
+<p>因为一个 M 执行普通 Go 代码时需要一个 P，所以同一时刻最多大约有 8 个 M 在并行执行 Go 代码。</p>
+<p>注意：</p>
+<ul>
+<li>G 的数量可以是十万个；</li>
+<li>M 的数量可能多于 8，因为有些 M 可能阻塞在系统调用中；</li>
+<li>P 的数量是 8；</li>
+<li>同时并行执行普通 Go 代码的数量主要由 P 控制。</li>
+</ul>
+<p>所以 P 同时承担了两个角色：</p>
+<ol>
+<li>保存本地调度资源，减少全局锁竞争；</li>
+<li>控制 Go 代码的并行度。</li>
+</ol>
+<h4>十、每个 P 为什么要有本地 G 队列？</h4>
+<p>如果仍然让所有 M 都从一个全局队列拿 G，锁竞争还是存在。</p>
+<p>所以每个 P 有自己的本地队列：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">P1 → G1、G2、G3
+P2 → G4、G5
+P3 → G6、G7、G8
+</code></pre></div>
+<p>M 拿着哪个 P，就优先运行哪个 P 队列里的 G。</p>
+<p>这样大多数时候不需要争抢全局锁：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">M1 + P1 → 从 P1 本地队列拿 G
+M2 + P2 → 从 P2 本地队列拿 G
+</code></pre></div>
+<h5>如果某个 P 没任务了怎么办？</h5>
+<p>例如：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">P1：很多 G
+P2：没有 G
+</code></pre></div>
+<p>P2 可以从 P1 那里偷一部分任务。</p>
+<p>这叫：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">work stealing，工作窃取
+</code></pre></div>
+<p>大白话就是：</p>
+<blockquote>
+<p>我的活干完了，你那边还有很多，我拿一些过来干。</p>
+</blockquote>
+<p>这样可以自动平衡任务。</p>
+<h4>十一、到这里，G、M、P 就推导出来了</h4>
+<p>现在形成了 Go 调度器的主体：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">大量 G：业务任务
+少量 M：操作系统线程
+固定数量的 P：执行资源和并行许可证
+</code></pre></div>
+<p>执行关系是：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">M 必须拿到 P
+P 提供一个可运行的 G
+M 执行这个 G
+</code></pre></div>
+<p>可以记成：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">M + P → 运行 G
+</code></pre></div>
+<p>为什么不能只有 G 和 M？</p>
+<p>不是说技术上绝对做不到，而是 Go 选择把 P 单独拆出来，可以更好地解决：</p>
+<ul>
+<li>本地队列；</li>
+<li>减少锁竞争；</li>
+<li>内存缓存；</li>
+<li>GC 状态；</li>
+<li>阻塞时转交资源；</li>
+<li>限制并行度。</li>
+</ul>
+<p>P 是一个工程上的组合设计。</p>
+<h4>十二、又遇到一个问题：谁来执行调度器？</h4>
+<p>假设 M 正在执行 G1。</p>
+<p>后来 G1 需要等待：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-go">等待 channel
+</code></pre></div>
+<p>runtime 要做这些事情：</p>
+<ol>
+<li>保存 G1 当前执行位置；</li>
+<li>把 G1 设置成等待状态；</li>
+<li>从队列里找另一个 G2；</li>
+<li>切换到 G2 的栈；</li>
+<li>恢复 G2 的执行。</li>
+</ol>
+<p>问题来了：</p>
+<blockquote>
+<p>这些「换任务」的代码运行在哪里？</p>
+</blockquote>
+<p>不能简单地一直使用 G1 的栈。</p>
+<p>因为此时 G1 的栈可能：</p>
+<ul>
+<li>很小，需要扩容；</li>
+<li>正在被扫描；</li>
+<li>即将暂停；</li>
+<li>状态正在切换；</li>
+<li>本身就是调度对象。</li>
+</ul>
+<p>这就像你要维修一台正在使用的机器，最好不要站在这台机器内部完成全部维修。</p>
+<p>所以每个 M 需要一个稳定的、专门运行调度代码的栈。</p>
+<p>于是有了 g0。</p>
+<h4>十三、g0：每个 M 的「调度工作台」</h4>
+<p>每个 M 都有一个特殊的 G，叫：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">g0
+</code></pre></div>
+<p>g0 虽然名字里有 G，但它不是普通业务 goroutine。</p>
+<p>它主要用于执行：</p>
+<ul>
+<li>调度；</li>
+<li>G 的切换；</li>
+<li>G 的栈扩容；</li>
+<li>一些 runtime 底层操作。</li>
+</ul>
+<p>可以把它理解成：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">普通 G：业务工作台
+g0：维修和调度工作台
+</code></pre></div>
+<p>执行过程大致是：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">M 正在执行 G1
+      ↓
+G1 需要等待
+      ↓
+切换到 M 的 g0
+      ↓
+g0 运行调度器，找到 G2
+      ↓
+切换到 G2
+</code></pre></div>
+<p>图示：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">G1 → g0 → G2
+</code></pre></div>
+<h5>为什么每个 M 都要有自己的 g0？</h5>
+<p>因为每条 M 都可能随时需要：</p>
+<ul>
+<li>暂停当前 G；</li>
+<li>执行调度；</li>
+<li>切换到另一个 G；</li>
+<li>处理栈相关操作。</li>
+</ul>
+<p>而且 g0 的栈和 M 绑定，提供一个稳定的底层执行环境。</p>
+<p>所以：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">每个 M 都有自己的 g0
+</code></pre></div>
+<h4>十四、又遇到一个问题：如果 G 一直不主动停下来怎么办？</h4>
+<p>早期可以依靠 G 在这些地方进入调度：</p>
+<ul>
+<li>函数调用；</li>
+<li>channel 操作；</li>
+<li>系统调用；</li>
+<li>内存分配；</li>
+<li>主动调用 <code>runtime.Gosched()</code>。</li>
+</ul>
+<p>但是假设有一个 G：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-go">for {
+    // 一直计算
+}
+</code></pre></div>
+<p>它不等待、不读 channel，也不主动让出 CPU。</p>
+<p>那它可能长时间霸占 M 和 P。</p>
+<p>其他 G 就可能得不到执行机会。</p>
+<p>另外，系统中还需要有人定期处理：</p>
+<ul>
+<li>定时器；</li>
+<li>长时间系统调用；</li>
+<li>网络轮询；</li>
+<li>抢占；</li>
+<li>GC；</li>
+<li>内存回收；</li>
+<li>调度状态检查。</li>
+</ul>
+<p>不能指望普通业务 G 主动完成这些事情。</p>
+<p>于是需要一个后台监控者。</p>
+<h4>十五、sysmon：不干业务的后台巡逻员</h4>
+<p>Go runtime 创建了一个系统监控任务：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">sysmon
+</code></pre></div>
+<p>可以理解成「巡逻员」。</p>
+<p>它会周期性检查系统状态，例如：</p>
+<ul>
+<li>有没有 G 长时间占着 CPU；</li>
+<li>有没有 M 长时间卡在系统调用里；</li>
+<li>是否需要抢占；</li>
+<li>是否有定时器到期；</li>
+<li>是否需要参与网络轮询；</li>
+<li>是否要推动 GC 和内存清理。</li>
+</ul>
+<p>sysmon 通常运行在专门的 M 上，而且通常不需要绑定普通 P。</p>
+<p>为什么？</p>
+<p>因为它主要执行 runtime 的监控代码，不是普通用户 Go 代码。</p>
+<p>如果巡逻员也必须先抢到一个 P 才能工作，那么所有 P 都被占满时，巡逻员反而可能无法处理问题。</p>
+<p>所以大体上可以理解为：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">普通 M：拿着 P 执行业务 G
+sysmon 的 M：在外面巡逻和监控
+</code></pre></div>
+<h4>十六、网络 I/O 阻塞怎么办？</h4>
+<p>这是高并发服务器最关键的问题之一。</p>
+<p>假设一个 G 调用：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-go">data, err := conn.Read(buf)
+</code></pre></div>
+<p>如果每次等待网络数据，都把 M 一起阻塞，那么连接很多时还是需要大量 M。</p>
+<p>所以 Go 对可以使用非阻塞模式的网络 I/O，通常会借助：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">netpoll 网络轮询器
+</code></pre></div>
+<p>执行逻辑大致是：</p>
+<ol>
+<li>G 尝试读取网络数据；</li>
+<li>数据还没到；</li>
+<li>不让 M 陪着等待；</li>
+<li>把 G 设置成等待状态；</li>
+<li>M 继续执行其他 G；</li>
+<li>操作系统通知「网络数据到了」；</li>
+<li>runtime 重新把这个 G 放进可运行队列。</li>
+</ol>
+<p>也就是：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">错误方式：
+G 等网络 → M 也跟着一直等
+
+Go 尽量采用的方式：
+G 等网络 → G 暂停
+         → M 去执行其他 G
+</code></pre></div>
+<p>这也是「少量线程承载大量 goroutine」能够成立的重要原因。</p>
+<p>不过，并不是所有阻塞都能转换成 netpoll。某些文件 I/O、系统调用或 cgo 调用仍可能阻塞 M。这时就需要把 P 转交给其他 M。</p>
+<h4>十七、程序最开始运行时，G、M、P 从哪里来？</h4>
+<p>现在又有一个「先有鸡还是先有蛋」的问题：</p>
+<ul>
+<li>G 要由 M 执行；</li>
+<li>M 执行普通 G 又需要 P；</li>
+<li>创建和调度它们需要 runtime；</li>
+<li>但程序刚启动时，这些东西都还没有。</li>
+</ul>
+<p>所以 Go 需要一套启动时预先准备的特殊结构。</p>
+<h4>十八、M0：操作系统最初给的线程</h4>
+<p>操作系统启动 Go 程序时，本来就会给程序一条初始线程。</p>
+<p>runtime 不需要先创建它，而是直接接管这条线程，把它表示为：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">M0
+</code></pre></div>
+<p>可以理解为：</p>
+<blockquote>
+<p>M0 是 Go 程序开机时的第一名工人。</p>
+</blockquote>
+<p>后面的其他 M，才是 runtime 按需创建的。</p>
+<p>M0 本身并不代表一直专门执行 <code>main</code>。它只是启动时的第一条操作系统线程，之后也会进入正常的调度体系。</p>
+<h4>十九、g0：M0 启动时的稳定执行环境</h4>
+<p>M0 也需要一个用于启动和调度的系统栈。</p>
+<p>这个特殊的 G 就是 M0 的：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">g0
+</code></pre></div>
+<p>启动阶段，runtime 先在这个稳定环境里做初始化：</p>
+<ul>
+<li>初始化调度器；</li>
+<li>初始化内存管理；</li>
+<li>初始化 GC；</li>
+<li>创建 P；</li>
+<li>创建 main G；</li>
+<li>启动后台监控；</li>
+<li>开始执行调度。</li>
+</ul>
+<p>所以启动时可以理解成：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">操作系统启动线程
+       ↓
+runtime 把它登记成 M0
+       ↓
+M0 在 g0 上完成底层初始化
+</code></pre></div>
+<h4>二十、为什么还需要 main G？</h4>
+<p>runtime 初始化完成之后，最终要执行用户写的：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-go">func main() {
+}
+</code></pre></div>
+<p>如果直接在 g0 上执行用户的 <code>main</code>，就会把两个用途混在一起：</p>
+<ul>
+<li>g0 本来用于调度和底层操作；</li>
+<li>用户 main 是普通业务代码，可能阻塞、扩栈、创建 goroutine。</li>
+</ul>
+<p>因此用户的 main 也应该作为一个普通 G 来执行。</p>
+<p>于是 runtime 创建：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">main G
+</code></pre></div>
+<p>它大致执行：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">runtime.main
+    ↓
+包初始化
+    ↓
+各个 init 函数
+    ↓
+用户的 main.main
+</code></pre></div>
+<p>所以 main G 没有什么神秘的。</p>
+<p>它就是：</p>
+<blockquote>
+<p>程序启动后，第一个非常重要的普通 goroutine。</p>
+</blockquote>
+<p>把 main 放在普通 G 里以后，它就自然适用整套调度规则：</p>
+<ul>
+<li>可以暂停；</li>
+<li>可以阻塞；</li>
+<li>可以被调度；</li>
+<li>可以与其他 G 并发；</li>
+<li>可以发生栈扩容。</li>
+</ul>
+<h4>二十一、完整推导过程</h4>
+<p>把整个过程压缩成一条逻辑链：</p>
+<h5>1. 想支持大量并发任务</h5>
+<p>操作系统线程太重。</p>
+<p>于是设计：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">G：轻量任务
+</code></pre></div>
+<h5>2. G 不能直接被 CPU 执行</h5>
+<p>操作系统只调度线程。</p>
+<p>于是需要：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">M：承载 G 的操作系统线程
+</code></pre></div>
+<h5>3. 大量 G 不能全都对应 M</h5>
+<p>于是采用：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">少量 M 调度大量 G
+</code></pre></div>
+<h5>4. 所有 M 抢一个全局队列，竞争太严重</h5>
+<p>于是需要本地队列和本地缓存。</p>
+<h5>5. 如果本地资源直接绑定 M，M 阻塞时资源会被浪费</h5>
+<p>于是把资源独立出来：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">P：可转交的执行资源和本地调度上下文
+</code></pre></div>
+<h5>6. 某个 P 没活，其他 P 很忙</h5>
+<p>于是采用：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">work stealing：工作窃取
+</code></pre></div>
+<h5>7. 普通 G 的栈不适合直接承担底层调度</h5>
+<p>于是每个 M 配置：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">g0：调度和底层操作的专用执行环境
+</code></pre></div>
+<h5>8. 有些 G 可能长时间占用 CPU，系统还需要定期维护</h5>
+<p>于是设计：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">sysmon：后台监控者
+</code></pre></div>
+<h5>9. 网络等待不能一直占用 M</h5>
+<p>于是加入：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">netpoll：网络轮询机制
+</code></pre></div>
+<h5>10. 程序启动时还没有普通调度环境</h5>
+<p>于是使用：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">M0：初始线程
+M0 的 g0：启动和底层初始化环境
+main G：运行用户 main 的普通 goroutine
+</code></pre></div>
+<h4>二十二、最终形成的整体模型</h4>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">                   大量 G
+        G1  G2  G3  G4  G5  G6 ...
+              业务任务
+                  ↓
+        ┌─────────┴─────────┐
+        │                   │
+       P1                  P2
+ 本地队列、缓存、状态   本地队列、缓存、状态
+        │                   │
+       M1                  M2
+   操作系统线程         操作系统线程
+        │                   │
+       CPU                 CPU
+</code></pre></div>
+<p>每个 M 还有自己的 g0：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">M1
+├── 当前运行的普通 G
+└── g0：负责调度切换
+</code></pre></div>
+<p>系统外面还有巡逻员：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">sysmon
+├── 检查抢占
+├── 检查系统调用
+├── 检查定时器
+├── 参与网络轮询
+└── 推动 GC 等工作
+</code></pre></div>
+<h4>二十三、最本质的设计目标</h4>
+<p>这些结构最终都在服务一个核心目标：</p>
+<blockquote>
+<p>让程序员可以像使用大量线程一样写顺序代码，但运行时不需要真的创建同样数量的操作系统线程。</p>
+</blockquote>
+<p>也就是说，程序员看到的是：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-go">go handle(conn)
+</code></pre></div>
+<p>非常简单。</p>
+<p>但 runtime 在背后需要解决：</p>
+<ul>
+<li>任务放在哪里；</li>
+<li>哪条线程执行；</li>
+<li>怎么利用多核；</li>
+<li>怎么限制并行度；</li>
+<li>线程阻塞了怎么办；</li>
+<li>网络等待怎么办；</li>
+<li>怎么切换任务；</li>
+<li>怎么避免队列锁竞争；</li>
+<li>怎么抢占死循环任务；</li>
+<li>怎么配合 GC；</li>
+<li>程序怎么启动。</li>
+</ul>
+<p>G、M、P、g0、sysmon，就是这些问题逐层推导出来的解决方案。</p>
+<h4>最后用一句工厂比喻记住</h4>
+<p>Go 想开一家能接百万订单的工厂：</p>
+<ul>
+<li><strong>G</strong>：订单，数量可以非常多；</li>
+<li><strong>M</strong>：工人，真正干活，但数量不能太多；</li>
+<li><strong>P</strong>：工位和工具箱，决定最多多少工人同时生产；</li>
+<li><strong>P 的本地队列</strong>：每个工位旁边的待办订单；</li>
+<li><strong>工作窃取</strong>：自己没订单了，就去其他工位拿一些；</li>
+<li><strong>g0</strong>：每个工人的调度、换单和维修工作台；</li>
+<li><strong>sysmon</strong>：巡逻员，检查谁卡住、谁霸占工位、什么时候维护；</li>
+<li><strong>netpoll</strong>：到货通知系统，不让工人站在门口干等；</li>
+<li><strong>M0</strong>：工厂开门时的第一名工人；</li>
+<li><strong>main G</strong>：工厂正式处理的第一份核心订单；</li>
+<li><strong>runtime</strong>：整套工厂管理制度。</li>
+</ul>
+<p>最关键的三角关系就是：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">G 是活
+M 是人
+P 是工位
+
+人拿到工位，才能干活。
+</code></pre></div>
+<p>这并不是唯一可能的设计，但它是 Go 为「高并发、低成本、多核并行、简单编程」选择的一套工程折中。</p>
+</div>
+      </details></div><h2 id="先看终点这一刻四条-g-各在哪儿">先看终点：这一刻，四条 G 各在哪儿</h2>
+<p>下面的图是 Go 程序跑起来之后某一刻的样子。3 个 P、4 条 M、8 个核，几十万个 G 里绝大多数在排队或等数据，<mark class="mk-blue">真正在核上执行 Go 代码的只有两条 M</mark>。</p>
+<figure class="archfig" data-arch style="--arch-max-width:1560px" data-boundaries="nested" data-pano data-parts='{"netpoll":{"label":"netpoll","sub":"就绪事件队列","detail":"网络 fd 是非阻塞的。读不到数据时，==挂起的是 G，不是线程==（第 8 级）。"},"grq":{"label":"全局队列","sub":"所有 P 共用的兜底","detail":"它要加锁，所以正常路径尽量不碰。每个 P 每 61 次调度才来抽查一次。"},"p0":{"label":"P0 · 一个许可","sub":"本地队列 + mcache","detail":"有它才能跑 Go 代码。本地队列让取任务不用抢全局锁（第 3 级），而 P 本身是可转交的（第 4 级）。"},"p1":{"label":"P1 · 同一个结构","sub":"只是队列里装的东西不同","detail":"P 之间只差队列里有什么。空了就去别的 P 偷一半（第 5 级）。"},"p2":{"label":"P2 · 空工位","sub":"没有 M 持有","detail":"P 是工具，不是线程的一部分 —— 所以它可以被放下、被转交、被晾着（第 4 级）。"},"m0":{"label":"M0","sub":"内核线程","detail":"开机时内核给的第一条线程就是它。后面要更多并行，才 clone 新的（第 2 级）。"},"m1":{"label":"M1","sub":"按需新开","detail":"线程数可以多于 P —— 卡在系统调用里的 M 不占 P。"},"m2":{"label":"M2","sub":"卡在 read() 里","detail":"读普通文件是真阻塞。这时 M 陪着内核，它手里的 P 被交出去继续干活（第 4 级）。"},"sysmon":{"label":"sysmon","sub":"不带 P 的巡逻线程","detail":"它要做的事包括抢占跑太久的 G、收回卡在系统调用里的 P、每 2 分钟强制一次 GC。"},"cpu":{"label":"CPU 核 ×8","sub":"真正执行指令的地方","detail":"核不认识 G、P、M，只认识此刻在它上面执行的指令。上核的是 M。"}}' data-tours='[{"id":"g-one","label":"G 的四种处境","steps":[{"at":["m0"],"text":"G1 正在 M0 上跑。它的现场此刻在寄存器里，栈是它自己那块 2 KiB。"},{"at":["p0"],"text":"同一个 P0 里还排着 G2、G3、G4。==G2 在 runnext，是下一个要被跑的。=="},{"at":["netpoll"],"text":"G8 在读 socket，数据没到。它被挂在这里，M 早就走了。"},{"at":["grq"],"text":"G6、G7 在全局队列。本地队列都空、也没偷到的 P 才来这里。"}]},{"id":"block","label":"卡住之后，P 去哪了","steps":[{"at":["m2"],"text":"M2 在读普通文件，内核没返回。这条线程被扣住了。"},{"at":["p2"],"text":"它手里的 P 被 sysmon 收走。==P 没跟着 M 一起卡死== —— 这就是第 4 级要拆出 P 的理由。"},{"at":["m1"],"text":"如果那时还有活，P 会连着队列一起交给别的 M（或者新开一条），由它接着跑。"}]}]' data-frames='[{"id":"rt","boundary":0,"kind":"contains","label":"Go runtime 自己管","detail":"G、P、M 的记录、队列、缓存都在进程地址空间里。M 虽然是内核线程，但「什么时候上哪个核」由内核决定 —— 这一层只管「谁持有谁」。","members":["netpoll","p0","p1","p2","m0","m1","m2","sysmon","grq"],"depth":1},{"id":"os","boundary":1,"kind":"contains","label":"操作系统管","detail":"核、时间片、迁移都归内核。Go 能定的只有一件事：同一刻最多几个 M 在跑 Go 代码，也就是 P 的个数。","members":["cpu"],"depth":1}]'>
+      <div class="arch-boundary-ui">
+          <div class="arch-boundary-toolbar"><span class="arch-boundary-label">边界</span>
+            <button type="button" data-boundary-mode="nested" aria-pressed="true">多层归属框</button>
+            <button type="button" data-boundary-mode="flat" aria-pressed="false">只留一层分区</button>
+            <button type="button" data-arch-reset>恢复全图</button>
+          </div>
+          <div class="arch-address-box" aria-live="polite"><div data-arch-address>点一个零件，看完整归属路径；点一个区域标题，看这一层的含义。</div>
+            <div data-arch-frame-detail>最外框表示逻辑资源域，不表示所有对象在一块内存里。每层边界的标题说明分组依据。</div></div>
+        </div>
+      <div class="arch-canvas"><svg viewBox="0 0 1560 1000" role="img" aria-labelledby="go-derive-map-archify-diagram-title go-derive-map-archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
+        <title id="go-derive-map-archify-diagram-title">同一刻：G 在跑、在排队、在等数据、在等一个没人领的 P</title>
+        <desc id="go-derive-map-archify-diagram-description">3 个 P、4 条 M、8 个核；同一刻真正在核上跑 Go 代码的只有 2 条 M</desc>
+        <!-- Definitions -->
+        <defs>
+          <marker id="go-derive-map-arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-default" />
+          </marker>
+          <marker id="go-derive-map-arrowhead-emphasis" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-emphasis" />
+          </marker>
+          <marker id="go-derive-map-arrowhead-security" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-security" />
+          </marker>
+          <marker id="go-derive-map-arrowhead-dashed" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-dashed" />
+          </marker>
+          <pattern id="go-derive-map-grid" width="40" height="40" patternUnits="userSpaceOnUse">
+            <path d="M 40 0 L 0 0 0 40" class="c-grid" stroke-width="0.5"/>
+          </pattern>
+        </defs>
+
+        <!-- Background Grid -->
+        <rect width="100%" height="100%" fill="url(#go-derive-map-grid)" />
+
+        <!-- Boundaries (behind everything) -->
+        <g class="arch-frame" data-frame="rt" data-depth="1" data-frame-flat="false" data-frame-kind="contains" role="button" tabindex="0" aria-pressed="false" aria-label="Go runtime 自己管"><title>G、P、M 的记录、队列、缓存都在进程地址空间里。M 虽然是内核线程，但「什么时候上哪个核」由内核决定 —— 这一层只管「谁持有谁」。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="0" data-frame-members="netpoll p0 p1 p2 m0 m1 m2 sysmon grq" x="26" y="56" width="1028" height="818" rx="12" class="c-region" stroke-width="1"/>
+        <text x="34" y="74" class="t-cloud" font-size="9" font-weight="600">Go runtime 自己管</text></g>
+
+        <g class="arch-frame" data-frame="os" data-depth="1" data-frame-flat="false" data-frame-kind="contains" role="button" tabindex="0" aria-pressed="false" aria-label="操作系统管"><title>核、时间片、迁移都归内核。Go 能定的只有一件事：同一刻最多几个 M 在跑 Go 代码，也就是 P 的个数。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="1" data-frame-members="cpu" x="1088" y="198" width="424" height="264" rx="12" class="c-region" stroke-width="1"/>
+        <text x="1096" y="216" class="t-cloud" font-size="9" font-weight="600">操作系统管</text></g>
+
+        <!-- Connection paths (before components for correct z-order) -->
+        <path data-edge-from="netpoll" data-edge-to="p0" data-edge-label="就绪：回队列" data-edge-key="0" data-edge-id="np-p0" data-composition-points="270,185;360,185" d="M 270 185 L 360 185" class="a-default" stroke-width="1.5" marker-end="url(#go-derive-map-arrowhead)"/>
+        <path data-edge-from="p0" data-edge-to="m0" data-edge-label="持有" data-edge-key="1" data-edge-id="p0-m0" data-composition-points="660,185;750,185" d="M 660 185 L 750 185" class="a-default" stroke-width="1.5" marker-end="url(#go-derive-map-arrowhead)"/>
+        <path data-edge-from="p1" data-edge-to="m1" data-edge-key="2" data-edge-id="p1-m1" data-composition-points="660,385;750,385" d="M 660 385 L 750 385" class="a-default" stroke-width="1.5" marker-end="url(#go-derive-map-arrowhead)"/>
+        <path data-edge-from="grq" data-edge-to="p2" data-edge-label="本地空了才来" data-edge-key="3" data-edge-id="grq-p2" data-composition-points="270,585;360,585" d="M 270 585 L 360 585" class="a-dashed" stroke-width="1.5" marker-end="url(#go-derive-map-arrowhead-dashed)"/>
+        <path data-edge-from="m1" data-edge-to="cpu" data-edge-key="4" data-edge-id="m1-cpu" data-composition-points="1010,385;1065,385;1065,337;1120,337" d="M 1010 385 L 1057 385 Q 1065 385 1065 377 L 1065 345 Q 1065 337 1073 337 L 1120 337" class="a-default" stroke-width="1.5" marker-end="url(#go-derive-map-arrowhead)"/>
+        <path data-edge-from="m0" data-edge-to="cpu" data-edge-label="上核" data-edge-key="5" data-edge-id="m0-cpu" data-composition-points="1010,185;1065,185;1065,323;1120,323" d="M 1010 185 L 1057 185 Q 1065 185 1065 193 L 1065 315 Q 1065 323 1073 323 L 1120 323" class="a-default" stroke-width="1.5" marker-end="url(#go-derive-map-arrowhead)"/>
+        <path data-edge-from="m2" data-edge-to="p2" data-edge-label="放下 P" data-edge-key="6" data-edge-id="m2-p2" data-composition-points="750,585;660,585" d="M 750 585 L 660 585" class="a-dashed" stroke-width="1.5" marker-end="url(#go-derive-map-arrowhead-dashed)"/>
+        <path data-edge-from="sysmon" data-edge-to="m2" data-edge-key="7" data-edge-id="sys-m2" data-composition-points="880,720;880,670" d="M 880 720 L 880 670" class="a-default" stroke-width="1.5" marker-end="url(#go-derive-map-arrowhead)"/>
+
+        <!-- Components -->
+        <g id="go-derive-map-node-netpoll" data-nb="1" data-node-id="netpoll" data-node-label="netpoll" tabindex="0" role="button" aria-label="Focus netpoll, 网络轮询 · 就绪了才唤醒, Go runtime 自己管" aria-pressed="false" data-node-kind="messagebus" data-node-sublabel="网络轮询 · 就绪了才唤醒" data-node-context="Go runtime 自己管">
+          <title>netpoll · 网络轮询 · 就绪了才唤醒 · Go runtime 自己管</title>
+          <rect x="70" y="100" width="200" height="170" rx="6" class="c-mask"/>
+          <rect x="70" y="100" width="200" height="170" rx="6" class="c-messagebus" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="messagebus" class="semantic-sigil s-messagebus" transform="translate(76 106) scale(0.6875)">
+            <path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h11"/>
+            <circle cx="5" cy="4.5" r="1" class="sigil-fill"/>
+            <circle cx="10.5" cy="8" r="1" class="sigil-fill"/>
+            <circle cx="7" cy="11.5" r="1" class="sigil-fill"/>
+          </g>
+          <rect class="nb-badge" x="212.4" y="108" width="45.6" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="235.2" y="119" font-size="8" text-anchor="middle">第 8 级</text>
+          <text class="nb-title" x="104" y="121" font-size="10.5" font-weight="600">netpoll</text>
+          <line class="nb-hr" x1="78" y1="128" x2="262" y2="128"/>
+          <text class="nb-k" x="82" y="188" font-size="9">挂着谁</text><text class="nb-v" x="123.4" y="188" font-size="9">G8 等 socket 可读、G9 等可写</text>
+          <text class="nb-k" x="82" y="202" font-size="9">谁在等</text><text class="nb-v" x="123.4" y="202" font-size="9">没有线程 —— 只有 G</text>
+          <text class="nb-note" x="82" y="262" font-size="8">数据到了才把 G 放回队列</text>
+        </g>
+
+        <g id="go-derive-map-node-p0" data-nb="1" data-node-id="p0" data-node-label="P0" tabindex="0" role="button" aria-label="Focus P0, runnext + 本地队列 + mcache, Go runtime 自己管" aria-pressed="false" data-node-kind="backend" data-node-sublabel="runnext + 本地队列 + mcache" data-node-context="Go runtime 自己管">
+          <title>P0 · runnext + 本地队列 + mcache · Go runtime 自己管</title>
+          <rect x="360" y="100" width="300" height="170" rx="6" class="c-mask"/>
+          <rect x="360" y="100" width="300" height="170" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(366 106) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <rect class="nb-badge" x="583.2" y="108" width="64.8" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="615.6" y="119" font-size="8" text-anchor="middle">第 1·3·4 级</text>
+          <text class="nb-title" x="394" y="121" font-size="10.5" font-weight="600">P0</text>
+          <line class="nb-hr" x1="368" y1="128" x2="652" y2="128"/>
+          <g class="nb-spot" data-nb-spot="1" tabindex="0" role="button" data-nb-tip="G 本身是第 1 级：一块 2 KiB 的栈 + 三个寄存器的现场 + 一个状态"><rect class="nb-hit" x="367" y="170" width="286.0" height="14"/><text class="nb-k" x="372" y="181" font-size="9">runnext</text><text class="nb-v" x="418.8" y="181" font-size="9">G2 —— 刚被唤醒，下一个跑</text></g>
+          <text class="nb-k" x="372" y="195" font-size="9">runq</text><text class="nb-v" x="418.8" y="195" font-size="9">256 槽，现在 2 个：G3、G4</text>
+          <text class="nb-k" x="372" y="209" font-size="9">mcache</text><text class="nb-v" x="418.8" y="209" font-size="9">小对象分配缓存，不用抢锁</text>
+          <text class="nb-note" x="372" y="262" font-size="8">取放只动自己的原子变量</text>
+        </g>
+
+        <g id="go-derive-map-node-m0" data-nb="1" data-node-id="m0" data-node-label="M0" tabindex="0" role="button" aria-label="Focus M0, 内核线程 · 开机第一条, Go runtime 自己管" aria-pressed="false" data-node-kind="backend" data-node-sublabel="内核线程 · 开机第一条" data-node-context="Go runtime 自己管">
+          <title>M0 · 内核线程 · 开机第一条 · Go runtime 自己管</title>
+          <rect x="750" y="100" width="260" height="170" rx="6" class="c-mask"/>
+          <rect x="750" y="100" width="260" height="170" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(756 106) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <rect class="nb-badge" x="952.4" y="108" width="45.6" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="975.2" y="119" font-size="8" text-anchor="middle">第 2 级</text>
+          <text class="nb-title" x="784" y="121" font-size="10.5" font-weight="600">M0</text>
+          <line class="nb-hr" x1="758" y1="128" x2="1002" y2="128"/>
+          <text class="nb-k" x="762" y="188" font-size="9">正在跑</text><text class="nb-v" x="803.4" y="188" font-size="9">G1（curg）</text>
+          <text class="nb-k" x="762" y="202" font-size="9">g0</text><text class="nb-v" x="803.4" y="202" font-size="9">16 KiB 系统栈，换 G 的代码在这跑</text>
+          <text class="nb-note" x="762" y="262" font-size="8">一条 M 同一时刻只跑一个 G</text>
+        </g>
+
+        <g id="go-derive-map-node-p1" data-nb="1" data-node-id="p1" data-node-label="P1" tabindex="0" role="button" aria-label="Focus P1, runnext + 本地队列 + mcache, Go runtime 自己管" aria-pressed="false" data-node-kind="backend" data-node-sublabel="runnext + 本地队列 + mcache" data-node-context="Go runtime 自己管">
+          <title>P1 · runnext + 本地队列 + mcache · Go runtime 自己管</title>
+          <rect x="360" y="300" width="300" height="170" rx="6" class="c-mask"/>
+          <rect x="360" y="300" width="300" height="170" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(366 306) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text class="nb-title" x="394" y="321" font-size="10.5" font-weight="600">P1</text>
+          <line class="nb-hr" x1="368" y1="328" x2="652" y2="328"/>
+          <text class="nb-k" x="372" y="381" font-size="9">runnext</text><text class="nb-v" x="418.8" y="381" font-size="9">空</text>
+          <text class="nb-k" x="372" y="395" font-size="9">runq</text><text class="nb-v" x="418.8" y="395" font-size="9">空 —— G5 已经被取走</text>
+          <text class="nb-k" x="372" y="409" font-size="9">mcache</text><text class="nb-v" x="418.8" y="409" font-size="9">一份</text>
+          <text class="nb-note" x="372" y="462" font-size="8">队列空了就去别的 P 偷一半</text>
+        </g>
+
+        <g id="go-derive-map-node-m1" data-nb="1" data-node-id="m1" data-node-label="M1" tabindex="0" role="button" aria-label="Focus M1, 内核线程 · 按需新开, Go runtime 自己管" aria-pressed="false" data-node-kind="backend" data-node-sublabel="内核线程 · 按需新开" data-node-context="Go runtime 自己管">
+          <title>M1 · 内核线程 · 按需新开 · Go runtime 自己管</title>
+          <rect x="750" y="300" width="260" height="170" rx="6" class="c-mask"/>
+          <rect x="750" y="300" width="260" height="170" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(756 306) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text class="nb-title" x="784" y="321" font-size="10.5" font-weight="600">M1</text>
+          <line class="nb-hr" x1="758" y1="328" x2="1002" y2="328"/>
+          <text class="nb-k" x="762" y="388" font-size="9">正在跑</text><text class="nb-v" x="803.4" y="388" font-size="9">G5（刚从 P0 偷来的）</text>
+          <text class="nb-k" x="762" y="402" font-size="9">g0</text><text class="nb-v" x="803.4" y="402" font-size="9">同上</text>
+          <text class="nb-note" x="762" y="462" font-size="8">要多一点并行时才新开线程</text>
+        </g>
+
+        <g id="go-derive-map-node-grq" data-nb="1" data-node-id="grq" data-node-label="全局队列 GRQ" tabindex="0" role="button" aria-label="Focus 全局队列 GRQ, 兜底 · 取放要加锁, Go runtime 自己管" aria-pressed="false" data-node-kind="messagebus" data-node-sublabel="兜底 · 取放要加锁" data-node-context="Go runtime 自己管">
+          <title>全局队列 GRQ · 兜底 · 取放要加锁 · Go runtime 自己管</title>
+          <rect x="70" y="500" width="200" height="170" rx="6" class="c-mask"/>
+          <rect x="70" y="500" width="200" height="170" rx="6" class="c-messagebus" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="messagebus" class="semantic-sigil s-messagebus" transform="translate(76 506) scale(0.6875)">
+            <path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h11"/>
+            <circle cx="5" cy="4.5" r="1" class="sigil-fill"/>
+            <circle cx="10.5" cy="8" r="1" class="sigil-fill"/>
+            <circle cx="7" cy="11.5" r="1" class="sigil-fill"/>
+          </g>
+          <rect class="nb-badge" x="226.8" y="508" width="31.2" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="242.4" y="519" font-size="8" text-anchor="middle">兜底</text>
+          <text class="nb-title" x="104" y="521" font-size="10.5" font-weight="600">全局队列 GRQ</text>
+          <line class="nb-hr" x1="78" y1="528" x2="262" y2="528"/>
+          <text class="nb-k" x="82" y="588" font-size="9">现在</text><text class="nb-v" x="145.0" y="588" font-size="9">G6、G7 在等</text>
+          <text class="nb-k" x="82" y="602" font-size="9">什么时候来</text><text class="nb-v" x="145.0" y="602" font-size="9">本地队列空、也没偷到</text>
+          <text class="nb-note" x="82" y="662" font-size="8">取放要拿 sched.lock，所以是慢路径</text>
+        </g>
+
+        <g id="go-derive-map-node-p2" data-nb="1" data-node-id="p2" data-node-label="P2" tabindex="0" role="button" aria-label="Focus P2, 没有 M 持有的空工位, Go runtime 自己管" aria-pressed="false" data-node-kind="backend" data-node-sublabel="没有 M 持有的空工位" data-node-context="Go runtime 自己管">
+          <title>P2 · 没有 M 持有的空工位 · Go runtime 自己管</title>
+          <rect x="360" y="500" width="300" height="170" rx="6" class="c-mask"/>
+          <rect x="360" y="500" width="300" height="170" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(366 506) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <rect class="nb-badge" x="602.4" y="508" width="45.6" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="625.2" y="519" font-size="8" text-anchor="middle">第 4 级</text>
+          <text class="nb-title" x="394" y="521" font-size="10.5" font-weight="600">P2</text>
+          <line class="nb-hr" x1="368" y1="528" x2="652" y2="528"/>
+          <text class="nb-k" x="372" y="581" font-size="9">持有者</text><text class="nb-v" x="413.4" y="581" font-size="9">没有 M</text>
+          <text class="nb-k" x="372" y="595" font-size="9">为什么</text><text class="nb-v" x="413.4" y="595" font-size="9">M2 卡进 read()，P 被收回</text>
+          <text class="nb-k" x="372" y="609" font-size="9">队列</text><text class="nb-v" x="413.4" y="609" font-size="9">空</text>
+          <text class="nb-note" x="372" y="662" font-size="8">P 和 M 不是一对绑定关系</text>
+        </g>
+
+        <g id="go-derive-map-node-m2" data-nb="1" data-node-id="m2" data-node-label="M2" tabindex="0" role="button" aria-label="Focus M2, 卡在 read() 里, Go runtime 自己管" aria-pressed="false" data-node-kind="backend" data-node-sublabel="卡在 read() 里" data-node-context="Go runtime 自己管">
+          <title>M2 · 卡在 read() 里 · Go runtime 自己管</title>
+          <rect x="750" y="500" width="260" height="170" rx="6" class="c-mask"/>
+          <rect x="750" y="500" width="260" height="170" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(756 506) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <rect class="nb-badge" x="933.2" y="508" width="64.8" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="965.6" y="519" font-size="8" text-anchor="middle">第 4 级现场</text>
+          <text class="nb-title" x="784" y="521" font-size="10.5" font-weight="600">M2</text>
+          <line class="nb-hr" x1="758" y1="528" x2="1002" y2="528"/>
+          <text class="nb-k" x="762" y="588" font-size="9">状态</text><text class="nb-v" x="808.8" y="588" font-size="9">在 read() 里，内核还没返回</text>
+          <text class="nb-k" x="762" y="602" font-size="9">带 P 吗</text><text class="nb-v" x="808.8" y="602" font-size="9">不带 —— P 已经交出去</text>
+          <text class="nb-note" x="762" y="662" font-size="8">线程陪着这次系统调用，P 不陪</text>
+        </g>
+
+        <g id="go-derive-map-node-sysmon" data-nb="1" data-node-id="sysmon" data-node-label="sysmon 的 M" tabindex="0" role="button" aria-label="Focus sysmon 的 M, 巡逻 · 不带 P, Go runtime 自己管" aria-pressed="false" data-node-kind="backend" data-node-sublabel="巡逻 · 不带 P" data-node-context="Go runtime 自己管">
+          <title>sysmon 的 M · 巡逻 · 不带 P · Go runtime 自己管</title>
+          <rect x="750" y="720" width="260" height="110" rx="6" class="c-mask"/>
+          <rect x="750" y="720" width="260" height="110" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(756 726) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <rect class="nb-badge" x="952.4" y="728" width="45.6" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="975.2" y="739" font-size="8" text-anchor="middle">第 7 级</text>
+          <text class="nb-title" x="784" y="741" font-size="10.5" font-weight="600">sysmon 的 M</text>
+          <line class="nb-hr" x1="758" y1="748" x2="1002" y2="748"/>
+          <text class="nb-k" x="762" y="778" font-size="9">带 P 吗</text><text class="nb-v" x="808.8" y="778" font-size="9">不带 —— 工位全占满也能进来</text>
+          <text class="nb-k" x="762" y="792" font-size="9">多久醒</text><text class="nb-v" x="808.8" y="792" font-size="9">20 µs 起，最长 10 ms</text>
+          <text class="nb-note" x="762" y="822" font-size="8">抢占、收 P、推 GC、顺手 poll 网络</text>
+        </g>
+
+        <g id="go-derive-map-node-cpu" data-nb="1" data-node-id="cpu" data-node-label="CPU 核 ×8" tabindex="0" role="button" aria-label="Focus CPU 核 ×8, 真正执行指令的地方, 操作系统管" aria-pressed="false" data-node-kind="external" data-node-sublabel="真正执行指令的地方" data-node-context="操作系统管">
+          <title>CPU 核 ×8 · 真正执行指令的地方 · 操作系统管</title>
+          <rect x="1120" y="230" width="360" height="200" rx="6" class="c-mask"/>
+          <rect x="1120" y="230" width="360" height="200" rx="6" class="c-external" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="external" class="semantic-sigil s-external" transform="translate(1126 236) scale(0.6875)">
+            <rect x="2.5" y="5" width="8.5" height="8" rx="1.5"/>
+            <path d="M8 2.5h5.5V8M13.5 2.5 7.5 8.5"/>
+          </g>
+          <rect class="nb-badge" x="1436.8" y="238" width="31.2" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="1452.4" y="249" font-size="8" text-anchor="middle">8 核</text>
+          <text class="nb-title" x="1154" y="251" font-size="10.5" font-weight="600">CPU 核 ×8</text>
+          <line class="nb-hr" x1="1128" y1="258" x2="1472" y2="258"/>
+          <rect class="nb-cell" x="1132.0" y="320" width="36.8" height="32" rx="4"/><text class="nb-cell-t" x="1150.4" y="333" font-size="9" text-anchor="middle">核 0</text><text class="nb-cell-s" x="1150.4" y="344" font-size="7.5" text-anchor="middle">M0 在跑</text>
+          <rect class="nb-cell" x="1174.8" y="320" width="36.8" height="32" rx="4"/><text class="nb-cell-t" x="1193.1" y="333" font-size="9" text-anchor="middle">核 1</text><text class="nb-cell-s" x="1193.1" y="344" font-size="7.5" text-anchor="middle">M1 在跑</text>
+          <rect class="nb-cell" data-tone="idle" x="1217.5" y="320" width="36.8" height="32" rx="4"/><text class="nb-cell-t" data-tone="idle" x="1235.9" y="333" font-size="9" text-anchor="middle">核 2</text>
+          <rect class="nb-cell" data-tone="idle" x="1260.3" y="320" width="36.8" height="32" rx="4"/><text class="nb-cell-t" data-tone="idle" x="1278.6" y="333" font-size="9" text-anchor="middle">核 3</text>
+          <rect class="nb-cell" data-tone="idle" x="1303.0" y="320" width="36.8" height="32" rx="4"/><text class="nb-cell-t" data-tone="idle" x="1321.4" y="333" font-size="9" text-anchor="middle">核 4</text>
+          <rect class="nb-cell" data-tone="idle" x="1345.8" y="320" width="36.8" height="32" rx="4"/><text class="nb-cell-t" data-tone="idle" x="1364.1" y="333" font-size="9" text-anchor="middle">核 5</text>
+          <rect class="nb-cell" data-tone="idle" x="1388.5" y="320" width="36.8" height="32" rx="4"/><text class="nb-cell-t" data-tone="idle" x="1406.9" y="333" font-size="9" text-anchor="middle">核 6</text>
+          <rect class="nb-cell" data-tone="idle" x="1431.3" y="320" width="36.8" height="32" rx="4"/><text class="nb-cell-t" data-tone="idle" x="1449.6" y="333" font-size="9" text-anchor="middle">核 7</text>
+          <text class="nb-note" x="1132" y="422" font-size="8">P 有 3 个，此刻只有 2 个核在跑 Go 代码</text>
+        </g>
+
+        <!-- Connection labels -->
+        <g data-detail="context" data-edge-from="netpoll" data-edge-to="p0" data-edge-label="就绪：回队列" data-edge-key="0" data-edge-id="np-p0">
+          <rect x="281.2" y="165" width="67.6" height="14" rx="3" class="c-mask"/>
+          <text x="315" y="175" class="t-muted" font-size="8" text-anchor="middle">就绪：回队列</text>
+        </g>
+        <g data-detail="context" data-edge-from="p0" data-edge-to="m0" data-edge-label="持有" data-edge-key="1" data-edge-id="p0-m0">
+          <rect x="690" y="165" width="30" height="14" rx="3" class="c-mask"/>
+          <text x="705" y="175" class="t-muted" font-size="8" text-anchor="middle">持有</text>
+        </g>
+
+        <g data-detail="context" data-edge-from="grq" data-edge-to="p2" data-edge-label="本地空了才来" data-edge-key="3" data-edge-id="grq-p2">
+          <rect x="281.2" y="565" width="67.6" height="14" rx="3" class="c-mask"/>
+          <text x="315" y="575" class="t-messagebus" font-size="8" text-anchor="middle">本地空了才来</text>
+        </g>
+
+        <g data-detail="context" data-edge-from="m0" data-edge-to="cpu" data-edge-label="上核" data-edge-key="5" data-edge-id="m0-cpu">
+          <rect x="1050" y="234" width="30" height="14" rx="3" class="c-mask"/>
+          <text x="1065" y="244" class="t-muted" font-size="8" text-anchor="middle">上核</text>
+        </g>
+        <g data-detail="context" data-edge-from="m2" data-edge-to="p2" data-edge-label="放下 P" data-edge-key="6" data-edge-id="m2-p2">
+          <rect x="685.6" y="565" width="38.8" height="14" rx="3" class="c-mask"/>
+          <text x="705" y="575" class="t-messagebus" font-size="8" text-anchor="middle">放下 P</text>
+        </g>
+
+
+        <!-- Legend -->
+        <g data-legend data-legend-bridge>
+          <text x="40" y="964" class="t-primary" font-size="12" font-weight="650">Legend</text>
+          <g data-legend-semantic-kind="backend" data-legend-kind="backend" data-legend-label="Backend" data-legend-x="40" data-legend-baseline="984" data-legend-width="78">
+            <rect x="40" y="975" width="16" height="10" rx="2.5" class="c-backend" stroke-width="1"/>
+            <text x="62" y="984" class="t-muted" font-size="10" font-weight="500">Backend</text>
+          </g>
+          <g data-legend-semantic-kind="messagebus" data-legend-kind="messagebus" data-legend-label="Message bus" data-legend-x="140" data-legend-baseline="984" data-legend-width="98">
+            <rect x="140" y="975" width="16" height="10" rx="2.5" class="c-messagebus" stroke-width="1"/>
+            <text x="162" y="984" class="t-muted" font-size="10" font-weight="500">Message bus</text>
+          </g>
+          <g data-legend-semantic-kind="external" data-legend-kind="external" data-legend-label="External" data-legend-x="260" data-legend-baseline="984" data-legend-width="83">
+            <rect x="260" y="975" width="16" height="10" rx="2.5" class="c-external" stroke-width="1"/>
+            <text x="282" y="984" class="t-muted" font-size="10" font-weight="500">External</text>
+          </g>
+        </g>
+      </svg></div>
+      <figcaption>从 M0 进去看「一个 G 正在跑」，或者从 M2 看「卡住之后 P 去哪了」。关键零件里的小标签写着它是第几级被逼出来的。</figcaption>
+      <div class="pano-ui"></div>
+      <p class="arch-hint"><span class="idle">点头上的任意一个框看它的关系，点区域标题看分组含义，点零件看完整归属路径；框里的每一行 / 每个格子都能点，跳到它指向的零件</span><span class="focused">再点一次空白处取消</span></p>
+    </figure><p>四条 G，四种处境：正在跑、排在本地队列、挂在 netpoll、躺在全局队列。这张图上的零件，就是下面九级推导的答案。</p>
+<h2 id="推导的规矩目标先定零件被逼出来">推导的规矩：目标先定，零件被逼出来</h2>
+<p>Go 不是先造好 G、M、P，再回头找用途。它先定了几个必须成立的效果，然后每撞一次墙，就加一个零件，只解决这一次撞上的问题。</p>
+<p><code>go handle(conn)</code> 这行代码看起来平平无奇，但它背后承诺了六件事：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>想要的效果</th><th>谁负责兑现</th></tr></thead><tbody><tr><th>用顺序代码写并发</th><td data-label="谁负责兑现"><strong>G</strong>：<code>go f()</code> 之后，函数体还是从上往下写，不用 <code>await</code>，不用回调</td></tr><tr><th>几十万条同时存在</th><td data-label="谁负责兑现"><strong>G 的栈</strong>：2 KiB 起步，不够再长；线程是创建时就把栈定死</td></tr><tr><th>用满多核</th><td data-label="谁负责兑现"><strong>P 的个数</strong>：等于 <code>GOMAXPROCS</code>，也就是同时跑 Go 代码的 M 的上限</td></tr><tr><th>一个卡住不拖累别人</th><td data-label="谁负责兑现"><strong>netpoll</strong> 把网络等待从线程上摘走；摘不掉的，<strong>P 转交</strong></td></tr><tr><th>切换成本低</th><td data-label="谁负责兑现">换 G 只在用户态动几个寄存器，不进内核</td></tr><tr><th>不用自己管线程</th><td data-label="谁负责兑现"><strong>M</strong> 由 runtime 按需创建、回收，业务代码里看不见</td></tr></tbody></table></div><p>这六条不是并列的功能清单。它们是同一个目标的不同侧面：<mark class="mk-blue">让程序员按线程的方式写代码，但不要真用那么多线程。</mark></p>
+<p>所以后面的推导只有一种句型：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">加一个零件 → 上一个问题解决 → 冒出一个新问题 → 再加一个零件
+</code></pre></div>
+<p>每一节我都把「留下的新问题」写在最后，它就是下一节的开头。</p>
+<h2 id="起点一个任务一条线程先撞三堵墙">起点：一个任务一条线程，先撞三堵墙</h2>
+<p>最直白的写法是：一条连接、一条线程。</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-go">for {
+    conn := accept()
+    go handle(conn)   // 底下真的开一条线程
+}
+</code></pre></div>
+<p><code>handle</code> 里可以放心写顺序代码：读请求、查库、写回。但真按这个方案跑十万个连接，会依次撞上三堵墙。</p>
+<p><strong>第一堵墙：栈在创建时定死。</strong> Linux/glibc 下线程栈的大小跟随 <code>RLIMIT_STACK</code>（<code>ulimit -s</code>，常见是 8192 KiB = 8 MiB）；设成 unlimited 时 glibc 才退到每架构的固定值，x86-64 上是 2 MB。十万条线程就是 800 GiB 虚拟地址空间。</p>
+<p><strong>第二堵墙：创建和销毁都要进内核。</strong> 线程带着一套内核数据结构、自己的内核栈、信号掩码、调度状态。十万次创建不是十万次函数调用。</p>
+<p><strong>第三堵墙：切换也要进内核。</strong> 一次线程切换要陷入内核、保存和恢复寄存器、可能换栈；回到用户态时，缓存里热的还是别人的数据。</p>
+<div class="demo" data-widget="spawn-budget-lab" data-config="{&quot;stops&quot;:[10,100,1000,10000,100000,1000000],&quot;p&quot;:10,&quot;threadStack&quot;:8,&quot;gStack&quot;:2048,&quot;start&quot;:3,&quot;tail&quot;:&quot;线程栈按 Linux/glibc 常见的 8 MiB 算，是虚拟地址预留不是常驻内存；G 的 2 KiB 是 Go 源码里的 stackMin。拖动看两条线什么时候拉开。&quot;}">
+      <div class="demo-head">
+        <span class="title">任务数从 10 涨到 100 万，两种做法的账</span>
+        <span class="status" data-status></span>
+        <span class="spacer"></span>
+        
+      </div>
+      <div class="demo-body custom" data-mount></div>
+    </div><div class="callout tone-amber">
+      <span class="ic">⚖</span>
+      <div><p><strong>8 MiB 不是一上来就吃掉 8 MiB 物理内存。</strong> 它预留的是地址空间，物理页按需分配。</p>
+<p>但它把两件事定死了：<mark class="mk-blue">同时能开多少条</mark>（地址空间有限），以及<mark class="mk-blue">最坏情况要留多少</mark>（大小创建时定死，不能搬）。</p>
+</div>
+    </div><p><mark class="mk-amber">留下的新问题：需要一个「不像线程那么重」的任务。</mark></p>
+<h2 id="第-1-级-只留下跟着执行流走的那点东西-g">第 1 级 · 只留下跟着执行流走的那点东西 → G</h2>
+<p>线程为什么重？因为它背了一堆<strong>不属于执行流</strong>的东西。把那些摘掉，剩下的就是 G。</p>
+<div class="tree" data-tree><ul class="tlist"><li class="has-kids">
+            <div class="tnode tone-violet" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>g</b>
+              <code>runtime 里的任务记录</code>
+              <span class="tnote">一个结构体，几十个字段，但在调度意义上只关心下面几样</span>
+            </div>
+            <ul class="tlist"><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>stack</b>
+              <code>lo / hi</code>
+              <span class="tnote">2 KiB 起步，不够就换一块更大的搬过去</span>
+            </div>
+            
+          </li><li class="has-kids">
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>sched</b>
+              
+              <span class="tnote">现场。让出时把三个值写进来，恢复时装回去</span>
+            </div>
+            <ul class="tlist"><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>sp</b>
+              
+              <span class="tnote">栈指针 —— 执行到哪一层了</span>
+            </div>
+            
+          </li><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>pc</b>
+              
+              <span class="tnote">程序计数器 —— 下一条指令在哪</span>
+            </div>
+            
+          </li><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>bp</b>
+              
+              <span class="tnote">栈帧基址 —— 回溯用</span>
+            </div>
+            
+          </li><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>lr</b>
+              
+              <span class="tnote">返回地址（ARM 上在寄存器里）</span>
+            </div>
+            
+          </li></ul>
+          </li><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>atomicstatus</b>
+              
+              <span class="tnote">一个整数。Grunnable / Grunning / Gwaiting / Gsyscall / Gdead …</span>
+            </div>
+            
+          </li><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>goid</b>
+              
+              <span class="tnote">编号只在 runtime 里用，不导出给业务</span>
+            </div>
+            
+          </li><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>m</b>
+              
+              <span class="tnote">此刻挂在哪条 M 上；不在跑就是空</span>
+            </div>
+            
+          </li></ul>
+          </li></ul></div><p>那些<strong>没进 G 的东西</strong>才是关键：代码段、堆、fd 表、页表都还在进程里，所有 G 共用一份。G 不背它们，所以它只有 2 KiB。</p>
+<p>栈为什么敢给 2 KiB？因为 Go 的栈是<strong>连续栈</strong>：不够用时，在别处申请一块两倍大的（源码里就是 <code>newsize := oldsize * 2</code>），把旧栈整段搬过去，再把栈里所有指向栈内的指针改一遍。上限 1 GB（64 位）。所以写代码时不用预估「这个函数最深要用多少栈」—— 这件事从程序员身上挪到了 runtime 身上。</p>
+<p><mark class="mk-amber">留下的新问题：G 只是一份数据，CPU 不认识它。</mark></p>
+<h2 id="第-2-级-数据不会自己跑-m">第 2 级 · 数据不会自己跑 → M</h2>
+<p>CPU 只执行线程。操作系统也只调度线程。所以 G 必须挂到一条线程上才能跑，runtime 把这条线程叫 <strong>M</strong>（machine）。</p>
+<p>于是有了第一个真实的分工：</p>
+<ul>
+<li><strong>G</strong> 是「要做什么，做到哪了」；</li>
+<li><strong>M</strong> 是「谁在做」。</li>
+</ul>
+<p>一条 M 同一时刻只跑一个 G。G 阻塞了（等 channel、等锁），runtime 把 G 的现场（SP、PC、BP）存进 <code>g.sched</code>，M 转头去跑队列里的下一个 G。</p>
+<p>这就是 M:N 调度：<strong>M 个 G 映射到 N 条线程</strong>。它想同时拿到两头的好处：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>方案</th><th>好处</th><th>坏处</th></tr></thead><tbody><tr><th>N:1（多条协程挤一条线程）</th><td data-label="好处">切换在用户态，极快</td><td data-label="坏处">用不满多核</td></tr><tr><th>1:1（一条协程一条线程）</th><td data-label="好处">能并行</td><td data-label="坏处">栈、创建、切换全都在内核那边付钱</td></tr><tr><th>M:N（Go 的选择）</th><td data-label="好处"><span class="tag tone-green">两头的便宜都占，代价是调度器变复杂</span></td><td data-label="坏处">复杂度全落在 runtime 里，业务代码看不见</td></tr></tbody></table></div><p><mark class="mk-amber">留下的新问题：所有 M 都来同一个地方拿 G，会发生什么？</mark></p>
+<h2 id="第-3-级-一把锁把核全拦住-本地队列">第 3 级 · 一把锁把核全拦住 → 本地队列</h2>
+<p>先按最省事的设计来：一个全局队列，所有 M 都从里面取 G。</p>
+<p>这个设计能用，但<strong>核越多越糟</strong>。每次取 G 都要拿同一把锁，M 越多，抢锁的时间越长。这不是理论担心：Go 1.1 换掉旧调度器，主要动机就是这一点 —— 旧实现只有一个全局队列配一把锁，在 32 核机器上线程大部分时间在等锁。</p>
+<p>改法很自然：<strong>把队列搬到每个执行上下文旁边</strong>，取放只碰自己的原子变量，不拿全局锁。</p>
+<p>Go 在 P 里放了两样东西：</p>
+<ul>
+<li><code>runnext</code>：<strong>1 格</strong>。刚被唤醒的 G 放这儿，下一个就跑它 —— 它刚跑过，缓存还是热的。</li>
+<li><code>runq</code>：<strong>256 槽</strong>的环形数组，其余排队的 G 在这儿。</li>
+</ul>
+<p>新建的 G 进哪个队列，源码写得很直白：<code>go f()</code> 编成 <code>newproc</code>，<code>newproc1</code> 造出 G 之后，<code>runqput(pp, newg, true)</code> —— 第三个参数 <code>true</code> 就是「放进当前 P 的 runnext」。所以新建的 G <strong>不会</strong>被随机分给别的 P。</p>
+<p><mark class="mk-amber">留下的新问题：这个「执行上下文」这时还长在 M 身上 —— 如果 M 卡住了呢？</mark></p>
+<h2 id="第-4-级-本地队列长在-m-上m-一卡就全赔-p">第 4 级 · 本地队列长在 M 上，M 一卡就全赔 → P</h2>
+<p>设想 M1 拿着队列和内存缓存，去读一个文件。内核把它扣住，几十毫秒不返回。</p>
+<p>如果队列和缓存<strong>属于 M1</strong>，那么这段时间里，队里那 5 个 G 一条也跑不了，mcache 也没人用 —— 明明只是「这条线程在等」，却赔进去一整份执行能力。</p>
+<p>问题的根子是把两件事绑在了一起：</p>
+<ul>
+<li>「哪条线程」是随时可能被内核扣住的；</li>
+<li>「跑 Go 代码需要的资源」并不需要跟着线程一起被扣住。</li>
+</ul>
+<p>所以把它们拆开。拆出来的那一坨叫 <strong>P</strong>（processor），里面装：本地队列、<code>runnext</code>、<code>mcache</code>、调度状态、GC 相关的本地状态。M 想跑 Go 代码，先得拿到一个 P。</p>
+<p>runtime 源码开头的注释就是这件事的定论：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">P - processor, a resource that is required to execute Go code.
+    M must have an associated P to execute Go code, however it can be
+    blocked or in a syscall w/o an associated P.
+</code></pre></div>
+<p>翻译成大白话：<mark class="mk-blue">M 想跑 Go 代码必须握着 P；但 M 完全可以不带 P 地卡在系统调用里。</mark></p>
+<p>于是卡住的现场变成这样：</p>
+<div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-green">① 正常</span>
+            <span class="name">P1</span>
+            <span class="spacer"></span>
+            <span class="tag tone-ok">有主</span>
+          </div>
+          <div class="rec"><div class="">
+            <b>持有者</b><span>M1</span></div><div class="">
+            <b>队列</b><span>5 个 G 等着</span></div><div class="">
+            <b>正在跑</b><span>G1（在 M1 上）</span></div><div class="">
+            <b>mcache</b><span>在用</span></div></div>
+          
+          <p class="jnote">这时 P1 和 M1 是一对，但只是<strong>暂时</strong>的一对。</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">G1 调了 read()<span class="note">读一个普通文件，不是 socket</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-amber">② 进内核</span>
+            <span class="name">P1</span>
+            <span class="spacer"></span>
+            <span class="tag tone-warn">M1 被扣住</span>
+          </div>
+          <div class="rec"><div class="">
+            <b>持有者</b><span>M1（卡在 read 里）</span></div><div class="">
+            <b>队列</b><span>5 个 G 还在等</span></div><div class="">
+            <b>正在跑</b><span>G1（在内核里等磁盘）</span></div><div class="">
+            <b>mcache</b><span>没人用</span></div></div>
+          
+          <p class="jnote bad">如果资源属于 M，这 5 个 G 就要陪 M1 一起等。</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">sysmon 巡检发现<span class="note">P 在系统调用里待太久了</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-violet">③ 转交</span>
+            <span class="name">P1</span>
+            <span class="spacer"></span>
+            <span class="tag tone-ok">换了个主人</span>
+          </div>
+          <div class="rec"><div class="">
+            <b>持有者</b><span>M2（或者新开一条）</span></div><div class="">
+            <b>队列</b><span>同样是那 5 个 G</span></div><div class="">
+            <b>正在跑</b><span>M2 接手，接着取 G</span></div><div class="">
+            <b>mcache</b><span>继续被用</span></div></div>
+          
+          <p class="jnote"><mark class="mk-blue">搬走的是工位，不是线程。</mark> 队列、缓存、任务一个都没丢。</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">M1 从 read 返回<span class="note">它手里已经没有 P 了，得去抢一个</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-blue">④ 回来</span>
+            <span class="name">P1</span>
+            <span class="spacer"></span>
+            <span class="tag tone-blue">已经不归它</span>
+          </div>
+          <div class="rec"><div class="">
+            <b>持有者</b><span>M3（原来的 M1 不在）</span></div><div class="">
+            <b>队列</b><span>有新活进来了</span></div><div class="">
+            <b>正在跑</b><span>G7</span></div><div class="">
+            <b>M1 自己</b><span>到处找空闲 P；找不到就把 G1 放进全局队列，自己去睡</span></div></div>
+          
+          <p class="jnote">短的系统调用通常能在别人抢走之前回来，P 还在原地 —— 所以不是每次 read 都换主人。</p>
+        </div><div class="demo" data-widget="handoff-lab" data-config="{&quot;gomaxprocs&quot;:4,&quot;blocked&quot;:30,&quot;max&quot;:120}">
+      <div class="demo-head">
+        <span class="title">同样是等，线程数差一个量级</span>
+        <span class="status" data-status></span>
+        <span class="spacer"></span>
+        
+      </div>
+      <div class="demo-body custom" data-mount></div>
+    </div><p>这带来一个很好用的副产品：<strong>P 的个数就是并行度的闸门</strong>。<code>GOMAXPROCS</code> 设成 8，就是 8 个 P，同一刻最多 8 条 M 在执行 Go 代码。M 的总数可以远多于 8（卡在系统调用里的那些不占 P），但它们在跑 Go 代码时必须有 P。</p>
+<div class="callout tone-violet">
+      <span class="ic">🧭</span>
+      <div><p><mark class="mk-blue">P 不是「线程的包装」，而是「跑 Go 代码的许可证 + 随身行李」。</mark></p>
+<p>所以它可以被放下、被转交、被晾着 —— 图里那个 P2 就是没人领的工位。线程的生死和它的生死是两回事。</p>
+</div>
+    </div><p><mark class="mk-amber">留下的新问题：有的 P 排满了，有的 P 空转。</mark></p>
+<h2 id="第-5-级-有的-p-排满有的-p-空转-偷一半">第 5 级 · 有的 P 排满，有的 P 空转 → 偷一半</h2>
+<p>本地队列解决了抢锁，但引入了不均：P0 队里 8 个 G，P1 队里空。P1 的 M 闲着，P0 的 M 忙不过来 —— 而这两个 P 本来是为同一批核服务的。</p>
+<p>办法是让闲的那个自己去拿：<strong>work stealing</strong>。</p>
+<p><code>runqgrab</code> 里那两行就是全部：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-go">n := t - h        // 目标 P 队列里有多少个
+n = n - n / 2     // 拿走一半，向上取整
+</code></pre></div>
+<p>为什么一次拿一半，而不是拿一个？</p>
+<ul>
+<li>拿一个，马上又空了，还得再来偷一次 —— 每次偷都要跨 P 同步，成本比拿一个高得多；</li>
+<li>拿一半，双方都还有活干，下次再偷的间隔拉长了。</li>
+</ul>
+<p>还要防另一个问题：如果所有 P 都只盯着本地队列，全局队列里的 G 可能永远轮不到。所以本地队列在每次调度时，<strong>第 61 次</strong>才去全局队列看一眼（<code>pp.schedtick%61 == 0</code>）—— 既不让全局锁变成热点，也不让全局队列饿死。</p>
+<div class="demo" data-widget="gmp-lab" data-config="{&quot;gomaxprocs&quot;:3,&quot;goroutines&quot;:16,&quot;ioRatio&quot;:0.4,&quot;seed&quot;:7}">
+      <div class="demo-head">
+        <span class="title">调度台：自己跑一遍</span>
+        <span class="status" data-status></span>
+        <span class="spacer"></span>
+        
+      </div>
+      <div class="demo-body custom" data-mount></div>
+    </div><p>新建的 G 全在 P0 队列里 —— 这是真实情况，也是「一边倒」的常态。把 GOMAXPROCS 调到 1 再跑一遍，看这个「并行」是怎么消失的。</p>
+<p><mark class="mk-amber">留下的新问题：换 G 的那段代码，跑在谁的栈上？</mark></p>
+<h2 id="第-6-级-调度代码站哪儿-g0">第 6 级 · 调度代码站哪儿 → g0</h2>
+<p>G1 要等 channel，runtime 得做四件事：存现场、改状态、挑下一个 G、跳过去。这四件事要在一个栈上跑。跑在 G1 的栈上不行，原因有三个，一个比一个硬：</p>
+<ol>
+<li>G1 的栈可能马上要扩容，而扩容要搬栈 —— 一只脚踩在正在搬走的地板上；</li>
+<li>G1 的栈可能正在被 GC 扫描，内容处于「不能随便动」的状态；</li>
+<li>最直接的：<mark class="mk-blue">G1 就是那个要被换下去的对象</mark>。你要把它的栈指针存起来，就不能再用它的栈往下调用函数。</li>
+</ol>
+<p>所以每条 M 都配一个专用的系统栈，用特殊的 G 表示，叫 <strong>g0</strong>。业务代码在普通 G 的栈上跑，调度代码在 g0 的栈上跑。</p>
+<div class="seqd has-grid" data-seq data-n="4" data-segs="[{&quot;from&quot;:1,&quot;to&quot;:5,&quot;label&quot;:&quot;整段在用户态：内核全程只看到 M 在跑&quot;}]"
+      style="--seq-fill:url(#s-fill-1);--seq-open:url(#s-fill-1-open)">
+      <svg class="seqd-svg" aria-hidden="true">
+        <defs>
+          <marker id="s-fill-1" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+          <marker id="s-fill-1-open" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10" fill="none" stroke="currentColor" stroke-width="1.4"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="seqd-head"><div class="scell"><div class="spart tone-green" data-id="g1">
+          <b>G1 · 用户栈</b>
+        </div></div><div class="scell"><div class="spart tone-violet" data-id="m">
+          <b>M · g0 栈</b>
+        </div></div><div class="scell"><div class="spart tone-blue" data-id="s">
+          <b>schedule()</b>
+        </div></div><div class="scell"><div class="spart tone-amber" data-id="g2">
+          <b>G2 · 用户栈</b>
+        </div></div></div>
+      <div class="seqd-body"><div class="smsg" data-from="g1" data-to="m" data-kind="sync" data-i="1"><span class="slabel">gopark：channel 上没有数据</span></div><div class="smsg is-self" data-from="m" data-to="m" data-kind="self" data-i="2"><span class="slabel">存三个值</span></div><div class="smsg" data-from="m" data-to="s" data-kind="sync" data-i="3"><span class="slabel">切到 g0 栈，开始调度</span></div><div class="smsg is-self" data-from="s" data-to="s" data-kind="self" data-i="4"><span class="slabel">挑中 G2</span></div><div class="smsg" data-from="s" data-to="g2" data-kind="sync" data-i="5"><span class="slabel">gogo：装回 SP/PC，跳过去</span></div></div>
+    </div><p><code>mcall</code> 存进 <code>G1.sched</code> 的只有 SP、PC、BP 三个值。为什么不用存全部寄存器？因为 G1 是在一次普通函数调用里让出的：活着的值早就被编译器放进了 G1 自己的栈帧，恢复 SP 和 PC 之后，栈帧会把它们一个个装回来。</p>
+<p>g0 的栈从哪来？在 Linux 这类平台上，<code>allocm</code> 给每条 M 显式分配 <strong>16 KiB</strong> 的系统栈（<code>malg(16384 * StackGuardMultiplier)</code>）。Darwin、cgo、Windows 这些场景下线程本身已经带一条栈，g0 直接用那条，不再另分配。</p>
+<p><mark class="mk-amber">留下的新问题：G 要是不肯让出呢？定时器、GC 这些定期维护又谁来推？</mark></p>
+<h2 id="第-7-级-g-不肯让系统还要人看着-sysmon">第 7 级 · G 不肯让，系统还要人看着 → sysmon</h2>
+<p>普通的调度点都是「协作式」的：函数调用、channel 操作、系统调用、栈扩容、内存分配。G 走到这些地方，才顺便看一眼「该不该让」。</p>
+<p>但下面这段代码一个都不占：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-go">for {
+    // 纯计算，不分配、不调用、不等任何东西
+}
+</code></pre></div>
+<p>Go 1.14 之前，它可以一直占着 M 和 P，别的 G 干等，GC 也没法让世界停下来 —— 这不是理论问题，是当年真实存在的 bug 来源。Go 1.14 起，goroutine 变成<strong>可异步抢占</strong>的：runtime 给它发一个信号，程序在信号处理里被强行拽到调度器。</p>
+<p>发信号的是 <strong>sysmon</strong>（system monitor）。它是一条专门的后台线程，醒来干这几件事：</p>
+<table>
+<thead>
+<tr>
+<th>隔多久</th>
+<th>干什么</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>20 µs 起，空闲后翻倍，最长 10 ms</td>
+<td>一轮巡检的间隔</td>
+</tr>
+<tr>
+<td>每轮</td>
+<td>看有没有 P 在系统调用里待太久 → 收回来</td>
+</tr>
+<tr>
+<td>每轮</td>
+<td>看有没有 G 跑同一个 P 超过 10 ms → 抢占它（发 <code>SIGURG</code>）</td>
+</tr>
+<tr>
+<td>超过 10 ms 没 poll 网络</td>
+<td>顺手 poll 一次，别让 netpoll 里的 G 等太久</td>
+</tr>
+<tr>
+<td>2 分钟</td>
+<td>强制一次 GC，防止程序不分配内存就永远不 GC</td>
+</tr>
+</tbody>
+</table>
+<p>最值得记的一处设计：<mark class="mk-blue">sysmon 自己的 M 不带 P</mark>。源码里就是 <code>newm(sysmon, nil, -1)</code> —— 第三个参数是 -1，表示不要 P。</p>
+<p>为什么？如果巡逻员也得先抢一个工位才能上班，那么「所有工位都被占满」这个最需要它的时刻，恰恰是它进不来的时候。</p>
+<p><mark class="mk-amber">留下的新问题：等网络数据，也占着一条线程。</mark></p>
+<h2 id="第-8-级-等数据不该占着线程-netpoll">第 8 级 · 等数据不该占着线程 → netpoll</h2>
+<p>一个十万连接的服务器，绝大部分连接在绝大部分时间里都在等：等请求、等数据库、等对端读完。</p>
+<p>如果每次等数据都要一条 M 陪着进内核，前面那套东西就白做了 —— 线程数又会被连接数顶上去。所以 Go 在网络 IO 上换了一条路：<strong>非阻塞 fd + 就绪通知</strong>。</p>
+<div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;call&quot;,&quot;to&quot;:&quot;chk&quot;},{&quot;from&quot;:&quot;chk&quot;,&quot;to&quot;:&quot;poll&quot;,&quot;label&quot;:&quot;能&quot;},{&quot;from&quot;:&quot;chk&quot;,&quot;to&quot;:&quot;blk&quot;,&quot;label&quot;:&quot;不能&quot;},{&quot;from&quot;:&quot;poll&quot;,&quot;to&quot;:&quot;wake&quot;},{&quot;from&quot;:&quot;blk&quot;,&quot;to&quot;:&quot;back&quot;}]" style="--flow-marker:url(#fa-1)">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa-1" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-green" data-id="call">
+              
+              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5L3 8l3 4.5M10 3.5L13 8l-3 4.5"/></svg>
+              <b>G 调 conn.Read(buf)</b>
+              <small>看起来是同步读</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-muted shape-note" data-id="chk">
+              
+              
+              <b>这条 fd 能交给 netpoll 吗</b>
+              <small>网络 / 管道 → 能；磁盘文件 → 不能</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="poll">
+              
+              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5L3 8l3 4.5M10 3.5L13 8l-3 4.5"/></svg>
+              <b>挂起 G</b>
+              <small>登记到 pollDesc，G 变 Gwaiting</small>
+            </div><div class="fnode tone-amber" data-id="blk">
+              
+              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5L3 8l3 4.5M10 3.5L13 8l-3 4.5"/></svg>
+              <b>M 陪着进内核</b>
+              <small>read 真的阻塞在那里</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="wake">
+              
+              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5L3 8l3 4.5M10 3.5L13 8l-3 4.5"/></svg>
+              <b>数据到了，G 回队列</b>
+              <small>线程数不变</small>
+            </div><div class="fnode tone-amber" data-id="back">
+              
+              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5L3 8l3 4.5M10 3.5L13 8l-3 4.5"/></svg>
+              <b>read 返回，M 抢回 P</b>
+              <small>线程数 +1</small>
+            </div></div></div>
+      
+    </div><p>左路就是「少量线程扛大量连接」的真正来源：<strong>等的时候，线程不在场</strong>。G 挂在一个 <code>pollDesc</code> 上，M 转头去跑别的 G；网卡有数据了，netpoll 把 G 标成可运行，放回某个 P 的队列。</p>
+<p>右路是没办法的那一类。为什么普通文件不能走左边？因为就绪通知机制本身不支持它：</p>
+<ul>
+<li>Linux 上 <code>epoll_ctl</code> 加磁盘文件会直接返回 <code>EPERM</code>，Go 只好退回收阻塞模式；</li>
+<li>Darwin / BSD 上 kqueue 对普通文件（和 FIFO）的行为不可靠，Go 干脆不把它们放进 netpoller。</li>
+</ul>
+<p>于是 <code>os.File.Read</code> 会真的把线程带进内核，等磁盘返回。这时候保命的是第 4 级那个设计：P 被交出去，别的 G 继续跑。</p>
+<div class="cards" data-cols="4"><div class="ccard tone-green">
+          <span class="tag tone-green">线程不陪</span>
+          <h4>网络 socket</h4>
+          <p>非阻塞 + netpoller。G 挂起，线程走人</p>
+          
+          
+        </div><div class="ccard tone-green">
+          <span class="tag tone-green">线程不陪</span>
+          <h4>管道 / FIFO</h4>
+          <p>可 poll；Darwin 上的 FIFO 例外，会退回阻塞</p>
+          
+          
+        </div><div class="ccard tone-amber">
+          <span class="tag tone-amber">线程陪</span>
+          <h4>普通文件</h4>
+          <p>epoll/kqueue 管不了，read 真阻塞，M 陪着进内核</p>
+          
+          
+        </div><div class="ccard tone-amber">
+          <span class="tag tone-amber">线程陪</span>
+          <h4>cgo 调用</h4>
+          <p>不在 runtime 掌控内，调用期间这条 M 被借走</p>
+          
+          
+        </div></div><div class="callout tone-green">
+      <span class="ic">✅</span>
+      <div><p><strong>一句话记住这张图的两条路</strong>：能 poll 的，<mark class="mk-blue">等的是 G</mark>；不能 poll 的，<mark class="mk-blue">等的是 M，P 先交出去</mark>。</p>
+</div>
+    </div><p><mark class="mk-amber">留下的新问题：程序刚启动时，M、P、g0、main G 一个都还不存在。</mark></p>
+<h2 id="第-9-级-开机那一刻这些零件从哪来-m0-与-main-g">第 9 级 · 开机那一刻，这些零件从哪来 → M0 与 main G</h2>
+<p>前面九级都假设「已经有 M、P、队列了」。但程序刚 exec 出来的时候，只有内核交给它的一条线程。</p>
+<div class="pipe"><div class="lane tone-muted">
+        <div class="lane-meta">
+          <span class="ln">KERNEL</span>
+          <b>内核 exec</b>
+          <small>只给一条线程</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>初始线程</b>
+        <small>程序入口 _rt0_amd64_linux</small>
+        <span class="tag tone-muted">就一条</span>
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">汇编入口 <span class="en">rt0_go</span><span class="note">把这条线程登记下来</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-blue">
+        <div class="lane-meta">
+          <span class="ln">RT0_GO</span>
+          <b>登记 M0 与 g0</b>
+          <small>先有个能跑调度代码的地方</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>M0</b>
+        <small>&amp;runtime.m0</small>
+        <span class="tag tone-blue">第一条</span>
+      </div><div class="pnode">
+        <b>g0</b>
+        <small>系统栈</small>
+        <span class="tag tone-blue">调度用</span>
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">初始化 <span class="en">schedinit</span><span class="note">建堆、建栈池、建 P</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-violet">
+        <div class="lane-meta">
+          <span class="ln">SCHEDINIT</span>
+          <b>一次建齐工位</b>
+          <small>数量 = GOMAXPROCS</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>P0 … P7</b>
+        <small>procresize(procs)</small>
+        <span class="tag tone-violet">全部</span>
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">造第一个普通 G <span class="en">newproc</span><span class="note">这一次造的是 G，不是线程</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-green">
+        <div class="lane-meta">
+          <span class="ln">NEWPROC</span>
+          <b>main G</b>
+          <small>用户代码将来在它里面跑</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>main G</b>
+        <small>runtime.main</small>
+        <span class="tag tone-green">2 KiB 栈</span>
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">进入调度循环 <span class="en">mstart</span><span class="note">从 g0 上开始找活</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-amber">
+        <div class="lane-meta">
+          <span class="ln">MSTART</span>
+          <b>开始调度</b>
+          <small>M0 之后就是普通的一条 M</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>schedule()</b>
+        <small>findRunnable → execute</small>
+        
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">跑用户代码 <span class="en">runtime.main</span><span class="note">包初始化 → main.main</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-green">
+        <div class="lane-meta">
+          <span class="ln">MAIN</span>
+          <b>用户程序</b>
+          <small>到了这里，前面九级全部就位</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>各个 init 函数</b>
+        <small>按依赖顺序</small>
+        
+      </div><div class="pnode">
+        <b>main.main</b>
+        <small>你写的那个</small>
+        
+      </div></div>
+      </div></div><p>顺带纠正一个常见误解：<code>go f()</code> <strong>只造 G，不造线程</strong>。<code>newproc</code> 把新 G 塞进当前 P 的 runnext，然后调 <code>wakep()</code> —— 它只是「叫醒」一个可能的空闲 M；真正要新线程时（比如所有 M 都在忙、或者有 P 没有 M），才去 clone 一条。</p>
+<p>所以「Go 程序线程数 = goroutine 数」是错的，「goroutine 数涨，线程数不怎么涨」才是常态。</p>
+<h2 id="这套折中换来了什么代价在哪">这套折中换来了什么，代价在哪</h2>
+<p>到这里，九级推导可以合成一句话：<mark class="mk-blue">Go 把「执行流的记账」和「执行流的执行」拆成了两层，中间隔着一个可转交的工位。</mark></p>
+<p>好处和代价是同一件事的两面：</p>
+<ul>
+<li><strong>好处是固定成本低。</strong> 一条任务 2 KiB 而不是 8 MiB，创建不经过内核，切换不经过内核。所以「先开一条再说」在 Go 里是合理的默认动作。</li>
+<li><strong>代价是复杂度集中在 runtime。</strong> 队列不均要偷、G 不让要抢、M 卡住要转交、栈不够要搬、GC 要扫每一个 G 的栈。这些在业务代码里看不见，但它们确实在跑。</li>
+<li><strong>另一个代价是会漏水。</strong> 便宜不等于免费：一个卡在 channel 上的 G，会连着它的栈一起活到进程退出。<mark class="mk-blue">能开一百万个，不等于可以让一百万个永远不结束。</mark></li>
+</ul>
+<div class="callout tone-amber">
+      <span class="ic">⚖</span>
+      <div><p><strong>换 G 便宜，不代表「并发」便宜。</strong> 缓存还是要重新热，锁还是真的会争，下游还是会被打挂。</p>
+<p>这套设计降低的是<mark class="mk-blue">每条任务的固定开销</mark>，不是每次并发交互的成本。</p>
+</div>
+    </div><h2 id="用工厂记一遍">用工厂记一遍</h2>
+<p>最后用一张对照表收尾。这张表本身就是九级推导的压缩版：左边是工厂里的东西，中间是它在 Go 里对应的零件，右边是它当初为了解决什么才被加进来。</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>工厂里</th><th>Go 里</th><th>它是为了解决什么才出现的</th></tr></thead><tbody><tr><th>订单</th><td data-label="Go 里"><strong>G</strong></td><td data-label="它是为了解决什么才出现的">任务本身：一块栈、一份现场、一个状态</td></tr><tr><th>工人</th><td data-label="Go 里"><strong>M</strong></td><td data-label="它是为了解决什么才出现的">内核线程 —— CPU 只认它</td></tr><tr><th>工位和工具箱</th><td data-label="Go 里"><strong>P</strong></td><td data-label="它是为了解决什么才出现的">跑 Go 代码的许可 + 本地队列 + mcache</td></tr><tr><th>工位旁的待办单</th><td data-label="Go 里"><strong>runnext / runq</strong></td><td data-label="它是为了解决什么才出现的">取任务不用抢全局锁</td></tr><tr><th>去别的工位拿活</th><td data-label="Go 里"><strong>work stealing</strong></td><td data-label="它是为了解决什么才出现的">有人闲着、有人排队 —— 偷一半</td></tr><tr><th>换单和维修的工作台</th><td data-label="Go 里"><strong>g0</strong></td><td data-label="它是为了解决什么才出现的">调度代码不能站在被换下去的 G 的栈上</td></tr><tr><th>巡逻员</th><td data-label="Go 里"><strong>sysmon</strong></td><td data-label="它是为了解决什么才出现的">抢占不肯让的 G、收回卡住的 P、推 GC</td></tr><tr><th>到货通知</th><td data-label="Go 里"><strong>netpoll</strong></td><td data-label="它是为了解决什么才出现的">等网络数据时不占着线程</td></tr><tr><th>开门时的第一名工人</th><td data-label="Go 里"><strong>M0 / main G</strong></td><td data-label="它是为了解决什么才出现的">程序启动时只有一条线程</td></tr></tbody></table></div><div class="summary">
+      <h3 id="一句话">一句话</h3>
+      <p>G 是活，M 是人，P 是工位。<mark class="mk-blue">人拿到工位才能干活，工位可以换人，活可以排队。</mark></p>
+<p>九级推导加起来的，就是这四句话背后的账。</p>
+
+    </div><h2 id="自测">自测</h2>
+<div class="quiz"><details>
+        <summary>为什么 P 不能直接长在 M 上（让 M 自己持有本地队列和 mcache）？</summary>
+        <div class="a"><p>因为 M 会被内核扣住。卡在系统调用里的 M 如果还攥着队列和缓存，队里的 G 一条也跑不了，
+而这些 G 其实一点都没阻塞。把资源从 M 上拆出来，M 卡住时 P 可以交给别的 M 继续干活。</p>
+</div>
+      </details><details>
+        <summary><code>go f()</code> 会创建一条新线程吗？</summary>
+        <div class="a"><p>不会。newproc 造一个 G 放进当前 P 的 runnext，然后 wakep() 只是叫醒可能空闲的 M。
+只有确实需要更多并行（有 P 没有 M）时，runtime 才去 clone 新线程。</p>
+</div>
+      </details><details>
+        <summary>同样是「等 10 秒」，等 socket 和读普通文件有什么不一样？</summary>
+        <div class="a"><p>等 socket：fd 是非阻塞的，G 挂在 netpoller 上变 Gwaiting，M 转头跑别的 G，线程数不变。
+读普通文件：epoll/kqueue 管不了普通文件，read 真的会阻塞在内核里，M 陪着等，P 被交出去。</p>
+</div>
+      </details><details>
+        <summary>一个死循环的 goroutine（不调函数、不分配内存），为什么不会把调度器卡死？</summary>
+        <div class="a"><p>Go 1.14 起 goroutine 可异步抢占：sysmon 发现某个 G 在同一个 P 上跑了超过 10ms，
+就发信号（Unix 上是 SIGURG）把它拽进调度器。1.14 之前只有函数调用处的协作检查点，那时确实会卡。</p>
+</div>
+      </details></div>
+
+    <footer>
+      <span>从零推导 G、M、P · 每一步都是被逼出来的</span>
+      <span>最后更新 2026-10-20 · 单文件可离线打开</span>
+    </footer>
+  </main>
+</div>
+
+<script src="../../assets/app.js?v=757eed9a2d"></script>
+</body>
+</html>
