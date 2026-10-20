@@ -1412,6 +1412,25 @@ finally { pool.release(conn); }
 <blockquote>
 <p>换个领域也能用：只要那个东西是「一堆任务 + 若干执行许可 + 本地/全局两级队列」。</p>
 </blockquote>
+<h4><code>gswitch-lab</code> —— 同一条线程里换一个任务</h4>
+<p><strong>讲「用户态换任务，内核不知道」</strong>：左边是正在跑的线程和它的寄存器，
+右边是每个任务的保存现场（sp / pc / bp / lr），中间一行行跑调度器的代码。
+一步一步点过去，看「谁存了什么、谁恢复了什么、内核那边发生了什么」。</p>
+<div class="demo" data-widget="gswitch-lab" data-config="{&quot;steps&quot;:[{&quot;title&quot;:&quot;A 在跑&quot;,&quot;code&quot;:[&quot;A: &lt;-ch   // 取不到值&quot;],&quot;kernel&quot;:&quot;内核看到的：M0 一直在运行&quot;,&quot;curg&quot;:&quot;A&quot;,&quot;cpu&quot;:{&quot;pc&quot;:&quot;0x10a2f0&quot;,&quot;sp&quot;:&quot;0x40001f80&quot;,&quot;bp&quot;:&quot;0x40001fb0&quot;,&quot;lr&quot;:&quot;0x10a2c8&quot;,&quot;who&quot;:&quot;A 的代码&quot;},&quot;g1&quot;:{&quot;st&quot;:&quot;Grunning&quot;,&quot;tone&quot;:&quot;green&quot;,&quot;where&quot;:&quot;在 M0 上跑&quot;,&quot;buf&quot;:null},&quot;g2&quot;:{&quot;st&quot;:&quot;Grunnable&quot;,&quot;tone&quot;:&quot;amber&quot;,&quot;where&quot;:&quot;排在队列里&quot;,&quot;buf&quot;:{&quot;sp&quot;:&quot;0x40003f20&quot;,&quot;pc&quot;:&quot;0x10b140&quot;,&quot;bp&quot;:&quot;0x40003f50&quot;,&quot;lr&quot;:&quot;0&quot;}},&quot;note&quot;:&quot;此刻 CPU 上跑的是 A。&quot;},{&quot;title&quot;:&quot;让出：把现场存进自己的 gobuf&quot;,&quot;code&quot;:[&quot;mcall(park)&quot;],&quot;kernel&quot;:&quot;内核看到的：M0 一直在运行&quot;,&quot;curg&quot;:&quot;A&quot;,&quot;cpu&quot;:{&quot;pc&quot;:&quot;0x1009f40&quot;,&quot;sp&quot;:&quot;0x40008000&quot;,&quot;bp&quot;:&quot;0x0&quot;,&quot;lr&quot;:&quot;0x10a2f8&quot;,&quot;who&quot;:&quot;调度栈&quot;},&quot;g1&quot;:{&quot;st&quot;:&quot;Grunning&quot;,&quot;tone&quot;:&quot;green&quot;,&quot;where&quot;:&quot;刚存好，还没改状态&quot;,&quot;buf&quot;:{&quot;sp&quot;:&quot;0x40001f80&quot;,&quot;pc&quot;:&quot;0x10a2f8&quot;,&quot;bp&quot;:&quot;0x40001fb0&quot;,&quot;lr&quot;:&quot;0&quot;}},&quot;g2&quot;:{&quot;st&quot;:&quot;Grunnable&quot;,&quot;tone&quot;:&quot;amber&quot;,&quot;where&quot;:&quot;还在队列里&quot;,&quot;buf&quot;:{&quot;sp&quot;:&quot;0x40003f20&quot;,&quot;pc&quot;:&quot;0x10b140&quot;,&quot;bp&quot;:&quot;0x40003f50&quot;,&quot;lr&quot;:&quot;0&quot;}},&quot;note&quot;:&quot;==只存 SP、BP、PC。==&quot;}]}">
+      <div class="demo-head">
+        <span class="title">同一条线程上，从 A 换到 B</span>
+        <span class="status" data-status></span>
+        <span class="spacer"></span>
+        
+      </div>
+      <div class="demo-body custom" data-mount></div>
+    </div><p><code>steps[]</code> 里每项：<code>title</code>（这一步的标题）、<code>code</code>（等宽代码行数组）、<code>kernel</code>（内核视角那一行，
+建议每一步都写同一句，让「没变」自己显形）、<code>curg</code>（此刻在跑的 id）、
+<code>cpu</code>（PC/SP/BP/LR 和一句注释）、<code>g1</code> / <code>g2</code>（每个任务的 <code>st</code> 状态、<code>tone</code> 配色、<code>where</code> 在哪、
+<code>buf</code> 为 <code>null</code> 表示现场在寄存器里）、<code>note</code>（支持 <code>==</code> <code>**</code> 行内标记）。</p>
+<blockquote>
+<p>固定两栏任务卡是刻意的：这个控件的卖点是「两个任务互相交接」，不是画任意多个。</p>
+</blockquote>
 <h4><code>handoff-lab</code> —— 同样是等，代价不一样</h4>
 <p><strong>讲「两条路径的成本差」</strong>：一根滑块拖动「同时阻塞的数量」，
 左右两栏的 M 数量分道扬镳。</p>
@@ -1463,6 +1482,24 @@ finally { pool.release(conn); }
 <blockquote>
 <p>它在讲一件很通用的事：<strong>「等」有两种 —— 能被事件驱动接管的，和不能的。</strong>
 缓存未命中、锁竞争、外部 API 调用，都能套这个模型。</p>
+</blockquote>
+<h4><code>spawn-budget-lab</code> —— 同样的任务数，两条路的固定成本</h4>
+<p><strong>讲「规模效应」</strong>：一根滑块从十个任务拖到一百万个，左右两栏同时算三件事 ——
+内核里有多少个调度实体、栈要预留多少、切换一次多少钱。</p>
+<div class="demo" data-widget="spawn-budget-lab" data-config="{&quot;stops&quot;:[10,100,1000,10000,100000,1000000],&quot;p&quot;:10,&quot;threadStack&quot;:8,&quot;gStack&quot;:2048,&quot;start&quot;:3,&quot;tail&quot;:&quot;线程栈按 8 MiB 保守算，是虚拟地址预留；G 的 2 KiB 是 stackMin。&quot;}">
+      <div class="demo-head">
+        <span class="title">10 个任务到 100 万个任务</span>
+        <span class="status" data-status></span>
+        <span class="spacer"></span>
+        
+      </div>
+      <div class="demo-body custom" data-mount></div>
+    </div><p><code>stops</code> 是任务数档位；<code>p</code> 是左栏线程数固定为 P 的那一栏（G 这边同时跑 Go 代码的线程数）；
+<code>threadStack</code>（MiB）和 <code>gStack</code>（字节）是两个方案的单任务成本。
+滑块下面会按档位换一句判断，<code>tail</code> 是固定脚注。</p>
+<blockquote>
+<p>它不绑定 Go：任何「一个任务一个执行体」和「一个任务一条记录」的方案都能套。
+数字是算出来的，别拿它当实测 —— 实测写进 <code>tail</code>。</p>
 </blockquote>
 <h4><code>ipc-flow-lab</code> —— 几种机制的数据流并排跑</h4>
 <p><strong>讲「同一件事，不同实现路径」</strong>：每一列都是同构的三格（发送方 / 中转站 / 接收方），

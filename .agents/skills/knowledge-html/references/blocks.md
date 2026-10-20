@@ -1037,6 +1037,43 @@ config:
 
 > 换个领域也能用：只要那个东西是「一堆任务 + 若干执行许可 + 本地/全局两级队列」。
 
+#### `gswitch-lab` —— 同一条线程里换一个任务
+
+**讲「用户态换任务，内核不知道」**：左边是正在跑的线程和它的寄存器，
+右边是每个任务的保存现场（sp / pc / bp / lr），中间一行行跑调度器的代码。
+一步一步点过去，看「谁存了什么、谁恢复了什么、内核那边发生了什么」。
+
+```demo
+widget: gswitch-lab
+title: 同一条线程上，从 A 换到 B
+actions: false
+config:
+  steps:
+    - title: "A 在跑"
+      code: ["A: <-ch   // 取不到值"]
+      kernel: "内核看到的：M0 一直在运行"
+      curg: "A"
+      cpu: { pc: "0x10a2f0", sp: "0x40001f80", bp: "0x40001fb0", lr: "0x10a2c8", who: "A 的代码" }
+      g1: { st: Grunning, tone: green, where: "在 M0 上跑", buf: null }
+      g2: { st: Grunnable, tone: amber, where: "排在队列里", buf: { sp: "0x40003f20", pc: "0x10b140", bp: "0x40003f50", lr: "0" } }
+      note: "此刻 CPU 上跑的是 A。"
+    - title: "让出：把现场存进自己的 gobuf"
+      code: ["mcall(park)"]
+      kernel: "内核看到的：M0 一直在运行"
+      curg: "A"
+      cpu: { pc: "0x1009f40", sp: "0x40008000", bp: "0x0", lr: "0x10a2f8", who: "调度栈" }
+      g1: { st: Grunning, tone: green, where: "刚存好，还没改状态", buf: { sp: "0x40001f80", pc: "0x10a2f8", bp: "0x40001fb0", lr: "0" } }
+      g2: { st: Grunnable, tone: amber, where: "还在队列里", buf: { sp: "0x40003f20", pc: "0x10b140", bp: "0x40003f50", lr: "0" } }
+      note: "==只存 SP、BP、PC。=="
+```
+
+`steps[]` 里每项：`title`（这一步的标题）、`code`（等宽代码行数组）、`kernel`（内核视角那一行，
+建议每一步都写同一句，让「没变」自己显形）、`curg`（此刻在跑的 id）、
+`cpu`（PC/SP/BP/LR 和一句注释）、`g1` / `g2`（每个任务的 `st` 状态、`tone` 配色、`where` 在哪、
+`buf` 为 `null` 表示现场在寄存器里）、`note`（支持 `==` `**` 行内标记）。
+
+> 固定两栏任务卡是刻意的：这个控件的卖点是「两个任务互相交接」，不是画任意多个。
+
 #### `handoff-lab` —— 同样是等，代价不一样
 
 **讲「两条路径的成本差」**：一根滑块拖动「同时阻塞的数量」，
@@ -1102,6 +1139,31 @@ config:
 
 > 它在讲一件很通用的事：**「等」有两种 —— 能被事件驱动接管的，和不能的。**
 > 缓存未命中、锁竞争、外部 API 调用，都能套这个模型。
+
+#### `spawn-budget-lab` —— 同样的任务数，两条路的固定成本
+
+**讲「规模效应」**：一根滑块从十个任务拖到一百万个，左右两栏同时算三件事 ——
+内核里有多少个调度实体、栈要预留多少、切换一次多少钱。
+
+```demo
+widget: spawn-budget-lab
+title: 10 个任务到 100 万个任务
+actions: false
+config:
+  stops: [10, 100, 1000, 10000, 100000, 1000000]
+  p: 10
+  threadStack: 8
+  gStack: 2048
+  start: 3
+  tail: 线程栈按 8 MiB 保守算，是虚拟地址预留；G 的 2 KiB 是 stackMin。
+```
+
+`stops` 是任务数档位；`p` 是左栏线程数固定为 P 的那一栏（G 这边同时跑 Go 代码的线程数）；
+`threadStack`（MiB）和 `gStack`（字节）是两个方案的单任务成本。
+滑块下面会按档位换一句判断，`tail` 是固定脚注。
+
+> 它不绑定 Go：任何「一个任务一个执行体」和「一个任务一条记录」的方案都能套。
+> 数字是算出来的，别拿它当实测 —— 实测写进 `tail`。
 
 #### `ipc-flow-lab` —— 几种机制的数据流并排跑
 

@@ -11972,6 +11972,251 @@ WIDGETS['mysql-2pc-crash'] = (root) => {
     render();
   };
 
+
+  /* ============================================================
+     控件：同一条线程里换 G
+     ------------------------------------------------------------
+     七步走完一次让出 → 调度 → 恢复，左右两边同时看：
+       左边 M0（内核线程 + 此刻在寄存器里的 PC/SP）
+       右边两个 G 的状态与 gobuf
+     想让人看到的一件事：
+       换 G 只动了三个寄存器和一个栈指针，内核从头到尾没参与。
+
+     config:
+       steps: [{ title, code: [..], note, kernel, curg, cpu:{pc,sp,bp,lr,who},
+                 g1:{st,tone,where,buf}, g2:{...} }]
+  ============================================================ */
+  WIDGETS['gswitch-lab'] = (root) => {
+    const cfg = cfgOf(root);
+    const steps = cfg.steps || [];
+    if (!steps.length) return;
+    const box = mountOf(root);
+    const statusEl = root.querySelector('[data-status]');
+
+    const bar = el('div', 'gs-bar');
+    const prev = el('button', 'gs-btn', '‹ 上一步');
+    const next = el('button', 'gs-btn gs-primary', '下一步 ›');
+    const reset = el('button', 'gs-btn gs-ghost', '重置');
+    const counter = el('span', 'gs-count');
+    bar.append(prev, next, reset, counter);
+
+    const stage = el('div', 'gs-stage');
+    const foot = el('div', 'gs-foot');
+    box.append(bar, stage, foot);
+
+    let k = 0;
+
+    const gcard = (name, g) => {
+      const c = el('div', 'gs-g');
+      const h = el('div', 'gs-g-head');
+      h.append(el('b', 'gs-g-name', name));
+      h.append(el('span', 'gs-pill ' + (g.tone || 'muted'), g.st));
+      c.append(h);
+      c.append(el('div', 'gs-where', g.where));
+      const buf = el('div', 'gs-buf');
+      if (g.buf) {
+        buf.append(el('span', 'gs-buf-lab', 'gobuf（保存的现场）'));
+        [['sp', g.buf.sp], ['pc', g.buf.pc], ['bp', g.buf.bp], ['lr', g.buf.lr]].forEach(([key, v]) => {
+          const r = el('div', 'gs-buf-row');
+          r.append(el('span', 'gs-buf-k', key));
+          r.append(el('span', 'gs-buf-v' + (v === '0' || v === '—' ? ' is-zero' : ''), v));
+          buf.append(r);
+        });
+      } else {
+        buf.append(el('span', 'gs-buf-lab', 'gobuf'));
+        buf.append(el('span', 'gs-buf-empty', '空 —— 现场在寄存器里'));
+      }
+      c.append(buf);
+      return c;
+    };
+
+    function draw() {
+      const s = steps[k];
+      counter.textContent = '第 ' + (k + 1) + ' / ' + steps.length + ' 步';
+      prev.disabled = k === 0;
+      next.disabled = k === steps.length - 1;
+
+      stage.textContent = '';
+
+      /* —— 左：M0 —— */
+      const m = el('div', 'gs-m');
+      const mh = el('div', 'gs-m-head');
+      mh.append(el('b', 'gs-m-id', 'M0'));
+      mh.append(el('span', 'gs-m-sub', '内核线程 · 同一条，全程没换'));
+      m.append(mh);
+
+      const kern = el('div', 'gs-kern');
+      kern.append(el('i', 'gs-dot'));
+      kern.append(el('span', '', s.kernel));
+      m.append(kern);
+
+      const cur = el('div', 'gs-cur');
+      cur.append(el('span', 'gs-cur-lab', 'curg（现在跑谁）'));
+      cur.append(el('b', 'gs-cur-v', s.curg || '—'));
+      m.append(cur);
+
+      const cpu = el('div', 'gs-cpu');
+      const ch = el('div', 'gs-cpu-head');
+      ch.append(el('span', '', 'CPU 寄存器'));
+      ch.append(el('span', 'gs-cpu-who', s.cpu.who));
+      cpu.append(ch);
+      [['PC', s.cpu.pc], ['SP', s.cpu.sp], ['BP', s.cpu.bp], ['LR', s.cpu.lr]].forEach(([key, v]) => {
+        const r = el('div', 'gs-cpu-row');
+        r.append(el('span', 'gs-cpu-k', key));
+        r.append(el('span', 'gs-cpu-v', v));
+        cpu.append(r);
+      });
+      m.append(cpu);
+      stage.append(m);
+
+      /* —— 中：这一步在做什么 —— */
+      const act = el('div', 'gs-act');
+      act.append(el('div', 'gs-act-head', s.title));
+      const code = el('div', 'gs-code');
+      (s.code || []).forEach((line) => code.append(el('div', 'gs-code-line', line)));
+      act.append(code);
+      stage.append(act);
+
+      /* —— 右：两个 G —— */
+      const gs = el('div', 'gs-gs');
+      gs.append(gcard('G1', s.g1));
+      gs.append(gcard('G2', s.g2));
+      stage.append(gs);
+
+      foot.textContent = '';
+      richText(foot, s.note || '');
+      if (statusEl) statusEl.textContent = '第 ' + (k + 1) + ' / ' + steps.length + ' 步 · ' + s.title;
+    }
+
+    prev.addEventListener('click', () => { if (k > 0) { k--; draw(); } });
+    next.addEventListener('click', () => { if (k < steps.length - 1) { k++; draw(); } });
+    reset.addEventListener('click', () => { k = 0; draw(); });
+    draw();
+  };
+
+  /* ============================================================
+     控件：同样的任务数，两条路的固定成本
+     ------------------------------------------------------------
+     一根滑块换任务数，左右两栏比三样：
+       内核里有多少条线程、栈要预留多少、切换一次多少钱。
+     想让人看到的一件事：
+       G 省下的不是「一次切换」，是每条任务的固定成本 ——
+       所以它改变的是「敢开多少个」，不是「单个快多少」。
+
+     config:
+       stops:  [10, 100, 1000, ...]   任务数的档位
+       p:      10                       Go 这边同时跑 Go 代码的线程数
+       threadStack: 8                  线程栈预留（MiB）
+       gStack: 2048                    G 栈起步（字节）
+  ============================================================ */
+  WIDGETS['spawn-budget-lab'] = (root) => {
+    const cfg = cfgOf(root);
+    const box = mountOf(root);
+    const statusEl = root.querySelector('[data-status]');
+    const stops = cfg.stops || [10, 100, 1000, 10000, 100000, 1000000];
+    const P = cfg.p || 10;
+    const THREAD_STACK = (cfg.threadStack || 8) * 1024 * 1024;
+    const G_STACK = cfg.gStack || 2048;
+
+    const fmtB = (b) => {
+      const u = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+      let i = 0;
+      while (b >= 1024 && i < u.length - 1) { b /= 1024; i++; }
+      const d = b >= 100 ? 0 : b >= 10 ? 1 : 2;
+      return (Math.round(b * Math.pow(10, d)) / Math.pow(10, d)).toFixed(d).replace(/\.0+$/, '') + ' ' + u[i];
+    };
+    const fmtN = (n) => (n >= 10000 ? (n / 10000) + ' 万' : String(n));
+
+    const ctl = el('div', 'sb-ctl');
+    const lab = el('span', 'sb-ctl-lab', '同时有任务在跑');
+    const range = el('input', 'sb-range');
+    range.type = 'range'; range.min = '0'; range.max = String(stops.length - 1); range.step = '1';
+    range.value = String(cfg.start || 3);
+    const readout = el('b', 'sb-readout');
+    ctl.append(lab, range, readout);
+
+    const grid = el('div', 'sb-grid');
+    const verdict = el('div', 'sb-verdict');
+    const foot = el('p', 'sb-foot');
+    box.append(ctl, grid, verdict, foot);
+    if (cfg.tail) foot.textContent = cfg.tail;
+
+    const MAXB = stops[stops.length - 1] * THREAD_STACK;
+
+    function column(kind, n) {
+      const thread = kind === 'thread';
+      const count = thread ? n : P;
+      const stack = thread ? n * THREAD_STACK : n * G_STACK;
+      const tone = thread ? 'red' : 'green';
+
+      const c = el('div', 'sb-col tone-' + tone);
+      const h = el('div', 'sb-col-head');
+      h.append(el('b', '', thread ? '一条线程一个任务' : '一个 goroutine 一个任务'));
+      h.append(el('span', 'sb-col-tag ' + tone, thread ? '内核认识每一个' : '内核只看见线程'));
+      c.append(h);
+
+      const rows = el('div', 'sb-rows');
+      const row = (k, v, sub) => {
+        const r = el('div', 'sb-row');
+        const kl = el('div', 'sb-k', k);
+        const vr = el('div', 'sb-v');
+        vr.append(el('b', '', v));
+        if (sub) vr.append(el('span', 'sb-sub', sub));
+        r.append(kl, vr);
+        rows.append(r);
+      };
+      row('内核里的线程', fmtN(count) + '条', thread ? '每条都有 task_struct、内核栈和时间片' : '超出的任务排在队列里，不占线程');
+      row('栈预留', fmtB(stack), thread ? '每条 8 MiB 虚拟地址 · 按页提交' : '每个 2 KiB 起步 · 不够翻倍搬家');
+      row('切换一次', thread ? '微秒级' : '约 150 ns', thread ? '要进内核，保存全部寄存器' : '本机实测：同一条线程上交接');
+      c.append(rows);
+
+      const barWrap = el('div', 'sb-barwrap');
+      const track = el('div', 'sb-track');
+      const fill = el('i');
+      const pct = Math.max(1.5, Math.min(100, (Math.log10(Math.max(stack, 1)) / Math.log10(MAXB)) * 100));
+      fill.style.width = pct.toFixed(1) + '%';
+      track.append(fill);
+      barWrap.append(el('span', 'sb-bar-lab', '栈预留（对数刻度）'), track);
+      c.append(barWrap);
+
+      c.append(el('p', 'sb-note', thread
+        ? '预留不等于常驻：用到多少才提交多少物理页。但每条线程在内核里还有一份 task_struct 和内核栈。'
+        : '栈按需长：不够时换一块两倍大的连续内存，把旧栈整段搬过去。'));
+      return { c, stack, count };
+    }
+
+    function draw(idx) {
+      const n = stops[idx];
+      readout.textContent = fmtN(n) + '个任务';
+      grid.textContent = '';
+
+      const t = column('thread', n);
+      const g = column('g', n);
+      grid.append(t.c, g.c);
+
+      const ratio = t.stack / g.stack;
+      verdict.textContent = '';
+      verdict.append(el('div', 'sb-vhead', '同样 ' + fmtN(n) + '个任务'));
+      verdict.append(el('div', 'sb-vline',
+        '线程方案的栈预留是 G 方案的 ' + Math.round(ratio) + ' 倍：' + fmtB(t.stack) + ' 对 ' + fmtB(g.stack) + '。'));
+      if (idx <= 1) {
+        verdict.append(el('div', 'sb-vline sb-dim', '这个量级两条路都还轻松 —— 差别要到切换和阻塞上才显出来。'));
+      } else if (idx === 2) {
+        verdict.append(el('div', 'sb-vline sb-dim', '一千条线程还能开，只是内核要替这一千条各维护一份调度实体。'));
+      } else if (idx === 3) {
+        verdict.append(el('div', 'sb-vline sb-dim', '一万条线程开始吃力：不是栈真的占了一万份，而是内核要调度一万个实体。'));
+      } else if (idx === 4) {
+        verdict.append(el('div', 'sb-vline sb-dim', '十万条线程，多数机器开不出来 —— 卡住它的通常不是地址空间，而是内核维护这些线程的成本。'));
+      } else {
+        verdict.append(el('div', 'sb-vline sb-dim', '一百万条线程不现实。一百万个 G 本机跑过：栈 1.95 GiB、进程 Sys 多 2.6 GiB、内核线程 12 条。'));
+      }
+      if (statusEl) statusEl.textContent = fmtN(n) + '个任务 · 线程 ' + fmtN(t.count) + ' vs G ' + fmtN(g.count);
+    }
+
+    range.addEventListener('input', () => draw(Number(range.value)));
+    draw(Number(range.value));
+  };
+
   /* ---------- 挂载 ---------- */
   document.querySelectorAll('[data-widget]').forEach((root) => {
     var name = root.getAttribute('data-widget');
