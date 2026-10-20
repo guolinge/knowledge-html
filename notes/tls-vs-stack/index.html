@@ -48,7 +48,7 @@
     </div>
 
 
-    <div class="provenance"><span><b>来源</b> 本机实测：podman 跑 Debian 12 / glibc 2.36 / x86-64（gcc 13），反汇编与运行输出见正文 · glibc manual 2.44: Dynamic Linking Tunables（glibc.rtld.optional_static_tls，默认 512 字节）— https://sourceware.org/glibc/manual/2.44/html_node/Dynamic-Linking-Tunables.html · glibc manual 2.44: Memory Allocation Tunables（per-thread cache）— https://sourceware.org/glibc/manual/2.44/html_node/Memory-Allocation-Tunables.html · pthread_key_create(3) / PTHREAD_KEYS_MAX — https://man7.org/linux/man-pages/man3/pthread_key_create.3.html · System V ABI: AMD64 (red zone、栈帧约定) — https://gitlab.com/x86-psABIs/x86-64-ABI · Ulrich Drepper: ELF Handling For Thread-Local Storage（四种访问模型）— https://www.akkadia.org/drepper/tls.pdf · Logback manual: Mapped Diagnostic Context（per thread basis；recycles threads → false information）— https://logback.qos.ch/manual/mdc.html · PEP 567 – Context Variables（thread-local 对异步任务不够；asyncio Task 复制 context）— https://peps.python.org/pep-0567/ · JEP 446: Scoped Values（ThreadLocal 的生命周期与内存问题、线程池泄漏）— https://openjdk.org/jeps/446 · JEP 506: Scoped Values（JDK 25 正式）— https://openjdk.org/jeps/506 · AsyncLocal&lt;T&gt; (Microsoft Learn，执行流跨 await 流动，与 ThreadLocal 对照) — https://learn.microsoft.com/en-us/dotnet/api/system.threading.asynclocal-1 · golang/go#21355 proposal: Replace Context with goroutine-local storage（被否）— https://github.com/golang/go/issues/21355</span><span><b>生成</b> 2026-10-20</span></div>
+    <div class="provenance"><span><b>来源</b> 本机实测：podman 跑 Debian 12 / glibc 2.36 / x86-64（gcc 13），反汇编与运行输出见正文 · glibc manual 2.44: Dynamic Linking Tunables（glibc.rtld.optional_static_tls，默认 512 字节）— https://sourceware.org/glibc/manual/2.44/html_node/Dynamic-Linking-Tunables.html · glibc manual 2.44: Memory Allocation Tunables（per-thread cache）— https://sourceware.org/glibc/manual/2.44/html_node/Memory-Allocation-Tunables.html · pthread_key_create(3) / PTHREAD_KEYS_MAX — https://man7.org/linux/man-pages/man3/pthread_key_create.3.html · System V ABI: AMD64 (red zone、栈帧约定) — https://gitlab.com/x86-psABIs/x86-64-ABI · Ulrich Drepper: ELF Handling For Thread-Local Storage（四种访问模型）— https://www.akkadia.org/drepper/tls.pdf · Logback manual: Mapped Diagnostic Context（per thread basis；recycles threads → false information）— https://logback.qos.ch/manual/mdc.html · PEP 567 – Context Variables（thread-local 对异步任务不够；asyncio Task 复制 context）— https://peps.python.org/pep-0567/ · JEP 446: Scoped Values（ThreadLocal 的生命周期与内存问题、线程池泄漏）— https://openjdk.org/jeps/446 · JEP 506: Scoped Values（JDK 25 正式）— https://openjdk.org/jeps/506 · AsyncLocal&lt;T&gt; (Microsoft Learn，执行流跨 await 流动，与 ThreadLocal 对照) — https://learn.microsoft.com/en-us/dotnet/api/system.threading.asynclocal-1 · golang/go#21355 proposal: Replace Context with goroutine-local storage（被否）— https://github.com/golang/go/issues/21355 · Quarkus guide: Duplicated context, context locals, asynchronous processing（事件循环下不能用 ThreadLocal，值会在并发处理之间泄漏）— https://quarkus.io/guides/duplicated-context</span><span><b>生成</b> 2026-10-20</span></div>
     <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">操作系统</span> <span class="tag tone-muted">Linux</span> <span class="tag tone-muted">TLS</span> <span class="tag tone-muted">线程</span> <span class="tag tone-muted">栈</span> <span class="tag tone-muted">glibc</span></span></div>
 
 <p><code>thread_local int counter;</code> 和 <code>int b = 2;</code> 之间只隔一行，行为却完全不同：一个跟着线程活到退出，一个跟着函数活到返回。它们还都「每个线程一份」，于是很容易被当成同一种东西。</p>
@@ -644,9 +644,14 @@ after join
 <p>同一条路上还有三种走法会出错：</p>
 <ul>
 <li><strong>异步、跨线程</strong>：主线程把任务丢给另一个线程，TLS 是另一份，值是空的。</li>
-<li><strong>协程 / 虚拟线程</strong>：切换不换线程，多条任务共用一份柜子，后一个覆盖前一个。</li>
+<li><strong>协程 / 虚拟线程 / 事件循环</strong>：切换不换线程，多条任务共用一份柜子，后一个覆盖前一个。</li>
 <li><strong>忘了删</strong>：柜子里的值活到线程退出。JDK 的 ScopedValue 提案里把这条的后果写得很直白：数据比需要的活得久，线程池里「values can leak into unrelated tasks」，还可能造成长期的内存泄漏。</li>
 </ul>
+<p>第二种在响应式栈里是常态：一条事件循环线程同时处理许多请求。Quarkus 的指南把结论写得很直接：</p>
+<blockquote>
+<p>When using a reactive and asynchronous execution model, you cannot use the same mechanism... the same thread can be used to handle multiple concurrent processing. Thus, you cannot use <code>ThreadLocals</code> as the values would be leaked between the various concurrent processing.</p>
+</blockquote>
+<p><mark class="mk-blue">线程池是「时间上复用一条线程」，事件循环是「同一时刻复用一条线程」。</mark> 前者要你记得在任务开头重置，后者根本没有「重置的时机」——同一时刻就有好几份请求在跑。所以这些框架不再用线程当作用域单位，而是给每个处理单元发一份上下文（Quarkus 叫 duplicated context / context locals，.NET 叫 ExecutionContext，Python 叫 context）。作用域从「线程」换成了「处理单元」，柜子就跟着换主人。</p>
 <h3 id="换一种传法把上下文当参数">换一种传法：把上下文当参数</h3>
 <p>同一件事，改成显式传一个 <code>Context</code>，就没有「谁的柜子」这个问题了：谁需要，谁拿到；跨线程时一起传过去。</p>
 <div class="seqd has-grid" data-seq data-n="5"

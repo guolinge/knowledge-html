@@ -501,8 +501,14 @@ messages:
 同一条路上还有三种走法会出错：
 
 - **异步、跨线程**：主线程把任务丢给另一个线程，TLS 是另一份，值是空的。
-- **协程 / 虚拟线程**：切换不换线程，多条任务共用一份柜子，后一个覆盖前一个。
+- **协程 / 虚拟线程 / 事件循环**：切换不换线程，多条任务共用一份柜子，后一个覆盖前一个。
 - **忘了删**：柜子里的值活到线程退出。JDK 的 ScopedValue 提案里把这条的后果写得很直白：数据比需要的活得久，线程池里「values can leak into unrelated tasks」，还可能造成长期的内存泄漏。
+
+第二种在响应式栈里是常态：一条事件循环线程同时处理许多请求。Quarkus 的指南把结论写得很直接：
+
+> When using a reactive and asynchronous execution model, you cannot use the same mechanism... the same thread can be used to handle multiple concurrent processing. Thus, you cannot use `ThreadLocals` as the values would be leaked between the various concurrent processing.
+
+==线程池是「时间上复用一条线程」，事件循环是「同一时刻复用一条线程」。== 前者要你记得在任务开头重置，后者根本没有「重置的时机」——同一时刻就有好几份请求在跑。所以这些框架不再用线程当作用域单位，而是给每个处理单元发一份上下文（Quarkus 叫 duplicated context / context locals，.NET 叫 ExecutionContext，Python 叫 context）。作用域从「线程」换成了「处理单元」，柜子就跟着换主人。
 
 ### 换一种传法：把上下文当参数
 
