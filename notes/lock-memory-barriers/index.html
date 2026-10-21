@@ -1,0 +1,949 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-has-toc="1">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>锁为什么慢：写缓冲、失效队列和内存屏障</title>
+<meta name="description" content="从「加锁不只是只许一个线程进」讲到硬件：一条原子指令抢缓存行、一条 release 把前面的写发出去、一条 acquire 把后面的读拦住。把缓存行、写缓冲、失效队列、四种重排、四类屏障、acquire/release 逐个拆开，并用本机实测把四笔账分开：无竞争锁 ~9 ns、seq_cst 原子加一 7.2 ns、伪共享慢 20 倍、内核唤醒 1.8 µs。" />
+<link rel="stylesheet" href="../../assets/theme.css?v=b918ec5c83" />
+  <link rel="stylesheet" href="../../assets/blocks.css?v=1af3923321" />
+  <link rel="stylesheet" href="../../assets/archify-embed.css?v=68fec0b81b" />
+</head>
+<body>
+<div id="progress"></div>
+<div id="tocScrim"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
+    <a class="brand" href="../../index.html"><span class="dot"></span>知识笔记</a>
+    
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="toc" id="toc">
+      <p class="toc-title">目录</p>
+      <a href="../../index.html" class="sub">← 全部笔记</a>
+      <a href="#硬件真相cpu-并不直接读写内存">硬件真相：CPU 并不直接读写内存</a>
+      <a href="#重排不是一种是四种">重排不是一种，是四种</a>
+      <a href="#两个核都读到-0把重排画出来">两个核都读到 0：把重排画出来</a>
+      <a href="#屏障到底在等什么">屏障到底在等什么</a>
+      <a href="#锁是这些零件拼出来的">锁是这些零件拼出来的</a>
+      <a href="#把开销拆开量">把开销拆开量</a>
+      <a href="#四个误解">四个误解</a>
+      <a href="#一句话总结" class="sub">一句话总结</a>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow">● CPU · 内存模型</span>
+      <h1>锁为什么慢：写缓冲、失效队列和内存屏障</h1>
+      <p class="lede">从「加锁不只是只许一个线程进」讲到硬件：一条原子指令抢缓存行、一条 release 把前面的写发出去、一条 acquire 把后面的读拦住。把缓存行、写缓冲、失效队列、四种重排、四类屏障、acquire/release 逐个拆开，并用本机实测把四笔账分开：无竞争锁 ~9 ns、seq_cst 原子加一 7.2 ns、伪共享慢 20 倍、内核唤醒 1.8 µs。</p>
+    </div>
+
+
+    <div class="provenance"><span><b>来源</b> Paul E. McKenney · Memory Barriers: a Hardware View for Software Hackers（经 Daniel Näslund 的逐节重述：写缓冲、失效队列、MESI、x86-64 只允许 StoreLoad、ARMv7 四种都可能）https://dannas.name/2020/06/19/memory-barriers · Linux 内核文档 · memory-barriers.txt（编译器屏障、通用/读/写屏障、acquire-release 配对、multicopy atomicity、「栈和全局」作为根的讨论）https://www.kernel.org/doc/html/latest/core-api/wrappers/memory-barriers.html · Linux 内核源码 · arch/arm64/include/asm/barrier.h（smp_mb = dmb ish，smp_rmb = dmb ishld，smp_wmb = dmb ishst，store-release = stlr，load-acquire = ldar）https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/plain/arch/arm64/include/asm/barrier.h · Jeff Preshing · Memory Barriers Are Like Source Control Operations + Acquire and Release Semantics（四种屏障；StoreLoad 是唯一能挡住 r1=r2=0 的；acquire/release 各自挡住哪些重排）https://preshing.com/20120710/memory-barriers-are-like-source-control-operations/ https://preshing.com/20120913/acquire-and-release-semantics/ · Intel SDM · LOCK 与 MFENCE（LOCK 让处理器独占共享内存，P6 之后改为锁缓存；MFENCE 保证之前的读写全局可见）https://www.felixcloutier.com/x86/lock https://www.felixcloutier.com/x86/mfence · futex(2) man page（无竞争时原子指令完全在用户态执行、内核不保存锁状态；抢不到才进内核阻塞）https://man7.org/linux/man-pages/man2/futex.2.html · JSR 133 (Java Memory Model) FAQ（重排的三个来源；as-if-serial；release 刷新 / acquire 失效的说法是「若干可能效果的简写」；volatile 写=release 读=acquire）https://www.cs.umd.edu/~pugh/java/memoryModel/jsr-133-faq.html · JEP 374 · Deprecate and Disable Biased Locking（偏向锁的目的就是省掉无竞争加锁时的那条 CAS）https://openjdk.org/jeps/374 · James Bornholt · Memory Consistency Models: A Tutorial（TSO 与 happens-before 的定义）https://www.cs.utexas.edu/~bornholt/post/memory-models.html · 本机实测（Apple M1 Max，8 性能核 + 2 能效核，128 字节缓存行，Apple clang 15 -O2，5 次运行）：mutex 无竞争 8.7–9.4 ns/对；atomic RMW relaxed 2.2 ns、seq_cst 7.1–7.3 ns；store relaxed 0.50 ns、seq_cst 0.54–0.59 ns；load relaxed 0.32–0.34 ns、acquire 0.51–0.52 ns；空转 full fence +0.2 ns · 本机实测：4 线程各占一行计数器 ~1700 M 次/秒，同一计数器 70–95 M 次/秒；1/2/4 线程抢同一把锁 8.7 / 12–15 / 14–28 ns 每次；管道 ping-pong 单次内核唤醒 1.8–2.1 µs · 本机实测：同一段 C 代码用 clang -O2 编到 arm64 与 x86-64 —— relaxed store str/mov、release store stlr/mov、acquire load ldapr/mov、full fence dmb ish/mfence、seq_cst 加一 ldaddal/lock xadd</span><span><b>生成</b> 2026-10-21</span><span><b>模型</b> deepseek-v4.1-flash-1017</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">CPU</span> <span class="tag tone-muted">内存屏障</span> <span class="tag tone-muted">缓存一致性</span> <span class="tag tone-muted">锁</span> <span class="tag tone-muted">并发</span> <span class="tag tone-muted">arm64</span> <span class="tag tone-muted">x86</span></span></div>
+
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-c">// 线程 A
+lock(&amp;m);
+x = 1;
+unlock(&amp;m);
+
+// 线程 B
+lock(&amp;m);
+int v = x;      // 必须看到 1
+unlock(&amp;m);
+</code></pre></div>
+<blockquote>
+<p>锁不仅表示「只允许一个线程进入」，还要保证：加锁后能看见前一个线程在临界区中的修改；解锁前，当前线程的修改已经正确发布。这会限制 CPU 和编译器对内存操作的重排，减少一部分优化空间。</p>
+</blockquote>
+<p>这段话里最容易被跳过的，是「限制重排」为什么算性能损耗。答案不玄：<strong>锁除了「只许一个线程进」，还得保证「上一个人的写，下一个人一定看得见」</strong>。为了这个保证，CPU 和编译器在锁的前后都得收着点 —— 收着的这部分，就是白花掉的那部分性能。</p>
+<p>先把答案放这：</p>
+<blockquote>
+<p>加锁不是一句「请排队」。它至少是三件事：一条原子指令把锁字改成「有人占用」，一次 acquire 把后面的读拦住，一次 release 把前面的写发出去。<mark class="mk-blue">三件事不一定对应三条指令——一条带序的原子指令能一次干两件；但它们都不便宜，而且没人抢的时候也得付</mark>。</p>
+</blockquote>
+<p>本机（Apple M1 Max，10 核，128 字节一行）实测几个数，先有个量级：</p>
+<table>
+<thead>
+<tr>
+<th>动作</th>
+<th>一次多久</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>没人抢的互斥锁，加锁+解锁一对</td>
+<td>~9 ns</td>
+</tr>
+<tr>
+<td>原子加一（不带顺序）</td>
+<td>2.2 ns</td>
+</tr>
+<tr>
+<td>原子加一（带全局顺序）</td>
+<td>7.2 ns</td>
+</tr>
+<tr>
+<td>抢不到、真的睡下去再被叫醒</td>
+<td>~1.8 µs</td>
+</tr>
+</tbody>
+</table>
+<p>最后一格比第一格贵 200 倍。中间那些数字为什么差这么多，就是这篇要拆的东西。</p>
+<h2 id="硬件真相cpu-并不直接读写内存"><span class="num">01</span>硬件真相：CPU 并不直接读写内存</h2>
+<p>先纠正一个默认假设。你写 <code>x = 1</code>，CPU 并不是「把 1 写进内存」就完事。真实的路径是：</p>
+<ol>
+<li><code>x</code> 所在的<strong>一整行</strong>（本机 128 字节）得先在这个核的缓存里，而且得是<strong>这个核独占</strong>的副本；</li>
+<li>如果别的核手里有这一行，得先把它们的副本作废，等它们回话；</li>
+<li>写可以先记在核自己的<strong>写缓冲</strong>里，不必等第 2 步完成 —— 不然每条写都要卡一百多个周期。</li>
+</ol>
+<p>第 3 条就是一切麻烦的源头：<mark class="mk-blue">「指令执行完了」和「别人能看见了」是两件不同的事</mark>。</p>
+<figure class="archfig" data-arch style="--arch-max-width:1560px" data-boundaries="nested" data-pano data-parts='{"sb0":{"label":"写缓冲 store buffer","sub":"写完不走，先记着","detail":"一条 store 退休了，数据可能还躺在写缓冲里。本核再读同一个地址时，会先查写缓冲（写转发），所以单线程看不出问题；别的核看不见。"},"l1_0":{"label":"L1 数据缓存","sub":"按行搬，按行作废","detail":"缓存的一致性以行为单位。改一个字节，也要把整行拿到独占，再让别的核的整行副本作废。==这就是「伪共享」的由来：两个线程改同一行的不同变量，也会互相打架。=="},"iq0":{"label":"失效队列","sub":"先回执，后作废","detail":"收到作废请求时立刻回执，把真正的作废排进队列。所以「对方已经收到回执」不等于「旧副本已经删掉」—— 这是读屏障要等的东西。"},"llc":{"label":"末级缓存 / 一致性点","sub":"协调谁拥有哪一行","detail":"核之间不直接对话，靠一致性协议在末级缓存和各级缓存之间传递所有权与作废请求。"},"dram":{"label":"主存","sub":"比缓存慢两个数量级","detail":"按 McKenney 那篇的估算，CPU 到主存的延迟和缓存命中差 100 倍以上。缓存命中十几个周期，去主存几百个周期。"}}' data-tours='[{"id":"one-write","label":"一次写经过哪","steps":[{"at":["sb0","l1_0"],"text":"写先落在自己的写缓冲里。这时它==只有本核看得见==。"},{"at":["l1_0","llc","iq1"],"text":"要写就得独占这一行：一致性点把作废请求发给别的核，请求进它们的失效队列。"},{"at":["iq1","l1_1"],"text":"别的核回执了，但真正作废可能要晚一点 —— ==回执不等于已作废==。"}]},{"id":"two-cores","label":"两个核看到的不一样","steps":[{"at":["l1_0","l1_1"],"text":"同一个地址，核 0 是 M（脏、独占），核 1 是 I（无效）。两个核手里的事实不一样。"},{"at":["sb0","sb1"],"text":"各自还有自己的写缓冲。谁先发布、谁后发布，没有额外指令时是不确定的。"}]}]' data-frames='[{"id":"core0","boundary":0,"kind":"contains","label":"Core 0 · 一个核的私有部分","detail":"写缓冲、L1 缓存、失效队列都只属于这个核。别的核看不见它们，只能通过一致性协议影响它们。","members":["sb0","l1_0","iq0"],"depth":1},{"id":"core1","boundary":1,"kind":"contains","label":"Core 1 · 同样的三样东西","detail":"每个核一套。所以「同一个变量」在两个核眼里可以暂时是两个不同的事实。","members":["sb1","l1_1","iq1"],"depth":1}]'>
+      <div class="arch-boundary-ui">
+          <div class="arch-boundary-toolbar"><span class="arch-boundary-label">边界</span>
+            <button type="button" data-boundary-mode="nested" aria-pressed="true">多层归属框</button>
+            <button type="button" data-boundary-mode="flat" aria-pressed="false">只留一层分区</button>
+            <button type="button" data-arch-reset>恢复全图</button>
+          </div>
+          <div class="arch-address-box" aria-live="polite"><div data-arch-address>点一个零件，看完整归属路径；点一个区域标题，看这一层的含义。</div>
+            <div data-arch-frame-detail>最外框表示逻辑资源域，不表示所有对象在一块内存里。每层边界的标题说明分组依据。</div></div>
+        </div>
+      <div class="arch-canvas"><svg viewBox="0 0 1560 900" role="img" aria-labelledby="cpu-mem-hierarchy-archify-diagram-title cpu-mem-hierarchy-archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
+        <title id="cpu-mem-hierarchy-archify-diagram-title">一个 store 出去之前，先在自己的核里排队</title>
+        <desc id="cpu-mem-hierarchy-archify-diagram-description">A architecture diagram generated by Archify.</desc>
+        <!-- Definitions -->
+        <defs>
+          <marker id="cpu-mem-hierarchy-arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-default" />
+          </marker>
+          <marker id="cpu-mem-hierarchy-arrowhead-emphasis" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-emphasis" />
+          </marker>
+          <marker id="cpu-mem-hierarchy-arrowhead-security" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-security" />
+          </marker>
+          <marker id="cpu-mem-hierarchy-arrowhead-dashed" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-dashed" />
+          </marker>
+          <pattern id="cpu-mem-hierarchy-grid" width="40" height="40" patternUnits="userSpaceOnUse">
+            <path d="M 40 0 L 0 0 0 40" class="c-grid" stroke-width="0.5"/>
+          </pattern>
+        </defs>
+
+        <!-- Background Grid -->
+        <rect width="100%" height="100%" fill="url(#cpu-mem-hierarchy-grid)" />
+
+        <!-- Boundaries (behind everything) -->
+        <g class="arch-frame" data-frame="core0" data-depth="1" data-frame-flat="false" data-frame-kind="contains" role="button" tabindex="0" aria-pressed="false" aria-label="Core 0 · 一个核的私有部分"><title>写缓冲、L1 缓存、失效队列都只属于这个核。别的核看不见它们，只能通过一致性协议影响它们。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="0" data-frame-members="sb0 l1_0 iq0" x="60" y="140" width="460" height="620" rx="12" class="c-region" stroke-width="1"/>
+        <text x="68" y="158" class="t-cloud" font-size="9" font-weight="600">Core 0 · 一个核的私有部分</text></g>
+
+        <g class="arch-frame" data-frame="core1" data-depth="1" data-frame-flat="false" data-frame-kind="contains" role="button" tabindex="0" aria-pressed="false" aria-label="Core 1 · 同样的三样东西"><title>每个核一套。所以「同一个变量」在两个核眼里可以暂时是两个不同的事实。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="1" data-frame-members="sb1 l1_1 iq1" x="1040" y="140" width="460" height="620" rx="12" class="c-region" stroke-width="1"/>
+        <text x="1048" y="158" class="t-cloud" font-size="9" font-weight="600">Core 1 · 同样的三样东西</text></g>
+
+        <!-- Connection paths (before components for correct z-order) -->
+        <path data-edge-from="sb0" data-edge-to="l1_0" data-edge-label="排空" data-edge-key="0" data-edge-id="drain" data-composition-points="290,300;290,380" d="M 290 300 L 290 380" class="a-default" stroke-width="1.5" marker-end="url(#cpu-mem-hierarchy-arrowhead)"/>
+        <path data-edge-from="l1_0" data-edge-to="llc" data-edge-label="要独占" data-edge-key="1" data-edge-id="own" data-composition-points="480,460;535,460;535,335;590,335" d="M 480 460 L 527 460 Q 535 460 535 452 L 535 343 Q 535 335 543 335 L 590 335" class="a-default" stroke-width="1.5" marker-end="url(#cpu-mem-hierarchy-arrowhead)"/>
+        <path data-edge-from="llc" data-edge-to="dram" data-edge-label="缺行时往下取" data-edge-key="2" data-edge-id="fill" data-composition-points="780,420;780,620" d="M 780 420 L 780 620" class="a-default" stroke-width="1.5" marker-end="url(#cpu-mem-hierarchy-arrowhead)"/>
+        <path data-edge-from="llc" data-edge-to="iq1" data-edge-label="invalidate 请求" data-edge-key="3" data-edge-id="inval" data-composition-points="970,335;994,335;994,576;1270,576;1270,600" d="M 970 335 L 986 335 Q 994 335 994 343 L 994 568 Q 994 576 1002 576 L 1262 576 Q 1270 576 1270 584 L 1270 600" class="a-default" stroke-width="1.5" marker-end="url(#cpu-mem-hierarchy-arrowhead)"/>
+
+        <!-- Components -->
+        <g id="cpu-mem-hierarchy-node-sb0" data-nb="1" data-node-id="sb0" data-node-label="写缓冲 store buffer" tabindex="0" role="button" aria-label="Focus 写缓冲 store buffer, 写完就往下走，不等别人回话, Core 0 · 一个核的全部私有部分" aria-pressed="false" data-node-kind="messagebus" data-node-sublabel="写完就往下走，不等别人回话" data-node-context="Core 0 · 一个核的全部私有部分">
+          <title>写缓冲 store buffer · 写完就往下走，不等别人回话 · Core 0 · 一个核的全部私有部分</title>
+          <rect x="100" y="180" width="380" height="120" rx="6" class="c-mask"/>
+          <rect x="100" y="180" width="380" height="120" rx="6" class="c-messagebus" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="messagebus" class="semantic-sigil s-messagebus" transform="translate(106 186) scale(0.6875)">
+            <path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h11"/>
+            <circle cx="5" cy="4.5" r="1" class="sigil-fill"/>
+            <circle cx="10.5" cy="8" r="1" class="sigil-fill"/>
+            <circle cx="7" cy="11.5" r="1" class="sigil-fill"/>
+          </g>
+          <rect class="nb-badge" x="417.6" y="188" width="50.4" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="442.8" y="199" font-size="8" text-anchor="middle">每核一个</text>
+          <text class="nb-title" x="134" y="201" font-size="10.5" font-weight="600">写缓冲 store buffer</text>
+          <line class="nb-hr" x1="108" y1="208" x2="472" y2="208"/>
+          <text class="nb-k" x="112" y="236" font-size="9">放什么</text><text class="nb-v" x="164.2" y="236" font-size="9">已经执行、但还没进缓存的写</text>
+          <text class="nb-k" x="112" y="250" font-size="9">为什么</text><text class="nb-v" x="164.2" y="250" font-size="9">等缓存行所有权的回执要好几十个周期，不能干等</text>
+          <text class="nb-k" x="112" y="264" font-size="9">谁能看见</text><text class="nb-v" x="164.2" y="264" font-size="9">只有本核（靠写转发）</text>
+          <text class="nb-note" x="112" y="292" font-size="8">写缓冲让「写」变快，代价是「可见」变慢</text>
+        </g>
+
+        <g id="cpu-mem-hierarchy-node-l1_0" data-nb="1" data-node-id="l1_0" data-node-label="L1d · 行 x 是 M（脏）" tabindex="0" role="button" aria-label="Focus L1d · 行 x 是 M（脏）, 本机 128 字节一行, Core 0 · 一个核的全部私有部分" aria-pressed="false" data-node-kind="database" data-node-sublabel="本机 128 字节一行" data-node-context="Core 0 · 一个核的全部私有部分">
+          <title>L1d · 行 x 是 M（脏） · 本机 128 字节一行 · Core 0 · 一个核的全部私有部分</title>
+          <rect x="100" y="380" width="380" height="160" rx="6" class="c-mask"/>
+          <rect x="100" y="380" width="380" height="160" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(106 386) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <rect class="nb-badge" x="398.4" y="388" width="69.6" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="433.2" y="399" font-size="8" text-anchor="middle">128 字节一行</text>
+          <text class="nb-title" x="134" y="401" font-size="10.5" font-weight="600">L1d · 行 x 是 M（脏）</text>
+          <line class="nb-hr" x1="108" y1="408" x2="472" y2="408"/>
+          <text class="nb-k" x="112" y="456" font-size="9">状态</text><text class="nb-v" x="142.6" y="456" font-size="9">M（独占且脏）：别人手里的副本已作废</text>
+          <text class="nb-k" x="112" y="470" font-size="9">想写</text><text class="nb-v" x="142.6" y="470" font-size="9">必须先把行拿到独占</text>
+          <text class="nb-k" x="112" y="484" font-size="9">想读</text><text class="nb-v" x="142.6" y="484" font-size="9">命中就几个周期，缺行要几百个</text>
+          <text class="nb-note" x="112" y="532" font-size="8">缓存按行搬，不按变量搬 —— 一行里放两个变量就会一起被搬</text>
+        </g>
+
+        <g id="cpu-mem-hierarchy-node-iq0" data-nb="1" data-node-id="iq0" data-node-label="失效队列 invalidate queue" tabindex="0" role="button" aria-label="Focus 失效队列 invalidate queue, 先回执，真正作废可以晚点, Core 0 · 一个核的全部私有部分" aria-pressed="false" data-node-kind="messagebus" data-node-sublabel="先回执，真正作废可以晚点" data-node-context="Core 0 · 一个核的全部私有部分">
+          <title>失效队列 invalidate queue · 先回执，真正作废可以晚点 · Core 0 · 一个核的全部私有部分</title>
+          <rect x="100" y="600" width="380" height="120" rx="6" class="c-mask"/>
+          <rect x="100" y="600" width="380" height="120" rx="6" class="c-messagebus" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="messagebus" class="semantic-sigil s-messagebus" transform="translate(106 606) scale(0.6875)">
+            <path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h11"/>
+            <circle cx="5" cy="4.5" r="1" class="sigil-fill"/>
+            <circle cx="10.5" cy="8" r="1" class="sigil-fill"/>
+            <circle cx="7" cy="11.5" r="1" class="sigil-fill"/>
+          </g>
+          <rect class="nb-badge" x="417.6" y="608" width="50.4" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="442.8" y="619" font-size="8" text-anchor="middle">每核一个</text>
+          <text class="nb-title" x="134" y="621" font-size="10.5" font-weight="600">失效队列 invalidate queue</text>
+          <line class="nb-hr" x1="108" y1="628" x2="472" y2="628"/>
+          <text class="nb-k" x="112" y="656" font-size="9">放什么</text><text class="nb-v" x="153.4" y="656" font-size="9">收到但还没真正执行的作废请求</text>
+          <text class="nb-k" x="112" y="670" font-size="9">为什么</text><text class="nb-v" x="153.4" y="670" font-size="9">先回执，别让发请求的核干等</text>
+          <text class="nb-k" x="112" y="684" font-size="9">后果</text><text class="nb-v" x="153.4" y="684" font-size="9">回执早于真正作废，别人可能还读到旧值</text>
+          <text class="nb-note" x="112" y="712" font-size="8">失效队列让「作废」变成异步动作</text>
+        </g>
+
+        <g id="cpu-mem-hierarchy-node-sb1" data-nb="1" data-node-id="sb1" data-node-label="写缓冲 store buffer" tabindex="0" role="button" aria-label="Focus 写缓冲 store buffer, 核 1 也有自己的一份, Core 1 · 同样的三样东西" aria-pressed="false" data-node-kind="messagebus" data-node-sublabel="核 1 也有自己的一份" data-node-context="Core 1 · 同样的三样东西">
+          <title>写缓冲 store buffer · 核 1 也有自己的一份 · Core 1 · 同样的三样东西</title>
+          <rect x="1080" y="180" width="380" height="120" rx="6" class="c-mask"/>
+          <rect x="1080" y="180" width="380" height="120" rx="6" class="c-messagebus" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="messagebus" class="semantic-sigil s-messagebus" transform="translate(1086 186) scale(0.6875)">
+            <path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h11"/>
+            <circle cx="5" cy="4.5" r="1" class="sigil-fill"/>
+            <circle cx="10.5" cy="8" r="1" class="sigil-fill"/>
+            <circle cx="7" cy="11.5" r="1" class="sigil-fill"/>
+          </g>
+          <rect class="nb-badge" x="1397.6" y="188" width="50.4" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="1422.8" y="199" font-size="8" text-anchor="middle">每核一个</text>
+          <text class="nb-title" x="1114" y="201" font-size="10.5" font-weight="600">写缓冲 store buffer</text>
+          <line class="nb-hr" x1="1088" y1="208" x2="1452" y2="208"/>
+          <text class="nb-k" x="1092" y="250" font-size="9">核 1 的写</text><text class="nb-v" x="1171.2" y="250" font-size="9">同样先进自己的缓冲</text>
+          <text class="nb-k" x="1092" y="264" font-size="9">和核 0 的关系</text><text class="nb-v" x="1171.2" y="264" font-size="9">互不干扰，直到抢同一行</text>
+        </g>
+
+        <g id="cpu-mem-hierarchy-node-l1_1" data-nb="1" data-node-id="l1_1" data-node-label="L1d · 行 x 是 I（无效）" tabindex="0" role="button" aria-label="Focus L1d · 行 x 是 I（无效）, 副本被作废了，得重新取, Core 1 · 同样的三样东西" aria-pressed="false" data-node-kind="database" data-node-sublabel="副本被作废了，得重新取" data-node-context="Core 1 · 同样的三样东西">
+          <title>L1d · 行 x 是 I（无效） · 副本被作废了，得重新取 · Core 1 · 同样的三样东西</title>
+          <rect x="1080" y="380" width="380" height="160" rx="6" class="c-mask"/>
+          <rect x="1080" y="380" width="380" height="160" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(1086 386) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <rect class="nb-badge" x="1407.2" y="388" width="40.8" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="1427.6" y="399" font-size="8" text-anchor="middle">同一行</text>
+          <text class="nb-title" x="1114" y="401" font-size="10.5" font-weight="600">L1d · 行 x 是 I（无效）</text>
+          <line class="nb-hr" x1="1088" y1="408" x2="1452" y2="408"/>
+          <text class="nb-k" x="1092" y="463" font-size="9">状态</text><text class="nb-v" x="1122.6" y="463" font-size="9">I（无效）：核 0 要写，把这份作废了</text>
+          <text class="nb-k" x="1092" y="477" font-size="9">再读</text><text class="nb-v" x="1122.6" y="477" font-size="9">不能自己取，必须找核 0 / 末级缓存要</text>
+          <text class="nb-note" x="1092" y="532" font-size="8">同一行不可能同时两个核都可写</text>
+        </g>
+
+        <g id="cpu-mem-hierarchy-node-iq1" data-nb="1" data-node-id="iq1" data-node-label="失效队列 invalidate queue" tabindex="0" role="button" aria-label="Focus 失效队列 invalidate queue, 作废请求先躺在这, Core 1 · 同样的三样东西" aria-pressed="false" data-node-kind="messagebus" data-node-sublabel="作废请求先躺在这" data-node-context="Core 1 · 同样的三样东西">
+          <title>失效队列 invalidate queue · 作废请求先躺在这 · Core 1 · 同样的三样东西</title>
+          <rect x="1080" y="600" width="380" height="120" rx="6" class="c-mask"/>
+          <rect x="1080" y="600" width="380" height="120" rx="6" class="c-messagebus" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="messagebus" class="semantic-sigil s-messagebus" transform="translate(1086 606) scale(0.6875)">
+            <path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h11"/>
+            <circle cx="5" cy="4.5" r="1" class="sigil-fill"/>
+            <circle cx="10.5" cy="8" r="1" class="sigil-fill"/>
+            <circle cx="7" cy="11.5" r="1" class="sigil-fill"/>
+          </g>
+          <rect class="nb-badge" x="1397.6" y="608" width="50.4" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="1422.8" y="619" font-size="8" text-anchor="middle">每核一个</text>
+          <text class="nb-title" x="1114" y="621" font-size="10.5" font-weight="600">失效队列 invalidate queue</text>
+          <line class="nb-hr" x1="1088" y1="628" x2="1452" y2="628"/>
+          <text class="nb-k" x="1092" y="670" font-size="9">收到什么</text><text class="nb-v" x="1176.6" y="670" font-size="9">「你那份 x 作废了」</text>
+          <text class="nb-k" x="1092" y="684" font-size="9">什么时候真作废</text><text class="nb-v" x="1176.6" y="684" font-size="9">队列轮到它的时候</text>
+        </g>
+
+        <g id="cpu-mem-hierarchy-node-llc" data-nb="1" data-node-id="llc" data-node-label="末级缓存 · 一致性点" tabindex="0" role="button" aria-label="Focus 末级缓存 · 一致性点, 所有核的失效请求在这里排队, Architecture component" aria-pressed="false" data-node-kind="database" data-node-sublabel="所有核的失效请求在这里排队" data-node-context="Architecture component">
+          <title>末级缓存 · 一致性点 · 所有核的失效请求在这里排队 · Architecture component</title>
+          <rect x="590" y="250" width="380" height="170" rx="6" class="c-mask"/>
+          <rect x="590" y="250" width="380" height="170" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(596 256) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <rect class="nb-badge" x="907.6" y="258" width="50.4" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="932.8" y="269" font-size="8" text-anchor="middle">一致性点</text>
+          <text class="nb-title" x="624" y="271" font-size="10.5" font-weight="600">末级缓存 · 一致性点</text>
+          <line class="nb-hr" x1="598" y1="278" x2="962" y2="278"/>
+          <text class="nb-k" x="602" y="338" font-size="9">管什么</text><text class="nb-v" x="654.2" y="338" font-size="9">谁可以拥有哪一行、作废请求发给谁</text>
+          <text class="nb-k" x="602" y="352" font-size="9">不管什么</text><text class="nb-v" x="654.2" y="352" font-size="9">它不保证「什么时候」完成，只保证顺序</text>
+          <text class="nb-note" x="602" y="412" font-size="8">所有核的失效请求在这排队</text>
+        </g>
+
+        <g id="cpu-mem-hierarchy-node-dram" data-nb="1" data-node-id="dram" data-node-label="DRAM" tabindex="0" role="button" aria-label="Focus DRAM, 比 L1 慢约两个数量级, Architecture component" aria-pressed="false" data-node-kind="cloud" data-node-sublabel="比 L1 慢约两个数量级" data-node-context="Architecture component">
+          <title>DRAM · 比 L1 慢约两个数量级 · Architecture component</title>
+          <rect x="590" y="620" width="380" height="140" rx="6" class="c-mask"/>
+          <rect x="590" y="620" width="380" height="140" rx="6" class="c-cloud" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="cloud" class="semantic-sigil s-cloud" transform="translate(596 626) scale(0.6875)">
+            <path d="M4.3 12.5h7.3a2.4 2.4 0 0 0 .2-4.8 4 4 0 0 0-7.5-1.3A3.1 3.1 0 0 0 4.3 12.5Z"/>
+          </g>
+          <rect class="nb-badge" x="888.4" y="628" width="69.6" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="923.2" y="639" font-size="8" text-anchor="middle">慢两个数量级</text>
+          <text class="nb-title" x="624" y="641" font-size="10.5" font-weight="600">DRAM</text>
+          <line class="nb-hr" x1="598" y1="648" x2="962" y2="648"/>
+          <text class="nb-k" x="602" y="693" font-size="9">缓存命中</text><text class="nb-v" x="654.2" y="693" font-size="9">十几个周期</text>
+          <text class="nb-k" x="602" y="707" font-size="9">去主存取</text><text class="nb-v" x="654.2" y="707" font-size="9">几百个周期</text>
+          <text class="nb-note" x="602" y="752" font-size="8">缓存存在的全部理由，就是别去这</text>
+        </g>
+
+        <!-- Connection labels -->
+        <g data-detail="context" data-edge-from="sb0" data-edge-to="l1_0" data-edge-label="排空" data-edge-key="0" data-edge-id="drain">
+          <rect x="275" y="320" width="30" height="14" rx="3" class="c-mask"/>
+          <text x="290" y="330" class="t-muted" font-size="8" text-anchor="middle">排空</text>
+        </g>
+        <g data-detail="context" data-edge-from="l1_0" data-edge-to="llc" data-edge-label="要独占" data-edge-key="1" data-edge-id="own">
+          <rect x="510.6" y="370" width="38.8" height="14" rx="3" class="c-mask"/>
+          <text x="530" y="380" class="t-muted" font-size="8" text-anchor="middle">要独占</text>
+        </g>
+        <g data-detail="context" data-edge-from="llc" data-edge-to="dram" data-edge-label="缺行时往下取" data-edge-key="2" data-edge-id="fill">
+          <rect x="746.2" y="535" width="67.6" height="14" rx="3" class="c-mask"/>
+          <text x="780" y="545" class="t-muted" font-size="8" text-anchor="middle">缺行时往下取</text>
+        </g>
+        <g data-detail="context" data-edge-from="llc" data-edge-to="iq1" data-edge-label="invalidate 请求" data-edge-key="3" data-edge-id="inval">
+          <rect x="999" y="460" width="82" height="14" rx="3" class="c-mask"/>
+          <text x="1040" y="470" class="t-muted" font-size="8" text-anchor="middle">invalidate 请求</text>
+        </g>
+
+        <!-- Legend -->
+        <g data-legend data-legend-bridge>
+          <text x="40" y="864" class="t-primary" font-size="12" font-weight="650">Legend</text>
+          <g data-legend-semantic-kind="database" data-legend-kind="database" data-legend-label="缓存与内存" data-legend-x="40" data-legend-baseline="884" data-legend-width="93">
+            <rect x="40" y="875" width="16" height="10" rx="2.5" class="c-database" stroke-width="1"/>
+            <text x="62" y="884" class="t-muted" font-size="10" font-weight="500">缓存与内存</text>
+          </g>
+          <g data-legend-semantic-kind="cloud" data-legend-kind="cloud" data-legend-label="Cloud" data-legend-x="155" data-legend-baseline="884" data-legend-width="68">
+            <rect x="155" y="875" width="16" height="10" rx="2.5" class="c-cloud" stroke-width="1"/>
+            <text x="177" y="884" class="t-muted" font-size="10" font-weight="500">Cloud</text>
+          </g>
+          <g data-legend-semantic-kind="messagebus" data-legend-kind="messagebus" data-legend-label="每条核自己的队列" data-legend-x="245" data-legend-baseline="884" data-legend-width="123">
+            <rect x="245" y="875" width="16" height="10" rx="2.5" class="c-messagebus" stroke-width="1"/>
+            <text x="267" y="884" class="t-muted" font-size="10" font-weight="500">每条核自己的队列</text>
+          </g>
+        </g>
+      </svg></div>
+      <figcaption>左边一个核，右边一个核，中间是它们共用的部分。读的时候从下往上：缓存行、所有权、写缓冲、失效队列 —— 这四样是理解锁开销的全部零件。</figcaption>
+      <div class="pano-ui"></div>
+      <p class="arch-hint"><span class="idle">点头上的任意一个框看它的关系，点区域标题看分组含义，点零件看完整归属路径</span><span class="focused">再点一次空白处取消</span></p>
+    </figure><p>这四样东西各有一个反直觉的地方，值得单独记住：</p>
+<div class="cards" data-cols="2"><div class="ccard tone-blue">
+          <span class="tag tone-blue">本机 128 字节</span>
+          <h4>缓存行 cache line</h4>
+          <p>缓存和内存之间搬东西的最小单位</p>
+          <div class="cbody"><p>改一个字节，也要把整行弄到手。一行里如果放了两个线程各自要改的变量，这两个变量就会互相拖累 —— 这就是<strong>伪共享</strong>（false sharing）。</p>
+<p>§06 量了：4 个线程加同一个计数器比各加各的慢 <strong>20 倍</strong>，差别只在这一行归谁。</p>
+</div>
+          
+        </div><div class="ccard tone-violet">
+          <span class="tag tone-violet">写的前提</span>
+          <h4>独占（M 状态 / 所有权）</h4>
+          <p>想写，先让别人的副本作废</p>
+          <div class="cbody"><p>写不是「改自己缓存里那份」就行。别的核可能也有这一行，你得先让它们的副本失效，自己拿到独占。</p>
+<p>一致性协议（MESI）给每行记四种状态：<strong>M</strong> 本核独占且改过、<strong>E</strong> 独占但干净、<strong>S</strong> 多核共享、<strong>I</strong> 无效。锁和共享变量只在 M 和 I 之间来回。</p>
+<p>所以「谁写谁独占」翻译成硬件动作，是<strong>一整行在核之间搬来搬去</strong>。</p>
+</div>
+          
+        </div><div class="ccard tone-amber">
+          <span class="tag tone-amber">让写变快</span>
+          <h4>写缓冲 store buffer</h4>
+          <p>写指令退休了，数据可能还没出核</p>
+          <div class="cbody"><p>写先记在自己的缓冲里，CPU 继续跑后面的指令；等独占拿到了再写进缓存。</p>
+<p>本核再读同一个地址时，会先查写缓冲（<strong>写转发</strong>），所以 <code>a = 1; b = a + 1</code> 一定得 2。但别的核看不到你的写缓冲。</p>
+</div>
+          
+        </div><div class="ccard tone-amber">
+          <span class="tag tone-amber">让作废变快</span>
+          <h4>失效队列 invalidate queue</h4>
+          <p>收到作废请求，先回执，稍后真作废</p>
+          <div class="cbody"><p>为了不让发请求的核干等，收到请求先回 ack，把真正的作废排进队列。</p>
+<p>于是「我已经回执了」不等于「我这边的旧副本已经删了」。读屏障要等的就是这个队列。</p>
+</div>
+          
+        </div><div class="ccard tone-muted">
+          <span class="tag tone-muted">单核的补丁</span>
+          <h4>写转发 store forwarding</h4>
+          <p>自己读自己刚写的，得从写缓冲里拿</p>
+          <div class="cbody"><p>载入时先查写缓冲、再查缓存。它是「单核看起来顺序执行」的一部分。</p>
+<p>它只保证本核自洽，不帮别的核 —— 别的核该看到旧值还是旧值。</p>
+</div>
+          
+        </div><div class="ccard tone-green">
+          <span class="tag tone-green">锁的地基</span>
+          <h4>原子读改写 RMW</h4>
+          <p>读、改、写三步之间，别人插不进来</p>
+          <div class="cbody"><p><code>CAS</code>、<code>xchg</code>、<code>fetch_add</code> 都是这一类。硬件保证这几步之间这一行归你独占，别的核改不了。</p>
+<p>锁的「只许一个线程进」，落到机器上就是<mark class="mk-blue">一条 RMW 成功了</mark>；抢不到就是失败了。</p>
+</div>
+          
+        </div></div><p>本机参数（用来校准上面的说法）：</p>
+<table>
+<thead>
+<tr>
+<th>参数</th>
+<th>值</th>
+<th>怎么来的</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>CPU</td>
+<td>Apple M1 Max，8 性能核 + 2 能效核</td>
+<td><code>sysctl hw.ncpu hw.perflevel0.logicalcpu</code></td>
+</tr>
+<tr>
+<td>缓存行</td>
+<td>128 字节</td>
+<td><code>sysctl hw.cachelinesize</code></td>
+</tr>
+<tr>
+<td>编译器</td>
+<td>Apple clang 15，<code>-O2</code></td>
+<td><code>clang --version</code></td>
+</tr>
+</tbody>
+</table>
+<h2 id="重排不是一种是四种"><span class="num">02</span>重排不是一种，是四种</h2>
+<p>「CPU 会乱序」这句话太粗。工程上把它拆成四种，因为每种要不同的屏障去挡：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>重排</th><th>意思</th><th>谁允许它</th><th>典型架构</th></tr></thead><tbody><tr><th>LoadLoad</th><td data-label="意思">后面的读，跑到前面读之前</td><td data-label="谁允许它">乱序执行 + 失效队列</td><td data-label="典型架构">ARM / POWER 允许；x86 不允许</td></tr><tr><th>LoadStore</th><td data-label="意思">后面的写，跑到前面读之前</td><td data-label="谁允许它">乱序执行</td><td data-label="典型架构">ARM 允许；x86 不允许</td></tr><tr><th>StoreStore</th><td data-label="意思">后面的写，跑到前面写之前</td><td data-label="谁允许它">写缓冲</td><td data-label="典型架构">ARM 允许；x86 不允许</td></tr><tr><th>StoreLoad</th><td data-label="意思">后面的读，跑到前面写之前</td><td data-label="谁允许它">写缓冲：读的时候写还没发布</td><td data-label="典型架构"><mark class="mk-blue">x86 也允许</mark>，所以它最贵也最常被讨论</td></tr></tbody></table></div><p>三个来源，各自干各自的：</p>
+<ul>
+<li><strong>编译器</strong>：只要不改变单线程语义，它可以把写挪后、把读挪前。这一层靠编译器屏障挡（C/C++ 里的 <code>atomic_signal_fence</code>，或者内核里的 <code>barrier()</code>）。</li>
+<li><strong>CPU 乱序执行</strong>：两条不相干的指令，谁先算完谁先走。寄存器重命名、乱序发射都在这一层。</li>
+<li><strong>内存系统</strong>：指令按顺序执行了，但<strong>写缓冲</strong>让写晚发布、<strong>失效队列</strong>让作废晚生效。这一层最阴，因为代码顺序看起来完全正常。</li>
+</ul>
+<p>x86 的模型强一些：<mark class="mk-blue">只有 StoreLoad 一种重排是允许的</mark>，普通读自带 acquire、普通写自带 release。ARM（包括本机的 arm64）四种都可能，所以需要 <code>dmb</code> / <code>ldar</code> / <code>stlr</code> 这些指令。§06 会把两边编译出来的指令摆在一起。</p>
+<h2 id="两个核都读到-0把重排画出来"><span class="num">03</span>两个核都读到 0：把重排画出来</h2>
+<p>经典例子，两个核各写一个变量、各读对方的变量：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-c">// 初始 x = 0, y = 0
+// Core 0                    // Core 1
+x = 1;                       y = 1;
+r1 = y;                      r2 = x;
+
+// 跑完可能得到 r1 == 0 &amp;&amp; r2 == 0
+</code></pre></div>
+<p>按代码顺序，两边都先写后读，怎么可能都读到 0？把它们放进写缓冲就说得通了：</p>
+<div class="seqd has-grid" data-seq data-n="5" data-segs="[{&quot;from&quot;:1,&quot;to&quot;:6,&quot;label&quot;:&quot;两条 store 都还卡在各自的缓冲里&quot;}]"
+      style="--seq-fill:url(#s-fill-1);--seq-open:url(#s-fill-1-open)">
+      <svg class="seqd-svg" aria-hidden="true">
+        <defs>
+          <marker id="s-fill-1" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+          <marker id="s-fill-1-open" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10" fill="none" stroke="currentColor" stroke-width="1.4"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="seqd-head"><div class="scell"><div class="spart tone-muted" data-id="c0">
+          <b>Core 0</b><small>x = 1; r1 = y</small>
+        </div></div><div class="scell"><div class="spart tone-amber has-icon" data-id="b0">
+          <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M3 5h10M3 8h10M3 11h6"/></svg><b>Core 0 的写缓冲</b><small>还没发布</small>
+        </div></div><div class="scell"><div class="spart tone-violet has-icon" data-id="mem">
+          <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="8" cy="4.2" rx="5" ry="1.9"/><path d="M3 4.2v7.6c0 1.05 2.24 1.9 5 1.9s5-.85 5-1.9V4.2"/></svg><b>缓存行 / 内存</b><small>一致性点</small>
+        </div></div><div class="scell"><div class="spart tone-amber has-icon" data-id="b1">
+          <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M3 5h10M3 8h10M3 11h6"/></svg><b>Core 1 的写缓冲</b><small>还没发布</small>
+        </div></div><div class="scell"><div class="spart tone-muted" data-id="c1">
+          <b>Core 1</b><small>y = 1; r2 = x</small>
+        </div></div></div>
+      <div class="seqd-body"><div class="smsg" data-from="c0" data-to="b0" data-kind="async" data-i="1" data-note="1"><span class="snote">1</span><span class="slabel">store x = 1</span></div><div class="smsg" data-from="c1" data-to="b1" data-kind="async" data-i="2" data-note="2"><span class="snote">2</span><span class="slabel">store y = 1</span></div><div class="smsg" data-from="c1" data-to="mem" data-kind="sync" data-i="3" data-note="3"><span class="snote">3</span><span class="slabel">load x</span></div><div class="smsg" data-from="mem" data-to="c1" data-kind="reply" data-i="4" data-note="4"><span class="snote">4</span><span class="slabel">读到 0</span></div><div class="smsg" data-from="c0" data-to="mem" data-kind="sync" data-i="5" data-note="5"><span class="snote">5</span><span class="slabel">load y</span></div><div class="smsg" data-from="mem" data-to="c0" data-kind="reply" data-i="6" data-note="6"><span class="snote">6</span><span class="slabel">读到 0</span></div><div class="smsg" data-from="b0" data-to="mem" data-kind="async" data-i="7" data-note="7" style="margin-top:26px"><span class="snote">7</span><span class="slabel">排空：x = 1</span></div><div class="smsg" data-from="b1" data-to="mem" data-kind="async" data-i="8" data-note="8"><span class="snote">8</span><span class="slabel">排空：y = 1</span></div></div>
+    </div><p>逐条读：</p>
+<ol>
+<li>核 0 的 <code>x = 1</code> 先落进自己的写缓冲 —— 指令退休了，数据没走。</li>
+<li>核 1 的 <code>y = 1</code> 同理。</li>
+<li>核 1 读 <code>x</code>，缓存里没有新的 <code>x</code>，读到 0。</li>
+<li>返回 0。</li>
+<li>核 0 读 <code>y</code>，同样读到 0。</li>
+<li>返回 0。</li>
+<li>两条写缓冲这时才排空。</li>
+</ol>
+<p><mark class="mk-blue">两个核都没有「违反程序顺序」，它们只是各自把写推迟了。</mark> 但这已经足够让外面的世界看到「先读后写」的效果。</p>
+<p>要让这段代码给出你期待的答案，至少有一边得在两条操作之间插一条 <mark class="mk-blue">StoreLoad 屏障</mark>（也就是全屏障）。只挡另外三种不够 —— 这正是 Preshing 特意指出的：<code>lwsync</code> 那种「除 StoreLoad 外都挡」的屏障在这段代码里不解决问题。锁能替代它，是因为加锁那条原子读改写自带完整顺序，而且互斥保证两个临界区不重叠。<mark class="mk-blue">锁的工作，就是把「谁先谁后」变成一个有名有姓的事实</mark>。</p>
+<h2 id="屏障到底在等什么"><span class="num">04</span>屏障到底在等什么</h2>
+<p>「内存屏障」这个名字容易让人以为它在刷缓存。它真正做的是<strong>等</strong>：等前面的写真的发出去，等该收的作废真的生效，然后才允许后面的操作动。</p>
+<p>一个 store 从「执行完」到「所有核都看见」，要经过这几步：</p>
+<div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-muted">① 执行 store</span>
+            <span class="name">x = 1</span>
+            <span class="spacer"></span>
+            <span class="tag tone-warn">只有本核看得见</span>
+          </div>
+          <div class="rec"><div class="">
+            <b>去哪了</b><span>写缓冲</span></div><div class="">
+            <b>缓存里</b><span>可能还是旧值</span></div><div class="">
+            <b>本核再读</b><span>写转发拿到 1</span></div></div>
+          
+          <p class="jnote">指令已经「退休」（retire：执行完、结果确定、可以从流水线里撤掉），数据还没离开这个核。</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">要写，先得拿到这一整行的独占</span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-amber">② 发失效请求</span>
+            <span class="name">invalidate 别的副本</span>
+            <span class="spacer"></span>
+            <span class="tag tone-amber">要等回执</span>
+          </div>
+          <div class="rec"><div class="">
+            <b>发给</b><span>别的核的缓存</span></div><div class="">
+            <b>等什么</b><span>每个核回一个 ack</span></div><div class="">
+            <b>期间</b><span>后面的指令可以继续跑</span></div></div>
+          
+          <p class="jnote">这是「写」变慢的根源：写要等别人确认，而读不用。</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">回执齐了，才轮到自己独占</span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-blue">③ 拿到独占</span>
+            <span class="name">写进 L1</span>
+            <span class="spacer"></span>
+            <span class="tag tone-blue">本核最新</span>
+          </div>
+          <div class="rec"><div class="">
+            <b>行状态</b><span>M（脏、独占）</span></div><div class="">
+            <b>别的核</b><span>副本已作废</span></div><div class="">
+            <b>内存</b><span>还是旧值</span></div></div>
+          
+          <p class="jnote">到这里，数据仍然只在核 0 的缓存里。</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">别的核想读，得先来找这一行</span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-violet">④ 别人来读</span>
+            <span class="name">核 1 要这一行</span>
+            <span class="spacer"></span>
+            <span class="tag tone-violet">先作废，再给数据</span>
+          </div>
+          <div class="rec"><div class="">
+            <b>谁处理</b><span>一致性点转发请求</span></div><div class="">
+            <b>核 1 的失效</b><span>先进失效队列</span></div><div class="">
+            <b>风险</b><span>回执早于真正作废</span></div></div>
+          
+          <p class="jnote">失效队列把「我作废了」变成「我登记了，等会儿作废」。</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">屏障就是在这里插进来等的</span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-red">⑤ 屏障</span>
+            <span class="name">dmb ish / mfence / lock</span>
+            <span class="spacer"></span>
+            <span class="tag tone-red">等前面全部完成</span>
+          </div>
+          <div class="rec"><div class="">
+            <b>等谁</b><span>写缓冲排空 + 失效队列处理完</span></div><div class="">
+            <b>阻止</b><span>后面的读写越过它</span></div><div class="">
+            <b>代价</b><span>空转里几乎免费（实测 +0.2 ns），有东西要等时才贵</span></div></div>
+          
+          <p class="jnote">屏障不清缓存，它只是「排队，等前面的做完」。</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">做完这一步，才算发布</span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-green">⑥ 发布完成</span>
+            <span class="name">所有核都看到 x = 1</span>
+            <span class="spacer"></span>
+            <span class="tag tone-green">这才叫可见</span>
+          </div>
+          <div class="rec"><div class="">
+            <b>谁能读到</b><span>任何核</span></div><div class="">
+            <b>保证来自</b><span>屏障 + 原子操作</span></div><div class="">
+            <b>锁的 unlock</b><span>就落在这里</span></div></div>
+          
+          <p class="jnote">解锁的成本，主要花在走到这一步上。</p>
+        </div><p>按「挡哪种重排」，屏障分四类；高级语言里的 acquire / release 就是它们的组合：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>屏障</th><th>它保证什么</th><th>高级语义</th><th>本机（arm64）怎么出现</th></tr></thead><tbody><tr><th>LoadLoad</th><td data-label="它保证什么">后面的读不会提到前面读之前</td><td data-label="高级语义">acquire 的一半</td><td data-label="本机（arm64）怎么出现">一条带 acquire 语义的 load 同时管住前两种</td></tr><tr><th>LoadStore</th><td data-label="它保证什么">后面的写不会提到前面读之前</td><td data-label="高级语义">acquire 的一半</td><td data-label="本机（arm64）怎么出现">同上</td></tr><tr><th>StoreStore</th><td data-label="它保证什么">后面的写不会提到前面写之前</td><td data-label="高级语义">release 的一半</td><td data-label="本机（arm64）怎么出现">一条带 release 语义的 store 同时管住后两种</td></tr><tr><th>StoreLoad</th><td data-label="它保证什么">前面的写必须先发布，后面的读才允许执行</td><td data-label="高级语义">全屏障 / <code>seq_cst</code></td><td data-label="本机（arm64）怎么出现"><code>dmb ish</code>，或 <code>ldaddal</code> 这类带序的原子读改写</td></tr></tbody></table></div><p>三个词，对应三种用法：</p>
+<ul>
+<li><strong>acquire（获取）</strong>：加在<strong>读</strong>之后。它保证「看到这个标志之后，标志之前发布的写我都看得见」。锁的加锁就是 acquire。</li>
+<li><strong>release（发布）</strong>：加在<strong>写</strong>之前。它保证「我发布这个标志之前，前面的写都已经发出去了」。锁的解锁就是 release。</li>
+<li><strong>full fence（全屏障）</strong>：四种都挡，还要等写缓冲和失效队列。<code>seq_cst</code> 用这个，最贵。</li>
+</ul>
+<p>JSR-133 的 FAQ 里有一句流传很广的话：「退出同步块会把缓存刷到主存，进入同步块会让本地缓存失效」。这句话<strong>是概念上的简写</strong>，FAQ 自己也补了一句「这是对若干可能效果的简写」。硬件层面真正发生的是上面这六步 —— <mark class="mk-blue">不是清缓存，是等队列</mark>。</p>
+<p>有个反直觉的实测结果值得先记住：<strong>在空转里插一条 <code>dmb ish</code>，几乎测不出成本（+0.2 ns）</strong>。屏障贵，不是贵在指令本身，而是贵在「它要等的东西」：</p>
+<table>
+<thead>
+<tr>
+<th>写法（同一段代码，只换内存序）</th>
+<th>实测</th>
+<th>差在哪</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>原子加一，relaxed</td>
+<td>2.2 ns</td>
+<td>只要独占，不要顺序</td>
+</tr>
+<tr>
+<td>原子加一，seq_cst</td>
+<td>7.2 ns</td>
+<td>多出的 ~5 ns，是等「写真的发出去」</td>
+</tr>
+</tbody>
+</table>
+<h2 id="锁是这些零件拼出来的"><span class="num">05</span>锁是这些零件拼出来的</h2>
+<p>一把锁在硬件里只占两样东西：<strong>一行缓存（锁字）+ 一个等待队列（抢不到时去哪）</strong>。</p>
+<figure class="archfig" data-arch style="--arch-max-width:1600px" data-boundaries="nested" data-pano data-parts='{"t1":{"label":"线程 A（持锁）","sub":"快路径","detail":"它做的全部事情是一条带 acquire 的原子读改写，加一条带 release 的 store。没有系统调用、没有调度。"},"lockword":{"label":"锁字","sub":"一行缓存","detail":"==锁的争用就是这一行的所有权在核之间搬。==没竞争时它一直待在一个核的缓存里，所以快；一旦换手，就要走一遍作废和传输。"},"data":{"label":"被保护的数据","sub":"另一行缓存","detail":"锁字和数据通常不在同一行：一行放两个线程都要改的东西，会白白多出一份争用。"},"t2":{"label":"线程 B（抢不到）","sub":"慢路径","detail":"先自旋（用户态，便宜），超过阈值才睡进内核。所以「有竞争」不等于「一定要切换」。"},"waitq":{"label":"内核等待队列","sub":"futex / ulock","detail":"Linux 上这套机制叫 futex。==无竞争时内核完全不知道这把锁存在==，只有线程真的要睡，才把锁字所在地址当键挂进队列。"}}' data-frames='[{"id":"user","boundary":0,"kind":"contains","label":"用户态 · 无竞争时只走这里","detail":"加锁、解锁的成功路径全部是用户态的原子指令和屏障，内核完全不知道。","members":["t1","lockword","data","t2"],"depth":1}]'>
+      <div class="arch-boundary-ui">
+          <div class="arch-boundary-toolbar"><span class="arch-boundary-label">边界</span>
+            <button type="button" data-boundary-mode="nested" aria-pressed="true">多层归属框</button>
+            <button type="button" data-boundary-mode="flat" aria-pressed="false">只留一层分区</button>
+            <button type="button" data-arch-reset>恢复全图</button>
+          </div>
+          <div class="arch-address-box" aria-live="polite"><div data-arch-address>点一个零件，看完整归属路径；点一个区域标题，看这一层的含义。</div>
+            <div data-arch-frame-detail>最外框表示逻辑资源域，不表示所有对象在一块内存里。每层边界的标题说明分组依据。</div></div>
+        </div>
+      <div class="arch-canvas"><svg viewBox="0 0 1600 940" role="img" aria-labelledby="lock-anatomy-archify-diagram-title lock-anatomy-archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
+        <title id="lock-anatomy-archify-diagram-title">一把锁在硬件里的样子：一行缓存 + 一个内核队列</title>
+        <desc id="lock-anatomy-archify-diagram-description">A architecture diagram generated by Archify.</desc>
+        <!-- Definitions -->
+        <defs>
+          <marker id="lock-anatomy-arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-default" />
+          </marker>
+          <marker id="lock-anatomy-arrowhead-emphasis" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-emphasis" />
+          </marker>
+          <marker id="lock-anatomy-arrowhead-security" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-security" />
+          </marker>
+          <marker id="lock-anatomy-arrowhead-dashed" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-dashed" />
+          </marker>
+          <pattern id="lock-anatomy-grid" width="40" height="40" patternUnits="userSpaceOnUse">
+            <path d="M 40 0 L 0 0 0 40" class="c-grid" stroke-width="0.5"/>
+          </pattern>
+        </defs>
+
+        <!-- Background Grid -->
+        <rect width="100%" height="100%" fill="url(#lock-anatomy-grid)" />
+
+        <!-- Boundaries (behind everything) -->
+        <g class="arch-frame" data-frame="user" data-depth="1" data-frame-flat="false" data-frame-kind="contains" role="button" tabindex="0" aria-pressed="false" aria-label="用户态 · 无竞争时只走这里"><title>加锁、解锁的成功路径全部是用户态的原子指令和屏障，内核完全不知道。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="0" data-frame-members="t1 lockword data t2" x="50" y="190" width="1470" height="510" rx="12" class="c-region" stroke-width="1"/>
+        <text x="58" y="208" class="t-cloud" font-size="9" font-weight="600">用户态 · 无竞争时只走这里</text></g>
+
+        <!-- Connection paths (before components for correct z-order) -->
+        <path data-edge-from="t1" data-edge-to="lockword" data-edge-label="① 原子 CAS：0 → 1" data-edge-key="0" data-edge-id="cas" data-composition-points="390,330;520,330" d="M 390 330 L 520 330" class="a-default" stroke-width="1.5" marker-end="url(#lock-anatomy-arrowhead)"/>
+        <path data-edge-from="t1" data-edge-to="data" data-edge-label="② 临界区里写" data-edge-key="1" data-edge-id="write" data-composition-points="240,420;240,444;496,444;496,565;520,565" d="M 240 420 L 240 436 Q 240 444 248 444 L 488 444 Q 496 444 496 452 L 496 557 Q 496 565 504 565 L 520 565" class="a-default" stroke-width="1.5" marker-end="url(#lock-anatomy-arrowhead)"/>
+        <path data-edge-from="lockword" data-edge-to="t2" data-edge-label="③ 换手：整行搬过去" data-edge-key="2" data-edge-id="handoff" data-composition-points="880,330;1060,330" d="M 880 330 L 1060 330" class="a-default" stroke-width="1.5" marker-end="url(#lock-anatomy-arrowhead)"/>
+        <path data-edge-from="t2" data-edge-to="waitq" data-edge-label="④ 睡进队列，等唤醒" data-edge-key="3" data-edge-id="sleep" data-composition-points="1270,415;1270,740" d="M 1270 415 L 1270 740" class="a-default" stroke-width="1.5" marker-end="url(#lock-anatomy-arrowhead)"/>
+
+        <!-- Components -->
+        <g id="lock-anatomy-node-t1" data-nb="1" data-node-id="t1" data-node-label="线程 A · 持锁" tabindex="0" role="button" aria-label="Focus 线程 A · 持锁, 它现在拥有那一行, 用户态 · 加锁解锁的无竞争路径全在这" aria-pressed="false" data-node-kind="backend" data-node-sublabel="它现在拥有那一行" data-node-context="用户态 · 加锁解锁的无竞争路径全在这">
+          <title>线程 A · 持锁 · 它现在拥有那一行 · 用户态 · 加锁解锁的无竞争路径全在这</title>
+          <rect x="90" y="240" width="300" height="180" rx="6" class="c-mask"/>
+          <rect x="90" y="240" width="300" height="180" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(96 246) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <rect class="nb-badge" x="337.2" y="248" width="40.8" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="357.6" y="259" font-size="8" text-anchor="middle">快路径</text>
+          <text class="nb-title" x="124" y="261" font-size="10.5" font-weight="600">线程 A · 持锁</text>
+          <line class="nb-hr" x1="98" y1="268" x2="382" y2="268"/>
+          <text class="nb-k" x="102" y="326" font-size="9">动作</text><text class="nb-v" x="132.6" y="326" font-size="9">一条 CAS 把锁字 0 改成 1</text>
+          <text class="nb-k" x="102" y="340" font-size="9">顺序</text><text class="nb-v" x="132.6" y="340" font-size="9">CAS 带 acquire，后面的读不能上移</text>
+          <text class="nb-k" x="102" y="354" font-size="9">实测</text><text class="nb-v" x="132.6" y="354" font-size="9">加锁+解锁一对约 9 ns</text>
+          <text class="nb-note" x="102" y="412" font-size="8">全程用户态，没有系统调用</text>
+        </g>
+
+        <g id="lock-anatomy-node-lockword" data-nb="1" data-node-id="lockword" data-node-label="锁字 · 一行缓存" tabindex="0" role="button" aria-label="Focus 锁字 · 一行缓存, 0 空闲 / 1 已占用, 用户态 · 加锁解锁的无竞争路径全在这" aria-pressed="false" data-node-kind="database" data-node-sublabel="0 空闲 / 1 已占用" data-node-context="用户态 · 加锁解锁的无竞争路径全在这">
+          <title>锁字 · 一行缓存 · 0 空闲 / 1 已占用 · 用户态 · 加锁解锁的无竞争路径全在这</title>
+          <rect x="520" y="230" width="360" height="200" rx="6" class="c-mask"/>
+          <rect x="520" y="230" width="360" height="200" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(526 236) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <rect class="nb-badge" x="817.6" y="238" width="50.4" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="842.8" y="249" font-size="8" text-anchor="middle">一行缓存</text>
+          <text class="nb-title" x="554" y="251" font-size="10.5" font-weight="600">锁字 · 一行缓存</text>
+          <line class="nb-hr" x1="528" y1="258" x2="872" y2="258"/>
+          <text class="nb-k" x="532" y="326" font-size="9">值</text><text class="nb-v" x="573.4" y="326" font-size="9">0 空闲 / 1 已占用</text>
+          <text class="nb-k" x="532" y="340" font-size="9">谁改它</text><text class="nb-v" x="573.4" y="340" font-size="9">原子指令（CAS / xchg）</text>
+          <text class="nb-k" x="532" y="354" font-size="9">换手</text><text class="nb-v" x="573.4" y="354" font-size="9">整行从核 A 搬到核 B</text>
+          <text class="nb-note" x="532" y="422" font-size="8">锁的争用，本质是这一行在核之间来回搬</text>
+        </g>
+
+        <g id="lock-anatomy-node-data" data-nb="1" data-node-id="data" data-node-label="被保护的数据" tabindex="0" role="button" aria-label="Focus 被保护的数据, 通常和锁字不在同一行, 用户态 · 加锁解锁的无竞争路径全在这" aria-pressed="false" data-node-kind="database" data-node-sublabel="通常和锁字不在同一行" data-node-context="用户态 · 加锁解锁的无竞争路径全在这">
+          <title>被保护的数据 · 通常和锁字不在同一行 · 用户态 · 加锁解锁的无竞争路径全在这</title>
+          <rect x="520" y="470" width="360" height="190" rx="6" class="c-mask"/>
+          <rect x="520" y="470" width="360" height="190" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(526 476) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <rect class="nb-badge" x="827.2" y="478" width="40.8" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="847.6" y="489" font-size="8" text-anchor="middle">另一行</text>
+          <text class="nb-title" x="554" y="491" font-size="10.5" font-weight="600">被保护的数据</text>
+          <line class="nb-hr" x1="528" y1="498" x2="872" y2="498"/>
+          <text class="nb-k" x="532" y="561" font-size="9">谁写</text><text class="nb-v" x="573.4" y="561" font-size="9">临界区里的代码</text>
+          <text class="nb-k" x="532" y="575" font-size="9">和锁字</text><text class="nb-v" x="573.4" y="575" font-size="9">通常不同行；同行就是伪共享</text>
+          <text class="nb-k" x="532" y="589" font-size="9">保护靠</text><text class="nb-v" x="573.4" y="589" font-size="9">release / acquire 这一对</text>
+          <text class="nb-note" x="532" y="652" font-size="8">锁字告诉你「轮到谁」，屏障保证「看得到前一个人写的」</text>
+        </g>
+
+        <g id="lock-anatomy-node-t2" data-nb="1" data-node-id="t2" data-node-label="线程 B · 抢不到" tabindex="0" role="button" aria-label="Focus 线程 B · 抢不到, CAS 会失败，或者行在别人手上, 用户态 · 加锁解锁的无竞争路径全在这" aria-pressed="false" data-node-kind="backend" data-node-sublabel="CAS 会失败，或者行在别人手上" data-node-context="用户态 · 加锁解锁的无竞争路径全在这">
+          <title>线程 B · 抢不到 · CAS 会失败，或者行在别人手上 · 用户态 · 加锁解锁的无竞争路径全在这</title>
+          <rect x="1060" y="245" width="420" height="170" rx="6" class="c-mask"/>
+          <rect x="1060" y="245" width="420" height="170" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(1066 251) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <rect class="nb-badge" x="1427.2" y="253" width="40.8" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="1447.6" y="264" font-size="8" text-anchor="middle">慢路径</text>
+          <text class="nb-title" x="1094" y="266" font-size="10.5" font-weight="600">线程 B · 抢不到</text>
+          <line class="nb-hr" x1="1068" y1="273" x2="1472" y2="273"/>
+          <text class="nb-k" x="1072" y="326" font-size="9">动作</text><text class="nb-v" x="1124.2" y="326" font-size="9">CAS 失败，或者行在别人手上</text>
+          <text class="nb-k" x="1072" y="340" font-size="9">先做什么</text><text class="nb-v" x="1124.2" y="340" font-size="9">自旋一小会儿，赌对方很快放锁</text>
+          <text class="nb-k" x="1072" y="354" font-size="9">再做什么</text><text class="nb-v" x="1124.2" y="354" font-size="9">睡进内核队列，等唤醒</text>
+          <text class="nb-note" x="1072" y="407" font-size="8">这一条路才会产生线程切换</text>
+        </g>
+
+        <g id="lock-anatomy-node-waitq" data-nb="1" data-node-id="waitq" data-node-label="内核等待队列" tabindex="0" role="button" aria-label="Focus 内核等待队列, Linux 叫 futex，macOS 叫 ulock, Architecture component" aria-pressed="false" data-node-kind="messagebus" data-node-sublabel="Linux 叫 futex，macOS 叫 ulock" data-node-context="Architecture component">
+          <title>内核等待队列 · Linux 叫 futex，macOS 叫 ulock · Architecture component</title>
+          <rect x="1060" y="740" width="420" height="140" rx="6" class="c-mask"/>
+          <rect x="1060" y="740" width="420" height="140" rx="6" class="c-messagebus" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="messagebus" class="semantic-sigil s-messagebus" transform="translate(1066 746) scale(0.6875)">
+            <path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h11"/>
+            <circle cx="5" cy="4.5" r="1" class="sigil-fill"/>
+            <circle cx="10.5" cy="8" r="1" class="sigil-fill"/>
+            <circle cx="7" cy="11.5" r="1" class="sigil-fill"/>
+          </g>
+          <rect class="nb-badge" x="1436.8" y="748" width="31.2" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="1452.4" y="759" font-size="8" text-anchor="middle">内核</text>
+          <text class="nb-title" x="1094" y="761" font-size="10.5" font-weight="600">内核等待队列</text>
+          <line class="nb-hr" x1="1068" y1="768" x2="1472" y2="768"/>
+          <text class="nb-k" x="1072" y="806" font-size="9">谁进</text><text class="nb-v" x="1108.0" y="806" font-size="9">自旋没等到锁的线程</text>
+          <text class="nb-k" x="1072" y="820" font-size="9">Linux</text><text class="nb-v" x="1108.0" y="820" font-size="9">futex 的等待队列</text>
+          <text class="nb-k" x="1072" y="834" font-size="9">代价</text><text class="nb-v" x="1108.0" y="834" font-size="9">一次唤醒约 1.8 µs</text>
+          <text class="nb-note" x="1072" y="872" font-size="8">比无竞争锁贵两个数量级</text>
+        </g>
+
+        <!-- Connection labels -->
+        <g data-detail="context" data-edge-from="t1" data-edge-to="lockword" data-edge-label="① 原子 CAS：0 → 1" data-edge-key="0" data-edge-id="cas">
+          <rect x="409.2" y="320" width="91.6" height="14" rx="3" class="c-mask"/>
+          <text x="455" y="330" class="t-muted" font-size="8" text-anchor="middle">① 原子 CAS：0 → 1</text>
+        </g>
+        <g data-detail="context" data-edge-from="t1" data-edge-to="data" data-edge-label="② 临界区里写" data-edge-key="1" data-edge-id="write">
+          <rect x="296.2" y="510" width="67.6" height="14" rx="3" class="c-mask"/>
+          <text x="330" y="520" class="t-muted" font-size="8" text-anchor="middle">② 临界区里写</text>
+        </g>
+        <g data-detail="context" data-edge-from="lockword" data-edge-to="t2" data-edge-label="③ 换手：整行搬过去" data-edge-key="2" data-edge-id="handoff">
+          <rect x="921.8" y="320" width="96.39999999999999" height="14" rx="3" class="c-mask"/>
+          <text x="970" y="330" class="t-muted" font-size="8" text-anchor="middle">③ 换手：整行搬过去</text>
+        </g>
+        <g data-detail="context" data-edge-from="t2" data-edge-to="waitq" data-edge-label="④ 睡进队列，等唤醒" data-edge-key="3" data-edge-id="sleep">
+          <rect x="1221.8" y="590" width="96.39999999999999" height="14" rx="3" class="c-mask"/>
+          <text x="1270" y="600" class="t-muted" font-size="8" text-anchor="middle">④ 睡进队列，等唤醒</text>
+        </g>
+
+        <!-- Legend -->
+        <g data-legend data-legend-bridge>
+          <text x="40" y="904" class="t-primary" font-size="12" font-weight="650">Legend</text>
+          <g data-legend-semantic-kind="backend" data-legend-kind="backend" data-legend-label="执行流" data-legend-x="40" data-legend-baseline="924" data-legend-width="73">
+            <rect x="40" y="915" width="16" height="10" rx="2.5" class="c-backend" stroke-width="1"/>
+            <text x="62" y="924" class="t-muted" font-size="10" font-weight="500">执行流</text>
+          </g>
+          <g data-legend-semantic-kind="database" data-legend-kind="database" data-legend-label="被原子操作改的那几行" data-legend-x="135" data-legend-baseline="924" data-legend-width="143">
+            <rect x="135" y="915" width="16" height="10" rx="2.5" class="c-database" stroke-width="1"/>
+            <text x="157" y="924" class="t-muted" font-size="10" font-weight="500">被原子操作改的那几行</text>
+          </g>
+          <g data-legend-semantic-kind="messagebus" data-legend-kind="messagebus" data-legend-label="抢不到时排队的地方" data-legend-x="300" data-legend-baseline="924" data-legend-width="133">
+            <rect x="300" y="915" width="16" height="10" rx="2.5" class="c-messagebus" stroke-width="1"/>
+            <text x="322" y="924" class="t-muted" font-size="10" font-weight="500">抢不到时排队的地方</text>
+          </g>
+        </g>
+      </svg></div>
+      <figcaption>上半部分是用户态：锁字和被保护的数据通常在两个不同的缓存行上。最下面那个框在内核里，只有真睡下去才用得上。①②是快路径，④是慢路径。</figcaption>
+      <div class="pano-ui"></div>
+      <p class="arch-hint"><span class="idle">点头上的任意一个框看它的关系，点区域标题看分组含义，点零件看完整归属路径</span><span class="focused">再点一次空白处取消</span></p>
+    </figure><p>用 C11 写一把最朴素的锁，能看清这几条指令分别落在哪：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-c">#include &lt;stdatomic.h&gt;
+
+typedef struct { _Atomic int word; } lock_t;   // 0 = 空闲，1 = 已占用
+
+static void lock(lock_t *l) {
+    int expected = 0;
+    // 原子地比较并交换。成功时的 acquire 语义：后面的读写不能上移
+    while (!atomic_compare_exchange_weak_explicit(
+               &amp;l-&gt;word, &amp;expected, 1,
+               memory_order_acquire, memory_order_relaxed)) {
+        expected = 0;   // 抢不到就重试（真实实现会先自旋、再睡）
+    }
+}
+
+static void unlock(lock_t *l) {
+    // release 语义：前面的读写不能下移，且必须先发布
+    atomic_store_explicit(&amp;l-&gt;word, 0, memory_order_release);
+}
+</code></pre></div>
+<ul>
+<li><strong>加锁 = 一条带 acquire 的原子读改写</strong>。CAS 成功意味着这一行已经在你手里独占；acquire 让临界区里的读不能跑到它前面。</li>
+<li><strong>解锁 = 一条 release store</strong>。release 让临界区里的写不能跑到它后面，而且必须发布出去。真实实现还会在这条 store 后面唤醒等待者。</li>
+<li><strong>抢不到</strong>：CAS 失败，说明锁字不是 0，有人占着。还有一种更常见的情况是 CAS 成功但变慢：这一行在别人手里，要先把整行搬过来。</li>
+<li><strong>等待策略</strong>：先自旋重试，超过阈值才进内核睡。</li>
+</ul>
+<p>futex 的手册把这条分界线写得很清楚：无竞争时，原子指令「完全在用户态执行，内核不保存任何关于锁状态的信息」；只有可能睡下去时，才把锁字地址当键进内核排队。macOS 上对应的机制叫 ulock，分界线一样。</p>
+<h2 id="把开销拆开量"><span class="num">06</span>把开销拆开量</h2>
+<p>把上面所有东西换成数字。都是本机实测（M1 Max，clang <code>-O2</code>，5 次运行取范围；机器上还有别的活，会有抖动）。</p>
+<p><strong>没竞争时：单次操作</strong></p>
+<table>
+<thead>
+<tr>
+<th>操作</th>
+<th>实测</th>
+<th>在锁里对应哪一步</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>互斥锁 lock+unlock，无竞争</td>
+<td>8.7–9.4 ns</td>
+<td>整套快路径</td>
+<td>改锁字的原子指令 + 一次发布，全在用户态</td>
+</tr>
+<tr>
+<td>原子加一，relaxed</td>
+<td>2.2 ns</td>
+<td>改锁字（不要求顺序时）</td>
+<td>要独占，不要顺序</td>
+</tr>
+<tr>
+<td>原子加一，seq_cst</td>
+<td>7.1–7.3 ns</td>
+<td>全屏障版</td>
+<td>多出的 ~5 ns 是 full barrier 在「有写要发」时的价</td>
+</tr>
+<tr>
+<td>普通 store，relaxed</td>
+<td>0.50 ns</td>
+<td>临界区里写数据</td>
+<td>一行 <code>str</code></td>
+</tr>
+<tr>
+<td>普通 store，seq_cst</td>
+<td>0.54–0.59 ns</td>
+<td>发布数据</td>
+<td>一行 <code>stlr</code>，本机几乎没有差别</td>
+</tr>
+<tr>
+<td>普通 load，relaxed</td>
+<td>0.32–0.34 ns</td>
+<td>临界区里读数据</td>
+<td>一行普通载入</td>
+</tr>
+<tr>
+<td>普通 load，acquire</td>
+<td>0.51–0.52 ns</td>
+<td>加锁后的第一次读</td>
+<td>一行带 acquire 语义的载入</td>
+</tr>
+<tr>
+<td>空转里插一条 full fence</td>
+<td>+0.2 ns</td>
+<td>——</td>
+<td>没有东西要等时，它几乎免费</td>
+</tr>
+</tbody>
+</table>
+<p><strong>有竞争时：缓存行与唤醒</strong></p>
+<table>
+<thead>
+<tr>
+<th>场景</th>
+<th>实测</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>4 线程各加各的计数器（各占一行）</td>
+<td>~1700 M 次/秒</td>
+<td>缓存行不打架</td>
+</tr>
+<tr>
+<td>4 线程抢同一个计数器</td>
+<td>70–95 M 次/秒</td>
+<td>同一行在核间来回搬，<mark class="mk-blue">慢约 20 倍</mark></td>
+</tr>
+<tr>
+<td>2 线程抢同一把锁</td>
+<td>12–15 ns/次</td>
+<td>开始排队</td>
+</tr>
+<tr>
+<td>4 线程抢同一把锁</td>
+<td>14–28 ns/次</td>
+<td>总吞吐从 ~115 M 掉到 40–70 M</td>
+</tr>
+<tr>
+<td>一次内核唤醒 + 调度（管道来回的一半）</td>
+<td>1.8–2.1 µs</td>
+<td>比无竞争锁贵两个数量级</td>
+</tr>
+</tbody>
+</table>
+<p>表里最容易被忽略的是前两行的差别：变量之间根本没有逻辑冲突（各加各的数），只要落在同一行，硬件就当成同一个东西抢。</p>
+<p>第三行往后才是锁本身：临界区只有几纳秒时，几个线程还能靠自旋扛住；临界区稍微长一点，线程就会从自旋转成睡觉，直接跳进最后一行的量级。</p>
+<p>最后是同一段 C 代码在两个架构上编译出来的指令（本机 clang，<code>-O2</code>）：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>源码里的写法</th><th>arm64（本机）</th><th>x86-64（交叉编译）</th></tr></thead><tbody><tr><th>relaxed store</th><td data-label="arm64（本机）"><code>str</code></td><td data-label="x86-64（交叉编译）"><code>mov</code></td></tr><tr><th>release store</th><td data-label="arm64（本机）"><code>stlr</code></td><td data-label="x86-64（交叉编译）"><code>mov</code>（和 relaxed 一模一样）</td></tr><tr><th>acquire load</th><td data-label="arm64（本机）"><code>ldapr</code></td><td data-label="x86-64（交叉编译）"><code>mov</code>（和 relaxed 一模一样）</td></tr><tr><th>full fence</th><td data-label="arm64（本机）"><code>dmb ish</code></td><td data-label="x86-64（交叉编译）"><code>mfence</code></td></tr><tr><th>seq_cst 加一</th><td data-label="arm64（本机）"><code>ldaddal</code></td><td data-label="x86-64（交叉编译）"><code>lock xadd</code></td></tr></tbody></table></div><p>先认一下这几条 arm64 指令：<code>str</code> 是普通写，<code>stlr</code> 是<strong>带 release 语义</strong>的写，<code>ldapr</code> 是<strong>带 acquire 语义</strong>的读，<code>dmb ish</code> 是屏障（<code>ish</code> = inner shareable，同一颗芯片里所有核的范围），<code>ldaddal</code> 是带 acquire+release 的原子加。</p>
+<p>这张表把「x86 只允许 StoreLoad 重排」落到了指令上：<mark class="mk-blue">x86 的普通读写本来就带 acquire/release 语义，所以源码里写 release 和写 relaxed 编出来是同一条 <code>mov</code></mark>；ARM 的普通读写什么都不保证，才需要 <code>stlr</code>、<code>ldar</code>、<code>dmb</code>。Linux 内核的 arm64 头文件里，<code>smp_mb()</code> 就是 <code>dmb ish</code>、<code>smp_rmb()</code> 是 <code>dmb ishld</code>、<code>smp_wmb()</code> 是 <code>dmb ishst</code>。</p>
+<h2 id="四个误解"><span class="num">07</span>四个误解</h2>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>常见说法</th><th>实际是怎么回事</th></tr></thead><tbody><tr><th>屏障会把缓存清空</th><td data-label="实际是怎么回事">屏障作用在<strong>写缓冲</strong>和<strong>失效队列</strong>上：等它们排空/处理完。缓存怎么保持一致是一致性协议一直在做的事，不是屏障才做的。<mark class="mk-blue">「刷缓存」是概念简写，不是硬件动作</mark>。</td></tr><tr><th>没竞争的锁不用付钱</th><td data-label="实际是怎么回事">一条原子 CAS 要把锁字那一行拿到独占，再加一条 release store。实测 ~9 ns。JEP 374 移除偏向锁，省掉的就是<strong>这条 CAS</strong>。</td></tr><tr><th>锁慢都是因为线程切换</th><td data-label="实际是怎么回事">无竞争时根本没有切换。只有抢不到、自旋超时、睡进内核，才有一次唤醒 —— 实测 ~1.8 µs。两笔账要分开算。</td></tr><tr><th>加锁只是「改个标志位」</th><td data-label="实际是怎么回事">标志位在<strong>一行缓存</strong>里：改它要先独占，换手要整行搬。锁的争用，本质是这一行在核之间来回搬。</td></tr></tbody></table></div><p>顺手记住两个数字的量级关系，比记定义有用：</p>
+<ul>
+<li><strong>无竞争锁 ≈ 9 ns</strong>，一次<strong>内核唤醒 ≈ 1.8 µs</strong> —— 差 200 倍。</li>
+<li><strong>同一行上的假争用</strong>能让 4 个线程的吞吐掉到 1/20 —— 比锁本身贵得多。</li>
+</ul>
+<div class="summary">
+      <h3 id="一句话总结">一句话总结</h3>
+      <p>锁的开销不是「等别人」，而是「确认顺序」：一条原子指令拿到缓存行的独占，一条 release 把前面的写发出去，一条 acquire 把后面的读拦住。
+<mark class="mk-blue">没竞争时这笔钱是几纳秒；有竞争时，多出来的是缓存行搬家（几十纳秒）和内核唤醒（几微秒）。</mark></p>
+
+    </div><div class="quiz"><details>
+        <summary>为什么「加锁只允许一个线程进入」这件事，会影响到内存操作的重排？</summary>
+        <div class="a"><p>因为光有互斥不够：线程 A 退出临界区时，它对 x 的写可能还躺在自己的写缓冲里；
+线程 B 进来读 x，可能读到旧值。所以加锁要带 acquire（挡住后面的读写上移），
+解锁要带 release（把前面的写发布出去），这两条都会限制重排。</p>
+</div>
+      </details><details>
+        <summary>一条 <code>dmb ish</code> 本身贵不贵？那锁的开销到底花在哪？</summary>
+        <div class="a"><p>空转里插一条 dmb 几乎测不出来（+0.2 ns）。它贵在「有东西要等」：
+等写缓冲排空、等失效队列处理完。原子加一从 relaxed 换到 seq_cst，2.2 ns 变 7.2 ns，
+差的那 5 ns 就是等的钱。再往上才是缓存行换手和内核唤醒。</p>
+</div>
+      </details><details>
+        <summary>4 个线程各加各的计数器（没有共享逻辑），为什么也会慢 20 倍？</summary>
+        <div class="a"><p>因为缓存按行一致性：四个计数器如果落在同一行，每次写都要把这行抢到独占，
+行就在核之间来回搬。把它们各放一行（padding），吞吐从 ~80 M 回到 ~1700 M 次/秒。
+这就是伪共享。</p>
+</div>
+      </details></div>
+
+    <footer>
+      <span>锁为什么慢：写缓冲、失效队列和内存屏障</span>
+      <span>最后更新 2026-10-21 · 单文件可离线打开</span>
+    </footer>
+  </main>
+</div>
+
+<script src="../../assets/app.js?v=757eed9a2d"></script>
+</body>
+</html>
