@@ -1,0 +1,810 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-has-toc="1">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>映射区、VMA、mm_struct、页表：地盘、地契、总档案、导航表</title>
+<meta name="description" content="一句话分清四样东西：映射区是用户虚拟地址范围，VMA 是内核给每段地址做的登记，mm_struct 是把登记和页表入口收在一起的总档案，页表负责翻译。附 mm_struct / vm_area_struct 的真实字段、1909 段映射的实测、缺页的三条路径，以及「映射区里到底放的是物理地址还是内容」的完整回答。" />
+<link rel="stylesheet" href="../../assets/theme.css?v=b918ec5c83" />
+  <link rel="stylesheet" href="../../assets/blocks.css?v=1af3923321" />
+  <link rel="stylesheet" href="../../assets/archify-embed.css?v=68fec0b81b" />
+</head>
+<body>
+<div id="progress"></div>
+<div id="tocScrim"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
+    <a class="brand" href="../../index.html"><span class="dot"></span>知识笔记</a>
+    
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="toc" id="toc">
+      <p class="toc-title">目录</p>
+      <a href="../../index.html" class="sub">← 全部笔记</a>
+      <a href="#两个世界谁在哪谁描述谁">两个世界：谁在哪，谁描述谁</a>
+      <a href="#mmstruct总档案里到底记了什么">mm_struct：总档案里到底记了什么</a>
+      <a href="#vma地契上写了什么">VMA：地契上写了什么</a>
+      <a href="#映射区不是一块是上千段">映射区不是一块，是上千段</a>
+      <a href="#页表导航表不在-mmstruct-里">页表：导航表不在 mm_struct 里</a>
+      <a href="#访问一个地址三条路代价差三个数量级">访问一个地址：三条路，代价差三个数量级</a>
+      <a href="#映射区里放的是物理地址还是内容">映射区里放的是物理地址，还是内容？</a>
+      <a href="#线程forkexec-与这份档案">线程、fork、exec 与这份档案</a>
+      <a href="#自己看一行命令验证一遍">自己看：一行命令验证一遍</a>
+      <a href="#一句话总结" class="sub">一句话总结</a>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow">● 操作系统 · 内存</span>
+      <h1>映射区、VMA、mm_struct、页表：地盘、地契、总档案、导航表</h1>
+      <p class="lede">一句话分清四样东西：映射区是用户虚拟地址范围，VMA 是内核给每段地址做的登记，mm_struct 是把登记和页表入口收在一起的总档案，页表负责翻译。附 mm_struct / vm_area_struct 的真实字段、1909 段映射的实测、缺页的三条路径，以及「映射区里到底放的是物理地址还是内容」的完整回答。</p>
+    </div>
+
+
+    <div class="provenance"><span><b>来源</b> Linux 内核源码 · include/linux/mm_types.h（struct mm_struct：mm_mt、mmap_base、pgd、map_count、mmap_lock、start_code/brk/start_stack、rss_stat、pgtables_bytes；struct vm_area_struct：vm_start/vm_end、vm_mm、vm_flags、vm_file、vm_pgoff、vm_ops、anon_vma）https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/plain/include/linux/mm_types.h · proc_pid_maps(5)（/proc/pid/maps 一行一条映射：address perms offset dev inode pathname；权限 r/w/x、s 共享、p 私有 copy-on-write；样例含 [stack] [stack:986] [vdso]）https://man7.org/linux/man-pages/man5/proc_pid_maps.5.html · mmap(2)（MAP_PRIVATE 是 copy-on-write：改动不回报文件、别的进程看不到；mincore(2) 可查哪些页当前驻留在 page cache）https://man7.org/linux/man-pages/man2/mmap.2.html · Linux 内核文档 · x86_64 内存布局（4 级页表用户空间 0.125 PB = 128 TB；5 级 64 PB；PGD/P4D/PUD/PMD/PTE 层级）https://docs.kernel.org/arch/x86/x86_64/mm.html · 本机实测（macOS 26.6.2 arm64，vmmap -summary）：一个 Node 进程有 1909 个映射区域，虚拟共 2.2 GB，驻留 589.7 MB；动态库部分映射 975.1 MB、驻留 234.7 MB</span><span><b>生成</b> 2026-10-22</span><span><b>模型</b> deepseek-v4.1-flash-1017</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">Linux</span> <span class="tag tone-muted">mm_struct</span> <span class="tag tone-muted">VMA</span> <span class="tag tone-muted">页表</span> <span class="tag tone-muted">缺页</span> <span class="tag tone-muted">mmap</span> <span class="tag tone-muted">虚拟内存</span></span></div>
+
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">用户空间                          内核空间
+┌────────────────────┐           ┌──────────────────────────┐
+│ 代码段  r-x        │           │ task_struct              │
+│ 数据段  rw-        │           │   └─ mm ──&gt; mm_struct    │
+│ 堆      rw-        │  ← 描述 ←  │              ├─ VMA 集合 │
+│ mmap 映射区 rw-/r-x│           │              └─ pgd ──┐  │
+│ 栈      rw-        │           │                       │  │
+└────────────────────┘           └───────────────────────┼──┘
+                                                         ↓
+                                                    页表（VA→PA）
+</code></pre></div>
+<p>一句话区分：</p>
+<blockquote>
+<p><strong>映射区是程序能用的虚拟地址范围；<code>mm_struct</code> 是内核里管理整个地址空间的那份档案。</strong></p>
+</blockquote>
+<p>一个是被管理的地盘，一个是管理它的档案。中间还有两样东西经常被卷进来，凑成四件套：</p>
+<table>
+<thead>
+<tr>
+<th>东西</th>
+<th>一句话</th>
+<th>在哪</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>映射区</td>
+<td>一段段用户虚拟地址范围</td>
+<td>用户地址空间里（不是内核对象）</td>
+</tr>
+<tr>
+<td><strong>VMA</strong>（<code>vm_area_struct</code>）</td>
+<td>内核给<strong>每一段</strong>地址做的登记：范围、权限、来源</td>
+<td>内核内存</td>
+</tr>
+<tr>
+<td><strong><code>mm_struct</code></strong></td>
+<td>管整个地址空间的<strong>总档案</strong>：VMA 集合、页表入口、各段范围</td>
+<td>内核内存</td>
+</tr>
+<tr>
+<td><strong>页表</strong></td>
+<td>虚拟地址到物理页帧的<strong>导航表</strong></td>
+<td>内核内存（受硬件格式约束）</td>
+</tr>
+</tbody>
+</table>
+<p>口诀：<mark class="mk-blue">映射区是地盘，VMA 是地契，<code>mm_struct</code> 是总档案，页表是导航表</mark>。再加一样：物理页帧是真正的房间。</p>
+<h2 id="两个世界谁在哪谁描述谁"><span class="num">01</span>两个世界：谁在哪，谁描述谁</h2>
+<figure class="archfig" data-arch style="--arch-max-width:1600px" data-boundaries="nested" data-pano data-parts='{"mmap":{"label":"mmap 映射区","sub":"一堆地址段，不是一个对象","detail":"动态库、文件映射、匿名内存、线程栈都落在这一段范围里。==它没有对应的内核结构体；对应的是一串 VMA。=="},"mm":{"label":"mm_struct","sub":"内核里的总档案","detail":"它记录「地址空间长什么样」：VMA 树、页表入口、各段的起止、统计和锁。它不含任何用户数据，也不在用户地址空间里。"},"vmas":{"label":"VMA 集合","sub":"每段地址一条登记","detail":"一条 VMA 覆盖 `[vm_start, vm_end)`，带权限、来源文件、缺页处理函数。缺页时内核就是靠它判断这个地址合不合法。"},"pt":{"label":"页表","sub":"地址翻译用","detail":"`mm->pgd` 只是入口指针。页表本身是另一套结构，按页帧组织，硬件 MMU 直接遍历它。"},"frames":{"label":"物理页帧","sub":"内容真正待的地方","detail":"虚拟地址大不代表物理内存大：没访问过的页可以根本没有物理页，也可能还在文件或 swap 里。"}}' data-tours='[{"id":"two-worlds","label":"两个世界各有什么","steps":[{"at":["text","data","heap","mmap","stack"],"text":"左边这五段都是==虚拟地址范围==。程序看到的就是这些数字，不是物理地址。"},{"at":["task","mm","vmas"],"text":"右边才是管理对象：task 指向 mm，mm 用一棵树管着所有 VMA。==mm 不在左边的任何一段里==。"},{"at":["mm","pt","frames"],"text":"mm 还持有页表入口，页表把左边的地址翻译到右边的物理页帧。"}]},{"id":"one-segment","label":"一段地址的三种身份","steps":[{"at":["mmap"],"text":"对程序来说，它是一段能用的地址（地盘）。"},{"at":["vmas"],"text":"对内核来说，它是一条 VMA（地契）：范围、权限、来源。"},{"at":["mm","pt","frames"],"text":"对硬件来说，它是一个个虚拟页，要靠页表翻成物理页帧（导航表）。"}]}]' data-frames='[{"id":"user","boundary":0,"kind":"contains","label":"用户空间 · 程序看到的虚拟地址范围","detail":"这五段都是虚拟地址范围。程序读写它们时，地址要经过页表翻译才会落到物理内存。这里没有 mm_struct，也没有 VMA。","members":["text","data","heap","mmap","stack"],"depth":1},{"id":"kernel","boundary":1,"kind":"contains","label":"内核空间 · 每个进程一份档案","detail":"mm_struct 本身是内核内存里的一个结构体。用户态拿不到它的指针，只能通过 mmap / munmap / mprotect / brk 这些系统调用让内核去改。","members":["task","mm","vmas","pt"],"depth":1},{"id":"phys","boundary":2,"kind":"contains","label":"物理内存 · 真正放内容","detail":"页表把虚拟页翻译成这里的物理页帧。内容可能来自文件（page cache），也可能是匿名页，也可能暂时不在内存里。","members":["frames"],"depth":1}]'>
+      <div class="arch-boundary-ui">
+          <div class="arch-boundary-toolbar"><span class="arch-boundary-label">边界</span>
+            <button type="button" data-boundary-mode="nested" aria-pressed="true">多层归属框</button>
+            <button type="button" data-boundary-mode="flat" aria-pressed="false">只留一层分区</button>
+            <button type="button" data-arch-reset>恢复全图</button>
+          </div>
+          <div class="arch-address-box" aria-live="polite"><div data-arch-address>点一个零件，看完整归属路径；点一个区域标题，看这一层的含义。</div>
+            <div data-arch-frame-detail>最外框表示逻辑资源域，不表示所有对象在一块内存里。每层边界的标题说明分组依据。</div></div>
+        </div>
+      <div class="arch-canvas"><svg viewBox="0 0 1600 1000" role="img" aria-labelledby="vma-mm-map-archify-diagram-title vma-mm-map-archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
+        <title id="vma-mm-map-archify-diagram-title">两个世界：用户空间的地盘，内核里的档案</title>
+        <desc id="vma-mm-map-archify-diagram-description">A architecture diagram generated by Archify.</desc>
+        <!-- Definitions -->
+        <defs>
+          <marker id="vma-mm-map-arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-default" />
+          </marker>
+          <marker id="vma-mm-map-arrowhead-emphasis" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-emphasis" />
+          </marker>
+          <marker id="vma-mm-map-arrowhead-security" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-security" />
+          </marker>
+          <marker id="vma-mm-map-arrowhead-dashed" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-dashed" />
+          </marker>
+          <pattern id="vma-mm-map-grid" width="40" height="40" patternUnits="userSpaceOnUse">
+            <path d="M 40 0 L 0 0 0 40" class="c-grid" stroke-width="0.5"/>
+          </pattern>
+        </defs>
+
+        <!-- Background Grid -->
+        <rect width="100%" height="100%" fill="url(#vma-mm-map-grid)" />
+
+        <!-- Boundaries (behind everything) -->
+        <g class="arch-frame" data-frame="user" data-depth="1" data-frame-flat="false" data-frame-kind="contains" role="button" tabindex="0" aria-pressed="false" aria-label="用户空间 · 程序看到的虚拟地址范围"><title>这五段都是虚拟地址范围。程序读写它们时，地址要经过页表翻译才会落到物理内存。这里没有 mm_struct，也没有 VMA。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="0" data-frame-members="text data heap mmap stack" x="60" y="120" width="460" height="710" rx="12" class="c-region" stroke-width="1"/>
+        <text x="68" y="138" class="t-cloud" font-size="9" font-weight="600">用户空间 · 程序看到的虚拟地址范围</text></g>
+
+        <g class="arch-frame" data-frame="kernel" data-depth="1" data-frame-flat="false" data-frame-kind="contains" role="button" tabindex="0" aria-pressed="false" aria-label="内核空间 · 每个进程一份档案"><title>mm_struct 本身是内核内存里的一个结构体。用户态拿不到它的指针，只能通过 mmap / munmap / mprotect / brk 这些系统调用让内核去改。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="1" data-frame-members="task mm vmas pt" x="600" y="110" width="940" height="620" rx="12" class="c-region" stroke-width="1"/>
+        <text x="608" y="128" class="t-cloud" font-size="9" font-weight="600">内核空间 · 每个进程一份档案</text></g>
+
+        <g class="arch-frame" data-frame="phys" data-depth="1" data-frame-flat="false" data-frame-kind="contains" role="button" tabindex="0" aria-pressed="false" aria-label="物理内存 · 真正放内容"><title>页表把虚拟页翻译成这里的物理页帧。内容可能来自文件（page cache），也可能是匿名页，也可能暂时不在内存里。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="2" data-frame-members="frames" x="604" y="764" width="932" height="182" rx="12" class="c-region" stroke-width="1"/>
+        <text x="612" y="782" class="t-cloud" font-size="9" font-weight="600">物理内存 · 真正放内容</text></g>
+
+        <!-- Connection paths (before components for correct z-order) -->
+        <path data-edge-from="task" data-edge-to="mm" data-edge-label="mm 指针" data-edge-key="0" data-edge-id="mm-link" data-composition-points="810,250;810,274;836,274;836,296;820,296;820,320" d="M 810 250 L 810 266 Q 810 274 818 274 L 828 274 Q 836 274 836 282 L 836 288 Q 836 296 828 296 L 828 296 Q 820 296 820 304 L 820 320" class="a-default" stroke-width="1.5" marker-end="url(#vma-mm-map-arrowhead)"/>
+        <path data-edge-from="mm" data-edge-to="vmas" data-edge-label="mm_mt" data-edge-key="1" data-edge-id="mt" data-composition-points="820,470;820,540" d="M 820 470 L 820 540" class="a-default" stroke-width="1.5" marker-end="url(#vma-mm-map-arrowhead)"/>
+        <path data-edge-from="mm" data-edge-to="pt" data-edge-label="pgd" data-edge-key="2" data-edge-id="pgd" data-composition-points="1000,395;1060,395;1060,615;1120,615" d="M 1000 395 L 1052 395 Q 1060 395 1060 403 L 1060 607 Q 1060 615 1068 615 L 1120 615" class="a-default" stroke-width="1.5" marker-end="url(#vma-mm-map-arrowhead)"/>
+        <path data-edge-from="vmas" data-edge-to="mmap" data-edge-label="描述一段" data-edge-key="3" data-edge-id="desc" data-composition-points="640,615;560,615;560,585;480,585" d="M 640 615 L 568 615 Q 560 615 560 607 L 560 593 Q 560 585 552 585 L 480 585" class="a-default" stroke-width="1.5" marker-end="url(#vma-mm-map-arrowhead)"/>
+        <path data-edge-from="pt" data-edge-to="frames" data-edge-label="翻译成页帧" data-edge-key="4" data-edge-id="trans" data-composition-points="1310,690;1310,745;1070,745;1070,800" d="M 1310 690 L 1310 737 Q 1310 745 1302 745 L 1078 745 Q 1070 745 1070 753 L 1070 800" class="a-default" stroke-width="1.5" marker-end="url(#vma-mm-map-arrowhead)"/>
+
+        <!-- Components -->
+        <g id="vma-mm-map-node-text" data-nb="1" data-node-id="text" data-node-label="代码段" tabindex="0" role="button" aria-label="Focus 代码段, r-x · 映射自可执行文件, 用户空间 · 程序看到的虚拟地址范围（地盘）" aria-pressed="false" data-node-kind="frontend" data-node-sublabel="r-x · 映射自可执行文件" data-node-context="用户空间 · 程序看到的虚拟地址范围（地盘）">
+          <title>代码段 · r-x · 映射自可执行文件 · 用户空间 · 程序看到的虚拟地址范围（地盘）</title>
+          <rect x="100" y="160" width="380" height="100" rx="6" class="c-mask"/>
+          <rect x="100" y="160" width="380" height="100" rx="6" class="c-frontend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="frontend" class="semantic-sigil s-frontend" transform="translate(106 166) scale(0.6875)">
+            <rect x="2" y="3" width="12" height="10" rx="2"/>
+            <path d="M2 6.5h12"/>
+            <circle cx="4.1" cy="4.8" r=".7" class="sigil-fill"/>
+            <circle cx="6.3" cy="4.8" r=".7" class="sigil-fill"/>
+          </g>
+          <rect class="nb-badge" x="417.6" y="168" width="50.4" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="442.8" y="179" font-size="8" text-anchor="middle">一条 VMA</text>
+          <text class="nb-title" x="134" y="181" font-size="10.5" font-weight="600">代码段</text>
+          <line class="nb-hr" x1="108" y1="188" x2="472" y2="188"/>
+          <text class="nb-k" x="112" y="213" font-size="9">权限</text><text class="nb-v" x="142.6" y="213" font-size="9">r-x（可读可执行，不可写）</text>
+          <text class="nb-k" x="112" y="227" font-size="9">来源</text><text class="nb-v" x="142.6" y="227" font-size="9">可执行文件或 .so 的代码段</text>
+          <text class="nb-note" x="112" y="252" font-size="8">多个进程可以共享同一份物理代码页</text>
+        </g>
+
+        <g id="vma-mm-map-node-data" data-nb="1" data-node-id="data" data-node-label="数据段" tabindex="0" role="button" aria-label="Focus 数据段, rw- · 全局变量, 用户空间 · 程序看到的虚拟地址范围（地盘）" aria-pressed="false" data-node-kind="frontend" data-node-sublabel="rw- · 全局变量" data-node-context="用户空间 · 程序看到的虚拟地址范围（地盘）">
+          <title>数据段 · rw- · 全局变量 · 用户空间 · 程序看到的虚拟地址范围（地盘）</title>
+          <rect x="100" y="280" width="380" height="100" rx="6" class="c-mask"/>
+          <rect x="100" y="280" width="380" height="100" rx="6" class="c-frontend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="frontend" class="semantic-sigil s-frontend" transform="translate(106 286) scale(0.6875)">
+            <rect x="2" y="3" width="12" height="10" rx="2"/>
+            <path d="M2 6.5h12"/>
+            <circle cx="4.1" cy="4.8" r=".7" class="sigil-fill"/>
+            <circle cx="6.3" cy="4.8" r=".7" class="sigil-fill"/>
+          </g>
+          <rect class="nb-badge" x="417.6" y="288" width="50.4" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="442.8" y="299" font-size="8" text-anchor="middle">一条 VMA</text>
+          <text class="nb-title" x="134" y="301" font-size="10.5" font-weight="600">数据段</text>
+          <line class="nb-hr" x1="108" y1="308" x2="472" y2="308"/>
+          <text class="nb-k" x="112" y="340" font-size="9">权限</text><text class="nb-v" x="142.6" y="340" font-size="9">rw-</text>
+          <text class="nb-k" x="112" y="354" font-size="9">来源</text><text class="nb-v" x="142.6" y="354" font-size="9">.data / .bss</text>
+        </g>
+
+        <g id="vma-mm-map-node-heap" data-nb="1" data-node-id="heap" data-node-label="堆" tabindex="0" role="button" aria-label="Focus 堆, rw- · 向高地址长, 用户空间 · 程序看到的虚拟地址范围（地盘）" aria-pressed="false" data-node-kind="frontend" data-node-sublabel="rw- · 向高地址长" data-node-context="用户空间 · 程序看到的虚拟地址范围（地盘）">
+          <title>堆 · rw- · 向高地址长 · 用户空间 · 程序看到的虚拟地址范围（地盘）</title>
+          <rect x="100" y="400" width="380" height="100" rx="6" class="c-mask"/>
+          <rect x="100" y="400" width="380" height="100" rx="6" class="c-frontend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="frontend" class="semantic-sigil s-frontend" transform="translate(106 406) scale(0.6875)">
+            <rect x="2" y="3" width="12" height="10" rx="2"/>
+            <path d="M2 6.5h12"/>
+            <circle cx="4.1" cy="4.8" r=".7" class="sigil-fill"/>
+            <circle cx="6.3" cy="4.8" r=".7" class="sigil-fill"/>
+          </g>
+          <rect class="nb-badge" x="417.6" y="408" width="50.4" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="442.8" y="419" font-size="8" text-anchor="middle">一条 VMA</text>
+          <text class="nb-title" x="134" y="421" font-size="10.5" font-weight="600">堆</text>
+          <line class="nb-hr" x1="108" y1="428" x2="472" y2="428"/>
+          <text class="nb-k" x="112" y="460" font-size="9">权限</text><text class="nb-v" x="142.6" y="460" font-size="9">rw-</text>
+          <text class="nb-k" x="112" y="474" font-size="9">增长</text><text class="nb-v" x="142.6" y="474" font-size="9">brk 往上推</text>
+        </g>
+
+        <g id="vma-mm-map-node-mmap" data-nb="1" data-node-id="mmap" data-node-label="mmap 映射区" tabindex="0" role="button" aria-label="Focus mmap 映射区, 动态库 / 文件映射 / 匿名内存 / 线程栈, 用户空间 · 程序看到的虚拟地址范围（地盘）" aria-pressed="false" data-node-kind="frontend" data-node-sublabel="动态库 / 文件映射 / 匿名内存 / 线程栈" data-node-context="用户空间 · 程序看到的虚拟地址范围（地盘）">
+          <title>mmap 映射区 · 动态库 / 文件映射 / 匿名内存 / 线程栈 · 用户空间 · 程序看到的虚拟地址范围（地盘）</title>
+          <rect x="100" y="520" width="380" height="130" rx="6" class="c-mask"/>
+          <rect x="100" y="520" width="380" height="130" rx="6" class="c-frontend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="frontend" class="semantic-sigil s-frontend" transform="translate(106 526) scale(0.6875)">
+            <rect x="2" y="3" width="12" height="10" rx="2"/>
+            <path d="M2 6.5h12"/>
+            <circle cx="4.1" cy="4.8" r=".7" class="sigil-fill"/>
+            <circle cx="6.3" cy="4.8" r=".7" class="sigil-fill"/>
+          </g>
+          <rect class="nb-badge" x="398.4" y="528" width="69.6" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="433.2" y="539" font-size="8" text-anchor="middle">不是一个对象</text>
+          <text class="nb-title" x="134" y="541" font-size="10.5" font-weight="600">mmap 映射区</text>
+          <line class="nb-hr" x1="108" y1="548" x2="472" y2="548"/>
+          <text class="nb-k" x="112" y="574" font-size="9">是什么</text><text class="nb-v" x="175.0" y="574" font-size="9">一段段虚拟地址范围，不是一个结构体</text>
+          <text class="nb-k" x="112" y="588" font-size="9">里面有什么</text><text class="nb-v" x="175.0" y="588" font-size="9">libc 的代码段、文件映射、匿名内存、线程栈</text>
+          <text class="nb-k" x="112" y="602" font-size="9">谁登记它</text><text class="nb-v" x="175.0" y="602" font-size="9">内核为每一段建一条 VMA</text>
+          <text class="nb-k" x="112" y="616" font-size="9">谁翻译它</text><text class="nb-v" x="175.0" y="616" font-size="9">页表（PTE 里记物理页帧）</text>
+          <text class="nb-note" x="112" y="642" font-size="8">你看到的「映射区」是几段地址，不是一个容器</text>
+        </g>
+
+        <g id="vma-mm-map-node-stack" data-nb="1" data-node-id="stack" data-node-label="主线程栈" tabindex="0" role="button" aria-label="Focus 主线程栈, rw- · 向低地址长, 用户空间 · 程序看到的虚拟地址范围（地盘）" aria-pressed="false" data-node-kind="frontend" data-node-sublabel="rw- · 向低地址长" data-node-context="用户空间 · 程序看到的虚拟地址范围（地盘）">
+          <title>主线程栈 · rw- · 向低地址长 · 用户空间 · 程序看到的虚拟地址范围（地盘）</title>
+          <rect x="100" y="690" width="380" height="100" rx="6" class="c-mask"/>
+          <rect x="100" y="690" width="380" height="100" rx="6" class="c-frontend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="frontend" class="semantic-sigil s-frontend" transform="translate(106 696) scale(0.6875)">
+            <rect x="2" y="3" width="12" height="10" rx="2"/>
+            <path d="M2 6.5h12"/>
+            <circle cx="4.1" cy="4.8" r=".7" class="sigil-fill"/>
+            <circle cx="6.3" cy="4.8" r=".7" class="sigil-fill"/>
+          </g>
+          <rect class="nb-badge" x="417.6" y="698" width="50.4" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="442.8" y="709" font-size="8" text-anchor="middle">一条 VMA</text>
+          <text class="nb-title" x="134" y="711" font-size="10.5" font-weight="600">主线程栈</text>
+          <line class="nb-hr" x1="108" y1="718" x2="472" y2="718"/>
+          <text class="nb-k" x="112" y="743" font-size="9">权限</text><text class="nb-v" x="142.6" y="743" font-size="9">rw-</text>
+          <text class="nb-k" x="112" y="757" font-size="9">增长</text><text class="nb-v" x="142.6" y="757" font-size="9">向低地址长</text>
+          <text class="nb-k" x="112" y="771" font-size="9">旁边</text><text class="nb-v" x="142.6" y="771" font-size="9">通常有一条 guard VMA 挡溢出</text>
+        </g>
+
+        <g id="vma-mm-map-node-task" data-nb="1" data-node-id="task" data-node-label="task_struct" tabindex="0" role="button" aria-label="Focus task_struct, 进程 / 线程的身份, 内核空间 · 每个进程一份档案" aria-pressed="false" data-node-kind="backend" data-node-sublabel="进程 / 线程的身份" data-node-context="内核空间 · 每个进程一份档案">
+          <title>task_struct · 进程 / 线程的身份 · 内核空间 · 每个进程一份档案</title>
+          <rect x="660" y="150" width="300" height="100" rx="6" class="c-mask"/>
+          <rect x="660" y="150" width="300" height="100" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(666 156) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <rect class="nb-badge" x="916.8" y="158" width="31.2" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="932.4" y="169" font-size="8" text-anchor="middle">身份</text>
+          <text class="nb-title" x="694" y="171" font-size="10.5" font-weight="600">task_struct</text>
+          <line class="nb-hr" x1="668" y1="178" x2="952" y2="178"/>
+          <text class="nb-k" x="672" y="203" font-size="9">是什么</text><text class="nb-v" x="724.2" y="203" font-size="9">进程 / 线程的描述结构</text>
+          <text class="nb-k" x="672" y="217" font-size="9">关键字段</text><text class="nb-v" x="724.2" y="217" font-size="9">mm：指向地址空间档案</text>
+          <text class="nb-note" x="672" y="242" font-size="8">同进程的多个线程共用一个 mm</text>
+        </g>
+
+        <g id="vma-mm-map-node-mm" data-nb="1" data-node-id="mm" data-node-label="mm_struct" tabindex="0" role="button" aria-label="Focus mm_struct, 地址空间的总档案（内核内存里）, 内核空间 · 每个进程一份档案" aria-pressed="false" data-node-kind="backend" data-node-sublabel="地址空间的总档案（内核内存里）" data-node-context="内核空间 · 每个进程一份档案">
+          <title>mm_struct · 地址空间的总档案（内核内存里） · 内核空间 · 每个进程一份档案</title>
+          <rect x="640" y="320" width="360" height="150" rx="6" class="c-mask"/>
+          <rect x="640" y="320" width="360" height="150" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(646 326) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <rect class="nb-badge" x="947.2" y="328" width="40.8" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="967.6" y="339" font-size="8" text-anchor="middle">总档案</text>
+          <text class="nb-title" x="674" y="341" font-size="10.5" font-weight="600">mm_struct</text>
+          <line class="nb-hr" x1="648" y1="348" x2="992" y2="348"/>
+          <text class="nb-k" x="652" y="377" font-size="9">mm_mt</text><text class="nb-v" x="823.0" y="377" font-size="9">VMA 集合（maple tree）</text>
+          <text class="nb-k" x="652" y="391" font-size="9">pgd</text><text class="nb-v" x="823.0" y="391" font-size="9">页表入口指针</text>
+          <text class="nb-k" x="652" y="405" font-size="9">mmap_base</text><text class="nb-v" x="823.0" y="405" font-size="9">mmap 区从哪开始长</text>
+          <text class="nb-k" x="652" y="419" font-size="9">start_code / brk / start_stack</text><text class="nb-v" x="823.0" y="419" font-size="9">各段范围的缓存</text>
+          <text class="nb-k" x="652" y="433" font-size="9">mm_users / map_count</text><text class="nb-v" x="823.0" y="433" font-size="9">引用计数 / VMA 条数</text>
+          <text class="nb-note" x="652" y="462" font-size="8">只存指针和范围，不存内容</text>
+        </g>
+
+        <g id="vma-mm-map-node-vmas" data-nb="1" data-node-id="vmas" data-node-label="VMA 集合" tabindex="0" role="button" aria-label="Focus VMA 集合, maple tree · 每段一条登记, 内核空间 · 每个进程一份档案" aria-pressed="false" data-node-kind="backend" data-node-sublabel="maple tree · 每段一条登记" data-node-context="内核空间 · 每个进程一份档案">
+          <title>VMA 集合 · maple tree · 每段一条登记 · 内核空间 · 每个进程一份档案</title>
+          <rect x="640" y="540" width="360" height="150" rx="6" class="c-mask"/>
+          <rect x="640" y="540" width="360" height="150" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(646 546) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <rect class="nb-badge" x="937.6" y="548" width="50.4" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="962.8" y="559" font-size="8" text-anchor="middle">每条一段</text>
+          <text class="nb-title" x="674" y="561" font-size="10.5" font-weight="600">VMA 集合</text>
+          <line class="nb-hr" x1="648" y1="568" x2="992" y2="568"/>
+          <text class="nb-k" x="652" y="618" font-size="9">记什么</text><text class="nb-v" x="704.2" y="618" font-size="9">起止地址、权限、来源文件、缺页怎么处理</text>
+          <text class="nb-k" x="652" y="632" font-size="9">谁遍历它</text><text class="nb-v" x="704.2" y="632" font-size="9">缺页异常处理、/proc/pid/maps</text>
+          <text class="nb-note" x="652" y="682" font-size="8">VMA 数量不等于 mmap 调用次数</text>
+        </g>
+
+        <g id="vma-mm-map-node-pt" data-nb="1" data-node-id="pt" data-node-label="页表" tabindex="0" role="button" aria-label="Focus 页表, VA → 物理页帧 · 4 级 / 5 级, 内核空间 · 每个进程一份档案" aria-pressed="false" data-node-kind="database" data-node-sublabel="VA → 物理页帧 · 4 级 / 5 级" data-node-context="内核空间 · 每个进程一份档案">
+          <title>页表 · VA → 物理页帧 · 4 级 / 5 级 · 内核空间 · 每个进程一份档案</title>
+          <rect x="1120" y="540" width="380" height="150" rx="6" class="c-mask"/>
+          <rect x="1120" y="540" width="380" height="150" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(1126 546) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <rect class="nb-badge" x="1447.2" y="548" width="40.8" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="1467.6" y="559" font-size="8" text-anchor="middle">导航表</text>
+          <text class="nb-title" x="1154" y="561" font-size="10.5" font-weight="600">页表</text>
+          <line class="nb-hr" x1="1128" y1="568" x2="1492" y2="568"/>
+          <text class="nb-k" x="1132" y="611" font-size="9">入口</text><text class="nb-v" x="1162.6" y="611" font-size="9">mm-&gt;pgd 指向最高一级</text>
+          <text class="nb-k" x="1132" y="625" font-size="9">层级</text><text class="nb-v" x="1162.6" y="625" font-size="9">x86-64 常见 4 级，也可能 5 级</text>
+          <text class="nb-k" x="1132" y="639" font-size="9">每项</text><text class="nb-v" x="1162.6" y="639" font-size="9">物理页帧号 + 权限位</text>
+          <text class="nb-note" x="1132" y="682" font-size="8">页表不是 mm_struct 的成员，只是被它指着</text>
+        </g>
+
+        <g id="vma-mm-map-node-frames" data-nb="1" data-node-id="frames" data-node-label="物理页帧" tabindex="0" role="button" aria-label="Focus 物理页帧, 4 KB 一页，内容真正待的地方, 物理内存 · 真正放内容的地方" aria-pressed="false" data-node-kind="database" data-node-sublabel="4 KB 一页，内容真正待的地方" data-node-context="物理内存 · 真正放内容的地方">
+          <title>物理页帧 · 4 KB 一页，内容真正待的地方 · 物理内存 · 真正放内容的地方</title>
+          <rect x="640" y="800" width="860" height="110" rx="6" class="c-mask"/>
+          <rect x="640" y="800" width="860" height="110" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(646 806) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <rect class="nb-badge" x="1428.0" y="808" width="60.0" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="1458.0" y="819" font-size="8" text-anchor="middle">真正的房间</text>
+          <text class="nb-title" x="674" y="821" font-size="10.5" font-weight="600">物理页帧</text>
+          <line class="nb-hr" x1="648" y1="828" x2="1492" y2="828"/>
+          <text class="nb-k" x="652" y="865" font-size="9">一页</text><text class="nb-v" x="736.6" y="865" font-size="9">通常 4 KB</text>
+          <text class="nb-k" x="652" y="879" font-size="9">现在有没有内容</text><text class="nb-v" x="736.6" y="879" font-size="9">可能来自文件、可能是匿名页、也可能还没分配</text>
+        </g>
+
+        <!-- Connection labels -->
+        <g data-detail="context" data-edge-from="task" data-edge-to="mm" data-edge-label="mm 指针" data-edge-key="0" data-edge-id="mm-link">
+          <rect x="788.2" y="280" width="43.6" height="14" rx="3" class="c-mask"/>
+          <text x="810" y="290" class="t-muted" font-size="8" text-anchor="middle">mm 指针</text>
+        </g>
+        <g data-detail="context" data-edge-from="mm" data-edge-to="vmas" data-edge-label="mm_mt" data-edge-key="1" data-edge-id="mt">
+          <rect x="803" y="495" width="34" height="14" rx="3" class="c-mask"/>
+          <text x="820" y="505" class="t-muted" font-size="8" text-anchor="middle">mm_mt</text>
+        </g>
+        <g data-detail="context" data-edge-from="mm" data-edge-to="pt" data-edge-label="pgd" data-edge-key="2" data-edge-id="pgd">
+          <rect x="1045" y="410" width="30" height="14" rx="3" class="c-mask"/>
+          <text x="1060" y="420" class="t-muted" font-size="8" text-anchor="middle">pgd</text>
+        </g>
+        <g data-detail="context" data-edge-from="vmas" data-edge-to="mmap" data-edge-label="描述一段" data-edge-key="3" data-edge-id="desc">
+          <rect x="535.8" y="605" width="48.4" height="14" rx="3" class="c-mask"/>
+          <text x="560" y="615" class="t-muted" font-size="8" text-anchor="middle">描述一段</text>
+        </g>
+        <g data-detail="context" data-edge-from="pt" data-edge-to="frames" data-edge-label="翻译成页帧" data-edge-key="4" data-edge-id="trans">
+          <rect x="1281" y="720" width="58" height="14" rx="3" class="c-mask"/>
+          <text x="1310" y="730" class="t-muted" font-size="8" text-anchor="middle">翻译成页帧</text>
+        </g>
+
+        <!-- Legend -->
+        <g data-legend data-legend-bridge>
+          <text x="40" y="964" class="t-primary" font-size="12" font-weight="650">Legend</text>
+          <g data-legend-semantic-kind="frontend" data-legend-kind="frontend" data-legend-label="用户空间的地址段" data-legend-x="40" data-legend-baseline="984" data-legend-width="123">
+            <rect x="40" y="975" width="16" height="10" rx="2.5" class="c-frontend" stroke-width="1"/>
+            <text x="62" y="984" class="t-muted" font-size="10" font-weight="500">用户空间的地址段</text>
+          </g>
+          <g data-legend-semantic-kind="backend" data-legend-kind="backend" data-legend-label="内核里的管理对象" data-legend-x="185" data-legend-baseline="984" data-legend-width="123">
+            <rect x="185" y="975" width="16" height="10" rx="2.5" class="c-backend" stroke-width="1"/>
+            <text x="207" y="984" class="t-muted" font-size="10" font-weight="500">内核里的管理对象</text>
+          </g>
+          <g data-legend-semantic-kind="database" data-legend-kind="database" data-legend-label="页表与物理页" data-legend-x="330" data-legend-baseline="984" data-legend-width="103">
+            <rect x="330" y="975" width="16" height="10" rx="2.5" class="c-database" stroke-width="1"/>
+            <text x="352" y="984" class="t-muted" font-size="10" font-weight="500">页表与物理页</text>
+          </g>
+        </g>
+      </svg></div>
+      <figcaption>左边是程序看到的地址段，右边是内核里的档案。VMA 每一条描述左边的一段；页表负责把地址翻译到物理页。注意 mm_struct 不在左边的任何一个段里。</figcaption>
+      <div class="pano-ui"></div>
+      <p class="arch-hint"><span class="idle">点头上的任意一个框看它的关系，点区域标题看分组含义，点零件看完整归属路径</span><span class="focused">再点一次空白处取消</span></p>
+    </figure><p>三个最常见的混淆，正好对应这张图上的三条线：</p>
+<ul>
+<li>把 <code>mm_struct</code> 当成「映射区」：它不在用户地址空间里，它是内核里的档案。</li>
+<li>把 VMA 当成 <code>mm_struct</code>：VMA 是<strong>一条</strong>登记，<code>mm_struct</code> 是<strong>整本</strong>档案。</li>
+<li>把映射区当成物理内存：映射区只是地址范围，内容是页表指过去的。</li>
+</ul>
+<h2 id="mmstruct总档案里到底记了什么"><span class="num">02</span><code>mm_struct</code>：总档案里到底记了什么</h2>
+<p>下面是从 Linux 内核源码 <code>include/linux/mm_types.h</code> 里摘的真实字段（省略了与这篇无关的）：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-c">struct mm_struct {
+    struct maple_tree mm_mt;          /* VMA 集合：所有 vm_area_struct */
+    unsigned long mmap_base;          /* mmap 区从哪开始 */
+    unsigned long task_size;          /* 这个地址空间有多大 */
+    pgd_t *pgd;                       /* 页表最高一级的入口 */
+
+    atomic_t mm_users;                /* 有多少个线程在用这个地址空间 */
+    int map_count;                    /* 一共有多少条 VMA */
+    struct rw_semaphore mmap_lock;    /* 改 VMA 时要拿的读写锁 */
+
+    unsigned long start_code, end_code, start_data, end_data;
+    unsigned long start_brk, brk, start_stack;
+    unsigned long arg_start, arg_end, env_start, env_end;
+
+    struct percpu_counter rss_stat[NR_MM_COUNTERS];
+    unsigned long total_vm;           /* 一共映射了多少页 */
+    unsigned long pgtables_bytes;     /* 页表本身占了多少字节 */
+};
+</code></pre></div>
+<p>从这些字段能读出三件事：</p>
+<ul>
+<li><strong>它管的是「范围」，不是「内容」。</strong> 代码段的起止、堆顶在哪、栈从哪开始、映射区从哪长 —— 全是地址和边界。</li>
+<li><strong>它只是「持有」页表入口。</strong> <code>pgd</code> 是个指针，页表本体是另一套结构，按页帧组织。</li>
+<li><strong>它有锁和计数。</strong> 改地址空间（<code>mmap</code> / <code>munmap</code>）要拿 <code>mmap_lock</code>；引用计数 <code>mm_users</code> 决定它什么时候能被释放。</li>
+</ul>
+<p>还有一条最容易被忽略：<mark class="mk-blue"><code>mm_struct</code> 里的 <code>start_code</code> 这些范围，和 VMA 里记的范围有重叠，但用途不同</mark>。前者是为了快速回答「代码段大概在哪」，后者才是真正决定某次访问合不合法的登记。两者不一致时，以 VMA 为准。</p>
+<h2 id="vma地契上写了什么"><span class="num">03</span>VMA：地契上写了什么</h2>
+<p>一条 VMA 的形状（同样摘自内核源码，删掉了 RCU、userfaultfd 之类）：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-c">struct vm_area_struct {
+    unsigned long vm_start;   /* 覆盖 [vm_start, vm_end) */
+    unsigned long vm_end;
+    struct mm_struct *vm_mm;  /* 属于哪个地址空间 */
+    vm_flags_t vm_flags;      /* 读 / 写 / 执行 / 共享 / 可增长 ... */
+
+    struct file *vm_file;     /* 文件映射时指向文件；匿名为 NULL */
+    unsigned long vm_pgoff;   /* 在文件里的偏移（按页计） */
+    const struct vm_operations_struct *vm_ops;  /* 缺页时调哪个处理函数 */
+    struct anon_vma *anon_vma;                  /* 匿名页反向映射 */
+};
+</code></pre></div>
+<p>一条 VMA 回答四个问题：</p>
+<ol>
+<li>这段地址从哪到哪（<code>vm_start</code> / <code>vm_end</code>）；</li>
+<li>允许怎么访问（<code>vm_flags</code>：可读、可写、可执行、私有还是共享）；</li>
+<li>内容从哪来（<code>vm_file</code> + <code>vm_pgoff</code>，或者匿名为空）；</li>
+<li>缺页时怎么办（<code>vm_ops-&gt;fault</code>）。</li>
+</ol>
+<p>这些 VMA 现在放在 <code>mm_mt</code> 这棵 maple tree 里（老内核是红黑树 + 链表，读旧资料时会看到）。你不需要记数据结构名，只要知道：<mark class="mk-blue">按地址找 VMA 是一次树查找</mark>，因为缺页处理每次都要问「这个地址归哪条地契管」。</p>
+<h2 id="映射区不是一块是上千段"><span class="num">04</span>映射区不是一块，是上千段</h2>
+<p>「映射区」这个词容易让人以为是一整块连续区域。实际不是：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">$ cat /proc/&lt;pid&gt;/maps        # Linux：一行一条 VMA
+7f2c7078c000-7f2c70790000 r--p 00000000 fd:01 1234 /usr/lib/libc.so.6
+7f2c70790000-7f2c70920000 r-xp 00001000 fd:01 1234 /usr/lib/libc.so.6
+7f2c70920000-7f2c70960000 r--p 001a0000 fd:01 1234 /usr/lib/libc.so.6
+7fffb2c0d000-7fffb2c2e000 rw-p 00000000 00:00 0   [stack]
+7fffb2d48000-7fffb2d49000 r-xp 00000000 00:00 0   [vdso]
+7f2c6ff8c000-7f2c7078c000 rw-p 00000000 00:00 0   [stack:986]   ← 线程栈
+</code></pre></div>
+<p>（样例按常见布局整理，地址、inode 是示意的；末行是线程栈，属于同一个 mm。）</p>
+<p>每一行的第一列就是一段虚拟地址范围，权限列里的 <code>p</code> 表示私有（copy-on-write）、<code>s</code> 表示共享。同一个 libc 会拆成好几条（代码一条、只读数据一条、可写数据一条），因为它们的权限不同 —— <mark class="mk-blue">一条 VMA 里的所有页权限必须一样</mark>。</p>
+<p>本机用另一种操作系统的工具量了一遍，结论一样（macOS 的 <code>vmmap</code>，对应 Linux 的 maps）：</p>
+<table>
+<thead>
+<tr>
+<th>量</th>
+<th>值</th>
+<th>怎么量</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>一个 Node 进程的映射段数</td>
+<td><strong>1909 段</strong></td>
+<td><code>vmmap -summary &lt;pid&gt;</code> 的最后一行 REGION 计数</td>
+</tr>
+<tr>
+<td>这些段加起来多大（虚拟）</td>
+<td><strong>2.2 GB</strong></td>
+<td>同上 TOTAL 行</td>
+</tr>
+<tr>
+<td>其中真正驻留物理内存</td>
+<td><strong>589.7 MB</strong></td>
+<td>同上 RESIDENT 列</td>
+</tr>
+<tr>
+<td>动态库部分</td>
+<td>975.1 MB 映射，只有 234.7 MB 驻留</td>
+<td>同上 Libraries 行</td>
+</tr>
+</tbody>
+</table>
+<p>两件事一起成立：<strong>段数很多</strong>（不是一块），<strong>虚拟远大于驻留</strong>（映射不等于占内存）。最后一行尤其典型：库被映射了 975 MB，真正读进内存的只有 235 MB，其余还在文件里 —— 这就是 §07 要讲的按需加载。</p>
+<h2 id="页表导航表不在-mmstruct-里"><span class="num">05</span>页表：导航表不在 <code>mm_struct</code> 里</h2>
+<p><code>mm_struct</code> 只存一个 <code>pgd</code> 指针。真正的页表是一棵树，按页帧组织：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">CR3 ──&gt; PGD ──&gt; P4D ──&gt; PUD ──&gt; PMD ──&gt; PTE ──&gt; 物理页帧
+         (每一级都是 512 项，每项指向下一级的页帧)
+</code></pre></div>
+<p>x86-64 常见两种布局：</p>
+<table>
+<thead>
+<tr>
+<th>布局</th>
+<th>用户空间能寻址</th>
+<th>页表级数</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>4 级</td>
+<td>128 TB</td>
+<td>PGD → PUD → PMD → PTE</td>
+</tr>
+<tr>
+<td>5 级</td>
+<td>64 PB</td>
+<td>多一级 P4D</td>
+</tr>
+</tbody>
+</table>
+<p>PTE 里记的是<strong>物理页帧号 + 权限位</strong>（可写、可执行、用户态能不能访问……）。页表本身由内核维护，但硬件 MMU 会直接遍历它 —— 这也是为什么页表必须按硬件规定的格式放在内存里，而不是随便一个结构体。</p>
+<p>地址翻译的加速靠 TLB：MMU 把最近用过的「虚拟页 → 物理页」翻译结果缓存起来，命中时不用走整棵树。</p>
+<h2 id="访问一个地址三条路代价差三个数量级"><span class="num">06</span>访问一个地址：三条路，代价差三个数量级</h2>
+<div class="pipe"><div class="lane tone-green">
+        <div class="lane-meta">
+          <span class="ln">PATH 01</span>
+          <b>TLB 命中</b>
+          <small>绝大多数访问走这条，不经过内核</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>MMU 查 TLB</b>
+        <small>虚拟页 → 物理页帧</small>
+        <span class="tag tone-green">几个周期</span>
+      </div><div class="pnode">
+        <b>直接读写</b>
+        <small>不经过内核</small>
+        
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">TLB 没命中 → 走页表遍历</span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-blue">
+        <div class="lane-meta">
+          
+          <b>页表命中，TLB 未命中</b>
+          <small>翻译关系已经有了，只是缓存里没有</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>硬件遍历页表</b>
+        <small>PGD → … → PTE</small>
+        <span class="tag tone-blue">十到几十个周期</span>
+      </div><div class="pnode">
+        <b>填进 TLB</b>
+        <small>下次就快了</small>
+        
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">PTE 无效 → 缺页异常进内核</span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-amber">
+        <div class="lane-meta">
+          
+          <b>缺页</b>
+          <small>这条才用到 mm_struct 和 VMA</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>陷入内核</b>
+        <small>带着出错的虚拟地址</small>
+        
+      </div><div class="pnode">
+        <b>找 mm 和 VMA</b>
+        <small>按地址在 mm_mt 里查</small>
+        
+      </div><div class="pnode">
+        <b>判断与准备</b>
+        <small>权限对不对 / 分配匿名页 / 从文件读 page cache</small>
+        
+      </div><div class="pnode">
+        <b>写 PTE</b>
+        <small>填物理页帧和权限</small>
+        
+      </div><div class="pnode">
+        <b>返回用户态</b>
+        <small>重新执行同一条指令</small>
+        
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">没有 VMA，或权限不符 → 失败</span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-red">
+        <div class="lane-meta">
+          
+          <b>失败</b>
+          <small>没有 VMA，或者权限不允许</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>SIGSEGV</b>
+        <small>程序看到 Segmentation fault</small>
+        
+      </div></div>
+      </div></div><p>三条路的差别值得记住：TLB 命中是纯硬件；页表遍历还是硬件，只是慢一点；<mark class="mk-blue">只有缺页才进内核，而进内核之后第一件事就是拿 <code>mm_struct</code> 去找 VMA</mark>。所以「VMA 跟访问合法性有关」这句话，只在缺页这条路上成立。</p>
+<h2 id="映射区里放的是物理地址还是内容"><span class="num">07</span>映射区里放的是物理地址，还是内容？</h2>
+<p>直接回答：<strong>都不是。</strong> 映射区是一段虚拟地址范围：</p>
+<ul>
+<li>物理地址的对应关系记在<strong>页表项</strong>里，不在映射区里；</li>
+<li>真正的内容在<strong>物理页帧</strong>里；</li>
+<li>而物理页帧里的内容，可能是从<strong>文件</strong>读进来的，也可能是匿名分配的新页，也可能此刻根本不在内存（还在文件或 swap 里）。</li>
+</ul>
+<p>一个文件页从「刚映射」到「被写过」，走的是这几步：</p>
+<div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-muted">① 建立映射</span>
+            <span class="name">mmap(file)</span>
+            <span class="spacer"></span>
+            <span class="tag tone-warn">只有地址，没有内容</span>
+          </div>
+          <div class="rec"><div class="">
+            <b>内核做了什么</b><span>找一段空闲地址，建一条 VMA</span></div><div class="">
+            <b>VMA 里记的</b><span>对应哪个文件、偏移、权限</span></div><div class="">
+            <b>物理页</b><span>一页都还没有</span></div></div>
+          
+          <p class="jnote">映射 1 GB 文件，不等于占 1 GB 内存。</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">第一次访问才会真的要内容</span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-amber">② 第一次读</span>
+            <span class="name">缺页异常</span>
+            <span class="spacer"></span>
+            <span class="tag tone-amber">进内核</span>
+          </div>
+          <div class="rec"><div class="">
+            <b>谁发现</b><span>MMU 查页表，PTE 无效</span></div><div class="">
+            <b>内核做什么</b><span>按地址找到 VMA，确认这是文件映射</span></div><div class="">
+            <b>从哪取内容</b><span>文件的 page cache（没有就从磁盘读进来）</span></div></div>
+          
+          <p class="jnote">这一页现在在 page cache 里，内核把 PTE 指向它。</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">多个进程映射同一个文件，会指向同一批页</span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-green">③ 只读访问</span>
+            <span class="name">共享 page cache</span>
+            <span class="spacer"></span>
+            <span class="tag tone-green">一份物理页，多个映射</span>
+          </div>
+          <div class="rec"><div class="">
+            <b>物理页</b><span>page cache 里的那一页</span></div><div class="">
+            <b>映射方式</b><span>只读、可共享</span></div><div class="">
+            <b>谁省了</b><span>十个进程跑同一个 libc，代码页只有一份</span></div></div>
+          
+          <p class="jnote">「共享」发生在物理页这一层，不是虚拟地址。</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">一旦要写，就得先复制一份</span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-violet">④ 写这一页</span>
+            <span class="name">copy-on-write</span>
+            <span class="spacer"></span>
+            <span class="tag tone-violet">MAP_PRIVATE 的写</span>
+          </div>
+          <div class="rec"><div class="">
+            <b>触发条件</b><span>PTE 是只读的、VMA 是私有的</span></div><div class="">
+            <b>内核做什么</b><span>复制一页新的，改 PTE 指向新页，标记可写</span></div><div class="">
+            <b>谁受影响</b><span>只有自己，别的进程仍看原页</span></div></div>
+          
+          <p class="jnote">MAP_SHARED 不复制，直接改 page cache（再由内核回写）。</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">脏页最后由内核回写或回收</span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-muted">⑤ 收尾</span>
+            <span class="name">回写 / 回收 / 换出</span>
+            <span class="spacer"></span>
+            <span class="tag tone-muted">内容不一定一直在内存里</span>
+          </div>
+          <div class="rec"><div class="">
+            <b>文件页</b><span>脏了会回写到文件</span></div><div class="">
+            <b>匿名页</b><span>内存紧张时可能换出到 swap</span></div><div class="">
+            <b>释放</b><span>munmap 只删 VMA，页由回收器处理</span></div></div>
+          
+          <p class="jnote">所以「映射区里有内容」只在被访问过的那几页上成立。</p>
+        </div><p>五种东西各记什么，一张表钉死：</p>
+<table>
+<thead>
+<tr>
+<th>东西</th>
+<th>记录或存放什么</th>
+<th>有没有「内容」</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>映射区</td>
+<td>虚拟地址范围</td>
+<td>没有，它本身就是范围</td>
+</tr>
+<tr>
+<td>VMA</td>
+<td>范围、权限、来源文件、缺页处理函数</td>
+<td>没有</td>
+</tr>
+<tr>
+<td>页表（PTE）</td>
+<td>虚拟页 → 物理页帧 + 权限位</td>
+<td>没有</td>
+</tr>
+<tr>
+<td>物理页帧</td>
+<td>当前驻留的代码和数据</td>
+<td><strong>有</strong></td>
+</tr>
+<tr>
+<td>文件 / page cache / swap</td>
+<td>还没进内存或已被换出的备份</td>
+<td>有（在别处）</td>
+</tr>
+</tbody>
+</table>
+<p>想确认某段地址此刻有没有物理页，Linux 上可以用 <code>mincore(2)</code> 问「哪些页当前在内存里」，或者看 <code>/proc/&lt;pid&gt;/smaps</code> 里的 <code>Rss</code> / <code>Pss</code>。虚拟大小和驻留大小从来不是一回事。</p>
+<h2 id="线程forkexec-与这份档案"><span class="num">08</span>线程、fork、exec 与这份档案</h2>
+<p><code>mm_struct</code> 是按<strong>地址空间</strong>算的，不是按线程算的：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">线程 1 的 task_struct ─┐
+线程 2 的 task_struct ─┼──&gt; 同一个 mm_struct
+线程 3 的 task_struct ─┘
+</code></pre></div>
+<ul>
+<li><strong>线程</strong>：<code>clone(CLONE_VM)</code> 共享同一个 <code>mm</code>，所以能直接看到彼此的全局变量、堆对象、动态库映射。</li>
+<li><strong>线程栈</strong>：每个线程有自己的栈，但那是<strong>同一个 <code>mm</code> 里的一条 VMA</strong>（通常是匿名映射，<code>maps</code> 里可能显示成匿名段或 <code>[stack:tid]</code>）。「每线程一个栈」说的是地址范围不同，不是地址空间不同。</li>
+<li><strong>fork</strong>：复制一份 <code>mm</code>，页表项设成只读、两边共享物理页，谁写谁触发 COW。</li>
+<li><strong>execve</strong>：丢掉旧的 <code>mm</code>，换一套新的地址空间（新的代码段、堆、栈）。</li>
+</ul>
+<p>所以看到 <code>maps</code> 里有好几段栈，不要以为有多个地址空间 —— 它们都在同一个 <code>mm_struct</code> 下面。</p>
+<h2 id="自己看一行命令验证一遍"><span class="num">09</span>自己看：一行命令验证一遍</h2>
+<table>
+<thead>
+<tr>
+<th>想看什么</th>
+<th>Linux</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>有哪些段、权限如何</td>
+<td><code>cat /proc/&lt;pid&gt;/maps</code></td>
+<td>一行一条 VMA</td>
+</tr>
+<tr>
+<td>每段驻留多少</td>
+<td><code>cat /proc/&lt;pid&gt;/smaps</code></td>
+<td><code>Rss</code> 实际驻留、<code>Pss</code> 按共享比例分摊</td>
+</tr>
+<tr>
+<td>总虚拟 / 总驻留</td>
+<td><code>grep Vm /proc/&lt;pid&gt;/status</code></td>
+<td><code>VmSize</code> vs <code>VmRSS</code></td>
+</tr>
+<tr>
+<td>某地址有没有物理页</td>
+<td><code>mincore(2)</code></td>
+<td>返回每页是否驻留</td>
+</tr>
+<tr>
+<td>macOS 对应工具</td>
+<td><code>vmmap -summary &lt;pid&gt;</code></td>
+<td>段数、虚拟、驻留一次看全</td>
+</tr>
+</tbody>
+</table>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-bash"># Linux：看一眼自己 shell 的地址空间
+grep -E 'Vm(Size|RSS|Data|Stk)' /proc/self/status
+cat /proc/self/maps | head -20
+</code></pre></div>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-bash"># macOS：段数 + 虚拟/驻留（本机实测 1909 段 / 2.2G / 589.7M）
+vmmap -summary $$
+</code></pre></div>
+<div class="summary">
+      <h3 id="一句话总结">一句话总结</h3>
+      <p>映射区是一段段用户虚拟地址，VMA 是内核给每一段做的登记，mm_struct 是把这些登记和页表入口收在一起的总档案。
+<mark class="mk-blue">映射区里没有物理地址，也没有内容：物理映射在页表里，内容在物理页里，而物理页可能来自文件、可能是匿名页，也可能还没分配。</mark></p>
+
+    </div><div class="quiz"><details>
+        <summary>映射区和 mm_struct 最本质的区别是什么？</summary>
+        <div class="a"><p>映射区是用户虚拟地址空间里的一段段地址范围，是「被管理的地盘」；
+mm_struct 是内核内存里的一个结构体，是「管理这份地址空间的档案」。
+前者没有对应的内核对象，后者持有 VMA 集合、页表入口和各段范围。</p>
+</div>
+      </details><details>
+        <summary>一条 VMA 至少记录哪四件事？</summary>
+        <div class="a"><p>起止地址（vm_start/vm_end）、权限（vm_flags）、内容来源（vm_file + vm_pgoff，匿名为空）、
+缺页时怎么处理（vm_ops-&gt;fault）。缺页异常就是靠这四样判断地址合不合法、该从哪取内容。</p>
+</div>
+      </details><details>
+        <summary>mmap 一个 1 GB 的文件，会立刻占 1 GB 物理内存吗？</summary>
+        <div class="a"><p>不会。mmap 只建立 VMA，页表里还没有有效 PTE。第一次访问触发缺页，
+内核才把对应页从文件读进 page cache 并填 PTE。没访问过的页可以一直没有物理页。</p>
+</div>
+      </details><details>
+        <summary>映射区里存的是物理地址吗？</summary>
+        <div class="a"><p>不是。映射区是虚拟地址范围；物理地址的对应关系记录在页表项里；
+真正的内容在物理页帧里，可能来自文件、可能是匿名页、也可能已被换出。</p>
+</div>
+      </details></div>
+
+    <footer>
+      <span>映射区、VMA、mm_struct、页表：地盘、地契、总档案、导航表</span>
+      <span>最后更新 2026-10-22 · 单文件可离线打开</span>
+    </footer>
+  </main>
+</div>
+
+<script src="../../assets/app.js?v=757eed9a2d"></script>
+</body>
+</html>
