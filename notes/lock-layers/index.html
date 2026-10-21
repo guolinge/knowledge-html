@@ -1,0 +1,780 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-has-toc="1">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>一把锁是怎么一层层长出来的：硬件、内核、库、应用</title>
+<meta name="description" content="四层清单里 futex 站错了位置：它是内核的系统调用，不在硬件层。这篇按「一层补上什么」讲：硬件只给原子性和可见性，内核只给睡眠与唤醒，库把两者包成 mutex 的语义，应用决定粒度与组合。附 futex 参数与 expected 防丢唤醒、mutex 三态状态字、一次有竞争加锁的完整时序，以及自旋 / 系统调用 / 唤醒三档成本的实测。" />
+<link rel="stylesheet" href="../../assets/theme.css?v=b918ec5c83" />
+  <link rel="stylesheet" href="../../assets/blocks.css?v=1af3923321" />
+  <link rel="stylesheet" href="../../assets/archify-embed.css?v=68fec0b81b" />
+</head>
+<body>
+<div id="progress"></div>
+<div id="tocScrim"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
+    <a class="brand" href="../../index.html"><span class="dot"></span>知识笔记</a>
+    
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="toc" id="toc">
+      <p class="toc-title">目录</p>
+      <a href="../../index.html" class="sub">← 全部笔记</a>
+      <a href="#四层地图谁调用谁谁在什么时候出现">四层地图：谁调用谁，谁在什么时候出现</a>
+      <a href="#硬件层它只卖三样东西">硬件层：它只卖三样东西</a>
+      <a href="#只用硬件能拼出自旋锁但有两个硬伤">只用硬件：能拼出自旋锁，但有两个硬伤</a>
+      <a href="#内核补上的那块睡眠唤醒调度">内核补上的那块：睡眠、唤醒、调度</a>
+      <a href="#futex-的两个动作和那个救命的-expected">futex 的两个动作，和那个救命的 expected</a>
+      <a href="#为什么-wait-必须带-expected" class="sub">为什么 WAIT 必须带 expected</a>
+      <a href="#库层把原子-睡眠包成一个接口">库层：把「原子 + 睡眠」包成一个接口</a>
+      <a href="#应用层四种常见组合">应用层：四种常见组合</a>
+      <a href="#全链路一次有竞争的加锁四个角色怎么配合">全链路：一次有竞争的加锁，四个角色怎么配合</a>
+      <a href="#为什么不能只用一层">为什么不能只用一层</a>
+      <a href="#一句话总结" class="sub">一句话总结</a>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow">● CPU · 并发</span>
+      <h1>一把锁是怎么一层层长出来的：硬件、内核、库、应用</h1>
+      <p class="lede">四层清单里 futex 站错了位置：它是内核的系统调用，不在硬件层。这篇按「一层补上什么」讲：硬件只给原子性和可见性，内核只给睡眠与唤醒，库把两者包成 mutex 的语义，应用决定粒度与组合。附 futex 参数与 expected 防丢唤醒、mutex 三态状态字、一次有竞争加锁的完整时序，以及自旋 / 系统调用 / 唤醒三档成本的实测。</p>
+    </div>
+
+
+    <div class="provenance"><span><b>来源</b> futex(2) man page（futex word 连接用户态同步与内核阻塞；无竞争时原子指令全在用户态、内核不保存锁状态；解锁先改状态再唤醒）https://man7.org/linux/man-pages/man2/futex.2.html · FUTEX_WAIT(2const) man page（读值、比较、入睡原子完成；值不匹配返回 EAGAIN；目的就是防止丢唤醒；返回 0 也可能是伪唤醒）https://man7.org/linux/man-pages/man2/FUTEX_WAIT.2const.html · FUTEX_WAKE(2const) man page（最多唤醒 val 个等待者；返回值是实际唤醒数；不保证唤醒顺序）https://man7.org/linux/man-pages/man2/FUTEX_WAKE.2const.html · LWN · A futex overview and update（无竞争用原子指令、不进系统调用；有竞争才进内核睡眠/唤醒；futex 是 pthread mutex / condvar / semaphore / rwlock / barrier 的基础；0/1 状态设计）https://lwn.net/Articles/360699/ · POSIX pthread_mutex_lock(3p)（已持有时必须阻塞；NORMAL / ERRORCHECK / RECURSIVE 的重入行为；robust 与 EOWNERDEAD；优先级保护；解锁后由调度策略决定谁获得锁）https://man7.org/linux/man-pages/man3/pthread_mutex_lock.3p.html · JEP 374 · Deprecate and Disable Biased Locking（偏向锁的目的就是省掉无竞争加锁时的那条 CAS；JDK 15 起默认关闭）https://openjdk.org/jeps/374 · Intel SDM · LOCK（LOCK 前缀让处理器独占共享内存；P6 之后改为锁缓存，由一致性机制保证原子）https://www.felixcloutier.com/x86/lock · Linux 内核 · arch/arm64/include/asm/barrier.h（smp_mb = dmb ish、smp_rmb = dmb ishld、smp_wmb = dmb ishst，store-release = stlr，load-acquire = ldar）https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/plain/arch/arm64/include/asm/barrier.h · 本机实测（Apple M1 Max，Apple clang 15 -O2）：原子加一 2.2 ns；无竞争 pthread mutex 一对 8.7–9.4 ns；getpid() 系统调用往返 134 ns；一次内核唤醒+调度 1.8–2.1 µs · 本机实测：4 线程、每次临界区约 2 ms、同等工作量 —— pthread_mutex 墙钟 181.8 ms / CPU 181.4 ms（比值 1.00），自旋锁墙钟 186.0 ms / CPU 465.0 ms（比值 2.50）；重复 3 次稳定在 2.50–2.51</span><span><b>生成</b> 2026-10-21</span><span><b>模型</b> deepseek-v4.1-flash-1017</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">锁</span> <span class="tag tone-muted">futex</span> <span class="tag tone-muted">mutex</span> <span class="tag tone-muted">并发</span> <span class="tag tone-muted">内核</span> <span class="tag tone-muted">原子操作</span> <span class="tag tone-muted">自旋锁</span></span></div>
+
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">应用层      任务队列 · 连接池 · 业务锁
+   ↓ 调用
+库层        mutex · 读写锁 · 条件变量 · 信号量
+   ↓ 抢不到时
+内核层      futex · 等待队列 · 睡眠 · 唤醒 · 调度
+   ↓ 依赖
+硬件层      CAS · 原子加减 · 内存屏障 · 缓存一致性
+</code></pre></div>
+<p>这张清单大体是对的，只有一处要挪：<strong>futex 不属于硬件层</strong>。它是 Linux 的一个系统调用，坐在「硬件之上、库之下」—— 硬件提供原子性，内核提供睡眠和唤醒，库把两者包成 <code>mutex</code> 这样的接口。</p>
+<p>一句话概括四层各自卖什么：</p>
+<table>
+<thead>
+<tr>
+<th>层</th>
+<th>提供什么</th>
+<th>不提供什么</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>应用</td>
+<td>保护什么、锁粒度多大、几个原语怎么组合</td>
+<td>不提供原子性，也不提供睡眠</td>
+</tr>
+<tr>
+<td>库</td>
+<td><code>lock()/unlock()</code> 的语义、阻塞、公平性策略</td>
+<td>不自己造原子性，靠下面两层</td>
+</tr>
+<tr>
+<td>内核</td>
+<td>睡眠、唤醒、调度（futex 就是这套能力的入口）</td>
+<td>不管锁状态，也不判断谁能拿到锁</td>
+</tr>
+<tr>
+<td>硬件</td>
+<td>原子性（CAS / 原子加减）、可见性（屏障）</td>
+<td>不认识「锁」，不会排队，不会让线程睡</td>
+</tr>
+</tbody>
+</table>
+<p>这篇按「一层怎么长出下一层」走：先看硬件能给什么，再看只用硬件会缺什么，然后看内核补上什么、库怎么包、应用怎么用，最后把一次加锁的完整配合串起来。</p>
+<h2 id="四层地图谁调用谁谁在什么时候出现"><span class="num">01</span>四层地图：谁调用谁，谁在什么时候出现</h2>
+<figure class="archfig" data-arch style="--arch-max-width:1600px" data-boundaries="nested" data-pano data-parts='{"queue":{"label":"任务队列","sub":"最典型的「锁 + 条件变量」","detail":"生产者加锁放任务、通知；消费者加锁取任务，没活儿就 wait。==wait 会原子地放锁并睡下==，醒来后再把锁拿回来。"},"mutex":{"label":"mutex","sub":"库层的核心抽象","detail":"它只保证三件事：同一时刻一个持有者、进出有 acquire/release 语义、抢不到会阻塞。可重入、超时、优先级继承都是在这一层加的。"},"cond":{"label":"条件变量","sub":"等谓词，不等锁","detail":"它自己不记状态。判断「队列空不空」必须拿着 mutex 做，否则会出现「判断完、睡下之前，条件已经成立」的窗口。"},"sem":{"label":"信号量","sub":"一个会阻塞的计数器","detail":"P 操作（减一）减不动就睡，V 操作（加一）加完唤醒一个。它和 mutex 的区别是允许多个持有者。"},"futex":{"label":"futex","sub":"内核提供的睡眠入口","detail":"它只认一个 32 位字和它的地址。==用户态告诉内核「这个地址上有人在等」，内核负责让他们睡和醒==。"},"atomic":{"label":"原子指令","sub":"互斥的物理基础","detail":"一条 CAS 就能把「读、比较、写」变成不可分割的一步。没有它，用户态根本没法实现互斥。"}}' data-tours='[{"id":"fast","label":"无竞争：一路到底，不进内核","steps":[{"at":["queue","mutex"],"text":"任务队列调 `lock()`。这时没有别人抢，库层只需要一条原子指令。"},{"at":["mutex","atomic","cache"],"text":"CAS 把状态字从 0 改成 1，==全程用户态==；内核完全不知道这把锁存在。"},{"at":["futex","sched"],"text":"这条路径上，内核层两个零件一次都没被调用。"}]},{"id":"slow","label":"有竞争：把地址交给内核","steps":[{"at":["mutex","futex"],"text":"CAS 失败了。库层不再空转，把状态字地址交给内核，说「这个地址上有人在等」。"},{"at":["futex","sched"],"text":"内核把线程挂进等待队列，调度器换别人上核。==这一刻 CPU 才真正被让出来==。"},{"at":["queue"],"text":"等持锁的人解锁并唤醒，线程回到就绪队列，再从 CAS 重试。"}]}]' data-frames='[{"id":"app","boundary":0,"kind":"classification","label":"应用层 · 你要保护的东西","detail":"这一层关心的是「哪段代码要互斥」「锁粒度多大」，不关心锁怎么实现。","members":["queue","pool"],"depth":1},{"id":"lib","boundary":1,"kind":"classification","label":"语言 / 库层 · 你调用的接口","detail":"这一层决定语义：互斥、acquire/release、可重入、超时、公平性。它自己用原子指令和 futex 拼出这些语义。","members":["mutex","cond","sem"],"depth":1},{"id":"kern","boundary":2,"kind":"classification","label":"内核层 · 只有睡和醒才进来","detail":"内核只做两件事：把线程挂起、把它放回就绪队列。它不知道「锁」是什么，只知道「这个地址上有人在等」。","members":["futex","sched"],"depth":1},{"id":"hw","boundary":3,"kind":"classification","label":"硬件层 · 原子性与可见性","detail":"原子指令保证读改写不被打断，缓存一致性保证一行只有一个主人，屏障保证顺序。","members":["atomic","cache","barrier"],"depth":1}]'>
+      <div class="arch-boundary-ui">
+          <div class="arch-boundary-toolbar"><span class="arch-boundary-label">边界</span>
+            <button type="button" data-boundary-mode="nested" aria-pressed="true">多层归属框</button>
+            <button type="button" data-boundary-mode="flat" aria-pressed="false">只留一层分区</button>
+            <button type="button" data-arch-reset>恢复全图</button>
+          </div>
+          <div class="arch-address-box" aria-live="polite"><div data-arch-address>点一个零件，看完整归属路径；点一个区域标题，看这一层的含义。</div>
+            <div data-arch-frame-detail>最外框表示逻辑资源域，不表示所有对象在一块内存里。每层边界的标题说明分组依据。</div></div>
+        </div>
+      <div class="arch-canvas"><svg viewBox="0 0 1600 1100" role="img" aria-labelledby="lock-layers-archify-diagram-title lock-layers-archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
+        <title id="lock-layers-archify-diagram-title">一把锁的四层：应用、库、内核、硬件</title>
+        <desc id="lock-layers-archify-diagram-description">A architecture diagram generated by Archify.</desc>
+        <!-- Definitions -->
+        <defs>
+          <marker id="lock-layers-arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-default" />
+          </marker>
+          <marker id="lock-layers-arrowhead-emphasis" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-emphasis" />
+          </marker>
+          <marker id="lock-layers-arrowhead-security" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-security" />
+          </marker>
+          <marker id="lock-layers-arrowhead-dashed" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-dashed" />
+          </marker>
+          <pattern id="lock-layers-grid" width="40" height="40" patternUnits="userSpaceOnUse">
+            <path d="M 40 0 L 0 0 0 40" class="c-grid" stroke-width="0.5"/>
+          </pattern>
+        </defs>
+
+        <!-- Background Grid -->
+        <rect width="100%" height="100%" fill="url(#lock-layers-grid)" />
+
+        <!-- Boundaries (behind everything) -->
+        <g class="arch-frame" data-frame="app" data-depth="1" data-frame-flat="false" data-frame-kind="classification" role="button" tabindex="0" aria-pressed="false" aria-label="应用层 · 你要保护的东西"><title>这一层关心的是「哪段代码要互斥」「锁粒度多大」，不关心锁怎么实现。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="0" data-frame-members="queue pool" x="100" y="110" width="1240" height="200" rx="12" class="c-region" stroke-width="1"/>
+        <text x="108" y="128" class="t-cloud" font-size="9" font-weight="600">应用层 · 你要保护的东西</text></g>
+
+        <g class="arch-frame" data-frame="lib" data-depth="1" data-frame-flat="false" data-frame-kind="classification" role="button" tabindex="0" aria-pressed="false" aria-label="语言 / 库层 · 你调用的接口"><title>这一层决定语义：互斥、acquire/release、可重入、超时、公平性。它自己用原子指令和 futex 拼出这些语义。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="1" data-frame-members="mutex cond sem" x="100" y="350" width="1240" height="200" rx="12" class="c-region" stroke-width="1"/>
+        <text x="108" y="368" class="t-cloud" font-size="9" font-weight="600">语言 / 库层 · 你调用的接口</text></g>
+
+        <g class="arch-frame" data-frame="kern" data-depth="1" data-frame-flat="false" data-frame-kind="classification" role="button" tabindex="0" aria-pressed="false" aria-label="内核层 · 只有睡和醒才进来"><title>内核只做两件事：把线程挂起、把它放回就绪队列。它不知道「锁」是什么，只知道「这个地址上有人在等」。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="2" data-frame-members="futex sched" x="520" y="590" width="820" height="200" rx="12" class="c-region" stroke-width="1"/>
+        <text x="528" y="608" class="t-cloud" font-size="9" font-weight="600">内核层 · 只有睡和醒才进来</text></g>
+
+        <g class="arch-frame" data-frame="hw" data-depth="1" data-frame-flat="false" data-frame-kind="classification" role="button" tabindex="0" aria-pressed="false" aria-label="硬件层 · 原子性与可见性"><title>原子指令保证读改写不被打断，缓存一致性保证一行只有一个主人，屏障保证顺序。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="3" data-frame-members="atomic cache barrier" x="100" y="840" width="1240" height="200" rx="12" class="c-region" stroke-width="1"/>
+        <text x="108" y="858" class="t-cloud" font-size="9" font-weight="600">硬件层 · 原子性与可见性</text></g>
+
+        <!-- Connection paths (before components for correct z-order) -->
+        <path data-edge-from="queue" data-edge-to="mutex" data-edge-label="lock()" data-edge-key="0" data-edge-id="app-lock" data-composition-points="290,270;290,390" d="M 290 270 L 290 390" class="a-default" stroke-width="1.5" marker-end="url(#lock-layers-arrowhead)"/>
+        <path data-edge-from="queue" data-edge-to="cond" data-edge-label="wait()" data-edge-key="1" data-edge-id="app-cond" data-composition-points="440,210;500,210;500,450;560,450" d="M 440 210 L 492 210 Q 500 210 500 218 L 500 442 Q 500 450 508 450 L 560 450" class="a-default" stroke-width="1.5" marker-end="url(#lock-layers-arrowhead)"/>
+        <path data-edge-from="pool" data-edge-to="sem" data-edge-label="acquire()" data-edge-key="2" data-edge-id="app-sem" data-composition-points="1150,270;1150,390" d="M 1150 270 L 1150 390" class="a-default" stroke-width="1.5" marker-end="url(#lock-layers-arrowhead)"/>
+        <path data-edge-from="mutex" data-edge-to="atomic" data-edge-label="快路径：用户态 CAS" data-edge-key="3" data-edge-id="fast" data-composition-points="290,510;290,880" d="M 290 510 L 290 880" class="a-default" stroke-width="1.5" marker-end="url(#lock-layers-arrowhead)"/>
+        <path data-edge-from="mutex" data-edge-to="futex" data-edge-label="慢路径" data-edge-key="4" data-edge-id="slow" data-composition-points="440,450;500,450;500,690;560,690" d="M 440 450 L 492 450 Q 500 450 500 458 L 500 682 Q 500 690 508 690 L 560 690" class="a-default" stroke-width="1.5" marker-end="url(#lock-layers-arrowhead)"/>
+        <path data-edge-from="cond" data-edge-to="futex" data-edge-label="睡" data-edge-key="5" data-edge-id="cond-wait" data-composition-points="710,510;710,630" d="M 710 510 L 710 630" class="a-default" stroke-width="1.5" marker-end="url(#lock-layers-arrowhead)"/>
+        <path data-edge-from="futex" data-edge-to="sched" data-edge-label="唤醒 → 就绪" data-edge-key="6" data-edge-id="wake" data-composition-points="860,690;1000,690" d="M 860 690 L 1000 690" class="a-default" stroke-width="1.5" marker-end="url(#lock-layers-arrowhead)"/>
+        <path data-edge-from="atomic" data-edge-to="cache" data-edge-label="要独占" data-edge-key="7" data-edge-id="own" data-composition-points="440,940;560,940" d="M 440 940 L 560 940" class="a-default" stroke-width="1.5" marker-end="url(#lock-layers-arrowhead)"/>
+
+        <!-- Components -->
+        <g id="lock-layers-node-queue" data-nb="1" data-node-id="queue" data-node-label="任务队列" tabindex="0" role="button" aria-label="Focus 任务队列, 线程池的活儿都在这进出, 应用层 · 你要保护的东西" aria-pressed="false" data-node-kind="frontend" data-node-sublabel="线程池的活儿都在这进出" data-node-context="应用层 · 你要保护的东西">
+          <title>任务队列 · 线程池的活儿都在这进出 · 应用层 · 你要保护的东西</title>
+          <rect x="140" y="150" width="300" height="120" rx="6" class="c-mask"/>
+          <rect x="140" y="150" width="300" height="120" rx="6" class="c-frontend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="frontend" class="semantic-sigil s-frontend" transform="translate(146 156) scale(0.6875)">
+            <rect x="2" y="3" width="12" height="10" rx="2"/>
+            <path d="M2 6.5h12"/>
+            <circle cx="4.1" cy="4.8" r=".7" class="sigil-fill"/>
+            <circle cx="6.3" cy="4.8" r=".7" class="sigil-fill"/>
+          </g>
+          <rect class="nb-badge" x="396.8" y="158" width="31.2" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="412.4" y="169" font-size="8" text-anchor="middle">应用</text>
+          <text class="nb-title" x="174" y="171" font-size="10.5" font-weight="600">任务队列</text>
+          <line class="nb-hr" x1="148" y1="178" x2="432" y2="178"/>
+          <text class="nb-k" x="152" y="213" font-size="9">临界区</text><text class="nb-v" x="204.2" y="213" font-size="9">队列的头尾指针</text>
+          <text class="nb-k" x="152" y="227" font-size="9">常用组合</text><text class="nb-v" x="204.2" y="227" font-size="9">mutex + 条件变量</text>
+          <text class="nb-note" x="152" y="262" font-size="8">空队列时消费者要等，所以光有 mutex 不够</text>
+        </g>
+
+        <g id="lock-layers-node-pool" data-nb="1" data-node-id="pool" data-node-label="连接池" tabindex="0" role="button" aria-label="Focus 连接池, 空闲连接借出、归还, 应用层 · 你要保护的东西" aria-pressed="false" data-node-kind="frontend" data-node-sublabel="空闲连接借出、归还" data-node-context="应用层 · 你要保护的东西">
+          <title>连接池 · 空闲连接借出、归还 · 应用层 · 你要保护的东西</title>
+          <rect x="1000" y="150" width="300" height="120" rx="6" class="c-mask"/>
+          <rect x="1000" y="150" width="300" height="120" rx="6" class="c-frontend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="frontend" class="semantic-sigil s-frontend" transform="translate(1006 156) scale(0.6875)">
+            <rect x="2" y="3" width="12" height="10" rx="2"/>
+            <path d="M2 6.5h12"/>
+            <circle cx="4.1" cy="4.8" r=".7" class="sigil-fill"/>
+            <circle cx="6.3" cy="4.8" r=".7" class="sigil-fill"/>
+          </g>
+          <rect class="nb-badge" x="1256.8" y="158" width="31.2" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="1272.4" y="169" font-size="8" text-anchor="middle">应用</text>
+          <text class="nb-title" x="1034" y="171" font-size="10.5" font-weight="600">连接池</text>
+          <line class="nb-hr" x1="1008" y1="178" x2="1292" y2="178"/>
+          <text class="nb-k" x="1012" y="213" font-size="9">临界区</text><text class="nb-v" x="1064.2" y="213" font-size="9">空闲连接表</text>
+          <text class="nb-k" x="1012" y="227" font-size="9">常用组合</text><text class="nb-v" x="1064.2" y="227" font-size="9">信号量，或 mutex + 条件变量</text>
+          <text class="nb-note" x="1012" y="262" font-size="8">连接是有限资源，计数天然适合信号量</text>
+        </g>
+
+        <g id="lock-layers-node-mutex" data-nb="1" data-node-id="mutex" data-node-label="mutex / std::mutex" tabindex="0" role="button" aria-label="Focus mutex / std::mutex, 互斥 + acquire/release 语义, 语言 / 库层 · 你调用的接口" aria-pressed="false" data-node-kind="backend" data-node-sublabel="互斥 + acquire/release 语义" data-node-context="语言 / 库层 · 你调用的接口">
+          <title>mutex / std::mutex · 互斥 + acquire/release 语义 · 语言 / 库层 · 你调用的接口</title>
+          <rect x="140" y="390" width="300" height="120" rx="6" class="c-mask"/>
+          <rect x="140" y="390" width="300" height="120" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(146 396) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <rect class="nb-badge" x="406.4" y="398" width="21.6" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="417.2" y="409" font-size="8" text-anchor="middle">库</text>
+          <text class="nb-title" x="174" y="411" font-size="10.5" font-weight="600">mutex / std::mutex</text>
+          <line class="nb-hr" x1="148" y1="418" x2="432" y2="418"/>
+          <text class="nb-k" x="152" y="439" font-size="9">状态字</text><text class="nb-v" x="193.4" y="439" font-size="9">32 位：0 空闲 / 1 占用 / 2 有等待者</text>
+          <text class="nb-k" x="152" y="453" font-size="9">快路径</text><text class="nb-v" x="193.4" y="453" font-size="9">用户态 CAS，不进内核</text>
+          <text class="nb-k" x="152" y="467" font-size="9">慢路径</text><text class="nb-v" x="193.4" y="467" font-size="9">抢不到就 futex_wait</text>
+          <text class="nb-k" x="152" y="481" font-size="9">语义</text><text class="nb-v" x="193.4" y="481" font-size="9">加锁 acquire，解锁 release</text>
+          <text class="nb-note" x="152" y="502" font-size="8">它把「原子性 + 睡眠」包成一个接口</text>
+        </g>
+
+        <g id="lock-layers-node-cond" data-nb="1" data-node-id="cond" data-node-label="条件变量" tabindex="0" role="button" aria-label="Focus 条件变量, 等一个谓词成立, 语言 / 库层 · 你调用的接口" aria-pressed="false" data-node-kind="backend" data-node-sublabel="等一个谓词成立" data-node-context="语言 / 库层 · 你调用的接口">
+          <title>条件变量 · 等一个谓词成立 · 语言 / 库层 · 你调用的接口</title>
+          <rect x="560" y="390" width="300" height="120" rx="6" class="c-mask"/>
+          <rect x="560" y="390" width="300" height="120" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(566 396) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <rect class="nb-badge" x="826.4" y="398" width="21.6" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="837.2" y="409" font-size="8" text-anchor="middle">库</text>
+          <text class="nb-title" x="594" y="411" font-size="10.5" font-weight="600">条件变量</text>
+          <line class="nb-hr" x1="568" y1="418" x2="852" y2="418"/>
+          <text class="nb-k" x="572" y="446" font-size="9">等什么</text><text class="nb-v" x="613.4" y="446" font-size="9">一个谓词（比如「队列非空」）</text>
+          <text class="nb-k" x="572" y="460" font-size="9">内部</text><text class="nb-v" x="613.4" y="460" font-size="9">一个 futex 字 + 一条等待队列</text>
+          <text class="nb-k" x="572" y="474" font-size="9">规矩</text><text class="nb-v" x="613.4" y="474" font-size="9">必须和 mutex 配对使用</text>
+          <text class="nb-note" x="572" y="502" font-size="8">条件变量不存状态，谓词要自己用 mutex 保护</text>
+        </g>
+
+        <g id="lock-layers-node-sem" data-nb="1" data-node-id="sem" data-node-label="信号量" tabindex="0" role="button" aria-label="Focus 信号量, 一个计数，减到 0 就等, 语言 / 库层 · 你调用的接口" aria-pressed="false" data-node-kind="backend" data-node-sublabel="一个计数，减到 0 就等" data-node-context="语言 / 库层 · 你调用的接口">
+          <title>信号量 · 一个计数，减到 0 就等 · 语言 / 库层 · 你调用的接口</title>
+          <rect x="1000" y="390" width="300" height="120" rx="6" class="c-mask"/>
+          <rect x="1000" y="390" width="300" height="120" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(1006 396) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <rect class="nb-badge" x="1266.4" y="398" width="21.6" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="1277.2" y="409" font-size="8" text-anchor="middle">库</text>
+          <text class="nb-title" x="1034" y="411" font-size="10.5" font-weight="600">信号量</text>
+          <line class="nb-hr" x1="1008" y1="418" x2="1292" y2="418"/>
+          <text class="nb-k" x="1012" y="453" font-size="9">状态</text><text class="nb-v" x="1064.2" y="453" font-size="9">一个非负计数</text>
+          <text class="nb-k" x="1012" y="467" font-size="9">计数为 0</text><text class="nb-v" x="1064.2" y="467" font-size="9">和条件变量一样，最终落到 futex</text>
+          <text class="nb-note" x="1012" y="502" font-size="8">计数在用户态减，减不动才进内核</text>
+        </g>
+
+        <g id="lock-layers-node-futex" data-nb="1" data-node-id="futex" data-node-label="futex 等待队列" tabindex="0" role="button" aria-label="Focus futex 等待队列, 按地址挂人，只管睡和醒, 内核层 · 只有睡和醒才进来" aria-pressed="false" data-node-kind="security" data-node-sublabel="按地址挂人，只管睡和醒" data-node-context="内核层 · 只有睡和醒才进来">
+          <title>futex 等待队列 · 按地址挂人，只管睡和醒 · 内核层 · 只有睡和醒才进来</title>
+          <rect x="560" y="630" width="300" height="120" rx="6" class="c-mask"/>
+          <rect x="560" y="630" width="300" height="120" rx="6" class="c-security" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="security" class="semantic-sigil s-security" transform="translate(566 636) scale(0.6875)">
+            <path d="M8 2.2 13 4v3.5c0 3.1-1.8 5.4-5 6.5-3.2-1.1-5-3.4-5-6.5V4Z"/>
+            <path d="m5.8 8 1.5 1.5 3-3"/>
+          </g>
+          <rect class="nb-badge" x="816.8" y="638" width="31.2" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="832.4" y="649" font-size="8" text-anchor="middle">内核</text>
+          <text class="nb-title" x="594" y="651" font-size="10.5" font-weight="600">futex 等待队列</text>
+          <line class="nb-hr" x1="568" y1="658" x2="852" y2="658"/>
+          <text class="nb-k" x="572" y="686" font-size="9">是什么</text><text class="nb-v" x="624.2" y="686" font-size="9">一个系统调用 + 每个地址一条等待队列</text>
+          <text class="nb-k" x="572" y="700" font-size="9">管什么</text><text class="nb-v" x="624.2" y="700" font-size="9">睡（WAIT）和醒（WAKE）</text>
+          <text class="nb-k" x="572" y="714" font-size="9">不管什么</text><text class="nb-v" x="624.2" y="714" font-size="9">锁状态、谁能拿锁、公平性</text>
+          <text class="nb-note" x="572" y="742" font-size="8">内核在无竞争时完全不知道这个地址存在</text>
+        </g>
+
+        <g id="lock-layers-node-sched" data-nb="1" data-node-id="sched" data-node-label="调度器" tabindex="0" role="button" aria-label="Focus 调度器, 挑下一个上核的线程, 内核层 · 只有睡和醒才进来" aria-pressed="false" data-node-kind="security" data-node-sublabel="挑下一个上核的线程" data-node-context="内核层 · 只有睡和醒才进来">
+          <title>调度器 · 挑下一个上核的线程 · 内核层 · 只有睡和醒才进来</title>
+          <rect x="1000" y="630" width="300" height="120" rx="6" class="c-mask"/>
+          <rect x="1000" y="630" width="300" height="120" rx="6" class="c-security" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="security" class="semantic-sigil s-security" transform="translate(1006 636) scale(0.6875)">
+            <path d="M8 2.2 13 4v3.5c0 3.1-1.8 5.4-5 6.5-3.2-1.1-5-3.4-5-6.5V4Z"/>
+            <path d="m5.8 8 1.5 1.5 3-3"/>
+          </g>
+          <rect class="nb-badge" x="1256.8" y="638" width="31.2" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="1272.4" y="649" font-size="8" text-anchor="middle">内核</text>
+          <text class="nb-title" x="1034" y="651" font-size="10.5" font-weight="600">调度器</text>
+          <line class="nb-hr" x1="1008" y1="658" x2="1292" y2="658"/>
+          <text class="nb-k" x="1012" y="693" font-size="9">何时出场</text><text class="nb-v" x="1064.2" y="693" font-size="9">线程真的要睡，或者被叫醒</text>
+          <text class="nb-k" x="1012" y="707" font-size="9">代价</text><text class="nb-v" x="1064.2" y="707" font-size="9">一次唤醒 + 调度，实测 ~1.8 µs</text>
+          <text class="nb-note" x="1012" y="742" font-size="8">这一步比用户态原子操作贵两个数量级</text>
+        </g>
+
+        <g id="lock-layers-node-atomic" data-nb="1" data-node-id="atomic" data-node-label="CAS / 原子指令" tabindex="0" role="button" aria-label="Focus CAS / 原子指令, 读改写三步不可分割, 硬件层 · 原子性与可见性" aria-pressed="false" data-node-kind="database" data-node-sublabel="读改写三步不可分割" data-node-context="硬件层 · 原子性与可见性">
+          <title>CAS / 原子指令 · 读改写三步不可分割 · 硬件层 · 原子性与可见性</title>
+          <rect x="140" y="880" width="300" height="120" rx="6" class="c-mask"/>
+          <rect x="140" y="880" width="300" height="120" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(146 886) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <rect class="nb-badge" x="396.8" y="888" width="31.2" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="412.4" y="899" font-size="8" text-anchor="middle">硬件</text>
+          <text class="nb-title" x="174" y="901" font-size="10.5" font-weight="600">CAS / 原子指令</text>
+          <line class="nb-hr" x1="148" y1="908" x2="432" y2="908"/>
+          <text class="nb-k" x="152" y="936" font-size="9">有什么</text><text class="nb-v" x="204.2" y="936" font-size="9">CAS / xchg / 原子加</text>
+          <text class="nb-k" x="152" y="950" font-size="9">保证什么</text><text class="nb-v" x="204.2" y="950" font-size="9">读改写三步之间插不进别人</text>
+          <text class="nb-k" x="152" y="964" font-size="9">实测</text><text class="nb-v" x="204.2" y="964" font-size="9">一次原子加一 2.2 ns</text>
+          <text class="nb-note" x="152" y="992" font-size="8">这是「互斥」在机器上的唯一来源</text>
+        </g>
+
+        <g id="lock-layers-node-cache" data-nb="1" data-node-id="cache" data-node-label="缓存行与一致性" tabindex="0" role="button" aria-label="Focus 缓存行与一致性, 写之前先拿到整行独占, 硬件层 · 原子性与可见性" aria-pressed="false" data-node-kind="database" data-node-sublabel="写之前先拿到整行独占" data-node-context="硬件层 · 原子性与可见性">
+          <title>缓存行与一致性 · 写之前先拿到整行独占 · 硬件层 · 原子性与可见性</title>
+          <rect x="560" y="880" width="300" height="120" rx="6" class="c-mask"/>
+          <rect x="560" y="880" width="300" height="120" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(566 886) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <rect class="nb-badge" x="816.8" y="888" width="31.2" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="832.4" y="899" font-size="8" text-anchor="middle">硬件</text>
+          <text class="nb-title" x="594" y="901" font-size="10.5" font-weight="600">缓存行与一致性</text>
+          <line class="nb-hr" x1="568" y1="908" x2="852" y2="908"/>
+          <text class="nb-k" x="572" y="936" font-size="9">单位</text><text class="nb-v" x="624.2" y="936" font-size="9">本机 128 字节一行</text>
+          <text class="nb-k" x="572" y="950" font-size="9">写的前提</text><text class="nb-v" x="624.2" y="950" font-size="9">拿到这一行的独占</text>
+          <text class="nb-k" x="572" y="964" font-size="9">换手</text><text class="nb-v" x="624.2" y="964" font-size="9">整行在两个核之间搬</text>
+          <text class="nb-note" x="572" y="992" font-size="8">锁的争用，本质是这一行在核之间来回搬</text>
+        </g>
+
+        <g id="lock-layers-node-barrier" data-nb="1" data-node-id="barrier" data-node-label="内存屏障" tabindex="0" role="button" aria-label="Focus 内存屏障, 挡住重排，等前面的写发布, 硬件层 · 原子性与可见性" aria-pressed="false" data-node-kind="database" data-node-sublabel="挡住重排，等前面的写发布" data-node-context="硬件层 · 原子性与可见性">
+          <title>内存屏障 · 挡住重排，等前面的写发布 · 硬件层 · 原子性与可见性</title>
+          <rect x="1000" y="880" width="300" height="120" rx="6" class="c-mask"/>
+          <rect x="1000" y="880" width="300" height="120" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(1006 886) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <rect class="nb-badge" x="1256.8" y="888" width="31.2" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="1272.4" y="899" font-size="8" text-anchor="middle">硬件</text>
+          <text class="nb-title" x="1034" y="901" font-size="10.5" font-weight="600">内存屏障</text>
+          <line class="nb-hr" x1="1008" y1="908" x2="1292" y2="908"/>
+          <text class="nb-k" x="1012" y="943" font-size="9">保证</text><text class="nb-v" x="1053.4" y="943" font-size="9">前面的写发布之后，后面的读才执行</text>
+          <text class="nb-k" x="1012" y="957" font-size="9">不保证</text><text class="nb-v" x="1053.4" y="957" font-size="9">不刷缓存，只等写缓冲和失效队列排空</text>
+          <text class="nb-note" x="1012" y="992" font-size="8">细节见「锁为什么慢」那篇</text>
+        </g>
+
+        <!-- Connection labels -->
+        <g data-detail="context" data-edge-from="queue" data-edge-to="mutex" data-edge-label="lock()" data-edge-key="0" data-edge-id="app-lock">
+          <rect x="270.6" y="330" width="38.8" height="14" rx="3" class="c-mask"/>
+          <text x="290" y="340" class="t-muted" font-size="8" text-anchor="middle">lock()</text>
+        </g>
+        <g data-detail="context" data-edge-from="queue" data-edge-to="cond" data-edge-label="wait()" data-edge-key="1" data-edge-id="app-cond">
+          <rect x="450.6" y="320" width="38.8" height="14" rx="3" class="c-mask"/>
+          <text x="470" y="330" class="t-muted" font-size="8" text-anchor="middle">wait()</text>
+        </g>
+        <g data-detail="context" data-edge-from="pool" data-edge-to="sem" data-edge-label="acquire()" data-edge-key="2" data-edge-id="app-sem">
+          <rect x="1123.4" y="330" width="53.199999999999996" height="14" rx="3" class="c-mask"/>
+          <text x="1150" y="340" class="t-muted" font-size="8" text-anchor="middle">acquire()</text>
+        </g>
+        <g data-detail="context" data-edge-from="mutex" data-edge-to="atomic" data-edge-label="快路径：用户态 CAS" data-edge-key="3" data-edge-id="fast">
+          <rect x="241.8" y="790" width="96.39999999999999" height="14" rx="3" class="c-mask"/>
+          <text x="290" y="800" class="t-muted" font-size="8" text-anchor="middle">快路径：用户态 CAS</text>
+        </g>
+        <g data-detail="context" data-edge-from="mutex" data-edge-to="futex" data-edge-label="慢路径" data-edge-key="4" data-edge-id="slow">
+          <rect x="460.6" y="600" width="38.8" height="14" rx="3" class="c-mask"/>
+          <text x="480" y="610" class="t-muted" font-size="8" text-anchor="middle">慢路径</text>
+        </g>
+        <g data-detail="context" data-edge-from="cond" data-edge-to="futex" data-edge-label="睡" data-edge-key="5" data-edge-id="cond-wait">
+          <rect x="695" y="570" width="30" height="14" rx="3" class="c-mask"/>
+          <text x="710" y="580" class="t-muted" font-size="8" text-anchor="middle">睡</text>
+        </g>
+        <g data-detail="context" data-edge-from="futex" data-edge-to="sched" data-edge-label="唤醒 → 就绪" data-edge-key="6" data-edge-id="wake">
+          <rect x="898.6" y="680" width="62.8" height="14" rx="3" class="c-mask"/>
+          <text x="930" y="690" class="t-muted" font-size="8" text-anchor="middle">唤醒 → 就绪</text>
+        </g>
+        <g data-detail="context" data-edge-from="atomic" data-edge-to="cache" data-edge-label="要独占" data-edge-key="7" data-edge-id="own">
+          <rect x="480.6" y="930" width="38.8" height="14" rx="3" class="c-mask"/>
+          <text x="500" y="940" class="t-muted" font-size="8" text-anchor="middle">要独占</text>
+        </g>
+
+        <!-- Legend -->
+        <g data-legend data-legend-bridge>
+          <text x="40" y="1064" class="t-primary" font-size="12" font-weight="650">Legend</text>
+          <g data-legend-semantic-kind="frontend" data-legend-kind="frontend" data-legend-label="应用层：用锁的人" data-legend-x="40" data-legend-baseline="1084" data-legend-width="123">
+            <rect x="40" y="1075" width="16" height="10" rx="2.5" class="c-frontend" stroke-width="1"/>
+            <text x="62" y="1084" class="t-muted" font-size="10" font-weight="500">应用层：用锁的人</text>
+          </g>
+          <g data-legend-semantic-kind="backend" data-legend-kind="backend" data-legend-label="库层：定语义的人" data-legend-x="185" data-legend-baseline="1084" data-legend-width="123">
+            <rect x="185" y="1075" width="16" height="10" rx="2.5" class="c-backend" stroke-width="1"/>
+            <text x="207" y="1084" class="t-muted" font-size="10" font-weight="500">库层：定语义的人</text>
+          </g>
+          <g data-legend-semantic-kind="database" data-legend-kind="database" data-legend-label="硬件层：提供原子性" data-legend-x="330" data-legend-baseline="1084" data-legend-width="133">
+            <rect x="330" y="1075" width="16" height="10" rx="2.5" class="c-database" stroke-width="1"/>
+            <text x="352" y="1084" class="t-muted" font-size="10" font-weight="500">硬件层：提供原子性</text>
+          </g>
+          <g data-legend-semantic-kind="security" data-legend-kind="security" data-legend-label="内核层：让你睡的人" data-legend-x="485" data-legend-baseline="1084" data-legend-width="133">
+            <rect x="485" y="1075" width="16" height="10" rx="2.5" class="c-security" stroke-width="1"/>
+            <text x="507" y="1084" class="t-muted" font-size="10" font-weight="500">内核层：让你睡的人</text>
+          </g>
+        </g>
+      </svg></div>
+      <figcaption>从上往下读：应用调库，库在抢不到时才把地址交给内核，内核让线程睡；快路径那条线从库直接下到硬件，跳过内核。</figcaption>
+      <div class="pano-ui"></div>
+      <p class="arch-hint"><span class="idle">点头上的任意一个框看它的关系，点区域标题看分组含义，点零件看完整归属路径</span><span class="focused">再点一次空白处取消</span></p>
+    </figure><p>四条边里最值得记住的是 <code>mutex → atomic</code> 那条：<mark class="mk-blue">它绕过了整个内核层</mark>。无竞争时锁的成本几乎只有硬件那 2 纳秒级的原子操作加一点库的开销，这也是「锁其实很快」这个说法的来源。</p>
+<h2 id="硬件层它只卖三样东西"><span class="num">02</span>硬件层：它只卖三样东西</h2>
+<p>硬件不认识「锁」。它能提供的只有三样，而这三样刚好够拼出互斥：</p>
+<ol>
+<li><strong>原子读改写</strong>：CAS、xchg、原子加减。保证「读、改、写」三步之间别的核插不进来。实测一次原子加一 <strong>2.2 ns</strong>。</li>
+<li><strong>缓存行与一致性</strong>：写之前要先拿到这一行的独占，别的核的副本作废。一行只有一个主人，这是「同一时刻只有一个线程改」的物理基础。</li>
+<li><strong>内存屏障</strong>：保证前面的写真的发布出去，后面的读不会提前。</li>
+</ol>
+<p>第三样最容易误解，展开在 <a href="../lock-memory-barriers/">锁为什么慢：写缓冲、失效队列和内存屏障</a> 里。这里只留一句：屏障不是刷缓存，是等写缓冲和失效队列排空。</p>
+<p>硬件<strong>不提供</strong>的东西同样重要：</p>
+<ul>
+<li>它不会排队。两个线程同时 CAS，谁赢是硬件仲裁的结果，没有先来后到。</li>
+<li>它不会让线程睡。抢不到只能继续占着 CPU 自旋。</li>
+<li>它不知道「锁」这个概念。锁是软件在这一层之上造出来的约定。</li>
+</ul>
+<h2 id="只用硬件能拼出自旋锁但有两个硬伤"><span class="num">03</span>只用硬件：能拼出自旋锁，但有两个硬伤</h2>
+<p>先证明硬件确实够用。下面这把锁只用了 C11 原子操作，没有任何系统调用：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-c">#include &lt;stdatomic.h&gt;
+
+typedef struct { _Atomic int word; } spinlock_t;   // 0 空闲，1 占用
+
+static void spin_lock(spinlock_t *l) {
+    // exchange 返回旧值：旧值是 0 说明我抢到了
+    while (atomic_exchange_explicit(&amp;l-&gt;word, 1, memory_order_acquire)) {
+        // 抢不到：原地打转，等对方放锁
+        while (atomic_load_explicit(&amp;l-&gt;word, memory_order_relaxed)) {
+            // 这里可以插一条 pause / yield 指令，减少总线压力
+        }
+    }
+}
+
+static void spin_unlock(spinlock_t *l) {
+    atomic_store_explicit(&amp;l-&gt;word, 0, memory_order_release);
+}
+</code></pre></div>
+<p>它能工作，但有两个硬伤：</p>
+<ul>
+<li><strong>抢不到就烧 CPU。</strong> 线程没有「让出」的能力，只能一直问「好了吗」。</li>
+<li><strong>没有排队。</strong> 谁手快谁赢，饥饿是可能的；优先级低的线程拿着锁时，高优先级线程也只能干等（优先级反转）。</li>
+</ul>
+<p>第一个硬伤可以量。4 个线程、每次临界区约 2 ms、同样的总工作量：</p>
+<table>
+<thead>
+<tr>
+<th>实现</th>
+<th>墙钟时间</th>
+<th>CPU 时间</th>
+<th>CPU / 墙钟</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>pthread_mutex</code></td>
+<td>181.8 ms</td>
+<td>181.4 ms</td>
+<td><strong>1.00</strong></td>
+</tr>
+<tr>
+<td>自旋锁</td>
+<td>186.0 ms</td>
+<td>465.0 ms</td>
+<td><strong>2.50</strong></td>
+</tr>
+</tbody>
+</table>
+<p>墙钟几乎一样，但自旋版多烧了 1.5 倍的 CPU —— 那些时间全花在「转着圈问」上。<mark class="mk-blue">临界区越长、线程越多，这个比例越难看。</mark></p>
+<p>要让线程在等的时候真的把 CPU 交出去，就需要一种用户态没有的能力：<strong>把一条正在运行的线程从 CPU 上摘下来，之后再放回去</strong>。这就是内核存在的理由。</p>
+<h2 id="内核补上的那块睡眠唤醒调度"><span class="num">04</span>内核补上的那块：睡眠、唤醒、调度</h2>
+<p>内核能做三件用户态做不到的事：</p>
+<table>
+<thead>
+<tr>
+<th>能力</th>
+<th>为什么用户态做不到</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>把线程挂起</td>
+<td>线程的运行状态由内核维护，用户态改不了</td>
+</tr>
+<tr>
+<td>按地址维护等待队列</td>
+<td>队列在内核里，用户态没有权限操作别人的调度状态</td>
+</tr>
+<tr>
+<td>把睡着的线程放回就绪队列</td>
+<td>需要调度器参与，还要处理优先级、CPU 亲和性</td>
+</tr>
+</tbody>
+</table>
+<p>但内核<strong>不应该</strong>接管整把锁。如果每次加锁都进内核，无竞争这个最常见的情况就要付一次系统调用的钱。实测本机一次最便宜的系统调用（<code>getpid()</code>）<strong>约 134 ns</strong>，已经是一把无竞争锁（~9 ns）的 15 倍。</p>
+<p>于是 Linux 的设计是：<strong>内核只提供「睡」和「醒」两个动作，锁的策略全部留在用户态。</strong></p>
+<p>这套机制叫 futex（Fast Userspace Mutex）。它的关键设计只有一句话：</p>
+<blockquote>
+<p><mark class="mk-blue">状态字在用户态，内核只按地址管等待队列。</mark></p>
+</blockquote>
+<p>无竞争时，用户态原子指令直接改状态字，内核连这个地址存在都不知道；只有抢不到、准备睡时，才把地址交给内核。futex 手册的原话是：这个 32 位字「把用户态的同步和内核的阻塞实现连了起来」。</p>
+<h2 id="futex-的两个动作和那个救命的-expected"><span class="num">05</span>futex 的两个动作，和那个救命的 expected</h2>
+<p>系统调用的样子（通常由 C 库包一层，你平时不会直接写）：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-c">long futex(uint32_t *uaddr, int op, uint32_t val,
+           const struct timespec *timeout, uint32_t *uaddr2, uint32_t val3);
+</code></pre></div>
+<ul>
+<li><code>FUTEX_WAIT</code>：<strong>如果这个地址还是我以为的值，就让我睡。</strong></li>
+<li><code>FUTEX_WAKE</code>：<strong>把这个地址上等着的线程，最多叫醒 N 个。</strong></li>
+</ul>
+<p>参数拆开看：</p>
+<table>
+<thead>
+<tr>
+<th>参数</th>
+<th>大白话</th>
+<th>细节</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>uaddr</code></td>
+<td>指向那个 32 位状态字</td>
+<td>必须 4 字节对齐；线程间放全局变量，进程间要放共享内存</td>
+</tr>
+<tr>
+<td><code>op</code></td>
+<td>要干什么</td>
+<td><code>FUTEX_WAIT</code> / <code>FUTEX_WAKE</code>；带 <code>_PRIVATE</code> 表示只在本进程内用，内核可以少做点事</td>
+</tr>
+<tr>
+<td><code>val</code></td>
+<td>WAIT 时是「期望值」，WAKE 时是「最多叫醒几个」</td>
+<td>WAIT：值不等于 <code>val</code> 就立刻返回 <code>EAGAIN</code>，不睡；WAKE：常用 <code>1</code> 或 <code>INT_MAX</code></td>
+</tr>
+<tr>
+<td><code>timeout</code></td>
+<td>最多睡多久</td>
+<td>相对时间（毫秒级精度）；传 <code>NULL</code> 表示一直睡</td>
+</tr>
+<tr>
+<td><code>uaddr2</code> / <code>val3</code></td>
+<td>给 requeue 这类高级操作用的</td>
+<td>普通的 wait / wake 用不到</td>
+</tr>
+</tbody>
+</table>
+<p>返回值也要看清楚：</p>
+<ul>
+<li><code>FUTEX_WAIT</code> 返回 0，只说明「我被叫醒了」，<strong>不代表条件成立</strong> —— 手册明确说可能是伪唤醒，所以必须回到循环里重新检查。</li>
+<li><code>FUTEX_WAKE</code> 返回实际叫醒了几个；返回 0 说明队列里没人。</li>
+</ul>
+<h3 id="为什么-wait-必须带-expected">为什么 WAIT 必须带 expected</h3>
+<p>这是 futex 最关键的一步。假设没有这个检查：</p>
+<ol>
+<li>线程 B 读锁字，发现是 1（有人占着），决定睡；</li>
+<li>就在 B 真正睡下去之前，线程 A 解锁，把锁字改成 0，然后 <code>FUTEX_WAKE</code>；</li>
+<li>但 B 还没进队列，这次唤醒没找到人，返回 0；</li>
+<li>B 这才睡下去 —— 而锁已经空了，没有人会再来叫它。</li>
+</ol>
+<div class="seqd has-grid" data-seq data-n="3"
+      style="--seq-fill:url(#s-fill-1);--seq-open:url(#s-fill-1-open)">
+      <svg class="seqd-svg" aria-hidden="true">
+        <defs>
+          <marker id="s-fill-1" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+          <marker id="s-fill-1-open" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10" fill="none" stroke="currentColor" stroke-width="1.4"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="seqd-head"><div class="scell"><div class="spart tone-muted" data-id="b">
+          <b>线程 B</b><small>想拿锁</small>
+        </div></div><div class="scell"><div class="spart tone-red has-icon" data-id="k">
+          <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2.2l4.8 1.9v4c0 2.9-2.1 4.8-4.8 5.7-2.7-.9-4.8-2.8-4.8-5.7v-4z"/></svg><b>内核 futex</b><small>按地址的等待队列</small>
+        </div></div><div class="scell"><div class="spart tone-muted" data-id="a">
+          <b>线程 A</b><small>持锁者</small>
+        </div></div></div>
+      <div class="seqd-body"><div class="smsg is-self" data-from="b" data-to="b" data-kind="self" data-i="1" data-note="①"><span class="snote">①</span><span class="slabel">读锁字 = 1</span></div><div class="smsg is-self" data-from="b" data-to="b" data-kind="self" data-i="2" data-note="②"><span class="snote">②</span><span class="slabel">决定睡（还没进内核）</span></div><div class="smsg is-self" data-from="a" data-to="a" data-kind="self" data-i="3" data-note="③"><span class="snote">③</span><span class="slabel">写锁字 = 0</span></div><div class="smsg" data-from="a" data-to="k" data-kind="sync" data-i="4" data-note="④"><span class="snote">④</span><span class="slabel">FUTEX_WAKE(1)</span></div><div class="smsg" data-from="k" data-to="a" data-kind="reply" data-i="5" data-note="⑤"><span class="snote">⑤</span><span class="slabel">队列空，返回 0</span></div><div class="smsg" data-from="b" data-to="k" data-kind="sync" data-i="6" data-note="⑥"><span class="snote">⑥</span><span class="slabel">FUTEX_WAIT(addr, 1)</span></div><div class="smsg" data-from="k" data-to="b" data-kind="reply" data-i="7" data-note="⑦"><span class="snote">⑦</span><span class="slabel">值已是 0，立刻 EAGAIN</span></div><div class="smsg is-self" data-from="b" data-to="b" data-kind="self" data-i="8" data-note="⑧"><span class="snote">⑧</span><span class="slabel">没睡成，回去重试 CAS</span></div></div>
+    </div><p>第 ⑥ 步就是 <code>expected</code> 起作用的地方：内核在把 B 挂进队列之前，会<strong>原子地</strong>做「读值 → 和 1 比较 → 决定睡不睡」。因为 A 已经把值改成 0，比较失败，B 直接拿到 <code>EAGAIN</code> 返回，不会睡死。手册把这个参数的目的写得很直接：<mark class="mk-blue">防止丢唤醒</mark>。</p>
+<h2 id="库层把原子-睡眠包成一个接口"><span class="num">06</span>库层：把「原子 + 睡眠」包成一个接口</h2>
+<p>到了 <code>mutex</code> 这一层，程序员看到的是契约，不是机制。POSIX 对 <code>pthread_mutex_lock</code> 的约定是：</p>
+<ul>
+<li>锁已经被别的线程持有，调用线程<strong>必须阻塞</strong>，直到锁可用；</li>
+<li>返回时，调用线程成为持有者；</li>
+<li>类型决定重入行为：普通锁重复加锁会死锁，<code>ERRORCHECK</code> 返回错误，<code>RECURSIVE</code> 计数加一；</li>
+<li>还有 robust（持有者死掉时返回 <code>EOWNERDEAD</code>）、优先级继承这些变体。</li>
+</ul>
+<p>这些语义 futex 一个都不提供。<mark class="mk-blue">futex 只会睡和醒，是库把它们组织成「锁」。</mark></p>
+<p>一个典型实现只要三样东西：一个 32 位状态字、一条快路径、一条慢路径。状态字常写成三种值：</p>
+<table>
+<thead>
+<tr>
+<th>值</th>
+<th>含义</th>
+<th>谁会看到</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>0</td>
+<td>空闲</td>
+<td>下一个来抢的人</td>
+</tr>
+<tr>
+<td>1</td>
+<td>已占用，没人等</td>
+<td>持锁者自己</td>
+</tr>
+<tr>
+<td>2</td>
+<td>已占用，<strong>有人在等</strong></td>
+<td>解锁的人：看到 2 才知道要 <code>FUTEX_WAKE</code></td>
+</tr>
+</tbody>
+</table>
+<p>第三种值是个优化：如果解锁时看到的是 1（没人等），就完全不用进内核。futex 手册也提到解锁路径「可以进一步优化以避免不必要的唤醒」。</p>
+<p>把三条路径写在一起，就是 <code>mutex</code> 的全部骨架：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-c">// futex_wait / futex_wake 就是 §05 那两个系统调用的包装
+// 状态字：0 空闲，1 占用，2 占用且有等待者
+static void mutex_lock(_Atomic int *w) {
+    int expected = 0;
+    // ① 快路径：一次 CAS 0 → 1
+    if (atomic_compare_exchange_strong_explicit(w, &amp;expected, 1,
+            memory_order_acquire, memory_order_relaxed))
+        return;
+
+    // ② 慢路径：抢不到，标记「有人在等」，然后睡
+    do {
+        if (atomic_exchange_explicit(w, 2, memory_order_acquire) == 0)
+            return;                       // 刚好在这期间被放开了
+        futex_wait(w, 2);                 // 值仍是 2 才睡；不是就立刻回来
+    } while (atomic_exchange_explicit(w, 2, memory_order_acquire) != 0);
+}
+
+static void mutex_unlock(_Atomic int *w) {
+    // ③ 解锁：如果有人在等（值 2），改回 0 并唤醒一个
+    if (atomic_exchange_explicit(w, 0, memory_order_release) == 2)
+        futex_wake(w, 1);
+}
+</code></pre></div>
+<p>三行注释对应三条路径：快路径不进内核，慢路径睡，解锁路径按需唤醒。C++ 的 <code>std::mutex</code>、Java 的 <code>synchronized</code>（HotSpot 的 monitor）、Rust 的 <code>Mutex</code> 在各自的运行时里都是这个形状，差别在状态字怎么编码、自旋多久、是否支持优先级继承。</p>
+<h2 id="应用层四种常见组合"><span class="num">07</span>应用层：四种常见组合</h2>
+<p>库层给了积木，应用层负责选组合：</p>
+<table>
+<thead>
+<tr>
+<th>要保护的东西</th>
+<th>典型组合</th>
+<th>关键点</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>任务队列</td>
+<td><code>mutex</code> + 条件变量</td>
+<td>消费者要等「非空」，光有 mutex 会忙等</td>
+</tr>
+<tr>
+<td>连接池</td>
+<td>信号量，或 <code>mutex</code> + 条件变量</td>
+<td>连接数是计数，减到 0 就等</td>
+</tr>
+<tr>
+<td>读写锁</td>
+<td>一个状态字 + 两条等待队列</td>
+<td>读多写少才有意义；写者可能饿死</td>
+</tr>
+<tr>
+<td>业务锁（按 key）</td>
+<td>分段锁 / 锁表</td>
+<td>锁粒度决定并发度，粒度太粗等于没分</td>
+</tr>
+</tbody>
+</table>
+<p>一个容易忽略的点：<strong>条件变量等的是谓词，不是锁。</strong> 「队列非空」这个判断必须和 <code>wait</code> 在同一个互斥区间里完成，否则又会出现「判断完、睡下之前，条件已经成立」的窗口 —— 这和 §05 那个丢唤醒是同一个坑，只是发生在库层。</p>
+<h2 id="全链路一次有竞争的加锁四个角色怎么配合"><span class="num">08</span>全链路：一次有竞争的加锁，四个角色怎么配合</h2>
+<p>把前面的零件按时间顺序摆开，就是一次完整的「程序 / 库 / 内核 / 硬件」配合：</p>
+<div class="seqd has-grid" data-seq data-n="4"
+      style="--seq-fill:url(#s-fill-2);--seq-open:url(#s-fill-2-open)">
+      <svg class="seqd-svg" aria-hidden="true">
+        <defs>
+          <marker id="s-fill-2" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+          <marker id="s-fill-2-open" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10" fill="none" stroke="currentColor" stroke-width="1.4"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="seqd-head"><div class="scell"><div class="spart tone-muted" data-id="a">
+          <b>线程 A</b><small>先拿到锁</small>
+        </div></div><div class="scell"><div class="spart tone-green has-icon" data-id="lib">
+          <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5L3 8l3 4.5M10 3.5L13 8l-3 4.5"/></svg><b>mutex（库）</b><small>状态字 + futex</small>
+        </div></div><div class="scell"><div class="spart tone-red has-icon" data-id="k">
+          <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2.2l4.8 1.9v4c0 2.9-2.1 4.8-4.8 5.7-2.7-.9-4.8-2.8-4.8-5.7v-4z"/></svg><b>内核</b><small>等待队列 + 调度器</small>
+        </div></div><div class="scell"><div class="spart tone-muted" data-id="b">
+          <b>线程 B</b><small>抢不到的那个</small>
+        </div></div></div>
+      <div class="seqd-body"><div class="smsg" data-from="a" data-to="lib" data-kind="sync" data-i="1" data-note="①"><span class="snote">①</span><span class="slabel">lock()</span></div><div class="smsg" data-from="lib" data-to="a" data-kind="reply" data-i="2" data-note="②"><span class="snote">②</span><span class="slabel">CAS 0→1 成功</span></div><div class="smsg is-self" data-from="a" data-to="a" data-kind="self" data-i="3" data-note="③"><span class="snote">③</span><span class="slabel">临界区</span></div><div class="smsg" data-from="b" data-to="lib" data-kind="sync" data-i="4" data-note="④"><span class="snote">④</span><span class="slabel">lock()</span></div><div class="smsg is-self" data-from="lib" data-to="lib" data-kind="self" data-i="5" data-note="⑤"><span class="snote">⑤</span><span class="slabel">CAS 失败，自旋</span></div><div class="smsg" data-from="lib" data-to="k" data-kind="sync" data-i="6" data-note="⑥"><span class="snote">⑥</span><span class="slabel">FUTEX_WAIT(addr, 2)</span></div><div class="smsg" data-from="k" data-to="b" data-kind="reply" data-i="7" data-note="⑦"><span class="snote">⑦</span><span class="slabel">挂进队列，调度走</span></div><div class="smsg" data-from="a" data-to="lib" data-kind="sync" data-i="8" data-note="⑧"><span class="snote">⑧</span><span class="slabel">unlock()</span></div><div class="smsg" data-from="lib" data-to="k" data-kind="sync" data-i="9" data-note="⑨"><span class="snote">⑨</span><span class="slabel">FUTEX_WAKE(1)</span></div><div class="smsg" data-from="k" data-to="b" data-kind="reply" data-i="10" data-note="⑩"><span class="snote">⑩</span><span class="slabel">放回就绪队列</span></div><div class="smsg" data-from="b" data-to="lib" data-kind="sync" data-i="11" data-note="⑪"><span class="snote">⑪</span><span class="slabel">醒来，重试 CAS</span></div><div class="smsg" data-from="lib" data-to="b" data-kind="reply" data-i="12" data-note="⑫"><span class="snote">⑫</span><span class="slabel">成功，进入临界区</span></div></div>
+    </div><p>逐段看角色分工：</p>
+<ul>
+<li><strong>程序（线程 A / B）</strong>：只调 <code>lock()</code> / <code>unlock()</code>，不知道下面发生了什么。</li>
+<li><strong>库（mutex）</strong>：决定什么时候用原子指令（②）、什么时候自旋（⑤）、什么时候交给内核（⑥）、什么时候唤醒（⑨）。</li>
+<li><strong>内核</strong>：只做两件事 —— 把 B 挂起（⑦）、把 B 放回就绪队列（⑩）。它从头到尾不知道「锁」是什么。</li>
+<li><strong>硬件</strong>：提供 ② 里那条 CAS 的原子性，以及 ② / ⑧ 两条边界上的顺序保证（acquire / release）。</li>
+</ul>
+<p>第 ⑪ 步值得单独说：<mark class="mk-blue">被唤醒不等于拿到锁</mark>。可能是别人先抢到了，也可能是伪唤醒，所以醒来必须回到 <code>while</code> 里重新检查 —— 这也是 §05 里 <code>EAGAIN</code> 和伪唤醒那两个细节的用途。</p>
+<h2 id="为什么不能只用一层"><span class="num">09</span>为什么不能只用一层</h2>
+<table>
+<thead>
+<tr>
+<th>方案</th>
+<th>会缺什么</th>
+<th>依据 / 例子</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>只用 CAS（自旋）</td>
+<td>抢不到就烧 CPU，没有排队</td>
+<td>同样工作量，CPU 时间 1.00× → 2.50×</td>
+</tr>
+<tr>
+<td>每次加锁都进内核</td>
+<td>无竞争也要付系统调用</td>
+<td>一次 <code>getpid()</code> ~134 ns，是无竞争锁（~9 ns）的 15 倍</td>
+</tr>
+<tr>
+<td>只给 futex、不给库</td>
+<td>没有互斥语义、没有 acquire/release、没有可重入 / 超时 / 优先级继承</td>
+<td>这些全是库层的约定，内核不提供</td>
+</tr>
+<tr>
+<td>只给 mutex、不给应用层选择</td>
+<td>锁粒度和组合方式决定成败，接口替代不了设计</td>
+<td>分段锁 / 读写锁 / 条件变量各有适用场景</td>
+</tr>
+</tbody>
+</table>
+<p>这张表也解释了题面那个疑问：<strong>futex 和 mutex 不在同一层，因为它们是两种不同的东西</strong> —— futex 是「让你睡」的机制，mutex 是「保证互斥」的语义。把 futex 归到硬件层会漏掉内核；把 mutex 归到内核层会把语义当成机制。</p>
+<p>最后，分层不是绝对的，几种常见的例外：</p>
+<ul>
+<li><strong>自旋锁</strong>：只碰硬件，一次系统调用都不进。适合临界区只有几条指令的场景。</li>
+<li><strong>读写锁 / 条件变量 / 信号量</strong>：在 Linux 上通常共用 futex，但各自维护不同的状态字和等待队列。</li>
+<li><strong>Java 的 <code>synchronized</code></strong>：历史上分了偏向锁、轻量级锁、重量级锁几级；JDK 15 起偏向锁默认关闭（JEP 374），理由之一是现代 CPU 上那条 CAS 已经很便宜，维护偏向锁不划算。</li>
+<li><strong>Go 的 <code>sync.Mutex</code></strong>：在自旋和排队之间做了折中，竞争久了会切到「饥饿模式」，把锁直接交给等待最久的 goroutine。</li>
+<li><strong>跨机器的「锁」</strong>：没有共享内存，也没有 futex，只能靠租约、超时和一致性协议 —— 那是另一套分层。</li>
+</ul>
+<div class="summary">
+      <h3 id="一句话总结">一句话总结</h3>
+      <p>硬件给原子性，内核给睡眠与唤醒，库把两者包成 mutex 的语义，应用层决定锁的粒度与组合。
+<mark class="mk-blue">无竞争时这条链只走「库 → 硬件」；有竞争时才往下走到内核。</mark></p>
+
+    </div><div class="quiz"><details>
+        <summary>futex 为什么不算硬件层？它到底提供了什么？</summary>
+        <div class="a"><p>硬件只提供原子指令和缓存一致性，不会让线程睡。futex 是 Linux 的系统调用，
+负责「按地址把线程挂起、再唤醒」，属于内核层。
+它不管锁状态，也不决定谁能拿到锁 —— 那些是库层的事。</p>
+</div>
+      </details><details>
+        <summary>FUTEX_WAIT 里的 expected 参数，少了会出什么问题？</summary>
+        <div class="a"><p>会丢唤醒：线程检查到锁被占用、准备睡，但还没真睡下去时，持锁者解锁并发出唤醒，
+这次唤醒找不到人；线程随后睡死，锁却空着。
+expected 让内核在挂起前原子地比较值：值已经变了就返回 EAGAIN，不睡，回去重试。</p>
+</div>
+      </details><details>
+        <summary>为什么被 FUTEX_WAKE 叫醒之后还要再抢一次锁？</summary>
+        <div class="a"><p>WAKE 只是把线程放回就绪队列，不把锁交给它。它可能被别人抢先，
+也可能遇到伪唤醒，所以必须回到 while 循环里重新 CAS，直到成功。</p>
+</div>
+      </details><details>
+        <summary>只用 CAS 写自旋锁，代价具体体现在哪？</summary>
+        <div class="a"><p>抢不到的线程会一直占着 CPU 空转。实测：4 线程、每次临界区约 2ms 时，
+mutex 的 CPU/墙钟 = 1.00，自旋锁 = 2.50 —— 墙钟差不多，但多烧了一倍半的 CPU。</p>
+</div>
+      </details></div>
+
+    <footer>
+      <span>一把锁是怎么一层层长出来的：硬件、内核、库、应用</span>
+      <span>最后更新 2026-10-21 · 单文件可离线打开</span>
+    </footer>
+  </main>
+</div>
+
+<script src="../../assets/app.js?v=757eed9a2d"></script>
+</body>
+</html>
