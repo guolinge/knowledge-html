@@ -320,7 +320,9 @@ function main() {
       title: meta.title || h1 || slug,
       summary: meta.summary || '',
       tags: meta.tags || [],
-      topic: meta.topic || '',
+      // 抽屉里那列灰色小字读的是 topic。挂到树上的笔记按约定只写 tree（归属放在 plan 里），
+      // 所以这里回落到 plan 的标题 —— 否则「理解 Go 协程」那十篇在抽屉里一个标签都没有。
+      topic: meta.topic || plan?.title || '',
       status: meta.status || 'draft',
       generated: meta.generated || now,
       updated: meta.updated || '',
@@ -371,6 +373,7 @@ function main() {
 
 /** 只读 meta，用于 --only 时重建完整索引 */
 function collectAll() {
+  const planByTopic = new Map(readAllPlans().plans.map((p) => [p.topic, p]));
   return fs
     .readdirSync(NOTES, { withFileTypes: true })
     .filter((d) => d.isDirectory())
@@ -386,7 +389,7 @@ function collectAll() {
         title: meta.title || h1 || d.name,
         summary: meta.summary || '',
         tags: meta.tags || [],
-        topic: meta.topic || '',
+        topic: meta.topic || planByTopic.get(meta.tree?.topic)?.title || '',
         status: meta.status || 'draft',
         generated: meta.generated || '',
         updated: meta.updated || '',
