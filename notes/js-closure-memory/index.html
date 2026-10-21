@@ -1,0 +1,1023 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-has-toc="1">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>闭包在内存里是怎么长出来的：栈、堆，和一个活下来的环境</title>
+<meta name="description" content="从 makeCounter 返回后 count 还在讲起 —— V8 在进入作用域时就把被捕获的变量搬进堆上的 Context，函数对象只留一个指针。用 %DebugPrint、堆快照和 19 MB 的保留量实测这条链，并纠正「只保留用到的变量」这个说法。" />
+<link rel="stylesheet" href="../../assets/theme.css?v=b918ec5c83" />
+  <link rel="stylesheet" href="../../assets/blocks.css?v=1af3923321" />
+  <link rel="stylesheet" href="../../assets/archify-embed.css?v=68fec0b81b" />
+</head>
+<body>
+<div id="progress"></div>
+<div id="tocScrim"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
+    <a class="brand" href="../../index.html"><span class="dot"></span>知识笔记</a>
+    
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="toc" id="toc">
+      <p class="toc-title">目录</p>
+      <a href="../../index.html" class="sub">← 全部笔记</a>
+      <a href="#先摆地址空间左边是栈右边是堆">先摆地址空间：左边是栈，右边是堆</a>
+      <a href="#六个词先钉住再往下看">六个词，先钉住再往下看</a>
+      <a href="#一次普通调用帧上来又下去">一次普通调用：帧上来，又下去</a>
+      <a href="#进入-makecounter-时context-就已经建好了">进入 makeCounter 时，Context 就已经建好了</a>
+      <a href="#返回之后栈没了堆还在">返回之后：栈没了，堆还在</a>
+      <a href="#两个-counter一份代码两份环境">两个 counter：一份代码，两份环境</a>
+      <a href="#什么时候能回收看可达性不看-return">什么时候能回收：看可达性，不看 return</a>
+      <a href="#只保留用到的变量只对了一半">「只保留用到的变量」只对了一半</a>
+      <a href="#三句话收尾">三句话收尾</a>
+      <a href="#一句话总结" class="sub">一句话总结</a>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow">● JavaScript 引擎 · 内存</span>
+      <h1>闭包在内存里是怎么长出来的：栈、堆，和一个活下来的环境</h1>
+      <p class="lede">从 makeCounter 返回后 count 还在讲起 —— V8 在进入作用域时就把被捕获的变量搬进堆上的 Context，函数对象只留一个指针。用 %DebugPrint、堆快照和 19 MB 的保留量实测这条链，并纠正「只保留用到的变量」这个说法。</p>
+    </div>
+
+
+    <div class="provenance"><span><b>来源</b> ECMAScript 2027 · 9.1 Environment Records（[[OuterEnv]]；环境记录纯属规范机制）https://tc39.es/ecma262/multipage/executable-code-and-execution-contexts.html · ECMAScript 2027 · 9.1.2.1 GetIdentifierReference（沿 [[OuterEnv]] 逐层递归）https://tc39.es/ecma262/multipage/executable-code-and-execution-contexts.html · ECMAScript 2027 · 9.1.2.4 NewFunctionEnvironment（Set envRecord.[[OuterEnv]] to func.[[Environment]]）https://tc39.es/ecma262/multipage/executable-code-and-execution-contexts.html · ECMAScript 2027 · 9.4 Execution Contexts（执行上下文栈、running execution context）https://tc39.es/ecma262/multipage/executable-code-and-execution-contexts.html · ECMAScript 2027 · 10.2.3 OrdinaryFunctionCreate 第 13 步 + 表 26 [[Environment]] 定义 https://tc39.es/ecma262/multipage/ordinary-and-exotic-objects-behaviours.html · V8 源码 src/objects/contexts.tq（Context 布局：scope_info / previous / 变量槽，MIN_CONTEXT_SLOTS）https://chromium.googlesource.com/v8/v8/+/refs/heads/main/src/objects/contexts.tq · Vyacheslav Egorov · Grokking V8 closures for fun（进入作用域时建 Context、按作用域共享、eval/with/arguments 强制分配）https://mrale.ph/blog/2012/09/23/grokking-v8-closures-for-fun.html · V8 博客 · Trash talk（两个 semi-space、Scavenger 复制并改写引用、存活两次进老生代、stack/globals 是根）https://v8.dev/blog/trash-talk · V8 博客 · Pointer Compression in V8（4 GB 保留区，32 位偏移）https://v8.dev/blog/pointer-compression · libuv 文档 · Thread pool（默认 4 条线程，fs / dns / crypto 走这里）https://docs.libuv.org/en/v1.x/threadpool.html · 本机实测（Node 24.19.0 / V8 13.6.233.17，macOS arm64，2026-10-21）：--stack-size 984 KB、ulimit -s 8176、heap_size_limit 4496293888、递归 492/984/1968 KB 分别 5165/10413/20909 层 · 本机实测：%DebugPrint 的 shared_info / context（同一闭包两次调用 context 地址不变），两个 counter 的 context 不同而 SFI 相同 · 本机实测：v8.writeHeapSnapshot 解析出的边 —— closure → internal:context → Context 的 context:payload / scope_info / previous · 本机实测：--expose-gc 保留量 3.4 / 3.7 / 19.0 / 3.7 MB；两个闭包共享同一 Context 节点（useSmall 与 useBig 的 context 同址）</span><span><b>生成</b> 2026-10-21</span><span><b>模型</b> deepseek-v4.1-flash-1017</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">JavaScript</span> <span class="tag tone-muted">闭包</span> <span class="tag tone-muted">V8</span> <span class="tag tone-muted">栈</span> <span class="tag tone-muted">堆</span> <span class="tag tone-muted">词法环境</span> <span class="tag tone-muted">GC</span></span></div>
+
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-js">function makeCounter() {
+  let count = 0;
+  return function inc() {
+    count++;
+    return count;
+  };
+}
+
+const counter = makeCounter();   // 这里，makeCounter 已经返回
+counter();                       // 1
+counter();                       // 2
+</code></pre></div>
+<p><code>makeCounter</code> 返回之后，它的栈帧按规矩要弹掉。可 <code>counter()</code> 每调一次，<code>count</code> 就涨一次 —— 那个变量没跟着帧一起消失。</p>
+<p>这篇要说清的就是这件事在内存里怎么发生：<mark class="mk-blue">函数对象活了下来，它身上有一个指针，指向另一个同样活下来的环境对象；变量住在环境对象里，从来不在栈帧里。</mark></p>
+<p>往下按五步走：</p>
+<ol>
+<li>先把用户空间摆开，看清栈和堆各在哪、谁管（§01）</li>
+<li>把六个容易混的词钉死：环境记录、<code>[[OuterEnv]]</code>、<code>[[Environment]]</code>、绑定、执行上下文、Context（§02）</li>
+<li>看一次普通调用，确认帧确实会消失（§03）</li>
+<li>跟着 <code>makeCounter</code> 走完「建立 → 返回 → 再调用」（§04、§05）</li>
+<li>两个 counter 为什么互不影响，以及它什么时候真能被回收（§06、§07）</li>
+</ol>
+<p>文中的实测来自本机 <code>Node 24.19.0</code>（V8 <code>13.6.233.17</code>，macOS arm64）。关键几处给出了能自己跑一遍的命令。</p>
+<h2 id="先摆地址空间左边是栈右边是堆"><span class="num">01</span>先摆地址空间：左边是栈，右边是堆</h2>
+<p>一个跑 JS 的进程，用户空间里同时住着两套性质完全不同的内存：</p>
+<ul>
+<li><strong>栈</strong>：每条线程一根，创建线程时由系统划好。调用函数压一帧，返回弹出来。没有谁给它做回收 —— 弹出就是没了，那块内存立刻可能被下一次调用复用。</li>
+<li><strong>堆</strong>：V8 的托管内存，全进程一份。<code>new</code> 出来的对象、函数对象、字符串，还有这篇的主角「环境对象」，都在这里。它不归调用栈管，归 GC 管，而且 GC 会搬动它们。</li>
+</ul>
+<figure class="archfig" data-arch style="--arch-max-width:1620px" data-boundaries="nested" data-pano data-parts='{"mainstack":{"label":"主线程栈","sub":"每线程一根 · 向低地址长","detail":"正在执行的那些帧全在这。函数返回，帧被弹出，那块内存没有任何人再认领。==变量本身没有被销毁，是承载它的那块内存不再属于这次调用。==","facts":{"归属":"每条线程","份数":"一根","跟着谁走":"随线程","回收":"弹栈，不经 GC"}},"poolstack":{"label":"线程池的 4 根原生栈","sub":"跑 C++，不跑 JS","detail":"libuv 默认开 4 条线程处理文件系统、加密和 DNS 这类阻塞调用。它们有自己的 C 栈，但不执行 JS，所以不会持有 JS 的帧。","facts":{"归属":"每条池线程","份数":"4 根","跟着谁走":"随线程","回收":"线程结束收回"}},"newspace":{"label":"新生代 new space","sub":"分两个半区，GC 一次搬一遍","detail":"新对象先落在这里。一次 minor GC 把活着的对象复制到另一个半区，原来那半整块丢弃。==复制就是清理==：没被复制的自动算垃圾。","facts":{"归属":"全进程","份数":"一块","跟着谁走":"随进程","回收":"复制式（Scavenger）"}},"oldspace":{"label":"老生代 old space","sub":"活过两次 GC 的对象","detail":"闭包的函数对象、它的 Context、内建原型通常都活到了这里。这里的回收是标记 + 压缩，压缩同样会移动对象、改写引用。","facts":{"归属":"全进程","份数":"一块","跟着谁走":"随进程","回收":"标记 + 压缩"}}}' data-tours='[{"id":"ownership","label":"按归属看","steps":[{"at":["mainstack","poolstack"],"text":"左边这两根栈各自属于一条线程。==线程结束，栈就没了，进程里其他人一点感觉都没有。=="},{"at":["newspace","oldspace"],"text":"右边这两块是同一个堆。堆归进程，所有线程共享；GC 在两块之间搬对象。"},{"at":["mainstack","newspace"],"text":"交界处那条箭头：栈上一个槽里放的是==指向堆对象的引用==。栈自己活多久，不影响堆里的对象活多久。"}]},{"id":"lifetime","label":"一个对象的两站","steps":[{"at":["newspace"],"text":"对象刚创建，落在新生代。Context 和函数对象也是这样开始的。"},{"at":["oldspace"],"text":"活过一次 minor GC 被搬走，活过第二次就进老生代。之后每次压缩都可能再挪一次。"}]}]' data-frames='[{"id":"user","boundary":0,"kind":"contains","label":"用户空间 · 一块虚拟地址空间","detail":"这块地址空间由内核映射，进程里的代码都能访问（只读段除外）。内核空间不在本图里。","members":["mainstack","poolstack","newspace","oldspace"],"depth":1},{"id":"stacks","boundary":1,"parent":"user","kind":"contains","label":"线程栈 · 每条线程一根","detail":"栈归线程，不归进程。主线程的栈在地址空间的高处；线程池那几根是 mmap 出来的另一块。","members":["mainstack","poolstack"],"depth":2},{"id":"heap","boundary":2,"parent":"user","kind":"contains","label":"V8 托管堆 · 全进程一份","detail":"堆归进程，由 GC 统一分配、搬运和回收。新生代和老生代不是两个堆，是同一个堆里的两块区域。","members":["newspace","oldspace"],"depth":2}]'>
+      <div class="arch-boundary-ui">
+          <div class="arch-boundary-toolbar"><span class="arch-boundary-label">边界</span>
+            <button type="button" data-boundary-mode="nested" aria-pressed="true">多层归属框</button>
+            <button type="button" data-boundary-mode="flat" aria-pressed="false">只留一层分区</button>
+            <button type="button" data-arch-reset>恢复全图</button>
+          </div>
+          <div class="arch-address-box" aria-live="polite"><div data-arch-address>点一个零件，看完整归属路径；点一个区域标题，看这一层的含义。</div>
+            <div data-arch-frame-detail>最外框表示逻辑资源域，不表示所有对象在一块内存里。每层边界的标题说明分组依据。</div></div>
+        </div>
+      <div class="arch-canvas"><svg viewBox="0 0 1620 780" role="img" aria-labelledby="js-closure-space-archify-diagram-title js-closure-space-archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
+        <title id="js-closure-space-archify-diagram-title">一个 Node 进程的用户空间：左边是线程的栈，右边是进程的堆</title>
+        <desc id="js-closure-space-archify-diagram-description">A architecture diagram generated by Archify.</desc>
+        <!-- Definitions -->
+        <defs>
+          <marker id="js-closure-space-arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-default" />
+          </marker>
+          <marker id="js-closure-space-arrowhead-emphasis" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-emphasis" />
+          </marker>
+          <marker id="js-closure-space-arrowhead-security" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-security" />
+          </marker>
+          <marker id="js-closure-space-arrowhead-dashed" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-dashed" />
+          </marker>
+          <pattern id="js-closure-space-grid" width="40" height="40" patternUnits="userSpaceOnUse">
+            <path d="M 40 0 L 0 0 0 40" class="c-grid" stroke-width="0.5"/>
+          </pattern>
+        </defs>
+
+        <!-- Background Grid -->
+        <rect width="100%" height="100%" fill="url(#js-closure-space-grid)" />
+
+        <!-- Boundaries (behind everything) -->
+        <g class="arch-frame" data-frame="user" data-depth="1" data-frame-flat="false" data-frame-kind="contains" role="button" tabindex="0" aria-pressed="false" aria-label="用户空间 · 一块虚拟地址空间"><title>这块地址空间由内核映射，进程里的代码都能访问（只读段除外）。内核空间不在本图里。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="0" data-frame-members="mainstack poolstack newspace oldspace" x="70" y="120" width="1460" height="505" rx="12" class="c-region" stroke-width="1"/>
+        <text x="78" y="138" class="t-cloud" font-size="9" font-weight="600">用户空间 · 一块虚拟地址空间</text></g>
+
+        <g class="arch-frame" data-frame="stacks" data-depth="2" data-frame-flat="false" data-frame-kind="contains" role="button" tabindex="0" aria-pressed="false" aria-label="线程栈 · 每条线程一根"><title>栈归线程，不归进程。主线程的栈在地址空间的高处；线程池那几根是 mmap 出来的另一块。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="1" data-frame-members="mainstack poolstack" x="100" y="150" width="560" height="430" rx="12" class="c-region" stroke-width="1"/>
+        <text x="108" y="168" class="t-cloud" font-size="9" font-weight="600">线程栈 · 每条线程一根</text></g>
+
+        <g class="arch-frame" data-frame="heap" data-depth="2" data-frame-flat="false" data-frame-kind="contains" role="button" tabindex="0" aria-pressed="false" aria-label="V8 托管堆 · 全进程一份"><title>堆归进程，由 GC 统一分配、搬运和回收。新生代和老生代不是两个堆，是同一个堆里的两块区域。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="2" data-frame-members="newspace oldspace" x="780" y="150" width="720" height="445" rx="12" class="c-region" stroke-width="1"/>
+        <text x="788" y="168" class="t-cloud" font-size="9" font-weight="600">V8 托管堆 · 全进程一份</text></g>
+
+        <!-- Connection paths (before components for correct z-order) -->
+        <path data-edge-from="mainstack" data-edge-to="newspace" data-edge-label="帧里的引用" data-edge-key="0" data-edge-id="ref-heap" data-composition-points="620,275;644,275;644,291;796,291;796,272.5;820,272.5" d="M 620 275 L 636 275 Q 644 275 644 283 L 644 283 Q 644 291 652 291 L 788 291 Q 796 291 796 283 L 796 280.5 Q 796 272.5 804 272.5 L 820 272.5" class="a-default" stroke-width="1.5" marker-end="url(#js-closure-space-arrowhead)"/>
+        <path data-edge-from="newspace" data-edge-to="oldspace" data-edge-label="活过两次就搬过去" data-edge-key="1" data-edge-id="promote" data-composition-points="1140,355;1140,400" d="M 1140 355 L 1140 400" class="a-default" stroke-width="1.5" marker-end="url(#js-closure-space-arrowhead)"/>
+
+        <!-- Components -->
+        <g id="js-closure-space-node-mainstack" data-nb="1" data-node-id="mainstack" data-node-label="主线程栈" tabindex="0" role="button" aria-label="Focus 主线程栈, 正在执行的那些帧住在这里, 进程的用户空间 · 一块虚拟地址空间（内核空间不在图里） › 线程栈 · 每条线程一根，向低地址长" aria-pressed="false" data-node-kind="backend" data-node-sublabel="正在执行的那些帧住在这里" data-node-context="进程的用户空间 · 一块虚拟地址空间（内核空间不在图里） › 线程栈 · 每条线程一根，向低地址长">
+          <title>主线程栈 · 正在执行的那些帧住在这里 · 进程的用户空间 · 一块虚拟地址空间（内核空间不在图里） › 线程栈 · 每条线程一根，向低地址长</title>
+          <rect x="140" y="190" width="480" height="170" rx="6" class="c-mask"/>
+          <rect x="140" y="190" width="480" height="170" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(146 196) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <rect class="nb-badge" x="548.0" y="198" width="60.0" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="578.0" y="209" font-size="8" text-anchor="middle">每线程一根</text>
+          <text class="nb-title" x="174" y="211" font-size="10.5" font-weight="600">主线程栈</text>
+          <line class="nb-hr" x1="148" y1="218" x2="612" y2="218"/>
+          <text class="nb-k" x="152" y="264" font-size="9">方向</text><text class="nb-v" x="204.2" y="264" font-size="9">向低地址长，栈顶在低处</text>
+          <text class="nb-k" x="152" y="278" font-size="9">一帧多大</text><text class="nb-v" x="204.2" y="278" font-size="9">约 96 字节（§03 实测）</text>
+          <text class="nb-k" x="152" y="292" font-size="9">额度</text><text class="nb-v" x="204.2" y="292" font-size="9">系统 8176 KB；V8 自己只认 984 KB</text>
+          <text class="nb-k" x="152" y="306" font-size="9">返回时</text><text class="nb-v" x="204.2" y="306" font-size="9">帧弹出，内存交给下一次调用</text>
+          <text class="nb-note" x="152" y="352" font-size="8">没有 GC，也没有延迟回收 —— 弹出就是没了</text>
+        </g>
+
+        <g id="js-closure-space-node-poolstack" data-nb="1" data-node-id="poolstack" data-node-label="线程池的 4 根原生栈" tabindex="0" role="button" aria-label="Focus 线程池的 4 根原生栈, 跑 C++ 和系统调用，不跑 JS, 进程的用户空间 · 一块虚拟地址空间（内核空间不在图里） › 线程栈 · 每条线程一根，向低地址长" aria-pressed="false" data-node-kind="backend" data-node-sublabel="跑 C++ 和系统调用，不跑 JS" data-node-context="进程的用户空间 · 一块虚拟地址空间（内核空间不在图里） › 线程栈 · 每条线程一根，向低地址长">
+          <title>线程池的 4 根原生栈 · 跑 C++ 和系统调用，不跑 JS · 进程的用户空间 · 一块虚拟地址空间（内核空间不在图里） › 线程栈 · 每条线程一根，向低地址长</title>
+          <rect x="140" y="410" width="480" height="130" rx="6" class="c-mask"/>
+          <rect x="140" y="410" width="480" height="130" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(146 416) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <rect class="nb-badge" x="538.4" y="418" width="69.6" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="573.2" y="429" font-size="8" text-anchor="middle">libuv · 4 条</text>
+          <text class="nb-title" x="174" y="431" font-size="10.5" font-weight="600">线程池的 4 根原生栈</text>
+          <line class="nb-hr" x1="148" y1="438" x2="612" y2="438"/>
+          <text class="nb-k" x="152" y="471" font-size="9">谁在用</text><text class="nb-v" x="209.6" y="471" font-size="9">文件系统、加密、DNS 的阻塞调用</text>
+          <text class="nb-k" x="152" y="485" font-size="9">跑不跑 JS</text><text class="nb-v" x="209.6" y="485" font-size="9">不跑；JS 在主线程和 worker 线程上</text>
+          <text class="nb-k" x="152" y="499" font-size="9">栈从哪来</text><text class="nb-v" x="209.6" y="499" font-size="9">mmap 划出来的，线程结束就收回</text>
+          <text class="nb-note" x="152" y="532" font-size="8">它们的存在只说明一件事：栈是按线程配的</text>
+        </g>
+
+        <g id="js-closure-space-node-newspace" data-nb="1" data-node-id="newspace" data-node-label="新生代 new space" tabindex="0" role="button" aria-label="Focus 新生代 new space, 两个半区，一次 GC 搬空一半, 进程的用户空间 · 一块虚拟地址空间（内核空间不在图里） › V8 托管堆 · 全进程一份，GC 负责搬运和回收" aria-pressed="false" data-node-kind="messagebus" data-node-sublabel="两个半区，一次 GC 搬空一半" data-node-context="进程的用户空间 · 一块虚拟地址空间（内核空间不在图里） › V8 托管堆 · 全进程一份，GC 负责搬运和回收">
+          <title>新生代 new space · 两个半区，一次 GC 搬空一半 · 进程的用户空间 · 一块虚拟地址空间（内核空间不在图里） › V8 托管堆 · 全进程一份，GC 负责搬运和回收</title>
+          <rect x="820" y="190" width="640" height="165" rx="6" class="c-mask"/>
+          <rect x="820" y="190" width="640" height="165" rx="6" class="c-messagebus" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="messagebus" class="semantic-sigil s-messagebus" transform="translate(826 196) scale(0.6875)">
+            <path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h11"/>
+            <circle cx="5" cy="4.5" r="1" class="sigil-fill"/>
+            <circle cx="10.5" cy="8" r="1" class="sigil-fill"/>
+            <circle cx="7" cy="11.5" r="1" class="sigil-fill"/>
+          </g>
+          <rect class="nb-badge" x="1397.6" y="198" width="50.4" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="1422.8" y="209" font-size="8" text-anchor="middle">两个半区</text>
+          <text class="nb-title" x="854" y="211" font-size="10.5" font-weight="600">新生代 new space</text>
+          <line class="nb-hr" x1="828" y1="218" x2="1452" y2="218"/>
+          <text class="nb-k" x="832" y="268.5" font-size="9">谁先落这</text><text class="nb-v" x="884.2" y="268.5" font-size="9">新创建的对象，包括 Context 和函数对象</text>
+          <text class="nb-k" x="832" y="282.5" font-size="9">一次 GC</text><text class="nb-v" x="884.2" y="282.5" font-size="9">把活着的搬到另一半，旧的整块丢掉</text>
+          <text class="nb-k" x="832" y="296.5" font-size="9">两次之后</text><text class="nb-v" x="884.2" y="296.5" font-size="9">还活着的搬进老生代</text>
+          <text class="nb-note" x="832" y="347" font-size="8">搬运会改地址，所有指向它的引用都要跟着改</text>
+        </g>
+
+        <g id="js-closure-space-node-oldspace" data-nb="1" data-node-id="oldspace" data-node-label="老生代 old space" tabindex="0" role="button" aria-label="Focus 老生代 old space, 活过两次 GC 的对象搬到这里, 进程的用户空间 · 一块虚拟地址空间（内核空间不在图里） › V8 托管堆 · 全进程一份，GC 负责搬运和回收" aria-pressed="false" data-node-kind="database" data-node-sublabel="活过两次 GC 的对象搬到这里" data-node-context="进程的用户空间 · 一块虚拟地址空间（内核空间不在图里） › V8 托管堆 · 全进程一份，GC 负责搬运和回收">
+          <title>老生代 old space · 活过两次 GC 的对象搬到这里 · 进程的用户空间 · 一块虚拟地址空间（内核空间不在图里） › V8 托管堆 · 全进程一份，GC 负责搬运和回收</title>
+          <rect x="820" y="400" width="640" height="155" rx="6" class="c-mask"/>
+          <rect x="820" y="400" width="640" height="155" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(826 406) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <rect class="nb-badge" x="1397.6" y="408" width="50.4" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="1422.8" y="419" font-size="8" text-anchor="middle">长期对象</text>
+          <text class="nb-title" x="854" y="421" font-size="10.5" font-weight="600">老生代 old space</text>
+          <line class="nb-hr" x1="828" y1="428" x2="1452" y2="428"/>
+          <text class="nb-k" x="832" y="473.5" font-size="9">谁在这</text><text class="nb-v" x="884.2" y="473.5" font-size="9">活过两次 GC 的对象：闭包函数、它的 Context、原型</text>
+          <text class="nb-k" x="832" y="487.5" font-size="9">回收方式</text><text class="nb-v" x="884.2" y="487.5" font-size="9">标记 + 压缩（Mark-Compact）</text>
+          <text class="nb-k" x="832" y="501.5" font-size="9">上限</text><text class="nb-v" x="884.2" y="501.5" font-size="9">实测约 4.2 GB，和指针压缩的 4 GB 保留区同量级</text>
+          <text class="nb-note" x="832" y="547" font-size="8">闭包的环境通常活到这里 —— 它必须比创建它的调用活得久</text>
+        </g>
+
+        <!-- Connection labels -->
+        <g data-detail="context" data-edge-from="mainstack" data-edge-to="newspace" data-edge-label="帧里的引用" data-edge-key="0" data-edge-id="ref-heap">
+          <rect x="731" y="275" width="58" height="14" rx="3" class="c-mask"/>
+          <text x="760" y="285" class="t-muted" font-size="8" text-anchor="middle">帧里的引用</text>
+        </g>
+        <g data-detail="context" data-edge-from="newspace" data-edge-to="oldspace" data-edge-label="活过两次就搬过去" data-edge-key="1" data-edge-id="promote">
+          <rect x="1096.6" y="372" width="86.8" height="14" rx="3" class="c-mask"/>
+          <text x="1140" y="382" class="t-muted" font-size="8" text-anchor="middle">活过两次就搬过去</text>
+        </g>
+
+        <!-- Legend -->
+        <g data-legend data-legend-bridge>
+          <text x="40" y="744" class="t-primary" font-size="12" font-weight="650">Legend</text>
+          <g data-legend-semantic-kind="backend" data-legend-kind="backend" data-legend-label="线程自己的栈" data-legend-x="40" data-legend-baseline="764" data-legend-width="103">
+            <rect x="40" y="755" width="16" height="10" rx="2.5" class="c-backend" stroke-width="1"/>
+            <text x="62" y="764" class="t-muted" font-size="10" font-weight="500">线程自己的栈</text>
+          </g>
+          <g data-legend-semantic-kind="database" data-legend-kind="database" data-legend-label="老生代：活下来的对象" data-legend-x="165" data-legend-baseline="764" data-legend-width="143">
+            <rect x="165" y="755" width="16" height="10" rx="2.5" class="c-database" stroke-width="1"/>
+            <text x="187" y="764" class="t-muted" font-size="10" font-weight="500">老生代：活下来的对象</text>
+          </g>
+          <g data-legend-semantic-kind="messagebus" data-legend-kind="messagebus" data-legend-label="新生代：对象先落这里" data-legend-x="330" data-legend-baseline="764" data-legend-width="143">
+            <rect x="330" y="755" width="16" height="10" rx="2.5" class="c-messagebus" stroke-width="1"/>
+            <text x="352" y="764" class="t-muted" font-size="10" font-weight="500">新生代：对象先落这里</text>
+          </g>
+        </g>
+      </svg></div>
+      <figcaption>左边是线程的栈，右边是进程的堆。中间那根箭头是整篇文章的内容 —— 栈帧里放的只是指向堆对象的引用。</figcaption>
+      <div class="pano-ui"></div>
+      <p class="arch-hint"><span class="idle">点头上的任意一个框看它的关系，点区域标题看分组含义，点零件看完整归属路径；用「对比两个零件」出一张对照表</span><span class="focused">再点一次空白处取消</span></p>
+    </figure><p>四个能记住的量，本机实测：</p>
+<table>
+<thead>
+<tr>
+<th>量</th>
+<th>值</th>
+<th>怎么量</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>系统给主线程的栈</td>
+<td>8176 KB（约 8 MB）</td>
+<td><code>ulimit -s</code></td>
+</tr>
+<tr>
+<td>V8 允许 JS 用的栈</td>
+<td>984 KB</td>
+<td><code>node --v8-options | grep stack-size</code></td>
+</tr>
+<tr>
+<td>V8 堆上限</td>
+<td>4 496 293 888 字节（约 4.2 GB）</td>
+<td><code>v8.getHeapStatistics().heap_size_limit</code></td>
+</tr>
+<tr>
+<td>一个 JS 栈帧</td>
+<td>约 96 字节</td>
+<td>见 §03 的递归实测</td>
+</tr>
+</tbody>
+</table>
+<p><mark class="mk-amber">V8 只认 984 KB，远小于系统给的 8 MB。</mark> 所以递归太深时先撞上的是 V8 抛的 <code>RangeError</code>，不是操作系统的段错误 —— §03 的实测就是这个现象。</p>
+<p>还有一件事要先说清：规范不管这些东西放在哪。ECMAScript 只规定「环境记录」是一种规范类型，并且明确写着 <mark class="mk-blue">环境记录纯属规范机制，不必对应实现的任何具体产物</mark>。所以下面所有的位置、对象形状和字节数都是 V8 的选择，不是 JS 语言的规矩。</p>
+<h2 id="六个词先钉住再往下看"><span class="num">02</span>六个词，先钉住再往下看</h2>
+<p>后面每一节都要用到这几个词，而它们经常被混着说。</p>
+<div class="cards" data-cols="2"><div class="ccard tone-blue">
+          <span class="tag tone-blue">规范类型</span>
+          <h4>环境记录 Environment Record</h4>
+          <p>规范里装「名字 → 绑定」的东西</p>
+          <div class="cbody"><p>每次求值一个函数、一个块、一个 <code>catch</code> 子句，都会新建一个。它记的是<strong>绑定</strong>：名字 <code>count</code> 和它当前指向的值。</p>
+<p>规范说它是「纯属规范机制」，所以它不是你能 <code>console.log</code> 出来的对象。V8 里对应它的是下面的 Context。</p>
+</div>
+          
+        </div><div class="ccard tone-violet">
+          <span class="tag tone-violet">内部字段</span>
+          <h4><code>[[OuterEnv]]</code></h4>
+          <p>每个环境记录都有的外层引用</p>
+          <div class="cbody"><p>内层环境找不到某个名字，就去 <code>[[OuterEnv]]</code> 指的那个环境找，一直找到 <code>null</code>（全局环境的外层是 null）。</p>
+<p>查找走的是这条链，跟调用栈没有关系 —— 这一点是理解闭包的关键。</p>
+</div>
+          
+        </div><div class="ccard tone-violet">
+          <span class="tag tone-violet">内部槽</span>
+          <h4><code>[[Environment]]</code></h4>
+          <p>函数对象身上的一个内部槽</p>
+          <div class="cbody"><p>函数被<strong>创建</strong>的那一刻，把「我所在的环境」记在这里。规范原文：<code>[[Environment]]</code> 是 “The Environment Record that the function was closed over. Used as the outer environment when evaluating the code of the function.”</p>
+<p>这句就是闭包在规范里的定义。</p>
+</div>
+          
+        </div><div class="ccard tone-amber">
+          <span class="tag tone-amber">最容易记错</span>
+          <h4>绑定 vs 值</h4>
+          <p>闭包捕获的是绑定，不是快照</p>
+          <div class="cbody"><p><code>count</code> 的槽只有一个，<code>counter()</code> 每次读写同一个槽。所以三次调用看到 0 → 1 → 2，而不是各看各的副本。</p>
+<p>这也解释了为什么两个函数共享一个变量时，一个改完另一个立刻看得见。</p>
+</div>
+          
+        </div><div class="ccard tone-muted">
+          <span class="tag tone-muted">别混用</span>
+          <h4>执行上下文 vs 栈帧</h4>
+          <p>一个是规范里的记录，一个是机器上的内存</p>
+          <div class="cbody"><p>规范用「执行上下文栈」描述「现在在跑哪段代码」，那是个抽象栈，你没法拿地址。</p>
+<p>实现里对应的是线程栈上真实的帧：返回地址、保存的寄存器、局部槽。讲内存时说的是后者，讲语义时说的是前者。</p>
+</div>
+          
+        </div><div class="ccard tone-green">
+          <span class="tag tone-green">实现</span>
+          <h4>Context（V8 的实现）</h4>
+          <p>堆上的一个对象，槽位编译期定死</p>
+          <div class="cbody"><p>V8 给需要长期存在的变量建一个 Context 对象，形状像定长数组：头两个槽放 <code>scope_info</code>（变量名到槽位的映射）和 <code>previous</code>（外层），后面按顺序放变量。</p>
+<p>取 <code>count</code> 就是「当前 context 的第 3 个槽」，不是按名字查表。</p>
+</div>
+          
+        </div></div><p>三个世界说的是同一件事，只是名字不一样：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>规范里</th><th>V8 里</th><th>用什么能看到</th></tr></thead><tbody><tr><th>环境记录 Environment Record</th><td data-label="V8 里">Context 对象</td><td data-label="用什么能看到">堆快照里的 <code>system / Context</code></td></tr><tr><th><code>[[Environment]]</code></th><td data-label="V8 里"><code>JSFunction.context</code> 字段</td><td data-label="用什么能看到"><code>%DebugPrint(fn)</code> 打出的 <code>context:</code> 一行</td></tr><tr><th><code>[[OuterEnv]]</code></th><td data-label="V8 里">Context 的 <code>previous</code> 槽</td><td data-label="用什么能看到">堆快照里的 <code>internal:previous</code> 边</td></tr><tr><th>绑定</th><td data-label="V8 里">Context 里的一个槽</td><td data-label="用什么能看到">堆快照里的 <code>context:变量名</code> 边（值是指针时才有）</td></tr></tbody></table></div><h2 id="一次普通调用帧上来又下去"><span class="num">03</span>一次普通调用：帧上来，又下去</h2>
+<p>先看清一次调用在线程栈上留下什么。下面这张是示意，真实的一帧里还有字节码偏移、函数对象、被调用者保存的寄存器，这里只留下与闭包有关的几样。</p>
+<figure class="memmap" data-memmap>
+      <figcaption class="mm-title">一次 JS 调用在栈上的样子（示意）<span class="mm-cap-sub">高地址在上，栈向低地址长</span></figcaption>
+      <div class="mm-stack"><div class="mm-seg tone-muted" style="--mm-size:1.2">
+        <div class="mm-body">
+          <div class="mm-head"><b>调用者的帧</b></div>
+          <p class="mm-sub">上一层的局部槽和返回地址</p>
+        </div>
+        
+      </div><div class="mm-seg tone-amber" style="--mm-size:0.7">
+        <div class="mm-body">
+          <div class="mm-head"><b>返回地址</b></div>
+          <p class="mm-sub">call 压进来的，ret 用它回去</p>
+        </div>
+        <div class="mm-side">
+              
+              <span class="mm-mark">一帧的边界</span>
+            </div>
+      </div><div class="mm-seg tone-muted" style="--mm-size:0.7">
+        <div class="mm-body">
+          <div class="mm-head"><b>保存的帧指针</b></div>
+          <p class="mm-sub">指回上一帧，栈回溯靠它</p>
+        </div>
+        <div class="mm-side">
+              
+              <span class="mm-mark">一帧的边界</span>
+            </div>
+      </div><div class="mm-seg tone-blue" style="--mm-size:0.9">
+        <div class="mm-body">
+          <div class="mm-head"><b>形参与 this</b></div>
+          <p class="mm-sub">被调用者从这里读参数</p>
+        </div>
+        
+      </div><div class="mm-seg tone-green" style="--mm-size:1">
+        <div class="mm-body">
+          <div class="mm-head"><b>局部槽</b></div>
+          <p class="mm-sub">没被捕获的变量留在这一层</p>
+        </div>
+        <div class="mm-side">
+              
+              <span class="mm-mark">帧弹出就没</span>
+            </div>
+      </div><div class="mm-seg tone-violet" style="--mm-size:1">
+        <div class="mm-body">
+          <div class="mm-head"><b>当前 context 指针</b></div>
+          <p class="mm-sub">指向堆里的 Context，也常驻在一个专用寄存器</p>
+        </div>
+        <div class="mm-side">
+              
+              <span class="mm-mark">指向堆</span>
+            </div>
+      </div></div>
+      <div class="mm-ends">
+            <span class="mm-end">高地址 调用者的帧所在</span>
+            <span class="mm-end">低地址 栈顶：下一次压栈在这</span>
+          </div>
+      <p class="mm-note">一帧的边界由返回地址和帧指针定住。返回时整帧弹掉，里面的局部槽没人再认领。</p>
+    </figure><p>拿一次最普通的调用走一遍：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-js">function add(a, b) {
+  const result = a + b;
+  return result;
+}
+const value = add(10, 20);
+</code></pre></div>
+<p>调用时压一帧，<code>a</code>、<code>b</code>、<code>result</code> 落在这帧的槽或寄存器里；<code>return</code> 之后帧被弹出，那 96 字节回到「可用」状态。<code>value</code> 能留下，是因为它已经被写进了调用者的槽。<mark class="mk-blue">变量本身没有被销毁，是承载它的那块内存不再属于这次调用了。</mark></p>
+<p>帧在原生栈上，这件事可以直接量。把 V8 的栈额度翻倍，递归深度几乎正好翻倍：</p>
+<table>
+<thead>
+<tr>
+<th><code>--stack-size</code></th>
+<th>递归到第几层抛 <code>RangeError</code></th>
+<th>折算每层</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>492 KB</td>
+<td>5165</td>
+<td>97.5 字节</td>
+</tr>
+<tr>
+<td>984 KB（默认）</td>
+<td>10413</td>
+<td>96.8 字节</td>
+</tr>
+<tr>
+<td>1968 KB</td>
+<td>20909</td>
+<td>96.4 字节</td>
+</tr>
+</tbody>
+</table>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-bash"># 自己量：改 --stack-size，看深度跟着变
+node --stack-size=984 -e 'let n=0; function f(){ n++; f(); } try { f(); } catch (e) { console.log(n, e.name); }'
+</code></pre></div>
+<p>额度翻倍、帧数翻倍，说明这些帧就是系统栈上的内存，不是 V8 另开的一块。而且先抛 <code>RangeError</code> 而不是崩溃，因为 V8 在碰到系统的栈边界之前就自己叫停了。</p>
+<p>（C 那边的一帧怎么摆、<code>call</code> / <code>ret</code> 各做了什么，在 <a href="../stack-call-return/">函数调用时，栈上到底放了什么</a> 里拆过一遍。JS 帧多了 context 和字节码相关的字段，弹栈行为一样。）</p>
+<p>那变量到底住哪？三选一，由编译器的作用域分析决定：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>维度</th><th>寄存器 / 栈槽</th><th>Context 的槽</th></tr></thead><tbody><tr><th>谁能读</th><td data-label="寄存器 / 栈槽">只有这次调用自己</td><td data-label="Context 的槽">任何拿到这个 Context 的函数对象</td></tr><tr><th>活多久</th><td data-label="寄存器 / 栈槽">帧弹出就没了</td><td data-label="Context 的槽">直到没有引用（§07）</td></tr><tr><th>谁决定</th><td data-label="寄存器 / 栈槽">编译器</td><td data-label="Context 的槽">编译器：变量被内部函数用到，或遇到 <code>eval</code> / <code>with</code></td></tr><tr><th>怎么取</th><td data-label="寄存器 / 栈槽">寄存器，或 <code>[帧指针 − 8]</code> 这类地址</td><td data-label="Context 的槽"><code>[context + 固定偏移]</code></td></tr></tbody></table></div><p>普通局部变量走左列，被闭包用到的变量走右列。这个分配是<strong>编译期</strong>定下来的，不是运行时发现「咦有闭包」才搬家。</p>
+<h2 id="进入-makecounter-时context-就已经建好了"><span class="num">04</span>进入 makeCounter 时，Context 就已经建好了</h2>
+<p>很多人以为 Context 是在「创建闭包的那一刻」建的。V8 不是：<mark class="mk-blue">它在进入这个作用域时就建好</mark>，因为编译期已经算出这个作用域里有变量会被内部函数用到。</p>
+<p>V8 工程师 Vyacheslav Egorov 在拆 V8 闭包时写得更直白：Context 是在进入作用域时创建的，不是创建闭包时；一个作用域只要可能需要，就提前建好，<strong>并且被这个作用域里创建的所有闭包共享</strong>。</p>
+<figure class="archfig" data-arch style="--arch-max-width:1600px" data-boundaries="nested" data-pano data-parts='{"stack":{"label":"主线程栈","sub":"帧活一时，环境活很久","detail":"帧里存的是**指针**，不是变量的副本。所以帧弹出不影响 E1 里的值，也不影响函数对象指向它。"},"incfn":{"label":"JSFunction inc","sub":"闭包的另一半：函数对象","detail":"堆里的一个 64 字节对象（`%DebugPrint` 打出 `instance size: 64`）。它记着自己是谁（`shared`）和出生在哪个环境（`context`），但不含变量本身。"},"sfi":{"label":"SharedFunctionInfo inc","sub":"代码和槽位表，一份","detail":"同一条源码位置产生的所有函数对象共用一个 SharedFunctionInfo（下面简称 SFI）。这就是「闭包复制环境不复制代码」的落地方式。"},"ctx1":{"label":"Context E1","sub":"makeCounter 的作用域","detail":"头两个槽固定是 `scope_info` 和 `previous`，后面按顺序放变量。`count` 占一个槽，`FunctionContext[3]` 里的 3 就是这个槽位数。"},"outer":{"label":"外层 Context","sub":"脚本 / 模块作用域","detail":"E1 的 `previous` 指向它。查找一路往外，直到 NativeContext（`globalThis` 和所有内建就挂在那里）。"}}' data-tours='[{"id":"birth","label":"建起来","steps":[{"at":["stack","ctx1"],"text":"进入 makeCounter：先建 Context，再让帧记住它。==这时候 inc 还没创建，E1 就已经存在了。=="},{"at":["ctx1"],"text":"count 被放进 E1 的第 3 个槽。槽位号在编译期定死，取用是固定偏移，不是按名字查表。"},{"at":["incfn","sfi","ctx1"],"text":"创建 inc：函数对象的 context 指向 E1，shared 指向那份唯一的字节码。==闭包的两半在这里合起来。=="}]},{"id":"after","label":"返回之后","steps":[{"at":["stack"],"text":"切到「返回之后」：makeCounter 的帧弹掉了，栈上找不到 count。"},{"at":["incfn","ctx1"],"text":"但顶层槽 counter 指向 inc，inc 指向 E1，E1 里装着 count。==这一整条链没有一环在栈上==。"}]},{"id":"run","label":"再调一次","steps":[{"at":["stack","ctx1"],"text":"切到「调用 counter()」：新压一帧，它的 context 从 inc.context 来 —— 还是 E1。"},{"at":["ctx1"],"text":"count 加一，写回同一个槽。帧弹掉，值留着；下一次读到的就是它。"}]}]' data-scenarios='[{"id":"during","label":"调用中","note":"makeCounter 正在跑：E1 刚建好，count = 0"},{"id":"returned","label":"返回之后","note":"帧已经弹掉，堆里剩下函数对象和 E1"},{"id":"call","label":"调用 counter()","note":"新帧拿旧的 E1 当环境，count 写回同一个槽"}]' data-frames='[{"id":"heap","boundary":0,"kind":"contains","label":"V8 托管堆 · 函数对象和环境对象都在这","detail":"这三个对象都住在堆里。栈上那个帧只放指针，不放 count 的值。","members":["sfi","incfn","ctx1","outer"],"depth":1},{"id":"stack","boundary":1,"kind":"contains","label":"主线程栈 · 帧在返回时弹出","detail":"切换下面的场景看帧的变化：调用中 → 返回之后 → 再调用。","members":["stack"],"depth":1}]'>
+      <div class="arch-boundary-ui">
+          <div class="arch-boundary-toolbar"><span class="arch-boundary-label">边界</span>
+            <button type="button" data-boundary-mode="nested" aria-pressed="true">多层归属框</button>
+            <button type="button" data-boundary-mode="flat" aria-pressed="false">只留一层分区</button>
+            <button type="button" data-arch-reset>恢复全图</button>
+          </div>
+          <div class="arch-address-box" aria-live="polite"><div data-arch-address>点一个零件，看完整归属路径；点一个区域标题，看这一层的含义。</div>
+            <div data-arch-frame-detail>最外框表示逻辑资源域，不表示所有对象在一块内存里。每层边界的标题说明分组依据。</div></div>
+        </div>
+      <div class="arch-canvas"><svg viewBox="0 0 1600 880" role="img" aria-labelledby="js-closure-life-archify-diagram-title js-closure-life-archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
+        <title id="js-closure-life-archify-diagram-title">闭包在内存里的三个对象：函数、代码、环境</title>
+        <desc id="js-closure-life-archify-diagram-description">A architecture diagram generated by Archify.</desc>
+        <!-- Definitions -->
+        <defs>
+          <marker id="js-closure-life-arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-default" />
+          </marker>
+          <marker id="js-closure-life-arrowhead-emphasis" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-emphasis" />
+          </marker>
+          <marker id="js-closure-life-arrowhead-security" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-security" />
+          </marker>
+          <marker id="js-closure-life-arrowhead-dashed" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-dashed" />
+          </marker>
+          <pattern id="js-closure-life-grid" width="40" height="40" patternUnits="userSpaceOnUse">
+            <path d="M 40 0 L 0 0 0 40" class="c-grid" stroke-width="0.5"/>
+          </pattern>
+        </defs>
+
+        <!-- Background Grid -->
+        <rect width="100%" height="100%" fill="url(#js-closure-life-grid)" />
+
+        <!-- Boundaries (behind everything) -->
+        <g class="arch-frame" data-frame="heap" data-depth="1" data-frame-flat="false" data-frame-kind="contains" role="button" tabindex="0" aria-pressed="false" aria-label="V8 托管堆 · 函数对象和环境对象都在这"><title>这三个对象都住在堆里。栈上那个帧只放指针，不放 count 的值。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="0" data-frame-members="sfi incfn ctx1 outer" x="580" y="110" width="950" height="720" rx="12" class="c-region" stroke-width="1"/>
+        <text x="588" y="128" class="t-cloud" font-size="9" font-weight="600">V8 托管堆 · 函数对象和环境对象都在这</text></g>
+
+        <g class="arch-frame" data-frame="stack" data-depth="1" data-frame-flat="false" data-frame-kind="contains" role="button" tabindex="0" aria-pressed="false" aria-label="主线程栈 · 帧在返回时弹出"><title>切换下面的场景看帧的变化：调用中 → 返回之后 → 再调用。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="1" data-frame-members="stack" x="30" y="260" width="480" height="255" rx="12" class="c-region" stroke-width="1"/>
+        <text x="38" y="278" class="t-cloud" font-size="9" font-weight="600">主线程栈 · 帧在返回时弹出</text></g>
+
+        <!-- Connection paths (before components for correct z-order) -->
+        <path data-edge-from="sfi" data-edge-to="incfn" data-edge-label="shared" data-edge-key="0" data-edge-id="shared" data-composition-points="810,270;810,340" d="M 810 270 L 810 340" class="a-default" stroke-width="1.5" marker-end="url(#js-closure-life-arrowhead)"/>
+        <path data-edge-from="incfn" data-edge-to="ctx1" data-edge-label="context" data-edge-key="1" data-edge-id="context" data-composition-points="810,515;810,565;835,565;835,615" d="M 810 515 L 810 557 Q 810 565 818 565 L 827 565 Q 835 565 835 573 L 835 615" class="a-default" stroke-width="1.5" marker-end="url(#js-closure-life-arrowhead)"/>
+        <path data-edge-from="stack" data-edge-to="incfn" data-edge-label="槽 counter" data-edge-key="2" data-edge-id="slot" data-composition-points="470,387.5;545,387.5;545,427.5;620,427.5" d="M 470 387.5 L 537 387.5 Q 545 387.5 545 395.5 L 545 419.5 Q 545 427.5 553 427.5 L 620 427.5" class="a-default" stroke-width="1.5" marker-end="url(#js-closure-life-arrowhead)"/>
+        <path data-edge-from="ctx1" data-edge-to="outer" data-edge-label="previous" data-edge-key="3" data-edge-id="outer" data-composition-points="1050,702.5;1100,702.5;1100,670;1150,670" d="M 1050 702.5 L 1092 702.5 Q 1100 702.5 1100 694.5 L 1100 678 Q 1100 670 1108 670 L 1150 670" class="a-default" stroke-width="1.5" marker-end="url(#js-closure-life-arrowhead)"/>
+
+        <!-- Components -->
+        <g id="js-closure-life-node-sfi" data-nb="1" data-node-id="sfi" data-node-label="SharedFunctionInfo inc" tabindex="0" role="button" aria-label="Focus SharedFunctionInfo inc, 字节码 + 变量到槽位的映射, V8 托管堆 · 函数对象和环境对象都住在这里" aria-pressed="false" data-node-kind="external" data-node-sublabel="字节码 + 变量到槽位的映射" data-node-context="V8 托管堆 · 函数对象和环境对象都住在这里">
+          <title>SharedFunctionInfo inc · 字节码 + 变量到槽位的映射 · V8 托管堆 · 函数对象和环境对象都住在这里</title>
+          <rect x="620" y="150" width="380" height="120" rx="6" class="c-mask"/>
+          <rect x="620" y="150" width="380" height="120" rx="6" class="c-external" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="external" class="semantic-sigil s-external" transform="translate(626 156) scale(0.6875)">
+            <rect x="2.5" y="5" width="8.5" height="8" rx="1.5"/>
+            <path d="M8 2.5h5.5V8M13.5 2.5 7.5 8.5"/>
+          </g>
+          <rect class="nb-badge" x="937.6" y="158" width="50.4" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="962.8" y="169" font-size="8" text-anchor="middle">只有一份</text>
+          <text class="nb-title" x="654" y="171" font-size="10.5" font-weight="600">SharedFunctionInfo inc</text>
+          <line class="nb-hr" x1="628" y1="178" x2="992" y2="178"/>
+          <g data-when="during">
+          <text class="nb-k" x="632" y="206" font-size="9">字节码</text><text class="nb-v" x="684.2" y="206" font-size="9">所有 inc 共用这一段</text>
+          <text class="nb-k" x="632" y="220" font-size="9">槽位表</text><text class="nb-v" x="684.2" y="220" font-size="9">count 在第 3 个槽：编译期定好</text>
+          <text class="nb-k" x="632" y="234" font-size="9">谁指向它</text><text class="nb-v" x="684.2" y="234" font-size="9">每个函数对象的 shared</text>
+          <text class="nb-note" x="632" y="262" font-size="8">代码不复制，每次调用复制的是环境</text>
+          </g>
+          <g data-when="returned">
+          <text class="nb-k" x="632" y="206" font-size="9">字节码</text><text class="nb-v" x="684.2" y="206" font-size="9">所有 inc 共用这一段</text>
+          <text class="nb-k" x="632" y="220" font-size="9">槽位表</text><text class="nb-v" x="684.2" y="220" font-size="9">count 在第 3 个槽：编译期定好</text>
+          <text class="nb-k" x="632" y="234" font-size="9">谁指向它</text><text class="nb-v" x="684.2" y="234" font-size="9">每个函数对象的 shared</text>
+          <text class="nb-note" x="632" y="262" font-size="8">代码不复制，每次调用复制的是环境</text>
+          </g>
+          <g data-when="call">
+          <text class="nb-k" x="632" y="206" font-size="9">字节码</text><text class="nb-v" x="684.2" y="206" font-size="9">所有 inc 共用这一段</text>
+          <text class="nb-k" x="632" y="220" font-size="9">槽位表</text><text class="nb-v" x="684.2" y="220" font-size="9">count 在第 3 个槽：编译期定好</text>
+          <text class="nb-k" x="632" y="234" font-size="9">谁指向它</text><text class="nb-v" x="684.2" y="234" font-size="9">每个函数对象的 shared</text>
+          <text class="nb-note" x="632" y="262" font-size="8">代码不复制，每次调用复制的是环境</text>
+          </g>
+        </g>
+
+        <g id="js-closure-life-node-stack" data-nb="1" data-node-id="stack" data-node-label="主线程栈 · 此刻的帧" tabindex="0" role="button" aria-label="Focus 主线程栈 · 此刻的帧, 帧里只放指针和局部值, 主线程栈 · 每线程一根，帧在返回时弹出" aria-pressed="false" data-node-kind="backend" data-node-sublabel="帧里只放指针和局部值" data-node-context="主线程栈 · 每线程一根，帧在返回时弹出">
+          <title>主线程栈 · 此刻的帧 · 帧里只放指针和局部值 · 主线程栈 · 每线程一根，帧在返回时弹出</title>
+          <rect x="70" y="300" width="400" height="175" rx="6" class="c-mask"/>
+          <rect x="70" y="300" width="400" height="175" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(76 306) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <rect class="nb-badge" x="398.0" y="308" width="60.0" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="428.0" y="319" font-size="8" text-anchor="middle">每线程一根</text>
+          <text class="nb-title" x="104" y="321" font-size="10.5" font-weight="600">主线程栈 · 此刻的帧</text>
+          <line class="nb-hr" x1="78" y1="328" x2="462" y2="328"/>
+          <g data-when="during">
+          <g class="nb-when" data-when="during"><text class="nb-k" x="82" y="379.5" font-size="9">此刻的帧</text><text class="nb-v" x="145.0" y="379.5" font-size="9">makeCounter：局部槽 + context → E1</text></g>
+          <text class="nb-k" x="82" y="393.5" font-size="9">顶层帧的槽</text><text class="nb-v" x="145.0" y="393.5" font-size="9">counter → JSFunction inc</text>
+          <text class="nb-k" x="82" y="407.5" font-size="9">返回时</text><text class="nb-v" x="145.0" y="407.5" font-size="9">帧弹出，96 字节交给下一次调用</text>
+          <text class="nb-note" x="82" y="467.0" font-size="8">帧活着，但它不是 count 的家：帧里只有指向 E1 的指针</text>
+          </g>
+          <g data-when="returned">
+          <g class="nb-when" data-when="returned"><text class="nb-k" x="82" y="379.5" font-size="9">此刻的帧</text><text class="nb-v" x="145.0" y="379.5" font-size="9">顶层代码：makeCounter 的帧已经不在了</text></g>
+          <text class="nb-k" x="82" y="393.5" font-size="9">顶层帧的槽</text><text class="nb-v" x="145.0" y="393.5" font-size="9">counter → JSFunction inc</text>
+          <text class="nb-k" x="82" y="407.5" font-size="9">返回时</text><text class="nb-v" x="145.0" y="407.5" font-size="9">帧弹出，96 字节交给下一次调用</text>
+          <text class="nb-note" x="82" y="467.0" font-size="8">栈上找不到 makeCounter 的任何痕迹</text>
+          </g>
+          <g data-when="call">
+          <g class="nb-when" data-when="call"><text class="nb-k" x="82" y="379.5" font-size="9">此刻的帧</text><text class="nb-v" x="145.0" y="379.5" font-size="9">inc：形参 / 局部 / context → E1</text></g>
+          <text class="nb-k" x="82" y="393.5" font-size="9">顶层帧的槽</text><text class="nb-v" x="145.0" y="393.5" font-size="9">counter → JSFunction inc</text>
+          <text class="nb-k" x="82" y="407.5" font-size="9">返回时</text><text class="nb-v" x="145.0" y="407.5" font-size="9">帧弹出，96 字节交给下一次调用</text>
+          <text class="nb-note" x="82" y="467.0" font-size="8">新帧、旧 Context：count 加完写回 E1</text>
+          </g>
+        </g>
+
+        <g id="js-closure-life-node-incfn" data-nb="1" data-node-id="incfn" data-node-label="JSFunction inc" tabindex="0" role="button" aria-label="Focus JSFunction inc, 闭包的那一半：函数对象, V8 托管堆 · 函数对象和环境对象都住在这里" aria-pressed="false" data-node-kind="database" data-node-sublabel="闭包的那一半：函数对象" data-node-context="V8 托管堆 · 函数对象和环境对象都住在这里">
+          <title>JSFunction inc · 闭包的那一半：函数对象 · V8 托管堆 · 函数对象和环境对象都住在这里</title>
+          <rect x="620" y="340" width="380" height="175" rx="6" class="c-mask"/>
+          <rect x="620" y="340" width="380" height="175" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(626 346) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <rect class="nb-badge" x="908.8" y="348" width="79.2" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="948.4" y="359" font-size="8" text-anchor="middle">64 字节 · 堆上</text>
+          <text class="nb-title" x="654" y="361" font-size="10.5" font-weight="600">JSFunction inc</text>
+          <line class="nb-hr" x1="628" y1="368" x2="992" y2="368"/>
+          <g data-when="during">
+          <g class="nb-spot" data-nb-spot="1" tabindex="0" role="button" data-nb-link="sfi"><rect class="nb-hit" x="627" y="412.5" width="366.0" height="14"/><text class="nb-k" x="632" y="423.5" font-size="9">shared</text><text class="nb-v" x="678.8" y="423.5" font-size="9">→ 同一段字节码和槽位表</text></g>
+          <g class="nb-spot" data-nb-spot="1" tabindex="0" role="button" data-nb-link="ctx1"><rect class="nb-hit" x="627" y="426.5" width="366.0" height="14"/><text class="nb-k" x="632" y="437.5" font-size="9">context</text><text class="nb-v" x="678.8" y="437.5" font-size="9">→ 创建它时的环境</text></g>
+          <text class="nb-k" x="632" y="451.5" font-size="9">code</text><text class="nb-v" x="678.8" y="451.5" font-size="9">没优化时只指向解释器入口</text>
+          <text class="nb-note" x="632" y="507" font-size="8">闭包的一半。它自己不含任何变量的值</text>
+          </g>
+          <g data-when="returned">
+          <g class="nb-spot" data-nb-spot="1" tabindex="0" role="button" data-nb-link="sfi"><rect class="nb-hit" x="627" y="412.5" width="366.0" height="14"/><text class="nb-k" x="632" y="423.5" font-size="9">shared</text><text class="nb-v" x="678.8" y="423.5" font-size="9">→ 同一段字节码和槽位表</text></g>
+          <g class="nb-spot" data-nb-spot="1" tabindex="0" role="button" data-nb-link="ctx1"><rect class="nb-hit" x="627" y="426.5" width="366.0" height="14"/><text class="nb-k" x="632" y="437.5" font-size="9">context</text><text class="nb-v" x="678.8" y="437.5" font-size="9">→ 创建它时的环境</text></g>
+          <text class="nb-k" x="632" y="451.5" font-size="9">code</text><text class="nb-v" x="678.8" y="451.5" font-size="9">没优化时只指向解释器入口</text>
+          <text class="nb-note" x="632" y="507" font-size="8">闭包的一半。它自己不含任何变量的值</text>
+          </g>
+          <g data-when="call">
+          <g class="nb-spot" data-nb-spot="1" tabindex="0" role="button" data-nb-link="sfi"><rect class="nb-hit" x="627" y="412.5" width="366.0" height="14"/><text class="nb-k" x="632" y="423.5" font-size="9">shared</text><text class="nb-v" x="678.8" y="423.5" font-size="9">→ 同一段字节码和槽位表</text></g>
+          <g class="nb-spot" data-nb-spot="1" tabindex="0" role="button" data-nb-link="ctx1"><rect class="nb-hit" x="627" y="426.5" width="366.0" height="14"/><text class="nb-k" x="632" y="437.5" font-size="9">context</text><text class="nb-v" x="678.8" y="437.5" font-size="9">→ 创建它时的环境</text></g>
+          <text class="nb-k" x="632" y="451.5" font-size="9">code</text><text class="nb-v" x="678.8" y="451.5" font-size="9">没优化时只指向解释器入口</text>
+          <text class="nb-note" x="632" y="507" font-size="8">闭包的一半。它自己不含任何变量的值</text>
+          </g>
+        </g>
+
+        <g id="js-closure-life-node-ctx1" data-nb="1" data-node-id="ctx1" data-node-label="Context E1" tabindex="0" role="button" aria-label="Focus Context E1, 闭包的另一半：makeCounter 的环境, V8 托管堆 · 函数对象和环境对象都住在这里" aria-pressed="false" data-node-kind="database" data-node-sublabel="闭包的另一半：makeCounter 的环境" data-node-context="V8 托管堆 · 函数对象和环境对象都住在这里">
+          <title>Context E1 · 闭包的另一半：makeCounter 的环境 · V8 托管堆 · 函数对象和环境对象都住在这里</title>
+          <rect x="620" y="615" width="430" height="175" rx="6" class="c-mask"/>
+          <rect x="620" y="615" width="430" height="175" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(626 621) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <rect class="nb-badge" x="968.4" y="623" width="69.6" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="1003.2" y="634" font-size="8" text-anchor="middle">每次调用一个</text>
+          <text class="nb-title" x="654" y="636" font-size="10.5" font-weight="600">Context E1</text>
+          <line class="nb-hr" x1="628" y1="643" x2="1042" y2="643"/>
+          <g data-when="during">
+          <text class="nb-k" x="632" y="698.5" font-size="9">scope_info</text><text class="nb-v" x="695.0" y="698.5" font-size="9">变量名 → 槽位的映射</text>
+          <g class="nb-spot" data-nb-spot="1" tabindex="0" role="button" data-nb-link="outer"><rect class="nb-hit" x="627" y="701.5" width="416.0" height="14"/><text class="nb-k" x="632" y="712.5" font-size="9">previous</text><text class="nb-v" x="695.0" y="712.5" font-size="9">外层环境</text></g>
+          <g class="nb-when" data-when="during"><text class="nb-k" x="632" y="726.5" font-size="9">count</text><text class="nb-v" x="695.0" y="726.5" font-size="9">0（刚初始化）</text></g>
+          <text class="nb-note" x="632" y="782" font-size="8">同一个 Context，几次调用之间地址不变</text>
+          </g>
+          <g data-when="returned">
+          <text class="nb-k" x="632" y="698.5" font-size="9">scope_info</text><text class="nb-v" x="695.0" y="698.5" font-size="9">变量名 → 槽位的映射</text>
+          <g class="nb-spot" data-nb-spot="1" tabindex="0" role="button" data-nb-link="outer"><rect class="nb-hit" x="627" y="701.5" width="416.0" height="14"/><text class="nb-k" x="632" y="712.5" font-size="9">previous</text><text class="nb-v" x="695.0" y="712.5" font-size="9">外层环境</text></g>
+          <g class="nb-when" data-when="returned"><text class="nb-k" x="632" y="726.5" font-size="9">count</text><text class="nb-v" x="695.0" y="726.5" font-size="9">0（没动过）</text></g>
+          <text class="nb-note" x="632" y="782" font-size="8">同一个 Context，几次调用之间地址不变</text>
+          </g>
+          <g data-when="call">
+          <text class="nb-k" x="632" y="698.5" font-size="9">scope_info</text><text class="nb-v" x="695.0" y="698.5" font-size="9">变量名 → 槽位的映射</text>
+          <g class="nb-spot" data-nb-spot="1" tabindex="0" role="button" data-nb-link="outer"><rect class="nb-hit" x="627" y="701.5" width="416.0" height="14"/><text class="nb-k" x="632" y="712.5" font-size="9">previous</text><text class="nb-v" x="695.0" y="712.5" font-size="9">外层环境</text></g>
+          <g class="nb-when" data-when="call"><text class="nb-k" x="632" y="726.5" font-size="9">count</text><text class="nb-v" x="695.0" y="726.5" font-size="9">1（这次调用写完）</text></g>
+          <text class="nb-note" x="632" y="782" font-size="8">同一个 Context，几次调用之间地址不变</text>
+          </g>
+        </g>
+
+        <g id="js-closure-life-node-outer" data-nb="1" data-node-id="outer" data-node-label="外层 Context" tabindex="0" role="button" aria-label="Focus 外层 Context, 脚本 / 模块作用域, V8 托管堆 · 函数对象和环境对象都住在这里" aria-pressed="false" data-node-kind="database" data-node-sublabel="脚本 / 模块作用域" data-node-context="V8 托管堆 · 函数对象和环境对象都住在这里">
+          <title>外层 Context · 脚本 / 模块作用域 · V8 托管堆 · 函数对象和环境对象都住在这里</title>
+          <rect x="1150" y="615" width="340" height="110" rx="6" class="c-mask"/>
+          <rect x="1150" y="615" width="340" height="110" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(1156 621) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <rect class="nb-badge" x="1446.8" y="623" width="31.2" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="1462.4" y="634" font-size="8" text-anchor="middle">外层</text>
+          <text class="nb-title" x="1184" y="636" font-size="10.5" font-weight="600">外层 Context</text>
+          <line class="nb-hr" x1="1158" y1="643" x2="1482" y2="643"/>
+          <g data-when="during">
+          <text class="nb-k" x="1162" y="673" font-size="9">是谁</text><text class="nb-v" x="1214.2" y="673" font-size="9">脚本 / 模块作用域</text>
+          <text class="nb-k" x="1162" y="687" font-size="9">previous</text><text class="nb-v" x="1214.2" y="687" font-size="9">再往外就是 NativeContext</text>
+          <text class="nb-note" x="1162" y="717" font-size="8">查找只走 [[OuterEnv]] 这条链，跟栈无关</text>
+          </g>
+          <g data-when="returned">
+          <text class="nb-k" x="1162" y="673" font-size="9">是谁</text><text class="nb-v" x="1214.2" y="673" font-size="9">脚本 / 模块作用域</text>
+          <text class="nb-k" x="1162" y="687" font-size="9">previous</text><text class="nb-v" x="1214.2" y="687" font-size="9">再往外就是 NativeContext</text>
+          <text class="nb-note" x="1162" y="717" font-size="8">查找只走 [[OuterEnv]] 这条链，跟栈无关</text>
+          </g>
+          <g data-when="call">
+          <text class="nb-k" x="1162" y="673" font-size="9">是谁</text><text class="nb-v" x="1214.2" y="673" font-size="9">脚本 / 模块作用域</text>
+          <text class="nb-k" x="1162" y="687" font-size="9">previous</text><text class="nb-v" x="1214.2" y="687" font-size="9">再往外就是 NativeContext</text>
+          <text class="nb-note" x="1162" y="717" font-size="8">查找只走 [[OuterEnv]] 这条链，跟栈无关</text>
+          </g>
+        </g>
+
+        <!-- Connection labels -->
+        <g data-detail="context" data-edge-from="sfi" data-edge-to="incfn" data-edge-label="shared" data-edge-key="0" data-edge-id="shared">
+          <rect x="790.6" y="285" width="38.8" height="14" rx="3" class="c-mask"/>
+          <text x="810" y="295" class="t-muted" font-size="8" text-anchor="middle">shared</text>
+        </g>
+        <g data-detail="context" data-edge-from="incfn" data-edge-to="ctx1" data-edge-label="context" data-edge-key="1" data-edge-id="context">
+          <rect x="788.2" y="555" width="43.6" height="14" rx="3" class="c-mask"/>
+          <text x="810" y="565" class="t-muted" font-size="8" text-anchor="middle">context</text>
+        </g>
+        <g data-detail="context" data-edge-from="stack" data-edge-to="incfn" data-edge-label="槽 counter" data-edge-key="2" data-edge-id="slot">
+          <rect x="516" y="395" width="58" height="14" rx="3" class="c-mask"/>
+          <text x="545" y="405" class="t-muted" font-size="8" text-anchor="middle">槽 counter</text>
+        </g>
+        <g data-detail="context" data-edge-from="ctx1" data-edge-to="outer" data-edge-label="previous" data-edge-key="3" data-edge-id="outer">
+          <rect x="1075.8" y="660" width="48.4" height="14" rx="3" class="c-mask"/>
+          <text x="1100" y="670" class="t-muted" font-size="8" text-anchor="middle">previous</text>
+        </g>
+
+        <!-- Legend -->
+        <g data-legend data-legend-bridge>
+          <text x="40" y="844" class="t-primary" font-size="12" font-weight="650">Legend</text>
+          <g data-legend-semantic-kind="backend" data-legend-kind="backend" data-legend-label="线程栈上的帧" data-legend-x="40" data-legend-baseline="864" data-legend-width="103">
+            <rect x="40" y="855" width="16" height="10" rx="2.5" class="c-backend" stroke-width="1"/>
+            <text x="62" y="864" class="t-muted" font-size="10" font-weight="500">线程栈上的帧</text>
+          </g>
+          <g data-legend-semantic-kind="database" data-legend-kind="database" data-legend-label="堆里的对象" data-legend-x="165" data-legend-baseline="864" data-legend-width="93">
+            <rect x="165" y="855" width="16" height="10" rx="2.5" class="c-database" stroke-width="1"/>
+            <text x="187" y="864" class="t-muted" font-size="10" font-weight="500">堆里的对象</text>
+          </g>
+          <g data-legend-semantic-kind="external" data-legend-kind="external" data-legend-label="代码与作用域信息" data-legend-x="280" data-legend-baseline="864" data-legend-width="123">
+            <rect x="280" y="855" width="16" height="10" rx="2.5" class="c-external" stroke-width="1"/>
+            <text x="302" y="864" class="t-muted" font-size="10" font-weight="500">代码与作用域信息</text>
+          </g>
+        </g>
+      </svg></div>
+      <figcaption>上半部分是「代码」和「栈」，下半部分是「堆」。四个箭头里，shared 是共用同一段代码，context 是函数记住创建它的环境，槽 counter 是外界找到这个函数的入口。</figcaption>
+      <div class="pano-ui"></div>
+      <p class="arch-hint"><span class="idle">点头上的任意一个框看它的关系，点区域标题看分组含义，点零件看完整归属路径；框里的每一行 / 每个格子都能点，跳到它指向的零件；用「场景」切换同一张图的两种状态</span><span class="focused">再点一次空白处取消</span></p>
+    </figure><p>用 <code>%DebugPrint</code> 能看到函数对象身上那个指针：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-bash">node --allow-natives-syntax -e '
+function makeCounter() {
+  let count = 0;
+  return function inc() { count++; return count; };
+}
+const counter = makeCounter();
+%DebugPrint(counter);
+counter(); counter();
+%DebugPrint(counter);'
+</code></pre></div>
+<p>只留关键三行，两次打印是这样的：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">DebugPrint: 0x04ea55a63991: [Function]
+ - shared_info: 0x27ac57ea3601 &lt;SharedFunctionInfo inc&gt;
+ - context:     0x04ea55a63969 &lt;FunctionContext[3]&gt;
+...
+DebugPrint: 0x04ea55a63991: [Function]        ← 同一个函数对象
+ - shared_info: 0x27ac57ea3601 &lt;SharedFunctionInfo inc&gt;
+ - context:     0x04ea55a63969 &lt;FunctionContext[3]&gt;   ← 同一个 Context
+</code></pre></div>
+<p>两件事：中间调用了两次 <code>counter()</code>，<code>context</code> 的地址一个字节都没变；<code>FunctionContext[3]</code> 里的 3 是槽位数 —— <code>scope_info</code>、<code>previous</code>、<code>count</code> 各占一个。</p>
+<h2 id="返回之后栈没了堆还在"><span class="num">05</span>返回之后：栈没了，堆还在</h2>
+<p><code>makeCounter</code> 返回时，它的帧照常弹掉。<code>counter</code> 这个顶层槽指向 <code>inc</code> 函数对象，<code>inc</code> 的 <code>context</code> 指向 E1，E1 里装着 <code>count</code>。这条链上没有任何一环在栈上 —— 所以帧弹掉不影响它。</p>
+<p>再调用 <code>counter()</code> 时：</p>
+<ol>
+<li>新压一帧，给 <code>inc</code> 用</li>
+<li>这帧的「当前环境」从函数对象的 <code>context</code> 来。规范里就一步：<code>NewFunctionEnvironment</code> 把新环境的 <code>[[OuterEnv]]</code> 设成 <code>func.[[Environment]]</code></li>
+<li>代码里读 <code>count</code>：先看本次调用的环境里有没有，没有就顺着 <code>[[OuterEnv]]</code> 往外走，在 E1 里命中</li>
+<li>写回的是 E1 的那个槽。帧弹掉，槽里的值留着</li>
+</ol>
+<div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;frame&quot;,&quot;to&quot;:&quot;e1&quot;,&quot;label&quot;:&quot;没找到，往外一层&quot;},{&quot;from&quot;:&quot;e1&quot;,&quot;to&quot;:&quot;outer&quot;,&quot;label&quot;:&quot;命中就停在这&quot;,&quot;dashed&quot;:true},{&quot;from&quot;:&quot;outer&quot;,&quot;to&quot;:&quot;native&quot;,&quot;label&quot;:&quot;再往外&quot;,&quot;dashed&quot;:true}]" style="--flow-marker:url(#fa-1)">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa-1" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-green" data-id="frame">
+              
+              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5L3 8l3 4.5M10 3.5L13 8l-3 4.5"/></svg>
+              <b>inc 的这次调用</b>
+              <small>形参 / 局部里没有 count</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="e1">
+              
+              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="8" cy="4.2" rx="5" ry="1.9"/><path d="M3 4.2v7.6c0 1.05 2.24 1.9 5 1.9s5-.85 5-1.9V4.2"/></svg>
+              <b>E1：makeCounter 的环境</b>
+              <small>count 在第 3 个槽 → 命中</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="outer">
+              
+              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="8" cy="4.2" rx="5" ry="1.9"/><path d="M3 4.2v7.6c0 1.05 2.24 1.9 5 1.9s5-.85 5-1.9V4.2"/></svg>
+              <b>外层环境</b>
+              <small>脚本 / 模块作用域，这次不会走到</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="native">
+              
+              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="8" cy="4.2" rx="5" ry="1.9"/><path d="M3 4.2v7.6c0 1.05 2.24 1.9 5 1.9s5-.85 5-1.9V4.2"/></svg>
+              <b>NativeContext</b>
+              <small>globalThis 与内建，[[OuterEnv]] 链的尽头</small>
+            </div></div></div>
+      
+    </div><p>这张图讲的是规范里的查找：一层一层找名字，在 E1 命中。V8 在编译期就把这件事结算了 —— <mark class="mk-blue">变量被解析成「第几层 context + 第几个槽」，运行时按层数沿 <code>previous</code> 走指针，再取固定偏移</mark>，<code>scope_info</code> 就是那张表。按名字查找的动作不存在了，但沿链跳过几层指针仍然要做。</p>
+<p>还有一个细节：V8 按需分配 Context。<code>inc</code> 的作用域里没有被任何内部函数捕获的变量，所以它没有属于自己的 Context —— 调用时帧直接拿 <code>inc</code> 的 context（也就是 E1）当环境。堆快照能证实这一点 —— <code>inc</code> 的 <code>context</code> 指向的，正是装着 <code>makeCounter</code> 那些变量的对象：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">#7181 closure &quot;inc&quot; size=64
+   --internal:shared--&gt;   #97819  &quot;inc&quot;（SharedFunctionInfo）   72 字节
+   --internal:context--&gt;  #103261 &quot;system / Context&quot;           48 字节
+  └─ Context #103261
+       --context:payload--&gt;      #103263 &quot;Object&quot;       ← 被捕获的那个对象
+       --internal:scope_info--&gt;  #97825  &quot;system / ScopeInfo&quot;
+       --internal:previous--&gt;    #7063   &quot;system / NativeContext&quot;
+</code></pre></div>
+<p><code>count</code> 不在这几条边里，因为它是小整数（Smi），值直接存在槽里，不是指针。堆快照的边只画指针。</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-bash"># 自己看：生成堆快照，在 Chrome DevTools 的 Memory 面板里打开
+node -e 'const v8 = require(&quot;node:v8&quot;);
+function makeCounter() { let count = 0; return function inc() { count++; return count; }; }
+const counter = makeCounter(); counter(); counter();
+v8.writeHeapSnapshot(&quot;closure.heapsnapshot&quot;);'
+</code></pre></div>
+<h2 id="两个-counter一份代码两份环境"><span class="num">06</span>两个 counter：一份代码，两份环境</h2>
+<p>每调一次 <code>makeCounter</code>，就新建一个 Context；<code>inc</code> 的函数对象也是新的。但两个函数对象共用同一份 SharedFunctionInfo —— 代码和槽位表只有一份，<code>count</code> 的槽位号也一样（都是第 3 个槽），只是两个 Context 各是各的。</p>
+<figure class="archfig" data-arch style="--arch-max-width:1400px" data-pano data-parts='{"sfi":{"label":"SharedFunctionInfo","sub":"代码和槽位表","detail":"同一条源码位置产生的所有函数对象共用一个 SFI。==代码不复制，复制的是环境==。","facts":{"归属":"全进程共用","份数":"一份","谁指向它":"两个函数对象","内容":"字节码 + 槽位表"}},"inc1":{"label":"第一个 JSFunction","sub":"counter1 指向它","detail":"创建于第一次 `makeCounter()`。它自己的 `context` 指向 E1。","facts":{"归属":"第一次调用","份数":"一个对象","context":"E1","count 存在哪":"E1 的第 3 个槽"}},"inc2":{"label":"第二个 JSFunction","sub":"counter2 指向它","detail":"创建于第二次 `makeCounter()`。它和 inc1 共享代码，但不共享环境。","facts":{"归属":"第二次调用","份数":"一个对象","context":"E2","count 存在哪":"E2 的第 3 个槽"}},"ctx1":{"label":"Context E1","sub":"第一次调用的环境","detail":"`count` 在这里，值 2。只要 counter1 还被引用，E1 就不会被回收。","facts":{"归属":"第一次调用","份数":"一个对象","count":2,"和 E2 的关系":"互不相干"}},"ctx2":{"label":"Context E2","sub":"第二次调用的环境","detail":"形状和 E1 一模一样，槽位号也一样，但它是另一个对象。","facts":{"归属":"第二次调用","份数":"一个对象","count":1,"和 E1 的关系":"互不相干"}}}' data-tours='[{"id":"share","label":"哪些共用、哪些各一份","steps":[{"at":["sfi"],"text":"代码和槽位表只有一份。两个函数对象的 `shared` 都指着它。"},{"at":["inc1","inc2"],"text":"但函数对象是两个 —— 创建两次就是两个堆对象，各有自己的 `context`。"},{"at":["ctx1","ctx2"],"text":"环境也是两个。同一个槽位号，各自一份 `count`。==互不影响靠的是这个「各自一份」==。"}]}]'>
+      
+      <div class="arch-canvas"><svg viewBox="0 0 1400 880" role="img" aria-labelledby="js-two-counters-archify-diagram-title js-two-counters-archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
+        <title id="js-two-counters-archify-diagram-title">两个 counter：一份代码，两份环境</title>
+        <desc id="js-two-counters-archify-diagram-description">A architecture diagram generated by Archify.</desc>
+        <!-- Definitions -->
+        <defs>
+          <marker id="js-two-counters-arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-default" />
+          </marker>
+          <marker id="js-two-counters-arrowhead-emphasis" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-emphasis" />
+          </marker>
+          <marker id="js-two-counters-arrowhead-security" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-security" />
+          </marker>
+          <marker id="js-two-counters-arrowhead-dashed" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-dashed" />
+          </marker>
+          <pattern id="js-two-counters-grid" width="40" height="40" patternUnits="userSpaceOnUse">
+            <path d="M 40 0 L 0 0 0 40" class="c-grid" stroke-width="0.5"/>
+          </pattern>
+        </defs>
+
+        <!-- Background Grid -->
+        <rect width="100%" height="100%" fill="url(#js-two-counters-grid)" />
+
+        <!-- Boundaries (behind everything) -->
+        <rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="0" data-frame-members="sfi inc1 inc2 ctx1 ctx2" x="210" y="110" width="930" height="690" rx="12" class="c-region" stroke-width="1"/>
+        <text x="218" y="128" class="t-cloud" font-size="9" font-weight="600">V8 托管堆 · 三个对象一份代码</text>
+
+        <!-- Connection paths (before components for correct z-order) -->
+        <path data-edge-from="inc1" data-edge-to="sfi" data-edge-label="shared" data-edge-key="0" data-edge-id="s1" data-composition-points="400,330;400,290;750,290;750,250" d="M 400 330 L 400 298 Q 400 290 408 290 L 742 290 Q 750 290 750 282 L 750 250" class="a-default" stroke-width="1.5" marker-end="url(#js-two-counters-arrowhead)"/>
+        <path data-edge-from="inc2" data-edge-to="sfi" data-edge-label="shared" data-edge-key="1" data-edge-id="s2" data-composition-points="850,330;850,290;750,290;750,250" d="M 850 330 L 850 298 Q 850 290 842 290 L 758 290 Q 750 290 750 282 L 750 250" class="a-default" stroke-width="1.5" marker-end="url(#js-two-counters-arrowhead)"/>
+        <path data-edge-from="inc1" data-edge-to="ctx1" data-edge-label="context" data-edge-key="2" data-edge-id="c1" data-composition-points="400,490;400,590" d="M 400 490 L 400 590" class="a-default" stroke-width="1.5" marker-end="url(#js-two-counters-arrowhead)"/>
+        <path data-edge-from="inc2" data-edge-to="ctx2" data-edge-label="context" data-edge-key="3" data-edge-id="c2" data-composition-points="850,490;850,590" d="M 850 490 L 850 590" class="a-default" stroke-width="1.5" marker-end="url(#js-two-counters-arrowhead)"/>
+
+        <!-- Components -->
+        <g id="js-two-counters-node-sfi" data-nb="1" data-node-id="sfi" data-node-label="SharedFunctionInfo inc" tabindex="0" role="button" aria-label="Focus SharedFunctionInfo inc, 字节码和「变量 → 槽位」的映射，只有这一份, V8 托管堆 · 三个对象一份代码" aria-pressed="false" data-node-kind="external" data-node-sublabel="字节码和「变量 → 槽位」的映射，只有这一份" data-node-context="V8 托管堆 · 三个对象一份代码">
+          <title>SharedFunctionInfo inc · 字节码和「变量 → 槽位」的映射，只有这一份 · V8 托管堆 · 三个对象一份代码</title>
+          <rect x="400" y="150" width="700" height="100" rx="6" class="c-mask"/>
+          <rect x="400" y="150" width="700" height="100" rx="6" class="c-external" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="external" class="semantic-sigil s-external" transform="translate(406 156) scale(0.6875)">
+            <rect x="2.5" y="5" width="8.5" height="8" rx="1.5"/>
+            <path d="M8 2.5h5.5V8M13.5 2.5 7.5 8.5"/>
+          </g>
+          <rect class="nb-badge" x="1056.8" y="158" width="31.2" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="1072.4" y="169" font-size="8" text-anchor="middle">一份</text>
+          <text class="nb-title" x="434" y="171" font-size="10.5" font-weight="600">SharedFunctionInfo inc</text>
+          <line class="nb-hr" x1="408" y1="178" x2="1092" y2="178"/>
+          <text class="nb-k" x="412" y="203" font-size="9">字节码</text><text class="nb-v" x="453.4" y="203" font-size="9">两个 inc 跑的是同一段指令</text>
+          <text class="nb-k" x="412" y="217" font-size="9">槽位表</text><text class="nb-v" x="453.4" y="217" font-size="9">count → 第 3 个槽，两边一样</text>
+          <text class="nb-note" x="412" y="242" font-size="8">不一样的是槽里的内容，不是槽的位置</text>
+        </g>
+
+        <g id="js-two-counters-node-inc1" data-nb="1" data-node-id="inc1" data-node-label="JSFunction inc · 第一次" tabindex="0" role="button" aria-label="Focus JSFunction inc · 第一次, counter1 指向它, V8 托管堆 · 三个对象一份代码" aria-pressed="false" data-node-kind="database" data-node-sublabel="counter1 指向它" data-node-context="V8 托管堆 · 三个对象一份代码">
+          <title>JSFunction inc · 第一次 · counter1 指向它 · V8 托管堆 · 三个对象一份代码</title>
+          <rect x="250" y="330" width="300" height="160" rx="6" class="c-mask"/>
+          <rect x="250" y="330" width="300" height="160" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(256 336) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <rect class="nb-badge" x="492.4" y="338" width="45.6" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="515.2" y="349" font-size="8" text-anchor="middle">64 字节</text>
+          <text class="nb-title" x="284" y="351" font-size="10.5" font-weight="600">JSFunction inc · 第一次</text>
+          <line class="nb-hr" x1="258" y1="358" x2="542" y2="358"/>
+          <g class="nb-spot" data-nb-spot="1" tabindex="0" role="button" data-nb-link="sfi"><rect class="nb-hit" x="257" y="402" width="286.0" height="14"/><text class="nb-k" x="262" y="413" font-size="9">shared</text><text class="nb-v" x="308.8" y="413" font-size="9">→ SFI（同一份）</text></g>
+          <g class="nb-spot" data-nb-spot="1" tabindex="0" role="button" data-nb-link="ctx1"><rect class="nb-hit" x="257" y="416" width="286.0" height="14"/><text class="nb-k" x="262" y="427" font-size="9">context</text><text class="nb-v" x="308.8" y="427" font-size="9">→ E1（自己这次调用的）</text></g>
+          <text class="nb-note" x="262" y="482" font-size="8">counter1 是外界对它的唯一引用</text>
+        </g>
+
+        <g id="js-two-counters-node-inc2" data-nb="1" data-node-id="inc2" data-node-label="JSFunction inc · 第二次" tabindex="0" role="button" aria-label="Focus JSFunction inc · 第二次, counter2 指向它, V8 托管堆 · 三个对象一份代码" aria-pressed="false" data-node-kind="database" data-node-sublabel="counter2 指向它" data-node-context="V8 托管堆 · 三个对象一份代码">
+          <title>JSFunction inc · 第二次 · counter2 指向它 · V8 托管堆 · 三个对象一份代码</title>
+          <rect x="700" y="330" width="300" height="160" rx="6" class="c-mask"/>
+          <rect x="700" y="330" width="300" height="160" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(706 336) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <rect class="nb-badge" x="942.4" y="338" width="45.6" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="965.2" y="349" font-size="8" text-anchor="middle">64 字节</text>
+          <text class="nb-title" x="734" y="351" font-size="10.5" font-weight="600">JSFunction inc · 第二次</text>
+          <line class="nb-hr" x1="708" y1="358" x2="992" y2="358"/>
+          <g class="nb-spot" data-nb-spot="1" tabindex="0" role="button" data-nb-link="sfi"><rect class="nb-hit" x="707" y="402" width="286.0" height="14"/><text class="nb-k" x="712" y="413" font-size="9">shared</text><text class="nb-v" x="758.8" y="413" font-size="9">→ SFI（同一份）</text></g>
+          <g class="nb-spot" data-nb-spot="1" tabindex="0" role="button" data-nb-link="ctx2"><rect class="nb-hit" x="707" y="416" width="286.0" height="14"/><text class="nb-k" x="712" y="427" font-size="9">context</text><text class="nb-v" x="758.8" y="427" font-size="9">→ E2（自己这次调用的）</text></g>
+          <text class="nb-note" x="712" y="482" font-size="8">和 inc1 是同一段代码生出来的两个对象</text>
+        </g>
+
+        <g id="js-two-counters-node-ctx1" data-nb="1" data-node-id="ctx1" data-node-label="Context E1" tabindex="0" role="button" aria-label="Focus Context E1, count = 2, V8 托管堆 · 三个对象一份代码" aria-pressed="false" data-node-kind="database" data-node-sublabel="count = 2" data-node-context="V8 托管堆 · 三个对象一份代码">
+          <title>Context E1 · count = 2 · V8 托管堆 · 三个对象一份代码</title>
+          <rect x="250" y="590" width="300" height="170" rx="6" class="c-mask"/>
+          <rect x="250" y="590" width="300" height="170" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(256 596) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <rect class="nb-badge" x="478.0" y="598" width="60.0" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="508.0" y="609" font-size="8" text-anchor="middle">第一次调用</text>
+          <text class="nb-title" x="284" y="611" font-size="10.5" font-weight="600">Context E1</text>
+          <line class="nb-hr" x1="258" y1="618" x2="542" y2="618"/>
+          <text class="nb-k" x="262" y="678" font-size="9">count</text><text class="nb-v" x="308.8" y="678" font-size="9">2（counter1 调了两次）</text>
+          <text class="nb-k" x="262" y="692" font-size="9">payload</text><text class="nb-v" x="308.8" y="692" font-size="9">那次调用里创建的其它对象</text>
+          <text class="nb-note" x="262" y="752" font-size="8">E1 与 E2 是两个对象，地址不同</text>
+        </g>
+
+        <g id="js-two-counters-node-ctx2" data-nb="1" data-node-id="ctx2" data-node-label="Context E2" tabindex="0" role="button" aria-label="Focus Context E2, count = 1, V8 托管堆 · 三个对象一份代码" aria-pressed="false" data-node-kind="database" data-node-sublabel="count = 1" data-node-context="V8 托管堆 · 三个对象一份代码">
+          <title>Context E2 · count = 1 · V8 托管堆 · 三个对象一份代码</title>
+          <rect x="700" y="590" width="300" height="170" rx="6" class="c-mask"/>
+          <rect x="700" y="590" width="300" height="170" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(706 596) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <rect class="nb-badge" x="928.0" y="598" width="60.0" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="958.0" y="609" font-size="8" text-anchor="middle">第二次调用</text>
+          <text class="nb-title" x="734" y="611" font-size="10.5" font-weight="600">Context E2</text>
+          <line class="nb-hr" x1="708" y1="618" x2="992" y2="618"/>
+          <text class="nb-k" x="712" y="678" font-size="9">count</text><text class="nb-v" x="758.8" y="678" font-size="9">1（counter2 只调了一次）</text>
+          <text class="nb-k" x="712" y="692" font-size="9">payload</text><text class="nb-v" x="758.8" y="692" font-size="9">另一次调用里创建的另一份</text>
+          <text class="nb-note" x="712" y="752" font-size="8">改 E2 的槽，E1 一点感觉都没有</text>
+        </g>
+
+        <!-- Connection labels -->
+        <g data-detail="context" data-edge-from="inc1" data-edge-to="sfi" data-edge-label="shared" data-edge-key="0" data-edge-id="s1">
+          <rect x="380.6" y="280" width="38.8" height="14" rx="3" class="c-mask"/>
+          <text x="400" y="290" class="t-muted" font-size="8" text-anchor="middle">shared</text>
+        </g>
+        <g data-detail="context" data-edge-from="inc2" data-edge-to="sfi" data-edge-label="shared" data-edge-key="1" data-edge-id="s2">
+          <rect x="830.6" y="280" width="38.8" height="14" rx="3" class="c-mask"/>
+          <text x="850" y="290" class="t-muted" font-size="8" text-anchor="middle">shared</text>
+        </g>
+        <g data-detail="context" data-edge-from="inc1" data-edge-to="ctx1" data-edge-label="context" data-edge-key="2" data-edge-id="c1">
+          <rect x="378.2" y="530" width="43.6" height="14" rx="3" class="c-mask"/>
+          <text x="400" y="540" class="t-muted" font-size="8" text-anchor="middle">context</text>
+        </g>
+        <g data-detail="context" data-edge-from="inc2" data-edge-to="ctx2" data-edge-label="context" data-edge-key="3" data-edge-id="c2">
+          <rect x="828.2" y="530" width="43.6" height="14" rx="3" class="c-mask"/>
+          <text x="850" y="540" class="t-muted" font-size="8" text-anchor="middle">context</text>
+        </g>
+
+        <!-- Legend -->
+        <g data-legend data-legend-bridge>
+          <text x="40" y="844" class="t-primary" font-size="12" font-weight="650">Legend</text>
+          <g data-legend-semantic-kind="database" data-legend-kind="database" data-legend-label="每次调用各建一份的对象" data-legend-x="40" data-legend-baseline="864" data-legend-width="153">
+            <rect x="40" y="855" width="16" height="10" rx="2.5" class="c-database" stroke-width="1"/>
+            <text x="62" y="864" class="t-muted" font-size="10" font-weight="500">每次调用各建一份的对象</text>
+          </g>
+          <g data-legend-semantic-kind="external" data-legend-kind="external" data-legend-label="只有一份的代码" data-legend-x="215" data-legend-baseline="864" data-legend-width="113">
+            <rect x="215" y="855" width="16" height="10" rx="2.5" class="c-external" stroke-width="1"/>
+            <text x="237" y="864" class="t-muted" font-size="10" font-weight="500">只有一份的代码</text>
+          </g>
+        </g>
+      </svg></div>
+      <figcaption>上面是共用的一份代码，下面两列是各自的环境。同一个槽位号，两个不同的对象 —— 这就是两个计数器互不影响的原因。</figcaption>
+      <div class="pano-ui"></div>
+      <p class="arch-hint"><span class="idle">点头上的任意一个框看它的关系，框里的每一行 / 每个格子都能点，跳到它指向的零件；用「对比两个零件」出一张对照表</span><span class="focused">再点一次空白处取消</span></p>
+    </figure><p>实测的地址关系（同一次运行里取）：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>对象</th><th>counter1</th><th>counter2</th></tr></thead><tbody><tr><th>JSFunction 地址</th><td data-label="counter1"><code>0x…68b1</code></td><td data-label="counter2"><code>0x…6919</code>（不同）</td></tr><tr><th>SharedFunctionInfo</th><td data-label="counter1"><span class="tag tone-green">同一份</span></td><td data-label="counter2"><span class="tag tone-green">同一份</span></td></tr><tr><th>Context 地址</th><td data-label="counter1"><code>0x…6889</code></td><td data-label="counter2"><code>0x…68f1</code>（不同）</td></tr><tr><th>count</th><td data-label="counter1">2</td><td data-label="counter2">1</td></tr></tbody></table></div><p>「闭包 = 函数 + 环境」这句话，在这里落成两个堆对象：一个 64 字节的 <code>JSFunction</code>，一个装着变量的 Context。代码和槽位表挂在 SFI 上，被所有同字面量的闭包共享。所以「复制环境不复制代码」不是一句比喻，是三个对象之间的关系。</p>
+<h2 id="什么时候能回收看可达性不看-return"><span class="num">07</span>什么时候能回收：看可达性，不看 return</h2>
+<p><code>makeCounter</code> 返回不释放任何东西，<code>counter = null</code> 也不「释放」—— 它只是把最后一个引用拿掉。真正决定命运的是下一次 GC 的标记：从 roots 出发还能不能走到这个对象。能走到就活，走不到就清。</p>
+<p>roots 是几处起点：栈上的槽、<code>globalThis</code> / NativeContext 里的引用，以及 C++ 侧（编译器、优化器）握着的句柄。V8 描述年轻代回收时说的也是这几个词：<mark class="mk-blue">栈和全局</mark>。</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>那一刻</th><th>还活着的东西</th><th>下一轮 GC 会做什么</th></tr></thead><tbody><tr><th><code>counter</code> 还指向 <code>inc</code></th><td data-label="还活着的东西">函数对象、E1、E1 里指向的对象都还在链上</td><td data-label="下一轮 GC 会做什么">一个都不动</td></tr><tr><th><code>counter = null</code></th><td data-label="还活着的东西">链从根上断开；函数对象、E1、被捕获的对象都不可达</td><td data-label="下一轮 GC 会做什么">标记走不到它们，清扫时回收</td></tr><tr><th>还有第二个闭包指向同一个 E1</th><td data-label="还活着的东西"><span class="tag tone-amber">E1 仍然可达，被回收的只是那个函数对象</span></td><td data-label="下一轮 GC 会做什么">只回收走不到的那部分</td></tr></tbody></table></div><p>实测保留量（<code>node --expose-gc</code>；每个数字都是 <code>global.gc()</code> 跑两次之后读 <code>process.memoryUsage().heapUsed</code>）：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-js">// ① 数组只是局部变量，没有任何内部函数用到它
+function makeA() {
+  const big = new Array(2_000_000).fill(1);
+  const small = { text: 'kept' };
+  return function useSmall() { return small.text; };   // 不碰 big
+}
+
+// ② 同一作用域里两个闭包，一个用 small，一个用 big；只留第一个
+function makeB() {
+  const big = new Array(2_000_000).fill(1);
+  const small = { text: 'kept' };
+  return {
+    useSmall() { return small.text; },
+    useBig() { return big.length; },
+  };
+}
+
+// ③ 直接捕获 big
+function makeC() {
+  const big = new Array(2_000_000).fill(1);
+  return function useBig() { return big.length; };
+}
+
+let pair = makeB();
+let onlySmall = pair.useSmall;
+pair = null;                    // 放掉 useBig，只留 useSmall
+const keepBig = makeC();        // 对照组：环境里只有一个被捕获的大数组
+</code></pre></div>
+<table>
+<thead>
+<tr>
+<th>场景</th>
+<th><code>heapUsed</code></th>
+<th>那些内存在哪</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>基线</td>
+<td>3.4 MB</td>
+<td>只有运行时自己的东西</td>
+</tr>
+<tr>
+<td>① 闭包还活着，<code>big</code> 没被捕获</td>
+<td>3.7 MB</td>
+<td><code>big</code> 从来没进过 Context，函数一返回就没主了</td>
+</tr>
+<tr>
+<td>② 只留 <code>useSmall</code>，<code>big</code> 被同一作用域的另一个闭包用到</td>
+<td>19.0 MB</td>
+<td><code>big</code> 在共用的 Context 里，<code>useSmall</code> 间接替它续了命</td>
+</tr>
+<tr>
+<td>③ 直接留一个捕获 <code>big</code> 的闭包</td>
+<td>19.0 MB</td>
+<td><code>big</code> 在 Context 里，闭包可达它就可达</td>
+</tr>
+<tr>
+<td>全部置空</td>
+<td>3.7 MB</td>
+<td>链断了，下一轮 GC 清掉</td>
+</tr>
+</tbody>
+</table>
+<p>②这一行是 19 MB，哪怕 <code>useBig</code> 已经被丢掉了。原因在下一节。</p>
+<h2 id="只保留用到的变量只对了一半"><span class="num">08</span>「只保留用到的变量」只对了一半</h2>
+<p>常见的说法是「引擎只保留闭包真正用到的变量」。方向对，粒度错了：<mark class="mk-blue">V8 保留的单位是作用域，不是单个变量。</mark></p>
+<p>一个作用域里，只要<strong>有任何一个</strong>内部函数用到了某个变量，这个变量就得进 Context；而同一个作用域产生的所有闭包共享<strong>同一个</strong> Context。所以只留下 <code>useSmall</code> 时，那个 Context 里 <code>big</code> 的槽还在，<code>big</code> 就跟着活着。</p>
+<p>堆快照里能直接看到：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">closure &quot;useSmall&quot;
+   --internal:context--&gt;  Context #103219
+Context #103219
+   --context:big--&gt;    Array     ← useBig 已经没人引用了，数组还在这
+   --context:small--&gt;  Object
+   --internal:previous--&gt;  ...
+</code></pre></div>
+<p>另一次快照里，同一个 Context 被两个函数对象同时指着（<code>useSmall</code> 和 <code>useBig</code> 的 <code>context</code> 是同一个地址）。这也解释了 §04 那句「被这个作用域里创建的所有闭包共享」。</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>说法</th><th>对不对</th><th>依据</th></tr></thead><tbody><tr><th>引擎只保留「这个闭包用到的」变量</th><td data-label="对不对"><span class="tag tone-red">❌ 粒度错了</span></td><td data-label="依据">保留单位是作用域：同作用域里被任一内部函数用到的变量都留着</td></tr><tr><th>引擎只保留「必须长期存在的」绑定</th><td data-label="对不对"><span class="tag tone-green">✅ 基本对</span></td><td data-label="依据">没被任何内部函数用到、也没遇到 eval / with 的局部变量，仍然留在栈槽或寄存器里（① 的 3.7 MB）</td></tr><tr><th>闭包会把整个栈帧保存下来</th><td data-label="对不对"><span class="tag tone-red">❌ 不对</span></td><td data-label="依据">栈帧照常销毁，活下来的是另建的 Context；帧里只有指针</td></tr></tbody></table></div><p>三种情况会强制把变量放进 Context，即使它看起来没被闭包用到：直接调用 <code>eval</code>、<code>with</code> 语句、非严格函数里引用 <code>arguments</code>。它们都会让编译器无法确定「谁可能访问这个名字」。</p>
+<p>反过来，想让一个大对象早点走，能做的不是「让闭包少用一点」，而是<mark class="mk-blue">把它放进另一个作用域</mark>：不同作用域的变量进不同的 Context，丢掉那个作用域的闭包就能放掉它；同一个作用域里的，只能一起留着。</p>
+<h2 id="三句话收尾"><span class="num">09</span>三句话收尾</h2>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>常见说法</th><th>实际发生的事</th></tr></thead><tbody><tr><th>闭包把变量的值复制进了函数</th><td data-label="实际发生的事">复制的是引用：函数指向环境，环境里的槽只有一份，所以多次调用能累加</td></tr><tr><th>闭包延长了栈帧的寿命</th><td data-label="实际发生的事">栈帧照常销毁。活下来的是另一个堆对象（Context），帧里只有指向它的指针</td></tr><tr><th>函数返回后内存就该回收</th><td data-label="实际发生的事">回收看可达性。没有引用之后，还要等 GC 真正跑到那一轮</td></tr><tr><th><code>counter = null</code> 立刻释放内存</th><td data-label="实际发生的事">只是断开了最后一个引用；释放发生在下一轮 GC 的清扫</td></tr></tbody></table></div><div class="summary">
+      <h3 id="一句话总结">一句话总结</h3>
+      <p>进入作用域时，V8 把会被内部函数用到的变量搬进堆上的 Context；函数对象记住这个 Context。
+<mark class="mk-blue">栈帧照常销毁，环境留在堆上，所以函数返回后还能读写那些变量。</mark></p>
+
+    </div><div class="quiz"><details>
+        <summary>makeCounter 返回之后，count 住在哪里？谁指向它？</summary>
+        <div class="a"><p>住在堆上的 Context（V8 里是 FunctionContext）的一个槽里，不在栈帧里。
+指向它的有两处：函数对象 inc 的 context 字段，以及 Context 自己的 previous 指向外层。
+外界的入口是顶层槽 counter → 函数对象 → context。</p>
+</div>
+      </details><details>
+        <summary>为什么只留下 useSmall，另一个闭包用过的 200 万元素数组还在？</summary>
+        <div class="a"><p>V8 按作用域分配 Context：两个闭包来自同一次 makeB 调用，共用同一个 Context。
+只留 useSmall 时 Context 仍然可达，里面 big 那个槽也还在，所以数组不会被回收。</p>
+</div>
+      </details><details>
+        <summary>规范里的「查找变量」和 V8 运行时的「读变量」，差在哪？</summary>
+        <div class="a"><p>规范是一层层找名字：当前环境找不到，就沿 [[OuterEnv]] 往外，直到命中或到 null。
+V8 在编译期就把变量解析成「哪一层 context + 第几个槽」，运行时是一条固定偏移的读取；
+本例里 inc 的作用域不需要自己的 Context，所以直接读 E1 的第 3 个槽。</p>
+</div>
+      </details></div>
+
+    <footer>
+      <span>闭包在内存里是怎么长出来的：栈、堆，和一个活下来的环境</span>
+      <span>最后更新 2026-10-21 · 单文件可离线打开</span>
+    </footer>
+  </main>
+</div>
+
+<script src="../../assets/app.js?v=757eed9a2d"></script>
+</body>
+</html>
