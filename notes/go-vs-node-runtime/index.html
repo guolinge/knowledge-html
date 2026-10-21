@@ -1,0 +1,683 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-has-toc="1">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>同一个 read()，Go 和 Node 走了两条路</title>
+<meta name="description" content="两套运行时都站在同一套系统调用上，分岔在「阻塞归谁承担」：Go 把它记进任务的状态（G 挂起、P 可转交），Node 把它外包给 4 条池线程、主线程只处理回调。栈、GC、抢占、并行度都是这条分岔的下游结果。" />
+<link rel="stylesheet" href="../../assets/theme.css?v=b918ec5c83" />
+  <link rel="stylesheet" href="../../assets/blocks.css?v=1af3923321" />
+  <link rel="stylesheet" href="../../assets/archify-embed.css?v=68fec0b81b" />
+</head>
+<body>
+<div id="progress"></div>
+<div id="tocScrim"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
+    <a class="brand" href="../../index.html"><span class="dot"></span>知识笔记</a>
+    
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="toc" id="toc">
+      <p class="toc-title">目录</p>
+      <a href="../../index.html" class="sub">← 全部笔记</a>
+      <a href="#先把两个运行时的零件摆在一起">先把两个运行时的零件摆在一起</a>
+      <a href="#你说对的那半句和只是内存和线程">你说对的那半句，和「只是内存和线程」</a>
+      <a href="#go-侧一次-socket-读线程走人">Go 侧：一次 socket 读，线程走人</a>
+      <a href="#node-侧一次-file-读池子里的一条线程替你去等">Node 侧：一次 file 读，池子里的一条线程替你去等</a>
+      <a href="#node-那个循环一轮到底转几圈">Node 那个循环，一轮到底转几圈</a>
+      <a href="#内存一个要扫几十万个栈一个只扫一个堆">内存：一个要扫几十万个栈，一个只扫一个堆</a>
+      <a href="#语言框架这个词两边指的不是一回事">「语言框架」这个词，两边指的不是一回事</a>
+      <a href="#把这套对照缩成一张词表">把这套对照缩成一张词表</a>
+      <a href="#回到你那句话">回到你那句话</a>
+      <a href="#一句话" class="sub">一句话</a>
+      <a href="#自测">自测</a>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow">● 运行时 · Go × Node</span>
+      <h1>同一个 read()，Go 和 Node 走了两条路</h1>
+      <p class="lede">两套运行时都站在同一套系统调用上，分岔在「阻塞归谁承担」：Go 把它记进任务的状态（G 挂起、P 可转交），Node 把它外包给 4 条池线程、主线程只处理回调。栈、GC、抢占、并行度都是这条分岔的下游结果。</p>
+    </div>
+
+
+    <div class="provenance"><span><b>来源</b> Node.js 文档：The Node.js Event Loop（六个阶段、single JavaScript thread、把操作 offload 给内核）https://nodejs.org/en/learn/asynchronous-work/event-loop-timers-and-nexttick · Node.js 文档：Don't Block the Event Loop（Event Loop 与 Worker Pool 的分工；哪些 API 用线程池）https://nodejs.org/en/learn/asynchronous-work/dont-block-the-event-loop · libuv 文档：Thread pool（默认 4 条、UV_THREADPOOL_SIZE 上限 1024、所有 fs 操作与 getaddrinfo、线程栈 8 MB）https://docs.libuv.org/en/v1.x/threadpool.html · libuv 文档：Design overview（网络走非阻塞 socket + epoll/kqueue/IOCP，loop 绑定单线程）https://docs.libuv.org/en/v1.x/design.html · Node.js 文档：worker_threads（适合 CPU 密集，I/O 密集用内建异步更划算）https://nodejs.org/api/worker_threads.html · V8 博客：Trash talk（两个 GC：Scavenger 收新生代、Mark-Compact 收全堆；分代布局）https://v8.dev/blog/trash-talk · Go 源码 src/runtime/mgc.go：并发标记清扫、非分代非压缩、STW 让所有 P 到安全点、GOGC=100、per-P 分配区 · Go 源码 src/runtime/proc.go：G/M/P 注释、findRunnable、sysmon、retake、handoffp · Go 源码 src/runtime/stack.go：stackMin = 2048、newstack 里 newsize := oldsize * 2 · Go 源码 src/runtime/signal_unix.go：sigPreempt = _SIGURG（异步抢占） · 本机实测（Node 24.19.0 / V8 13.6.233.17 / libuv 1.52.1，macOS 26，Apple M4，2026-10-20）：ps -M 数线程 —— 空转 7 条；8 个并发 fs 读 11 条；UV_THREADPOOL_SIZE=8 时 15 条；24 个并发读仍 11 条 · 本机实测（同上）：200 ms 忙循环里 10 ms 定时器触发 0 次；单线程递归 10384 层触发 RangeError；v8.getHeapStatistics().heap_size_limit = 4288 MiB</span><span><b>生成</b> 2026-10-20</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">Go</span> <span class="tag tone-muted">Node.js</span> <span class="tag tone-muted">运行时</span> <span class="tag tone-muted">事件循环</span></span></div>
+
+<h2 id="先把两个运行时的零件摆在一起">先把两个运行时的零件摆在一起</h2>
+<p>左边是 Go 二进制，右边是 Node 进程。两个框里各有四五个零件，底下都落到同一个操作系统。<mark class="mk-blue">同一个 read() 在两边会停在不同的零件上</mark> —— 这就是「语言框架的差别」具体指什么。</p>
+<figure class="archfig" data-arch style="--arch-max-width:1560px" data-boundaries="nested" data-pano data-parts='{"g":{"label":"G","sub":"goroutine","detail":"一个任务 = 一块栈 + 一份现场 + 一个状态。它不绑定线程，谁拿到谁跑。"},"netpoll":{"label":"netpoll","sub":"网络轮询器","detail":"socket 设成非阻塞，读不到就把 G 挂这儿。==等的时候没有线程在场==。"},"p":{"label":"P","sub":"运行许可 + 本地队列","detail":"M 拿到 P 才能跑 Go 代码；M 卡在系统调用时，P 可以转手给别的 M。"},"m":{"label":"M","sub":"内核线程","detail":"真正被内核调度的东西。数量可以远多于 P —— 卡在系统调用里的那些不占 P。"},"js":{"label":"JS 主线程","sub":"只有一条","detail":"所有 JS 代码（包括 await 之后那段）都在这条线程上。它被卡住，整个进程就停摆。"},"uvpoll":{"label":"libuv poll","sub":"网络那条路","detail":"和 Go 的 netpoll 是同一个思路 —— 非阻塞 socket + epoll/kqueue/IOCP，只是主线程不陪着等。"},"queue":{"label":"事件循环","sub":"六个阶段的队列","detail":"一轮里依次走完几个阶段，每个阶段把自己队列里的回调清空。你的代码只在「取回调」这一刻被调用。"},"pool":{"label":"线程池","sub":"4 条，全是阻塞操作","detail":"文件、DNS、crypto、zlib 这些内核没有异步接口的活，交给池线程真阻塞。==等的是线程，不是回调==。"},"os":{"label":"操作系统","sub":"同一套接口","detail":"线程、系统调用、多路复用、核 —— 两套运行时都得通过这一层，差别只在怎么用它。"}}' data-tours='[{"id":"go-read","label":"Go 侧：一次 socket 读","steps":[{"at":["g"],"text":"G 调 read，内核说数据没到。==挂起的是这个 G，不是那条线程。=="},{"at":["netpoll"],"text":"G 被登记到 pollDesc 上，状态改成 Gwaiting。线程转头去跑队列里的下一个 G。"},{"at":["p"],"text":"数据到了，netpoll 把 G 放回某个 P 的本地队列 —— 还是那条 2 KiB 的栈，接着往下读。"}]},{"id":"node-read","label":"Node 侧：一次 fs.readFile","steps":[{"at":["js"],"text":"JS 调 fs.readFile，登记一个回调就立刻返回 —— 主线程一秒都不等。"},{"at":["queue"],"text":"回调挂在队列上。这时主线程已经在跑别的 JS 了。"},{"at":["pool"],"text":"真正的 read 在池子里的一条线程上阻塞。池子默认只有 4 条，第 5 个任务要排队。"},{"at":["os"],"text":"池线程进内核等磁盘；读完了，回调被排进事件循环，等下一轮被取出来执行。"}]}]' data-frames='[{"id":"go","boundary":0,"kind":"contains","label":"Go 二进制：runtime 编在里面","detail":"调度器、netpoller、GC 都是这个二进制的一部分，和语言同版本。所以 Go 能自己决定「谁跑、谁等、谁停」。","members":["g","p","m","netpoll"],"depth":1},{"id":"node","boundary":1,"kind":"contains","label":"Node 进程：V8 + libuv 拼起来","detail":"JS 引擎（V8）和 I/O 库（libuv）独立演进，Node 只是把它们和一堆内建模块装进一个进程。所以「升级 Node」其实是换这两样东西。","members":["js","queue","pool","uvpoll"],"depth":1},{"id":"osf","boundary":2,"kind":"contains","label":"两个都落到这儿","detail":"线程、系统调用、多路复用、核，都归内核。两套运行时的差别不在这一层，而在它们怎么用这一层。","members":["os"],"depth":1}]'>
+      <div class="arch-boundary-ui">
+          <div class="arch-boundary-toolbar"><span class="arch-boundary-label">边界</span>
+            <button type="button" data-boundary-mode="nested" aria-pressed="true">多层归属框</button>
+            <button type="button" data-boundary-mode="flat" aria-pressed="false">只留一层分区</button>
+            <button type="button" data-arch-reset>恢复全图</button>
+          </div>
+          <div class="arch-address-box" aria-live="polite"><div data-arch-address>点一个零件，看完整归属路径；点一个区域标题，看这一层的含义。</div>
+            <div data-arch-frame-detail>最外框表示逻辑资源域，不表示所有对象在一块内存里。每层边界的标题说明分组依据。</div></div>
+        </div>
+      <div class="arch-canvas"><svg viewBox="0 0 1560 1040" role="img" aria-labelledby="runtime-two-lanes-archify-diagram-title runtime-two-lanes-archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
+        <title id="runtime-two-lanes-archify-diagram-title">两套运行时：同一个系统调用，落在不同的零件上</title>
+        <desc id="runtime-two-lanes-archify-diagram-description">Go 把阻塞记在一个任务的状态里；Node 把阻塞外包给 4 条池线程。两边的线程数都跟并发量脱钩，脱钩的办法完全不同</desc>
+        <!-- Definitions -->
+        <defs>
+          <marker id="runtime-two-lanes-arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-default" />
+          </marker>
+          <marker id="runtime-two-lanes-arrowhead-emphasis" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-emphasis" />
+          </marker>
+          <marker id="runtime-two-lanes-arrowhead-security" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-security" />
+          </marker>
+          <marker id="runtime-two-lanes-arrowhead-dashed" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-dashed" />
+          </marker>
+          <pattern id="runtime-two-lanes-grid" width="40" height="40" patternUnits="userSpaceOnUse">
+            <path d="M 40 0 L 0 0 0 40" class="c-grid" stroke-width="0.5"/>
+          </pattern>
+        </defs>
+
+        <!-- Background Grid -->
+        <rect width="100%" height="100%" fill="url(#runtime-two-lanes-grid)" />
+
+        <!-- Boundaries (behind everything) -->
+        <g class="arch-frame" data-frame="go" data-depth="1" data-frame-flat="false" data-frame-kind="contains" role="button" tabindex="0" aria-pressed="false" aria-label="Go 二进制：runtime 编在里面"><title>调度器、netpoller、GC 都是这个二进制的一部分，和语言同版本。所以 Go 能自己决定「谁跑、谁等、谁停」。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="0" data-frame-members="g p m netpoll" x="40" y="60" width="670" height="610" rx="12" class="c-region" stroke-width="1"/>
+        <text x="48" y="78" class="t-cloud" font-size="9" font-weight="600">Go 二进制：runtime 编在里面</text></g>
+
+        <g class="arch-frame" data-frame="node" data-depth="1" data-frame-flat="false" data-frame-kind="contains" role="button" tabindex="0" aria-pressed="false" aria-label="Node 进程：V8 + libuv 拼起来"><title>JS 引擎（V8）和 I/O 库（libuv）独立演进，Node 只是把它们和一堆内建模块装进一个进程。所以「升级 Node」其实是换这两样东西。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="1" data-frame-members="js queue pool uvpoll" x="840" y="60" width="660" height="610" rx="12" class="c-region" stroke-width="1"/>
+        <text x="848" y="78" class="t-cloud" font-size="9" font-weight="600">Node 进程：V8 + libuv 拼起来</text></g>
+
+        <g class="arch-frame" data-frame="osf" data-depth="1" data-frame-flat="false" data-frame-kind="contains" role="button" tabindex="0" aria-pressed="false" aria-label="两个都落到这儿"><title>线程、系统调用、多路复用、核，都归内核。两套运行时的差别不在这一层，而在它们怎么用这一层。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="2" data-frame-members="os" x="470" y="690" width="620" height="190" rx="12" class="c-region" stroke-width="1"/>
+        <text x="478" y="708" class="t-cloud" font-size="9" font-weight="600">两个都落到这儿</text></g>
+
+        <!-- Connection paths (before components for correct z-order) -->
+        <path data-edge-from="g" data-edge-to="p" data-edge-label="进队列" data-edge-key="0" data-edge-id="g-p" data-composition-points="210,240;210,300" d="M 210 240 L 210 300" class="a-default" stroke-width="1.5" marker-end="url(#runtime-two-lanes-arrowhead)"/>
+        <path data-edge-from="p" data-edge-to="m" data-edge-label="持有" data-edge-key="1" data-edge-id="p-m" data-composition-points="210,440;210,500" d="M 210 440 L 210 500" class="a-default" stroke-width="1.5" marker-end="url(#runtime-two-lanes-arrowhead)"/>
+        <path data-edge-from="g" data-edge-to="netpoll" data-edge-label="等 socket" data-edge-key="2" data-edge-id="g-np" data-composition-points="340,170;545,170;545,300" d="M 340 170 L 537 170 Q 545 170 545 178 L 545 300" class="a-default" stroke-width="1.5" marker-end="url(#runtime-two-lanes-arrowhead)"/>
+        <path data-edge-from="netpoll" data-edge-to="p" data-edge-label="就绪" data-edge-key="3" data-edge-id="np-p" data-composition-points="420,370;340,370" d="M 420 370 L 340 370" class="a-dashed" stroke-width="1.5" marker-end="url(#runtime-two-lanes-arrowhead-dashed)"/>
+        <path data-edge-from="m" data-edge-to="os" data-edge-label="系统调用 / 上核" data-edge-key="4" data-edge-id="m-os" data-composition-points="210,630;210,785;500,785" d="M 210 630 L 210 777 Q 210 785 218 785 L 500 785" class="a-default" stroke-width="1.5" marker-end="url(#runtime-two-lanes-arrowhead)"/>
+        <path data-edge-from="js" data-edge-to="uvpoll" data-edge-label="注册 socket" data-edge-key="5" data-edge-id="js-uv" data-composition-points="1160,170;1340,170;1340,300" d="M 1160 170 L 1332 170 Q 1340 170 1340 178 L 1340 300" class="a-default" stroke-width="1.5" marker-end="url(#runtime-two-lanes-arrowhead)"/>
+        <path data-edge-from="uvpoll" data-edge-to="queue" data-edge-label="就绪回调" data-edge-key="6" data-edge-id="uv-q" data-composition-points="1220,370;1160,370" d="M 1220 370 L 1160 370" class="a-default" stroke-width="1.5" marker-end="url(#runtime-two-lanes-arrowhead)"/>
+        <path data-edge-from="js" data-edge-to="queue" data-edge-label="登记回调" data-edge-key="7" data-edge-id="js-q" data-composition-points="1020,240;1020,300" d="M 1020 240 L 1020 300" class="a-default" stroke-width="1.5" marker-end="url(#runtime-two-lanes-arrowhead)"/>
+        <path data-edge-from="queue" data-edge-to="js" data-edge-label="取出回调" data-edge-key="8" data-edge-id="q-js" data-composition-points="1020,300;1020,240" d="M 1020 300 L 1020 240" class="a-default" stroke-width="1.5" marker-end="url(#runtime-two-lanes-arrowhead)"/>
+        <path data-edge-from="queue" data-edge-to="pool" data-edge-label="交给池" data-edge-key="9" data-edge-id="q-pool" data-composition-points="1020,440;1020,500" d="M 1020 440 L 1020 500" class="a-default" stroke-width="1.5" marker-end="url(#runtime-two-lanes-arrowhead)"/>
+        <path data-edge-from="pool" data-edge-to="os" data-edge-label="真的阻塞在读盘上" data-edge-key="10" data-edge-id="pool-os" data-composition-points="1020,630;1020,675;780,675;780,720" d="M 1020 630 L 1020 667 Q 1020 675 1012 675 L 788 675 Q 780 675 780 683 L 780 720" class="a-default" stroke-width="1.5" marker-end="url(#runtime-two-lanes-arrowhead)"/>
+
+        <!-- Components -->
+        <g id="runtime-two-lanes-node-g" data-nb="1" data-node-id="g" data-node-label="G × 几十万" tabindex="0" role="button" aria-label="Focus G × 几十万, 任务：栈 + 现场 + 状态, Go 二进制：runtime 编在里面" aria-pressed="false" data-node-kind="backend" data-node-sublabel="任务：栈 + 现场 + 状态" data-node-context="Go 二进制：runtime 编在里面">
+          <title>G × 几十万 · 任务：栈 + 现场 + 状态 · Go 二进制：runtime 编在里面</title>
+          <rect x="80" y="100" width="260" height="140" rx="6" class="c-mask"/>
+          <rect x="80" y="100" width="260" height="140" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(86 106) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <rect class="nb-badge" x="277.6" y="108" width="50.4" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="302.8" y="119" font-size="8" text-anchor="middle">几十万个</text>
+          <text class="nb-title" x="114" y="121" font-size="10.5" font-weight="600">G × 几十万</text>
+          <line class="nb-hr" x1="88" y1="128" x2="332" y2="128"/>
+          <text class="nb-k" x="92" y="166" font-size="9">栈</text><text class="nb-v" x="122.6" y="166" font-size="9">2 KiB 起，不够就搬大的</text>
+          <text class="nb-k" x="92" y="180" font-size="9">现场</text><text class="nb-v" x="122.6" y="180" font-size="9">SP / PC / BP 三个值</text>
+          <text class="nb-k" x="92" y="194" font-size="9">状态</text><text class="nb-v" x="122.6" y="194" font-size="9">一个整数，等于排队还是等</text>
+          <text class="nb-note" x="92" y="232" font-size="8">代码段、堆、fd 表都是进程的，G 不背</text>
+        </g>
+
+        <g id="runtime-two-lanes-node-netpoll" data-nb="1" data-node-id="netpoll" data-node-label="netpoll" tabindex="0" role="button" aria-label="Focus netpoll, 等 socket 的 G 挂这儿, Go 二进制：runtime 编在里面" aria-pressed="false" data-node-kind="messagebus" data-node-sublabel="等 socket 的 G 挂这儿" data-node-context="Go 二进制：runtime 编在里面">
+          <title>netpoll · 等 socket 的 G 挂这儿 · Go 二进制：runtime 编在里面</title>
+          <rect x="420" y="300" width="250" height="140" rx="6" class="c-mask"/>
+          <rect x="420" y="300" width="250" height="140" rx="6" class="c-messagebus" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="messagebus" class="semantic-sigil s-messagebus" transform="translate(426 306) scale(0.6875)">
+            <path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h11"/>
+            <circle cx="5" cy="4.5" r="1" class="sigil-fill"/>
+            <circle cx="10.5" cy="8" r="1" class="sigil-fill"/>
+            <circle cx="7" cy="11.5" r="1" class="sigil-fill"/>
+          </g>
+          <text class="nb-title" x="454" y="321" font-size="10.5" font-weight="600">netpoll</text>
+          <line class="nb-hr" x1="428" y1="328" x2="662" y2="328"/>
+          <text class="nb-k" x="432" y="373" font-size="9">谁在等</text><text class="nb-v" x="473.4" y="373" font-size="9">G，不是线程</text>
+          <text class="nb-k" x="432" y="387" font-size="9">底层</text><text class="nb-v" x="473.4" y="387" font-size="9">epoll / kqueue / IOCP</text>
+          <text class="nb-note" x="432" y="432" font-size="8">只有 socket 这类能 poll 的才走这条</text>
+        </g>
+
+        <g id="runtime-two-lanes-node-p" data-nb="1" data-node-id="p" data-node-label="P（GOMAXPROCS 个）" tabindex="0" role="button" aria-label="Focus P（GOMAXPROCS 个）, 本地队列 + mcache, Go 二进制：runtime 编在里面" aria-pressed="false" data-node-kind="backend" data-node-sublabel="本地队列 + mcache" data-node-context="Go 二进制：runtime 编在里面">
+          <title>P（GOMAXPROCS 个） · 本地队列 + mcache · Go 二进制：runtime 编在里面</title>
+          <rect x="80" y="300" width="260" height="140" rx="6" class="c-mask"/>
+          <rect x="80" y="300" width="260" height="140" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(86 306) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text class="nb-title" x="114" y="321" font-size="10.5" font-weight="600">P（GOMAXPROCS 个）</text>
+          <line class="nb-hr" x1="88" y1="328" x2="332" y2="328"/>
+          <text class="nb-k" x="92" y="366" font-size="9">runnext</text><text class="nb-v" x="138.8" y="366" font-size="9">1 格</text>
+          <text class="nb-k" x="92" y="380" font-size="9">runq</text><text class="nb-v" x="138.8" y="380" font-size="9">256 槽环形数组</text>
+          <text class="nb-k" x="92" y="394" font-size="9">mcache</text><text class="nb-v" x="138.8" y="394" font-size="9">小对象分配不用锁</text>
+          <text class="nb-note" x="92" y="432" font-size="8">数量 = GOMAXPROCS；可以没有 M 持有</text>
+        </g>
+
+        <g id="runtime-two-lanes-node-m" data-nb="1" data-node-id="m" data-node-label="M × 十几条" tabindex="0" role="button" aria-label="Focus M × 十几条, 内核线程，带 g0, Go 二进制：runtime 编在里面" aria-pressed="false" data-node-kind="backend" data-node-sublabel="内核线程，带 g0" data-node-context="Go 二进制：runtime 编在里面">
+          <title>M × 十几条 · 内核线程，带 g0 · Go 二进制：runtime 编在里面</title>
+          <rect x="80" y="500" width="260" height="130" rx="6" class="c-mask"/>
+          <rect x="80" y="500" width="260" height="130" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(86 506) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text class="nb-title" x="114" y="521" font-size="10.5" font-weight="600">M × 十几条</text>
+          <line class="nb-hr" x1="88" y1="528" x2="332" y2="528"/>
+          <text class="nb-k" x="92" y="568" font-size="9">g0</text><text class="nb-v" x="165.8" y="568" font-size="9">16 KiB 系统栈，调度代码在这跑</text>
+          <text class="nb-k" x="92" y="582" font-size="9">数量</text><text class="nb-v" x="165.8" y="582" font-size="9">可以多于 P</text>
+          <text class="nb-k" x="92" y="596" font-size="9">卡在系统调用</text><text class="nb-v" x="165.8" y="596" font-size="9">不占 P</text>
+        </g>
+
+        <g id="runtime-two-lanes-node-js" data-nb="1" data-node-id="js" data-node-label="主线程 · 跑 JS" tabindex="0" role="button" aria-label="Focus 主线程 · 跑 JS, 一条 JS 栈，堆在 V8, Node 进程：V8 + libuv 拼起来" aria-pressed="false" data-node-kind="backend" data-node-sublabel="一条 JS 栈，堆在 V8" data-node-context="Node 进程：V8 + libuv 拼起来">
+          <title>主线程 · 跑 JS · 一条 JS 栈，堆在 V8 · Node 进程：V8 + libuv 拼起来</title>
+          <rect x="880" y="100" width="280" height="140" rx="6" class="c-mask"/>
+          <rect x="880" y="100" width="280" height="140" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(886 106) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text class="nb-title" x="914" y="121" font-size="10.5" font-weight="600">主线程 · 跑 JS</text>
+          <line class="nb-hr" x1="888" y1="128" x2="1152" y2="128"/>
+          <text class="nb-k" x="892" y="166" font-size="9">JS 栈</text><text class="nb-v" x="928.0" y="166" font-size="9">一条，固定大小</text>
+          <text class="nb-k" x="892" y="180" font-size="9">堆</text><text class="nb-v" x="928.0" y="180" font-size="9">分代，归 V8</text>
+          <text class="nb-k" x="892" y="194" font-size="9">线程</text><text class="nb-v" x="928.0" y="194" font-size="9">默认只有这一条在跑 JS</text>
+          <text class="nb-note" x="892" y="232" font-size="8">你的回调、await 后面那段，都在这里</text>
+        </g>
+
+        <g id="runtime-two-lanes-node-uvpoll" data-nb="1" data-node-id="uvpoll" data-node-label="libuv poll" tabindex="0" role="button" aria-label="Focus libuv poll, 网络 socket 走这条, Node 进程：V8 + libuv 拼起来" aria-pressed="false" data-node-kind="messagebus" data-node-sublabel="网络 socket 走这条" data-node-context="Node 进程：V8 + libuv 拼起来">
+          <title>libuv poll · 网络 socket 走这条 · Node 进程：V8 + libuv 拼起来</title>
+          <rect x="1220" y="300" width="240" height="140" rx="6" class="c-mask"/>
+          <rect x="1220" y="300" width="240" height="140" rx="6" class="c-messagebus" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="messagebus" class="semantic-sigil s-messagebus" transform="translate(1226 306) scale(0.6875)">
+            <path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h11"/>
+            <circle cx="5" cy="4.5" r="1" class="sigil-fill"/>
+            <circle cx="10.5" cy="8" r="1" class="sigil-fill"/>
+            <circle cx="7" cy="11.5" r="1" class="sigil-fill"/>
+          </g>
+          <text class="nb-title" x="1254" y="321" font-size="10.5" font-weight="600">libuv poll</text>
+          <line class="nb-hr" x1="1228" y1="328" x2="1452" y2="328"/>
+          <text class="nb-k" x="1232" y="373" font-size="9">走这条的</text><text class="nb-v" x="1284.2" y="373" font-size="9">网络 socket（非阻塞）</text>
+          <text class="nb-k" x="1232" y="387" font-size="9">主线程</text><text class="nb-v" x="1284.2" y="387" font-size="9">不陪着等，只处理回调</text>
+          <text class="nb-note" x="1232" y="432" font-size="8">文件、DNS、crypto 不走这条</text>
+        </g>
+
+        <g id="runtime-two-lanes-node-queue" data-nb="1" data-node-id="queue" data-node-label="事件循环" tabindex="0" role="button" aria-label="Focus 事件循环, 一轮六个阶段，回调排队, Node 进程：V8 + libuv 拼起来" aria-pressed="false" data-node-kind="messagebus" data-node-sublabel="一轮六个阶段，回调排队" data-node-context="Node 进程：V8 + libuv 拼起来">
+          <title>事件循环 · 一轮六个阶段，回调排队 · Node 进程：V8 + libuv 拼起来</title>
+          <rect x="880" y="300" width="280" height="140" rx="6" class="c-mask"/>
+          <rect x="880" y="300" width="280" height="140" rx="6" class="c-messagebus" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="messagebus" class="semantic-sigil s-messagebus" transform="translate(886 306) scale(0.6875)">
+            <path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h11"/>
+            <circle cx="5" cy="4.5" r="1" class="sigil-fill"/>
+            <circle cx="10.5" cy="8" r="1" class="sigil-fill"/>
+            <circle cx="7" cy="11.5" r="1" class="sigil-fill"/>
+          </g>
+          <text class="nb-title" x="914" y="321" font-size="10.5" font-weight="600">事件循环</text>
+          <line class="nb-hr" x1="888" y1="328" x2="1152" y2="328"/>
+          <text class="nb-k" x="892" y="373" font-size="9">一轮六阶段</text><text class="nb-v" x="955.0" y="373" font-size="9">timers → pending → poll → check → close</text>
+          <text class="nb-k" x="892" y="387" font-size="9">队列</text><text class="nb-v" x="955.0" y="387" font-size="9">每个阶段一个 FIFO</text>
+          <text class="nb-note" x="892" y="432" font-size="8">你的回调按阶段排队，不是「随便插队」</text>
+        </g>
+
+        <g id="runtime-two-lanes-node-pool" data-nb="1" data-node-id="pool" data-node-label="线程池（默认 4 条）" tabindex="0" role="button" aria-label="Focus 线程池（默认 4 条）, fs · DNS · crypto · zlib, Node 进程：V8 + libuv 拼起来" aria-pressed="false" data-node-kind="backend" data-node-sublabel="fs · DNS · crypto · zlib" data-node-context="Node 进程：V8 + libuv 拼起来">
+          <title>线程池（默认 4 条） · fs · DNS · crypto · zlib · Node 进程：V8 + libuv 拼起来</title>
+          <rect x="880" y="500" width="280" height="130" rx="6" class="c-mask"/>
+          <rect x="880" y="500" width="280" height="130" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(886 506) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text class="nb-title" x="914" y="521" font-size="10.5" font-weight="600">线程池（默认 4 条）</text>
+          <line class="nb-hr" x1="888" y1="528" x2="1152" y2="528"/>
+          <text class="nb-k" x="892" y="561" font-size="9">默认几条</text><text class="nb-v" x="944.2" y="561" font-size="9">4（UV_THREADPOOL_SIZE）</text>
+          <text class="nb-k" x="892" y="575" font-size="9">干什么</text><text class="nb-v" x="944.2" y="575" font-size="9">fs、dns.lookup、crypto、zlib</text>
+          <text class="nb-k" x="892" y="589" font-size="9">谁在等</text><text class="nb-v" x="944.2" y="589" font-size="9">池线程陪着阻塞</text>
+          <text class="nb-note" x="892" y="622" font-size="8">超出 4 个的任务在池子的队列里等</text>
+        </g>
+
+        <g id="runtime-two-lanes-node-os" data-nb="1" data-node-id="os" data-node-label="操作系统" tabindex="0" role="button" aria-label="Focus 操作系统, 系统调用 · 多路复用 · 线程 · 核, 两个都落到这儿" aria-pressed="false" data-node-kind="external" data-node-sublabel="系统调用 · 多路复用 · 线程 · 核" data-node-context="两个都落到这儿">
+          <title>操作系统 · 系统调用 · 多路复用 · 线程 · 核 · 两个都落到这儿</title>
+          <rect x="500" y="720" width="560" height="130" rx="6" class="c-mask"/>
+          <rect x="500" y="720" width="560" height="130" rx="6" class="c-external" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="external" class="semantic-sigil s-external" transform="translate(506 726) scale(0.6875)">
+            <rect x="2.5" y="5" width="8.5" height="8" rx="1.5"/>
+            <path d="M8 2.5h5.5V8M13.5 2.5 7.5 8.5"/>
+          </g>
+          <text class="nb-title" x="534" y="741" font-size="10.5" font-weight="600">操作系统</text>
+          <line class="nb-hr" x1="508" y1="748" x2="1052" y2="748"/>
+          <text class="nb-k" x="512" y="781" font-size="9">系统调用</text><text class="nb-v" x="564.2" y="781" font-size="9">read / write / mmap</text>
+          <text class="nb-k" x="512" y="795" font-size="9">多路复用</text><text class="nb-v" x="564.2" y="795" font-size="9">epoll / kqueue / IOCP</text>
+          <text class="nb-k" x="512" y="809" font-size="9">线程</text><text class="nb-v" x="564.2" y="809" font-size="9">pthread_create，内核调度</text>
+          <text class="nb-note" x="512" y="842" font-size="8">两套运行时都在这一层之上各搭了一套</text>
+        </g>
+
+        <!-- Connection labels -->
+        <g data-detail="context" data-edge-from="g" data-edge-to="p" data-edge-label="进队列" data-edge-key="0" data-edge-id="g-p">
+          <rect x="190.6" y="260" width="38.8" height="14" rx="3" class="c-mask"/>
+          <text x="210" y="270" class="t-muted" font-size="8" text-anchor="middle">进队列</text>
+        </g>
+        <g data-detail="context" data-edge-from="p" data-edge-to="m" data-edge-label="持有" data-edge-key="1" data-edge-id="p-m">
+          <rect x="195" y="460" width="30" height="14" rx="3" class="c-mask"/>
+          <text x="210" y="470" class="t-muted" font-size="8" text-anchor="middle">持有</text>
+        </g>
+        <g data-detail="context" data-edge-from="g" data-edge-to="netpoll" data-edge-label="等 socket" data-edge-key="2" data-edge-id="g-np">
+          <rect x="518.4" y="215" width="53.199999999999996" height="14" rx="3" class="c-mask"/>
+          <text x="545" y="225" class="t-muted" font-size="8" text-anchor="middle">等 socket</text>
+        </g>
+        <g data-detail="context" data-edge-from="netpoll" data-edge-to="p" data-edge-label="就绪" data-edge-key="3" data-edge-id="np-p">
+          <rect x="365" y="350" width="30" height="14" rx="3" class="c-mask"/>
+          <text x="380" y="360" class="t-messagebus" font-size="8" text-anchor="middle">就绪</text>
+        </g>
+        <g data-detail="context" data-edge-from="m" data-edge-to="os" data-edge-label="系统调用 / 上核" data-edge-key="4" data-edge-id="m-os">
+          <rect x="314" y="765" width="82" height="14" rx="3" class="c-mask"/>
+          <text x="355" y="775" class="t-muted" font-size="8" text-anchor="middle">系统调用 / 上核</text>
+        </g>
+        <g data-detail="context" data-edge-from="js" data-edge-to="uvpoll" data-edge-label="注册 socket" data-edge-key="5" data-edge-id="js-uv">
+          <rect x="1308.6" y="215" width="62.8" height="14" rx="3" class="c-mask"/>
+          <text x="1340" y="225" class="t-muted" font-size="8" text-anchor="middle">注册 socket</text>
+        </g>
+        <g data-detail="context" data-edge-from="uvpoll" data-edge-to="queue" data-edge-label="就绪回调" data-edge-key="6" data-edge-id="uv-q">
+          <rect x="1165.8" y="350" width="48.4" height="14" rx="3" class="c-mask"/>
+          <text x="1190" y="360" class="t-muted" font-size="8" text-anchor="middle">就绪回调</text>
+        </g>
+        <g data-detail="context" data-edge-from="js" data-edge-to="queue" data-edge-label="登记回调" data-edge-key="7" data-edge-id="js-q">
+          <rect x="960.8" y="258" width="48.4" height="14" rx="3" class="c-mask"/>
+          <text x="985" y="268" class="t-muted" font-size="8" text-anchor="middle">登记回调</text>
+        </g>
+        <g data-detail="context" data-edge-from="queue" data-edge-to="js" data-edge-label="取出回调" data-edge-key="8" data-edge-id="q-js">
+          <rect x="1030.8" y="278" width="48.4" height="14" rx="3" class="c-mask"/>
+          <text x="1055" y="288" class="t-muted" font-size="8" text-anchor="middle">取出回调</text>
+        </g>
+        <g data-detail="context" data-edge-from="queue" data-edge-to="pool" data-edge-label="交给池" data-edge-key="9" data-edge-id="q-pool">
+          <rect x="1000.6" y="460" width="38.8" height="14" rx="3" class="c-mask"/>
+          <text x="1020" y="470" class="t-muted" font-size="8" text-anchor="middle">交给池</text>
+        </g>
+        <g data-detail="context" data-edge-from="pool" data-edge-to="os" data-edge-label="真的阻塞在读盘上" data-edge-key="10" data-edge-id="pool-os">
+          <rect x="856.6" y="655" width="86.8" height="14" rx="3" class="c-mask"/>
+          <text x="900" y="665" class="t-muted" font-size="8" text-anchor="middle">真的阻塞在读盘上</text>
+        </g>
+
+        <!-- Legend -->
+        <g data-legend data-legend-bridge>
+          <text x="40" y="1004" class="t-primary" font-size="12" font-weight="650">Legend</text>
+          <g data-legend-semantic-kind="backend" data-legend-kind="backend" data-legend-label="Backend" data-legend-x="40" data-legend-baseline="1024" data-legend-width="78">
+            <rect x="40" y="1015" width="16" height="10" rx="2.5" class="c-backend" stroke-width="1"/>
+            <text x="62" y="1024" class="t-muted" font-size="10" font-weight="500">Backend</text>
+          </g>
+          <g data-legend-semantic-kind="messagebus" data-legend-kind="messagebus" data-legend-label="Message bus" data-legend-x="140" data-legend-baseline="1024" data-legend-width="98">
+            <rect x="140" y="1015" width="16" height="10" rx="2.5" class="c-messagebus" stroke-width="1"/>
+            <text x="162" y="1024" class="t-muted" font-size="10" font-weight="500">Message bus</text>
+          </g>
+          <g data-legend-semantic-kind="external" data-legend-kind="external" data-legend-label="External" data-legend-x="260" data-legend-baseline="1024" data-legend-width="83">
+            <rect x="260" y="1015" width="16" height="10" rx="2.5" class="c-external" stroke-width="1"/>
+            <text x="282" y="1024" class="t-muted" font-size="10" font-weight="500">External</text>
+          </g>
+        </g>
+      </svg></div>
+      <figcaption>从 G 点进去看「任务怎么排队」，或者从 JS 主线程点进去看「回调交给谁」。两条导览各走一遍同一个读请求。</figcaption>
+      <div class="pano-ui"></div>
+      <p class="arch-hint"><span class="idle">点头上的任意一个框看它的关系，点区域标题看分组含义，点零件看完整归属路径</span><span class="focused">再点一次空白处取消</span></p>
+    </figure><p>左边一个任务只花 2 KiB，所以能开几十万个；右边只有一条 JS 线程，所以你的代码一秒都不能卡。<mark class="mk-blue">这两句话已经把后面所有差别都框住了。</mark></p>
+<h2 id="你说对的那半句和只是内存和线程">你说对的那半句，和「只是内存和线程」</h2>
+<p>你画的梯子是对的，而且是对的层次：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">你的代码 → 语言/运行时给的抽象 → 系统调用 → 硬件
+</code></pre></div>
+<p>不管 Go 还是 Node，最后都得用内核给的那一套：创建线程、申请内存、读写文件、收发网络包。<mark class="mk-blue">这一层两边没有差别，差别在「谁去用、什么时候用、用完怎么收」。</mark></p>
+<p>但「差别就是怎么利用内存和利用线程」把结果说成了原因。内存和线程是<strong>材料</strong>，真正分开两条路的是四个职责的分工：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>职责</th><th>Go runtime</th><th>Node（V8 + libuv）</th></tr></thead><tbody><tr><th>下一条执行什么</th><td data-label="Go runtime">调度器：G/M/P + 本地队列 + 窃取</td><td data-label="Node（V8 + libuv）">事件循环：一轮六个阶段，按阶段取回调</td></tr><tr><th>阻塞的调用谁去等</th><td data-label="Go runtime">能 poll 的交给 netpoll（G 挂起）；不能的让 M 陪着，P 转交</td><td data-label="Node（V8 + libuv）">网络交给 libuv poll；文件/DNS/crypto 交给线程池</td></tr><tr><th>内存谁回收</th><td data-label="Go runtime">runtime 的 GC：并发标记清扫，非分代、非压缩</td><td data-label="Node（V8 + libuv）">V8 的 GC：分两代，Scavenger 复制 + Mark-Compact</td></tr><tr><th>并行度谁决定</th><td data-label="Go runtime"><code>GOMAXPROCS</code> 个 P，同一刻最多这么多条 M 跑 Go 代码</td><td data-label="Node（V8 + libuv）">JS 只有一条线程；要更多就自己开 <code>worker_threads</code></td></tr></tbody></table></div><p>四行里最要命的是第二行。<mark class="mk-blue">Go 让「等」变成任务的一个状态；Node 让「等」变成池子里一条线程的差事，而你的代码只负责处理回调。</mark></p>
+<p>这一条分岔，往下长出了后面所有差别：栈要不要可搬、GC 要不要抢占、代码能不能写出「阻塞」、并发到底是不是并行。</p>
+<h2 id="go-侧一次-socket-读线程走人">Go 侧：一次 socket 读，线程走人</h2>
+<p>先看 Go。读一个 socket，数据还没到：</p>
+<div class="seqd has-grid" data-seq data-n="4"
+      style="--seq-fill:url(#s-fill-1);--seq-open:url(#s-fill-1-open)">
+      <svg class="seqd-svg" aria-hidden="true">
+        <defs>
+          <marker id="s-fill-1" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+          <marker id="s-fill-1-open" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10" fill="none" stroke="currentColor" stroke-width="1.4"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="seqd-head"><div class="scell"><div class="spart tone-green" data-id="g">
+          <b>G · 读 socket</b>
+        </div></div><div class="scell"><div class="spart tone-blue" data-id="m">
+          <b>M · 内核线程</b>
+        </div></div><div class="scell"><div class="spart tone-violet" data-id="np">
+          <b>netpoller</b>
+        </div></div><div class="scell"><div class="spart tone-amber" data-id="p">
+          <b>P 的本地队列</b>
+        </div></div></div>
+      <div class="seqd-body"><div class="smsg" data-from="g" data-to="m" data-kind="sync" data-i="1" data-note="1"><span class="snote">1</span><span class="slabel">read(fd)：内核返回 EAGAIN</span></div><div class="smsg" data-from="m" data-to="np" data-kind="sync" data-i="2" data-note="2"><span class="snote">2</span><span class="slabel">G 登记到 pollDesc，状态改成 Gwaiting</span></div><div class="smsg" data-from="m" data-to="p" data-kind="sync" data-i="3" data-note="3"><span class="snote">3</span><span class="slabel">同一条线程接着取下一个 G</span></div><div class="smsg" data-from="np" data-to="p" data-kind="sync" data-i="4" data-note="4"><span class="snote">4</span><span class="slabel">数据到了：G 放回 runnext</span></div></div>
+    </div><p>四步里最关键的是第 2 步：<mark class="mk-blue">挂起的是 G，不是线程。</mark> G 的栈（2 KiB 起步）还留在原地，寄存器里的现场被存进 <code>g.sched</code>，这条 M 转头就去跑别的 G 了 —— 内核从头到尾不知道发生过什么。</p>
+<p>第 4 步之后，G 被某条 M 取到，从 <code>gopark</code> 里返回，接着往下读。它可能换了条线程，但代码里看不出来：<code>conn.Read(buf)</code> 就是一次普通调用。</p>
+<div class="callout tone-amber">
+      <span class="ic">⚖</span>
+      <div><p>这条路只对<strong>能 poll 的东西</strong>成立：socket、管道。</p>
+<p>普通文件在 Linux 上加不进 epoll（<code>epoll_ctl</code> 直接返回 <code>EPERM</code>），Darwin/BSD 的 kqueue 对普通文件也不可靠 —— 所以读磁盘时线程只能陪着进内核。这时候保命的是另一条设计：<mark class="mk-blue">M 陪内核，P 交出去</mark>，别的 G 继续跑。</p>
+</div>
+    </div><h2 id="node-侧一次-file-读池子里的一条线程替你去等">Node 侧：一次 file 读，池子里的一条线程替你去等</h2>
+<p>同样一句「读」，Node 的走法完全不同：</p>
+<div class="seqd has-grid" data-seq data-n="4"
+      style="--seq-fill:url(#s-fill-2);--seq-open:url(#s-fill-2-open)">
+      <svg class="seqd-svg" aria-hidden="true">
+        <defs>
+          <marker id="s-fill-2" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+          <marker id="s-fill-2-open" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10" fill="none" stroke="currentColor" stroke-width="1.4"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="seqd-head"><div class="scell"><div class="spart tone-green" data-id="js">
+          <b>JS 主线程</b>
+        </div></div><div class="scell"><div class="spart tone-violet" data-id="pool">
+          <b>libuv 线程池</b>
+        </div></div><div class="scell"><div class="spart tone-amber" data-id="disk">
+          <b>磁盘</b>
+        </div></div><div class="scell"><div class="spart tone-blue" data-id="q">
+          <b>事件循环队列</b>
+        </div></div></div>
+      <div class="seqd-body"><div class="smsg" data-from="js" data-to="pool" data-kind="sync" data-i="1" data-note="1"><span class="snote">1</span><span class="slabel">fs.readFile：包成 uv_fs_t 投进池</span></div><div class="smsg" data-from="pool" data-to="disk" data-kind="sync" data-i="2" data-note="2"><span class="snote">2</span><span class="slabel">池线程真的阻塞在 read 上</span></div><div class="smsg" data-from="disk" data-to="pool" data-kind="reply" data-i="3" data-note="3"><span class="snote">3</span><span class="slabel">读完，数据在内核缓冲里</span></div><div class="smsg" data-from="pool" data-to="q" data-kind="sync" data-i="4" data-note="4"><span class="snote">4</span><span class="slabel">回调排进队列</span></div><div class="smsg" data-from="q" data-to="js" data-kind="sync" data-i="5" data-note="5" style="margin-top:30px"><span class="snote">5</span><span class="slabel">下一轮取出来执行</span></div></div>
+    </div><p>第 1 步返回得极快：主线程只是把一个任务投进池子，然后立刻回去跑别的 JS。真正阻塞的是<strong>池子里的那条线程</strong>，和你写的 JS 没有关系。</p>
+<p>所以「Node 是单线程的」这句话只在说一件事：<mark class="mk-blue">你的 JS 只在一条线程上跑</mark>。进程里其实有好几条：</p>
+<div class="cards" data-cols="4"><div class="ccard tone-muted">
+          <span class="tag tone-muted">7 条</span>
+          <h4>空转的 Node 进程</h4>
+          <p>本机 7 条线程 —— 主线程 + V8 后台 + libuv 的几条</p>
+          
+          
+        </div><div class="ccard tone-green">
+          <span class="tag tone-green">+4 条</span>
+          <h4>同时 8 个 fs 读</h4>
+          <p>变成 11 条：只多了 4 条，正好是池子的默认大小</p>
+          
+          
+        </div><div class="ccard tone-green">
+          <span class="tag tone-green">+4 条</span>
+          <h4>24 个 fs 读</h4>
+          <p>还是 11 条 —— 多出来的 20 个在池子的队列里等</p>
+          
+          
+        </div><div class="ccard tone-blue">
+          <span class="tag tone-blue">+8 条</span>
+          <h4>UV_THREADPOOL_SIZE=8</h4>
+          <p>同样 8 个读，变成 15 条：池子按这个值开线程</p>
+          
+          
+        </div></div><p>上面四个数字是 <code>ps -M</code> 数出来的（Node 24.19.0 / macOS 26 / Apple M4）。池子默认 4 条，启动时可以用 <code>UV_THREADPOOL_SIZE</code> 改，上限 1024 —— 但改大只是让更多阻塞调用同时等，不会让你的 JS 变快。</p>
+<div class="callout tone-red">
+      <span class="ic">⚠</span>
+      <div><p><strong>反过来说，主线程一卡，整个进程就停摆。</strong></p>
+<p>本机实测：一段 200 ms 的纯计算循环里，一个 10 ms 的定时器<mark class="mk-blue">触发 0 次</mark>。所以 <code>readFileSync</code>、大 <code>JSON.parse</code>、同步 crypto，在 Node 里不是「慢一点」，是把所有连接一起冻住。</p>
+<p>要跑 CPU 密集的活，得自己开 <code>worker_threads</code> —— 它共享内存，但不共享事件循环。</p>
+</div>
+    </div><h2 id="node-那个循环一轮到底转几圈">Node 那个循环，一轮到底转几圈</h2>
+<p>「池子完成之后回调排进队列」，这个队列不是一个，而是按阶段分的几个：</p>
+<div class="pipe"><div class="lane tone-green">
+        <div class="lane-meta">
+          <span class="ln">阶段 1</span>
+          <b>timers</b>
+          <small>到期的定时器和 interval 回调先跑</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>setTimeout / setInterval</b>
+        <small>delay 到了才执行</small>
+        <span class="tag tone-green">到期</span>
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">阶段 2 <span class="en">pending callbacks</span><span class="note">上一轮推迟下来的 I/O 回调</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-blue">
+        <div class="lane-meta">
+          <span class="ln">阶段 2</span>
+          <b>pending callbacks</b>
+          <small>上一轮没做完的 I/O 回调在这里补跑</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>被推迟的 I/O 回调</b>
+        <small>例如某些 TCP 错误</small>
+        <span class="tag tone-blue">补跑</span>
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">阶段 3 <span class="en">poll</span><span class="note">取新 I/O —— 没事干就在这里等</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-violet">
+        <div class="lane-meta">
+          <span class="ln">阶段 3</span>
+          <b>poll</b>
+          <small>取新的 I/O 事件；没有活的时候，循环就停在这里等</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>可读 / 可写的 socket</b>
+        <small>libuv poll 返回就绪</small>
+        <span class="tag tone-violet">主战场</span>
+      </div><div class="pnode">
+        <b>线程池完成的任务</b>
+        <small>fs / DNS / crypto 的回调</small>
+        <span class="tag tone-violet">汇入</span>
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">阶段 4 <span class="en">check</span><span class="note">setImmediate 的回调在这一站</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-amber">
+        <div class="lane-meta">
+          <span class="ln">阶段 4</span>
+          <b>check</b>
+          <small>setImmediate 的回调在这里跑</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>setImmediate</b>
+        <small>排在 poll 之后、下一轮之前</small>
+        <span class="tag tone-amber">立即</span>
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">阶段 5 <span class="en">close callbacks</span><span class="note">socket.on('close') 这类</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-muted">
+        <div class="lane-meta">
+          <span class="ln">阶段 5</span>
+          <b>close callbacks</b>
+          <small>句柄关闭时的收尾回调</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>socket.on('close')</b>
+        <small>句柄关掉之后触发</small>
+        <span class="tag tone-muted">收尾</span>
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">一轮结束 <span class="en">回到 timers</span><span class="note">每个阶段之间，先清 nextTick，再清 Promise 微任务</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div></div><p>每一轮就是这五站，每站有自己的 FIFO 队列，进站之后把这个队列清空（或者达到回调上限）才走下一站。官方文档里还有一站 <code>idle, prepare</code>，只给内部用，写业务遇不到。</p>
+<p>两个容易被忽略的位置：</p>
+<ul>
+<li><strong>poll 会阻塞。</strong> 没有定时器、没有 <code>setImmediate</code> 的时候，循环就停在 poll 等 I/O —— 这不是浪费，是省 CPU。</li>
+<li><strong>每个阶段之间要清队列。</strong> <code>process.nextTick</code> 排的回调，文档的原话是「在当前调用栈结束后、事件循环继续之前、任何其他排队的任务或阶段之前」执行；<code>await</code> 之后的代码（微任务）也插在这些间隙里。</li>
+</ul>
+<p><mark class="mk-blue">Node 的「并发」不是同时执行，是排队轮流执行。</mark> 一条线程上，回调之间永远不会真的并行 —— 这也解释了为什么一个慢回调会拖住后面所有人。</p>
+<h2 id="内存一个要扫几十万个栈一个只扫一个堆">内存：一个要扫几十万个栈，一个只扫一个堆</h2>
+<p>两种模型的差别，落到内存上就一句话：<strong>要扫的东西不一样多。</strong></p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>维度</th><th>Go</th><th>Node（V8）</th></tr></thead><tbody><tr><th>栈</th><td data-label="Go">每条任务一块，2 KiB 起；不够就换一块两倍大的，整段搬过去（上限 1 GB）</td><td data-label="Node（V8）">只有一条 JS 栈，大小固定；本机递归 10384 层就 RangeError</td></tr><tr><th>堆怎么分</th><td data-label="Go">一个堆，按 P 切分配区（mcache），常见路径不抢锁</td><td data-label="Node（V8）">分两代：新生代（nursery / intermediate）+ 老生代</td></tr><tr><th>回收算法</th><td data-label="Go">并发标记清扫，<strong>非分代、非压缩</strong>（源码注释原话）</td><td data-label="Node（V8）">两套：Scavenger 复制新生代；Mark-Compact 收全堆并压缩</td></tr><tr><th>停世界要等什么</th><td data-label="Go">等所有 P 到安全点；有 G 不肯让就用 SIGURG 抢它</td><td data-label="Node（V8）">等主线程到安全点；堆上限本机约 4288 MiB</td></tr><tr><th>为什么这么选</th><td data-label="Go">精度换并发：栈要能扫、能搬，所以必须有精确栈图和抢占</td><td data-label="Node（V8）">分代假设：大多数对象很快死，复制活下来的少数更便宜</td></tr></tbody></table></div><p>第五行是因果，值得单独说：Go 的 GC 是<strong>并发</strong>的，但它仍然需要短暂停世界，让所有 P 到一个「内存状态一致」的点。而 P 上跑的是几十万个 G —— 如果某个 G 在死循环里不肯到安全点，这次 GC 就卡住了。这就是 Go 必须有异步抢占的原因。</p>
+<p>V8 这边没有这个问题：只有一个栈、一条主线程，等它到安全点就行。<strong>「要不要抢占」不是风格选择，是「你有多少个栈要停」的直接后果。</strong></p>
+<h2 id="语言框架这个词两边指的不是一回事">「语言框架」这个词，两边指的不是一回事</h2>
+<p>你说「它们各自实现了自己的一套抽象的系统，简单来说就是一个运行时」—— 这句在 Go 上很贴切，在 Node 上要拆开看。</p>
+<div class="tree" data-tree><ul class="tlist"><li class="has-kids">
+            <div class="tnode tone-violet" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>装进一个进程里的东西</b>
+              
+              <span class="tnote">两边的「运行时」都不是一个东西，是一组零件的装配方式</span>
+            </div>
+            <ul class="tlist"><li class="has-kids">
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>Go 的二进制</b>
+              
+              <span class="tnote">静态编译，一次装好，版本和语言绑死</span>
+            </div>
+            <ul class="tlist"><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>编译器产物</b>
+              
+              <span class="tnote">机器码，运行时不再改</span>
+            </div>
+            
+          </li><li class="has-kids">
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>runtime</b>
+              <code>src/runtime</code>
+              <span class="tnote">编进每一个二进制，不是外部依赖</span>
+            </div>
+            <ul class="tlist"><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>调度器 G / M / P</b>
+              
+              <span class="tnote">几十万个任务压到十几条线程上</span>
+            </div>
+            
+          </li><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>netpoller</b>
+              
+              <span class="tnote">socket 就绪通知</span>
+            </div>
+            
+          </li><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>GC</b>
+              
+              <span class="tnote">并发标记清扫</span>
+            </div>
+            
+          </li><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>栈管理</b>
+              
+              <span class="tnote">2 KiB 起步，按需搬</span>
+            </div>
+            
+          </li></ul>
+          </li><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>标准库</b>
+              
+              <span class="tnote">net 包直接用 netpoller，不经过 libc</span>
+            </div>
+            
+          </li></ul>
+          </li><li class="has-kids">
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>Node 的进程</b>
+              
+              <span class="tnote">一个宿主程序，把三样东西装在一起，各自独立升版本</span>
+            </div>
+            <ul class="tlist"><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>V8</b>
+              <code>13.6.233.17</code>
+              <span class="tnote">执行 JS、JIT、管堆和 GC</span>
+            </div>
+            
+          </li><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>libuv</b>
+              <code>1.52.1</code>
+              <span class="tnote">事件循环、线程池、poll</span>
+            </div>
+            
+          </li><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>内建模块</b>
+              
+              <span class="tnote">fs / net / crypto / zlib —— 决定哪些活进线程池</span>
+            </div>
+            
+          </li><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>node 可执行文件</b>
+              
+              <span class="tnote">把上面三样接起来，再暴露 process / Buffer 这些全局</span>
+            </div>
+            
+          </li></ul>
+          </li></ul>
+          </li></ul></div><p>差别在升级方式上：换 Go 版本，你换的是<strong>编译器和 runtime</strong>（调度器、GC 的策略可能一起变）；换 Node 版本，你同时换掉<strong>V8 和 libuv</strong>，JS 语法、GC 行为、I/O 实现都可能变。所以「Node 24 的 fs 比 Node 18 快」这种事，跟「Go 1.22 的调度器比 1.20 好」不是同一类变化。</p>
+<h2 id="把这套对照缩成一张词表">把这套对照缩成一张词表</h2>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>这件事</th><th>Go</th><th>Node</th></tr></thead><tbody><tr><th>你的代码跑在</th><td data-label="Go">某条 M 上；G 会被换到任意 M</td><td data-label="Node">主线程；默认只有这一条</td></tr><tr><th>一次并发的单位</th><td data-label="Go">goroutine（2 KiB 起步）</td><td data-label="Node">一个回调 / 一条 Promise 链（不另占栈）</td></tr><tr><th>等网络</th><td data-label="Go">netpoll，挂起 G</td><td data-label="Node">libuv poll，主线程不陪</td></tr><tr><th>等磁盘 / DNS / crypto</th><td data-label="Go">M 陪着进内核，P 转交给别人</td><td data-label="Node">线程池里的一条线程陪着，池子默认 4 条</td></tr><tr><th>并行度</th><td data-label="Go"><code>GOMAXPROCS</code> 个 P</td><td data-label="Node">1（JS）+ 自己开的 worker</td></tr><tr><th>能不能被强行打断</th><td data-label="Go">能：Go 1.14 起用 SIGURG 异步抢占</td><td data-label="Node">不能：回调必须自己让出</td></tr><tr><th>栈</th><td data-label="Go">每条任务一块，可搬</td><td data-label="Node">一条，固定</td></tr><tr><th>有没有「可转交的工位」</th><td data-label="Go"><span class="tag tone-green">有：P</span></td><td data-label="Node"><span class="tag tone-red">没有对应物 —— 没有并行度可调，也就没有工位要转交</span></td></tr></tbody></table></div><p>最后一行是你原来那句话里缺的那块：<mark class="mk-blue">Go 和 Node 的差别不是「同一个东西的两种实现」，而是「两套零件清单」。</mark> 你在 Go 里能指出 P、g0、本地队列，在 Node 里找不到对应物，只能找到事件循环、线程池、poll。</p>
+<h2 id="回到你那句话">回到你那句话</h2>
+<p>原话是：</p>
+<blockquote>
+<p>底层的差别就是怎么利用内存和利用线程，各自实现了自己的一套抽象的系统，最终接口都是操作系统规定的那一套。</p>
+</blockquote>
+<p>前半句要改，后半句完全对。改完是这样：</p>
+<div class="summary">
+      <h3 id="一句话">一句话</h3>
+      <p>两套运行时都站在同一套系统调用上。<mark class="mk-blue">真正的分岔是「阻塞归谁承担」</mark>：Go 把它记进一个任务的状态（G 挂起、P 可转交），Node 把它外包给有限的线程池（主线程只处理回调）。</p>
+<p>栈、GC、抢占、并行度，都是这条分岔的下游结果。</p>
+
+    </div><p>如果只能记三句话：</p>
+<ol>
+<li><strong>Go 的任务多、线程少，因为「等」不占线程；Node 的线程也少，因为「等」被外包给了 4 条池线程。</strong></li>
+<li><strong>Go 的代码允许阻塞（那是任务级事件）；Node 的代码不允许阻塞（那是进程级事故）。</strong></li>
+<li><strong>Go 能抢你的代码，Node 不能 —— 因为 Go 有几十万个栈要停，Node 只有一个。</strong></li>
+</ol>
+<h2 id="自测">自测</h2>
+<div class="quiz"><details>
+        <summary>为什么 Node 里一段 200 ms 的纯计算会把所有请求一起拖住，而 Go 里一个死循环只影响它自己？</summary>
+        <div class="a"><p>Node 的 JS 只有一条线程：这段计算占着主线程，事件循环转不动，所有回调都排不上。
+Go 里一个 G 占着一条 M 和 P，但 sysmon 会在 10 ms 后抢它，把 P 让给别的 G —— 受影响的是调度延迟，不是整个进程。</p>
+</div>
+      </details><details>
+        <summary>&quot;Node 是单线程的&quot; 这句话哪里不准确？</summary>
+        <div class="a"><p>只对 JS 成立。进程里还有 V8 的后台线程、libuv 的事件循环和线程池（默认 4 条）、inspector 等。
+本机实测：空转的 Node 进程 7 条线程，8 个并发 fs 读变成 11 条。</p>
+</div>
+      </details><details>
+        <summary>同样是读 4 KiB，读 socket 和读普通文件在 Go 里为什么走两条路？</summary>
+        <div class="a"><p>socket 能设成非阻塞并用 epoll/kqueue 等就绪：G 挂起，线程走人。
+普通文件在 Linux 上连 epoll 都注册不进去（EPERM），read 只能真的进内核阻塞 —— 这时让 M 陪着，把 P 交给别的 M。</p>
+</div>
+      </details><details>
+        <summary>为什么 Go 需要异步抢占，V8 不需要？</summary>
+        <div class="a"><p>Go 的 GC 要停世界、让所有 P 到安全点，而这些 P 上跑着几十万个 G，必须保证每个都能被打断。
+V8 只有一个 JS 栈、一条主线程，等它自己到安全点就够了。</p>
+</div>
+      </details></div>
+
+    <footer>
+      <span>同一个 read()，Go 和 Node 走了两条路</span>
+      <span>最后更新 2026-10-20 · 单文件可离线打开</span>
+    </footer>
+  </main>
+</div>
+
+<script src="../../assets/app.js?v=757eed9a2d"></script>
+</body>
+</html>
