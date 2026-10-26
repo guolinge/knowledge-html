@@ -1,0 +1,473 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-has-toc="1">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>用表示换复杂度：CFG、支配树、SSA、别名，和一份能复用的分析</title>
+<meta name="description" content="编译器里有几十种优化，但它不是为每种情况写一条规则。它先搭一层公共设施：基本块与 CFG 描述控制流，支配关系回答「谁一定先执行」，SSA 让每个定义只有一个版本，别名分析回答「两处访问会不会撞同一块内存」。这篇讲这四件事各自解决了什么问题、为什么缺了它们优化规则会指数爆炸，以及规范化为什么必须只朝一个方向走。" />
+<link rel="stylesheet" href="../../assets/theme.css?v=b918ec5c83" />
+  <link rel="stylesheet" href="../../assets/blocks.css?v=1af3923321" />
+  <link rel="stylesheet" href="../../assets/archify-embed.css?v=68fec0b81b" />
+</head>
+<body>
+<div id="progress"></div>
+<div id="tocScrim"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
+    <a class="brand" href="../../index.html"><span class="dot"></span>知识笔记</a>
+    
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="toc" id="toc">
+      <p class="toc-title">目录</p>
+      <a href="../../index.html" class="sub">← 全部笔记</a>
+      <a href="#优化器不是规则大全">优化器不是规则大全</a>
+      <a href="#先把代码切成基本块再连成图">先把代码切成基本块，再连成图</a>
+      <a href="#支配关系谁一定先执行">支配关系：谁一定先执行</a>
+      <a href="#ssa给每个定义一个版本">SSA：给每个定义一个版本</a>
+      <a href="#别名两处访问会不会撞同一块内存">别名：两处访问会不会撞同一块内存</a>
+      <a href="#一遍识别八处复用循环信息">一遍识别，八处复用：循环信息</a>
+      <a href="#规范化把一万种写法收成一种">规范化：把一万种写法收成一种</a>
+      <a href="#速查">速查</a>
+      <a href="#自测">自测</a>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow">● 编译 · 优化</span>
+      <h1>用表示换复杂度：CFG、支配树、SSA、别名，和一份能复用的分析</h1>
+      <p class="lede">编译器里有几十种优化，但它不是为每种情况写一条规则。它先搭一层公共设施：基本块与 CFG 描述控制流，支配关系回答「谁一定先执行」，SSA 让每个定义只有一个版本，别名分析回答「两处访问会不会撞同一块内存」。这篇讲这四件事各自解决了什么问题、为什么缺了它们优化规则会指数爆炸，以及规范化为什么必须只朝一个方向走。</p>
+    </div>
+
+<aside class="needs">
+      <p class="needs-title">读这篇之前，你需要先知道</p>
+      <a class="need" href="../opt-legality/">← <b>1. 一次优化要过两道闸</b><span>as-if 只保护可观察行为；合法性与收益性分开判断；别名分析的三个值；为什么「证明不了就不做」</span></a>
+    </aside>
+    <div class="provenance"><span><b>来源</b> Cytron, Ferrante, Rosen, Wegman, Zadeck · Efficiently Computing Static Single Assignment Form and the Control Dependence Graph, TOPLAS 1991（用支配边界精确放置 φ 函数）https://www.cs.utexas.edu/~pingali/CS380C/2010/papers/ssaCytron.pdf · Wikipedia · Static single-assignment form（每个变量只赋值一次；φ 在选择点按前驱取值；出 SSA 时在边上插入拷贝）https://en.wikipedia.org/wiki/Static_single-assignment_form · Lengauer, Tarjan · A fast algorithm for finding dominators in a flowgraph, TOPLAS 1979（支配树可以接近线性时间构造）https://dl.acm.org/doi/10.1145/357062.357071 · Wikipedia · Dominator (graph theory)（d 支配 n：从入口到 n 的每条路径都经过 d；直接支配者 idom）https://en.wikipedia.org/wiki/Dominator_(graph_theory) · Rosen, Wegman, Zadeck · Global Value Numbers and Redundant Computations, POPL 1988（SSA 上的值编号与冗余消除）https://dl.acm.org/doi/10.1145/73560.73562 · Wikipedia · Basic block（最长直线序列：单一入口、单一出口；leader 的三种来源）https://en.wikipedia.org/wiki/Basic_block · Wikipedia · Control-flow graph（节点是基本块，边是可能的控制转移）https://en.wikipedia.org/wiki/Control-flow_graph · Wikipedia · Live-variable analysis（逆向数据流：一个变量在后面还会不会被读）https://en.wikipedia.org/wiki/Live-variable_analysis · Steensgaard · Points-to Analysis in Almost Linear Time, POPL 1996（统一式指针分析：快到近线性，代价是精度）https://dl.acm.org/doi/10.1145/237721.237727 · Wikipedia · Alias analysis（may-alias / must-alias / 无法判定；按类型划分别名类）https://en.wikipedia.org/wiki/Alias_analysis · LLVM 文档 · LangRef 的 phi 指令（φ 的取值由「从哪个前驱跳来」决定）https://llvm.org/docs/LangRef.html#phi-instruction · Muchnick · Advanced Compiler Design and Implementation（数据流分析框架与各类分析的经典表述） · Appel · Modern Compiler Implementation in C（支配树、SSA 与循环优化的教学顺序）</span><span><b>生成</b> 2026-10-26</span><span><b>模型</b> deepseek-v4.1-flash-1017</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">编译器</span> <span class="tag tone-muted">SSA</span> <span class="tag tone-muted">控制流图</span> <span class="tag tone-muted">支配树</span> <span class="tag tone-muted">别名分析</span> <span class="tag tone-muted">中间表示</span></span></div>
+
+<p>第 1 篇留下的问题：每次变换都要先「证明」。那这些证明是从哪来的？</p>
+<p>如果一个优化器为每种情况单独判断，规则数量会随程序写法迅速爆炸：<code>a*2</code>、<code>a+a</code>、<code>a&lt;&lt;1</code> 各写一条，<code>if</code> 里套 <code>while</code> 再套 <code>if</code> 又要各写一套。真实的优化器走另一条路：<strong>先搭一层公共设施，把程序变成一种可分析的形状，再让所有优化共用同一批结论。</strong> 这篇讲这层设施的四根柱子。</p>
+<h2 id="优化器不是规则大全"><span class="num">01</span>优化器不是规则大全</h2>
+<p>先把整体摆出来。编译器中段（middle end）是一条流水线，越往后，拿到的信息越&quot;加工过&quot;：</p>
+<div class="pipe"><div class="lane tone-muted">
+        <div class="lane-meta">
+          <span class="ln">前端</span>
+          <b>源码 → 中间表示</b>
+          <small>词法、语法、语义检查，然后翻译成三地址码</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>AST</b>
+        <small>语法树：结构清楚，但不好直接分析</small>
+        <span class="tag tone-muted">树形</span>
+      </div><div class="pnode">
+        <b>三地址码</b>
+        <small>x = a + b 这种一条一个操作的写法</small>
+        <span class="tag tone-muted">线性</span>
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">一份与源语言无关的表示 <span class="en">IR</span><span class="note">后面所有分析都建立在这上面</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-blue">
+        <div class="lane-meta">
+          <span class="ln">中段</span>
+          <b>表示层：把代码变成图</b>
+          <small>基本块、CFG、SSA —— 这一层不优化，只改变形状</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>基本块 + CFG</b>
+        <small>谁能到谁</small>
+        <span class="tag tone-blue">控制流</span>
+      </div><div class="pnode">
+        <b>SSA</b>
+        <small>每个变量只有一个定义</small>
+        <span class="tag tone-blue">数据流</span>
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">形状稳定了，才能谈分析<span class="note">同一份 IR，几十个 pass 共享</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-violet">
+        <div class="lane-meta">
+          <span class="ln">中段</span>
+          <b>分析层：回答特定问题</b>
+          <small>每份分析只回答一个问题，结论被多处复用</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>支配树</b>
+        <small>谁一定先执行</small>
+        <span class="tag tone-violet">结构</span>
+      </div><div class="pnode">
+        <b>循环信息</b>
+        <small>哪些块构成一个环</small>
+        <span class="tag tone-violet">结构</span>
+      </div><div class="pnode">
+        <b>活跃变量</b>
+        <small>这个值后面还用不用</small>
+        <span class="tag tone-violet">数据流</span>
+      </div><div class="pnode">
+        <b>别名</b>
+        <small>两处访问会不会撞同一块内存</small>
+        <span class="tag tone-violet">内存</span>
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">结论是「可证明的事实」，不是猜测<span class="note">讲清条件才能安全变换</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-green">
+        <div class="lane-meta">
+          <span class="ln">中段</span>
+          <b>变换层：改写 IR</b>
+          <small>常量传播、CSE、DCE、LICM、向量化……全部消费上面那批结论</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>常量传播 / SCCP</b>
+        <small>用到支配与可达性</small>
+        <span class="tag tone-green">保守但有依据</span>
+      </div><div class="pnode">
+        <b>CSE / GVN</b>
+        <small>用到 SSA 与值编号</small>
+        <span class="tag tone-green">复用已算过的值</span>
+      </div><div class="pnode">
+        <b>DCE</b>
+        <small>用到活跃变量</small>
+        <span class="tag tone-green">删无用计算</span>
+      </div><div class="pnode">
+        <b>LICM</b>
+        <small>用到循环信息 + 别名</small>
+        <span class="tag tone-green">提到循环外</span>
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">改写后的 IR 还要再走一轮<span class="note">见第 4 篇的 pass 顺序</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-amber">
+        <div class="lane-meta">
+          <span class="ln">后端</span>
+          <b>目标代码</b>
+          <small>指令选择、寄存器分配、调度，这一步开始绑定具体机器</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>寄存器分配</b>
+        <small>用到活跃变量与干涉图</small>
+        <span class="tag tone-amber">内存层次</span>
+      </div></div>
+      </div></div><p>关键在第三层与第四层的关系：<mark class="mk-blue">分析和变换是分开的，一份分析被几十个 pass 消费。</mark> 这就是为什么「优化器很大」不等于「规则很多」：规则多的部分集中在变换层，而变换层的每个 pass 都很薄，因为它们把&quot;证明&quot;这件事外包给了分析层。</p>
+<h2 id="先把代码切成基本块再连成图"><span class="num">02</span>先把代码切成基本块，再连成图</h2>
+<p>分析要能跑，代码得先变成可遍历的形状。第一步是切块：**基本块（basic block）**是一段最长的直线代码，从开头进、从结尾出，中间没有分叉也没有汇合。</p>
+<p>切法是找&quot;leader&quot;（块的第一条指令）：</p>
+<table>
+<thead>
+<tr>
+<th>leader 从哪来</th>
+<th>为什么</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>函数的第一条指令</td>
+<td>总得有个入口</td>
+</tr>
+<tr>
+<td>任何跳转指令的目标</td>
+<td>别人会跳到这里，它必须能独立开始</td>
+</tr>
+<tr>
+<td>任何跳转指令的下一条</td>
+<td>跳走之后，这里是另一条路的起点</td>
+</tr>
+</tbody>
+</table>
+<p>切完再连边：一个块的结尾能转到另一个块的开头，就有一条边。整张图就是<strong>控制流图（control-flow graph, CFG）</strong>。一个 <code>while</code> 循环切出来大概是这样：</p>
+<div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;b0&quot;,&quot;to&quot;:&quot;b1&quot;},{&quot;from&quot;:&quot;b1&quot;,&quot;to&quot;:&quot;b2&quot;,&quot;label&quot;:&quot;真&quot;,&quot;labelDx&quot;:-22},{&quot;from&quot;:&quot;b1&quot;,&quot;to&quot;:&quot;b3&quot;,&quot;label&quot;:&quot;假&quot;,&quot;labelDx&quot;:22},{&quot;from&quot;:&quot;b2&quot;,&quot;to&quot;:&quot;b1&quot;,&quot;label&quot;:&quot;回边&quot;,&quot;tone&quot;:&quot;amber&quot;,&quot;labelDx&quot;:-52,&quot;labelDy&quot;:22}]" style="--flow-marker:url(#fa-1)">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa-1" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-blue is-initial" data-id="b0">
+              <span class="finit" title="初始状态"></span>
+              
+              <b>B0 · 入口</b>
+              <small>i = 0；sum = 0</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-violet shape-note" data-id="b1">
+              
+              
+              <b>B1 · 条件</b>
+              <small>i &lt; n ?</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="b2">
+              
+              
+              <b>B2 · 循环体</b>
+              <small>sum += a[i]；i++</small>
+            </div><div class="fnode tone-muted" data-id="b3">
+              
+              
+              <b>B3 · 出口</b>
+              <small>return sum</small>
+            </div></div></div>
+      
+    </div><p>这张图上有两样后面反复用到的东西：</p>
+<ul>
+<li><strong>回边（back edge）</strong>：<code>B2 → B1</code>。一条边的头支配它的尾时，这条边就是回边，<code>B1</code> 是这个循环的入口（header）。</li>
+<li><strong>汇合点</strong>：<code>B3</code> 有两条入边。凡是&quot;不同的路汇到一起&quot;的地方，都会带来麻烦——第 04 节要在这里放 φ 函数。</li>
+</ul>
+<p>CFG 是后面所有结构分析的底座。没有它，&quot;这段代码会不会被执行到&quot;&quot;这两条语句哪个先&quot;&quot;这个循环的边界在哪&quot;都只能靠读文本猜。</p>
+<h2 id="支配关系谁一定先执行"><span class="num">03</span>支配关系：谁一定先执行</h2>
+<p>CFG 上的第一个重要结论是支配（dominance）：</p>
+<blockquote>
+<p>如果从入口到节点 n 的<strong>每一条</strong>路径都经过 d，就说 d 支配 n。</p>
+</blockquote>
+<p>这个定义很小，但它把&quot;一定&quot;这个词变成了可计算的。看上面那张图：从 <code>B0</code> 到 <code>B2</code> 必须经过 <code>B1</code>，所以 <code>B1</code> 支配 <code>B2</code>；<code>B2</code> 不支配 <code>B3</code>（走假分支可以绕过它）。</p>
+<p>支配能推出的东西，几乎每一项都对应一类优化：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>由支配得到的结论</th><th>它允许什么</th><th>用在哪</th></tr></thead><tbody><tr><th>A 支配 B，A 里算了 <code>t = x + y</code>，B 里又要算一次</th><td data-label="它允许什么">可以把 A 的结果直接用到 B，不用重算</td><td data-label="用在哪">全局公共子表达式消除（CSE/GVN）</td></tr><tr><th>只有当所有路径都经过这里时，某个常量才「一定」是这个值</th><td data-label="它允许什么">可以把这个常量代入后续所有使用点</td><td data-label="用在哪">稀疏条件常量传播（SCCP）</td></tr><tr><th>循环的 header 支配循环里所有块</th><td data-label="它允许什么">循环里不依赖迭代的值可以提到 header 之前</td><td data-label="用在哪">循环不变量外提（LICM）</td></tr><tr><th>一个定义支配它所有的使用</th><td data-label="它允许什么">SSA 能成立的前提之一</td><td data-label="用在哪">构造 SSA</td></tr><tr><th>某条边是回边</th><td data-label="它允许什么">找到了一个自然循环，可以建循环树</td><td data-label="用在哪">循环优化、展开、向量化</td></tr></tbody></table></div><p>支配关系一般画成<strong>支配树</strong>：每个节点挂在它的直接支配者（immediate dominator, idom）下面。构造算法有接近线性的做法（Lengauer–Tarjan，1979），这也是它能在每个函数上都跑一遍的原因。</p>
+<p><mark class="mk-amber">「支配」说的是控制流上的必然性，不是执行次数。</mark> 一个块支配另一个块，不代表前者每次都执行，只代表后者执行时，前者一定已经执行过。</p>
+<h2 id="ssa给每个定义一个版本"><span class="num">04</span>SSA：给每个定义一个版本</h2>
+<p>有了支配树，才能做第二步改造：把「变量」拆成「定义」。</p>
+<p>普通 IR 里，<code>x</code> 在整个函数里是同一个名字，被赋值很多次。想回答「这条指令用的 <code>x</code> 是哪个定义写的」，就得做数据流分析。<strong>SSA（static single assignment）</strong> 换了个办法：改名，让每个变量只被赋值一次。</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">// 原始写法
+if (cond) x = 10; else x = 20;
+y = x + 1;
+</code></pre></div>
+<p>转换成 SSA 之后，<code>x</code> 变成三个名字，汇合处用一个 φ（phi）函数按来路取值：</p>
+<div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;entry&quot;,&quot;to&quot;:&quot;b1&quot;,&quot;label&quot;:&quot;真&quot;},{&quot;from&quot;:&quot;entry&quot;,&quot;to&quot;:&quot;b2&quot;,&quot;label&quot;:&quot;假&quot;},{&quot;from&quot;:&quot;b1&quot;,&quot;to&quot;:&quot;b3&quot;},{&quot;from&quot;:&quot;b2&quot;,&quot;to&quot;:&quot;b3&quot;}]" style="--flow-marker:url(#fa-2)">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa-2" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-blue is-initial" data-id="entry">
+              <span class="finit" title="初始状态"></span>
+              
+              <b>入口</b>
+              <small>if cond goto B1 else B2</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="b1">
+              
+              
+              <b>B1</b>
+              <small>x1 = 10</small>
+            </div><div class="fnode tone-green" data-id="b2">
+              
+              
+              <b>B2</b>
+              <small>x2 = 20</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="b3">
+              
+              
+              <b>B3 · 汇合</b>
+              <small>x3 = φ(x1, x2)；y1 = x3 + 1</small>
+            </div></div></div>
+      
+    </div><p><code>φ(x1, x2)</code> 的意思是：从 B1 过来就取 <code>x1</code>，从 B2 过来就取 <code>x2</code>。它不执行任何运算，只是一个&quot;在汇合点按前驱选择版本&quot;的记号。</p>
+<p>难点不在改名，在于<strong>该在哪些地方放 φ</strong>。放多了是冗余，放少了会算错。Cytron 等人在 1991 年给出的答案很干净：</p>
+<ol>
+<li>先算每个节点的<strong>支配边界</strong>（dominance frontier）：那些&quot;被这个节点支配、但它的某个前驱不被支配&quot;的节点集合。</li>
+<li>在这个变量所有定义点的支配边界上插入 φ。</li>
+<li>迭代到不动点，然后改名：沿着支配树深度优先，遇到 φ 就推入新的版本号。</li>
+</ol>
+<p><mark class="mk-blue">SSA 真正省掉的是「反复问」，不是「变量」。</mark> 换成 SSA 之后，「这个值从哪来」是一次查表；常量传播、死代码删除、值编号都变成在图上走一遍的小算法，而不是一遍遍扫全函数。</p>
+<p>出 SSA 的时候要还回来：寄存器分配之前，把 φ 拆成边上的拷贝（φ 的两个输入如果落到同一个寄存器，还得处理&quot;丢失的拷贝&quot;问题）。这一步叫 SSA 消除。</p>
+<h2 id="别名两处访问会不会撞同一块内存"><span class="num">05</span>别名：两处访问会不会撞同一块内存</h2>
+<p>控制流解决了&quot;顺序&quot;，剩下的大头是内存。下面四行代码，能不能删掉第一行、能不能把第三行提到循环外，全看一个问题：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-c">*p = 10;
+x = *q;       // p 和 q 会不会指向同一处？
+*p = 20;
+y = *p;       // 这里读到的到底是 10 还是 20？
+</code></pre></div>
+<p>编译器需要的是「被访问的内存集合」，而指针可以让同一块内存在不同时刻有不同的名字。这就是别名分析（alias analysis）要算的东西，它的结论直接决定多少个优化能做：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>分析的精度</th><th>它怎么算</th><th>代价与后果</th></tr></thead><tbody><tr><th>完全不分析</th><td data-label="它怎么算"><span class="tag tone-red">任何写入都可能影响任何读取</span></td><td data-label="代价与后果">几乎不能重排、不能外提</td></tr><tr><th>按类型划分（TBAA，类型别名分析）</th><td data-label="它怎么算">不同类型的指针必不别名</td><td data-label="代价与后果">便宜；但 <code>int*</code> 和 <code>char*</code> 这类转换会破功</td></tr><tr><th>流不敏感 + 统一（Steensgaard）</th><td data-label="它怎么算">指向关系用并查集合并</td><td data-label="代价与后果">近线性时间；精度低，容易把两个对象合并</td></tr><tr><th>流敏感 + 包含（Andersen 类）</th><td data-label="它怎么算">按程序点精确计算可能指向集合</td><td data-label="代价与后果">立方级复杂度，编译时间换精度</td></tr><tr><th>加上 <code>restrict</code> 等人工承诺</th><td data-label="它怎么算"><span class="tag tone-green">由程序员保证一定不别名</span></td><td data-label="代价与后果">有承诺时最省事，违反承诺就是 UB</td></tr></tbody></table></div><p>这张表说明一个反复出现的模式：<strong>精度和编译时间是一条滑尺，优化器只能选一个位置。</strong> 选得保守，第 1 篇那句「可能别名就当冲突处理」就开始生效，一批优化被挡在门外；选得激进，编译时间和内存都会涨上去，而且一旦分析有 bug 就是错编译。</p>
+<p><code>restrict</code>、<code>__restrict</code>、<code>noalias</code> 这类标注的价值就在这里：它们把「我保证不重叠」这句话写进类型系统，让分析不用猜。</p>
+<h2 id="一遍识别八处复用循环信息"><span class="num">06</span>一遍识别，八处复用：循环信息</h2>
+<p>循环是优化的重点（第 4 篇展开），但识别循环这件事本身只做一次。做完之后，下面这些优化共享同一份结论：</p>
+<div class="cards" data-cols="2"><div class="ccard tone-green">
+          <span class="tag tone-green">消费者 1</span>
+          <h4>循环不变量外提（LICM）</h4>
+          <p>依赖：header 支配全循环 + 体内无人写它的操作数</p>
+          
+          
+        </div><div class="ccard tone-green">
+          <span class="tag tone-green">消费者 2</span>
+          <h4>归纳变量优化</h4>
+          <p>依赖：认出 <code>i</code> 每次加固定步长，把它的派生量换成加法</p>
+          
+          
+        </div><div class="ccard tone-green">
+          <span class="tag tone-green">消费者 3</span>
+          <h4>强度削弱</h4>
+          <p>依赖：循环结构 + 归纳变量，把乘换成累加</p>
+          
+          
+        </div><div class="ccard tone-blue">
+          <span class="tag tone-blue">消费者 4</span>
+          <h4>循环展开</h4>
+          <p>依赖：迭代次数可分析，或者能证明至少执行几次</p>
+          
+          
+        </div><div class="ccard tone-blue">
+          <span class="tag tone-blue">消费者 5</span>
+          <h4>循环交换 / 分块</h4>
+          <p>依赖：嵌套循环树 + 依赖分析（两次迭代写不写同一块内存）</p>
+          
+          
+        </div><div class="ccard tone-violet">
+          <span class="tag tone-violet">消费者 6</span>
+          <h4>自动向量化</h4>
+          <p>依赖：迭代间无依赖 + 别名分析证明不重叠</p>
+          
+          
+        </div><div class="ccard tone-violet">
+          <span class="tag tone-violet">消费者 7</span>
+          <h4>循环版本化（versioning）</h4>
+          <p>依赖：别名不确定时，生成「不重叠快版 / 保守慢版」两个循环</p>
+          
+          
+        </div><div class="ccard tone-amber">
+          <span class="tag tone-amber">消费者 8</span>
+          <h4>软流水 / 调度</h4>
+          <p>依赖：循环体里各步的依赖距离</p>
+          
+          
+        </div></div><p>八个消费者，一份循环信息。这就是&quot;统一分析框架&quot;的实际含义：不是少写几行代码，而是<strong>同一批事实被反复使用，不需要每个优化各自重新证明一遍</strong>。</p>
+<h2 id="规范化把一万种写法收成一种"><span class="num">07</span>规范化：把一万种写法收成一种</h2>
+<p>还剩一个规模问题。同一件事，源码里能写出很多种样子：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-c">x = a * 2;
+x = a + a;
+x = a &lt;&lt; 1;
+</code></pre></div>
+<p>如果优化器为每种写法准备一套规则，<code>a*2 + b*2</code>、<code>a+a+b+b</code>、<code>(a&lt;&lt;1) + (b&lt;&lt;1)</code> 又各要一套，规则数量跟着写法组合爆炸。解决办法是<strong>规范化（canonicalization）</strong>：先统一成一种形式，后面的规则只认那一种。</p>
+<div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;w1&quot;,&quot;to&quot;:&quot;canon&quot;},{&quot;from&quot;:&quot;w2&quot;,&quot;to&quot;:&quot;canon&quot;},{&quot;from&quot;:&quot;w3&quot;,&quot;to&quot;:&quot;canon&quot;},{&quot;from&quot;:&quot;canon&quot;,&quot;to&quot;:&quot;rules&quot;}]" style="--flow-marker:url(#fa-3)">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa-3" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-muted" data-id="w1">
+              
+              
+              <b>a * 2</b>
+              
+            </div><div class="fnode tone-muted" data-id="w2">
+              
+              
+              <b>a + a</b>
+              
+            </div><div class="fnode tone-muted" data-id="w3">
+              
+              
+              <b>a &lt;&lt; 1</b>
+              
+            </div></div><div class="flowd-row"><div class="fnode tone-blue shape-note" data-id="canon">
+              
+              
+              <b>规范形式 · 只留一种</b>
+              <small>比如左移 1 位</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="rules">
+              
+              
+              <b>后续规则只写一份</b>
+              <small>常量折叠、CSE、强度削弱都只匹配这一种</small>
+            </div></div></div>
+      
+    </div><p>规范化的对象不只是表达式，还有结构：</p>
+<table>
+<thead>
+<tr>
+<th>规范化什么</th>
+<th>收成什么形状</th>
+<th>为什么</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>表达式</td>
+<td>一种固定的等价写法</td>
+<td>规则只写一遍；避免 A→B 与 B→A 两条规则互相打架</td>
+</tr>
+<tr>
+<td>控制流</td>
+<td>每个 <code>if</code> 只有一个出口、每个循环有唯一 header</td>
+<td>分析算法不用处理几十种控制流变体</td>
+</tr>
+<tr>
+<td>循环</td>
+<td>加前导块（preheader），把循环条件挪到 latch</td>
+<td>LICM 有地方放代码，展开与向量化只面对一种循环形状</td>
+</tr>
+<tr>
+<td>临界边</td>
+<td>拆成两条边加一个空块</td>
+<td>φ 的插入点不会落在&quot;一条边同时是两条边&quot;的位置</td>
+</tr>
+<tr>
+<td>数据结构</td>
+<td>统一成 SSA 形式</td>
+<td>所有数据流分析共用一套接口</td>
+</tr>
+</tbody>
+</table>
+<p><mark class="mk-amber">规范化必须只朝一个方向走。</mark> 如果同时存在 <code>a*2 → a&lt;&lt;1</code> 和 <code>a&lt;&lt;1 → a*2</code> 两条规则，pass 会在两者之间来回切换，永远到不了不动点，编译时间就爆了。这也是为什么很多规范化的方向看起来&quot;反直觉&quot;——它选的不是最快的写法，而是<strong>唯一的写法</strong>；到底哪个更快，留给后面的成本模型决定。</p>
+<h2 id="速查"><span class="num">08</span>速查</h2>
+<ul class="check"><li>优化器不是规则大全：规则多的部分在变换层，证明的部分在分析层，两层分开</li><li>基本块是最长直线段；CFG 的节点是块、边是可能的转移；回边的头就是循环 header</li><li>支配 = 每条路径都经过；支配树让「一定」变成可查的表；Lengauer–Tarjan 接近线性</li><li>SSA 用改名消灭「当前是哪个 x」；φ 放在支配边界上，出 SSA 时拆成边上的拷贝</li><li>别名分析是精度与编译时间的滑尺；<code>restrict</code> / 类型信息 / 属性都是给分析送前提</li><li>循环识别只做一次，LICM、归纳变量、削弱、展开、交换、向量化共享它</li><li>规范化只朝一个方向走，否则来回转换到不了不动点；规范形式不等于最快形式</li></ul><h2 id="自测"><span class="num">09</span>自测</h2>
+<div class="quiz"><details>
+        <summary>为什么说优化器「不是把所有情况枚举出来」？</summary>
+        <div class="a"><p>因为它把「证明」这一步抽出去做成了公共分析：支配树、SSA、别名、活跃变量、循环信息。
+每个优化都只是「读的分析结论 + 一小段改写逻辑」，所以 pass 本身很薄。</p>
+<p>真正多的是变换的种类，而不是每个变换都要自带一套推理。</p>
+</div>
+      </details><details>
+        <summary>支配关系能用来做什么？举两个具体例子。</summary>
+        <div class="a"><p>支配 = 从入口到该节点的每条路径都经过它。它可以支持：
+① CSE：A 支配 B，A 里算过的表达式在 B 里可以复用；
+② SCCP：只有所有路径都经过的地方，某个常量才「一定」成立；
+③ LICM：循环 header 支配全循环，所以提到 header 之前的计算一定先于使用；
+④ 构造 SSA 与识别自然循环的前提。</p>
+</div>
+      </details><details>
+        <summary>SSA 里的 φ 函数到底在做什么？为什么不能随便放？</summary>
+        <div class="a"><p>φ 在汇合点按「从哪个前驱跳来」选择变量的版本，本身不做运算。
+放少了，汇合点后面的值来源就不唯一；放多了会引入冗余定义，还让后面的分析变慢。</p>
+<p>Cytron 等人的做法是精确地放在「定义的支配边界」上，再迭代到不动点。</p>
+</div>
+      </details><details>
+        <summary>为什么别名分析选「流敏感 + 包含」会让编译变慢？</summary>
+        <div class="a"><p>精度和编译时间是滑尺。流敏感要按程序点分别计算可能指向集合，包含式要解集合约束，
+复杂度可以到立方级。换来的是更少被「可能别名」挡住的重排、外提和向量化。</p>
+<p>所以常见做法是分层：默认用便宜的（类型、流不敏感），只在关键处用贵的，
+或者让程序员用 <code>restrict</code> 直接把前提写出来。</p>
+</div>
+      </details><details>
+        <summary>规范化为什么不能两个方向都做？</summary>
+        <div class="a"><p>两条相反的规则会让 pass 在两种写法之间来回切换，永远到不了不动点，编译时间失控。
+规范化选的是「唯一的写法」，不是「最快的写法」；快不快由后面的成本模型判断。</p>
+</div>
+      </details></div>
+
+    <footer>
+      <span>用表示换复杂度：CFG、支配树、SSA、别名，和一份能复用的分析</span>
+      <span>最后更新 2026-10-26 · 单文件可离线打开</span>
+    </footer>
+  </main>
+</div>
+
+<script src="../../assets/app.js?v=757eed9a2d"></script>
+</body>
+</html>

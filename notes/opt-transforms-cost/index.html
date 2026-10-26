@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-has-toc="1">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>变换与代价：强度削弱、循环五件套、成本模型与 pass 顺序</title>
+<meta name="description" content="经典优化规则提供的是候选，不是结论。i*4 改成 x+=4 在纸面上更便宜，在 x86-64 上却可能毫无差别；内联的收益和代价都具体到代码体积与寄存器压力；而 pass 之间会互相创造和破坏机会，于是顺序成了一个没有完美解的问题。这篇讲变换层怎么在「合法」之上再判断「划算」，以及固定点迭代为什么会让编译时间失控。" />
+<link rel="stylesheet" href="../../assets/theme.css?v=b918ec5c83" />
+  <link rel="stylesheet" href="../../assets/blocks.css?v=1af3923321" />
+  <link rel="stylesheet" href="../../assets/archify-embed.css?v=68fec0b81b" />
+</head>
+<body>
+<div id="progress"></div>
+<div id="tocScrim"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
+    <a class="brand" href="../../index.html"><span class="dot"></span>知识笔记</a>
+    
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="toc" id="toc">
+      <p class="toc-title">目录</p>
+      <a href="../../index.html" class="sub">← 全部笔记</a>
+      <a href="#强度削弱一条经典规则和它今天的处境">强度削弱：一条经典规则，和它今天的处境</a>
+      <a href="#循环五件套各自解决什么">循环：五件套各自解决什么</a>
+      <a href="#交换和分块让一次取回的数据被用满">交换和分块：让一次取回的数据被用满</a>
+      <a href="#内联收益和代价都要算">内联：收益和代价都要算</a>
+      <a href="#pass-顺序机会是被前一个-pass-造出来的">pass 顺序：机会是被前一个 pass 造出来的</a>
+      <a href="#成本模型为什么难">成本模型为什么难</a>
+      <a href="#速查">速查</a>
+      <a href="#自测">自测</a>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow">● 编译 · 优化</span>
+      <h1>变换与代价：强度削弱、循环五件套、成本模型与 pass 顺序</h1>
+      <p class="lede">经典优化规则提供的是候选，不是结论。i*4 改成 x+=4 在纸面上更便宜，在 x86-64 上却可能毫无差别；内联的收益和代价都具体到代码体积与寄存器压力；而 pass 之间会互相创造和破坏机会，于是顺序成了一个没有完美解的问题。这篇讲变换层怎么在「合法」之上再判断「划算」，以及固定点迭代为什么会让编译时间失控。</p>
+    </div>
+
+<aside class="needs">
+      <p class="needs-title">读这篇之前，你需要先知道</p>
+      <a class="need" href="../opt-ir-analysis/">← <b>3. 用表示换复杂度</b><span>基本块与 CFG；支配关系；SSA 让每个定义只有一个版本；别名分析为什么必须存在；规范化把一万种写法收成一种</span></a>
+    </aside>
+    <div class="provenance"><span><b>来源</b> Cocke, Kennedy · An Algorithm for Reduction of Operator Strength, CACM 1977（用归纳变量把循环里的乘法换成加法）https://dl.acm.org/doi/10.1145/359863.359888 · Wikipedia · Strength reduction（乘法 → 加法、乘法 → 移位、除法 → 乘倒数等经典替换）https://en.wikipedia.org/wiki/Strength_reduction · Lam, Rothberg, Wolf · The Cache Performance and Optimizations of Blocked Algorithms, ASPLOS 1991（分块提升缓存利用率；未分块时列访问会反复冲突）https://suif.stanford.edu/papers/lam-asplos91.pdf · GCC 手册 · Optimize Options（-O3 追加 -ftree-loop-vectorize、-ftree-slp-vectorize、-floop-interchange、-fpeel-loops、-funswitch-loops；-O2 用 very-cheap 向量化成本模型）https://gcc.gnu.org/onlinedocs/gcc/Optimize-Options.html · LLVM 文档 · Auto-Vectorization in LLVM（循环向量化与 SLP 两类，都受依赖分析与成本模型约束）https://llvm.org/docs/Vectorizers.html · LLVM 文档 · Loop Terminology（自然循环、header、latch、preheader、回边）https://llvm.org/docs/LoopTerminology.html · Agner Fog · Instruction tables / Optimizing subroutines in assembly language（乘法的延迟与吞吐、LEA 的用法与延迟、乱序执行下指令代价的场景依赖）https://www.agner.org/optimize/ · Muchnick · Advanced Compiler Design and Implementation（优化 = 合法性条件 + 收益启发式；成本模型的目标相关部分） · Wikipedia · Compiler optimization / Phase ordering（pass 之间存在相互作用，最优顺序因程序而异）https://en.wikipedia.org/wiki/Optimizing_compiler · UW PLSE · What is the phase ordering problem and can equality saturation help?（顺序问题与用等式饱和统一处理变换的思路）https://uwplse.org/2025/04/14/Phase-ordering.html · Drepper · What Every Programmer Should Know About Memory（分块尺寸与缓存容量、组相联冲突的关系）https://people.freebsd.org/~lstewart/articles/cpumemory.pdf</span><span><b>生成</b> 2026-10-26</span><span><b>模型</b> deepseek-v4.1-flash-1017</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">编译器</span> <span class="tag tone-muted">强度削弱</span> <span class="tag tone-muted">循环优化</span> <span class="tag tone-muted">向量化</span> <span class="tag tone-muted">内联</span> <span class="tag tone-muted">成本模型</span> <span class="tag tone-muted">pass 顺序</span></span></div>
+
+<p>前两篇讲完了「能不能做」：先证明合法，再看值不值。这一篇展开那个「值不值」。同一条变换，在不同机器、不同代码形状下，收益能差出一个数量级，而决定权在一份<strong>成本模型</strong>手里。它也是优化器最像工程而不是像数学的地方：没有定理可证，只有估算和回退。</p>
+<h2 id="强度削弱一条经典规则和它今天的处境"><span class="num">01</span>强度削弱：一条经典规则，和它今天的处境</h2>
+<p><strong>强度削弱（strength reduction）</strong> 指的是用便宜的操作替代昂贵的操作。最经典的一例是把循环里的乘法换成累加：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-c">for (int i = 0; i &lt; n; i++) {
+    x = i * 4;      // 每轮一次乘法
+    a[i] = x;
+}
+</code></pre></div>
+<p>改成</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-c">x = 0;
+for (int i = 0; i &lt; n; i++) {
+    a[i] = x;       // 每轮一次加法
+    x = x + 4;
+}
+</code></pre></div>
+<p>这条规则 1977 年由 Cocke 和 Kennedy 写成算法时，乘法的代价确实是加法的好几倍：它要靠多次移位和相加，或者走一条慢得多的乘法器。改写成累加，等于把每轮的一次&quot;贵操作&quot;换成&quot;便宜操作&quot;。</p>
+<p>但今天的机器不是这样了。x86-64 上 <code>i * 4</code> 常常被编译成一条 <code>LEA</code> 指令：<code>base + index*4</code> 这种地址计算是它的本职工作，延迟 1 个周期，和加法一样。也就是说，<mark class="mk-blue">这条规则换来的可能只是&quot;指令数不变、延迟不变&quot;，收益接近零</mark>。</p>
+<p>那它还有用吗？有，但用处变了：</p>
+<div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-muted">① 原始写法</span>
+            <span class="name">for 循环</span>
+            <span class="spacer"></span>
+            
+          </div>
+          
+          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>for (int i = 0; i &lt; n; i++) {
+  a[i] = i * 4;
+}
+</pre></div>
+          <p class="jnote">每轮一次乘法。<code>i</code> 是归纳变量：它每轮固定加 1。</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">认出归纳变量<span class="note">这是强度削弱的前提</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-blue">② 强度削弱后</span>
+            <span class="name">累加形式</span>
+            <span class="spacer"></span>
+            
+          </div>
+          
+          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>x = 0;
+for (int i = 0; i &lt; n; i++) {
+  a[i] = x;
+  x = x + 4;
+}
+</pre></div>
+          <p class="jnote">乘法没了，多了一个变量 <code>x</code>，多一条加法。</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">看目标机值不值<span class="note">交给成本模型</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-amber">③ 今天的判断</span>
+            <span class="name">由成本模型决定</span>
+            <span class="spacer"></span>
+            <span class="tag tone-red">收益可能为零</span>
+          </div>
+          <div class="rec"><div class="warn">
+            <b>指令数</b><span>1 → 1</span><em>LEA 一条就够</em></div><div class="">
+            <b>延迟</b><span>1 → 1 周期</span></div><div class="warn">
+            <b>寄存器压力</b><span>多一个活着的变量</span><em>有时反而更差</em></div></div>
+          
+          <p class="jnote">真正的收益出现在「步长是运行时才知道的值」或「能顺带暴露向量化」的时候。</p>
+        </div><p>这段演变的结论，比这条规则本身重要：<strong>经典优化规则提供的是候选变换，是否采用由面向目标机器的成本模型决定。</strong> 规则是 1977 年总结的，机器是每年在变的，两者不能混为一谈。</p>
+<h2 id="循环五件套各自解决什么"><span class="num">02</span>循环：五件套各自解决什么</h2>
+<p>循环之所以是重点，因为程序的时间大多花在少数几个循环里。围绕它形成的优化各有各的前提和风险：</p>
+<div class="cards" data-cols="2"><div class="ccard tone-muted">
+          <span class="tag tone-muted">前提：header 支配全循环 + 体内没人写它的操作数</span>
+          <h4>循环不变量外提（LICM）</h4>
+          <p>循环里算出来每轮都一样的值，提到循环外只算一次</p>
+          <div class="cbody"><p>要过两道门：<strong>合法性</strong>要求这个值在循环里不被改写（别名分析说了算），
+<strong>收益</strong>要求循环至少跑几次——只跑一次时，外提反而多付一次开销。</p>
+</div>
+          
+        </div><div class="ccard tone-muted">
+          <span class="tag tone-muted">前提：迭代次数可分析</span>
+          <h4>循环展开（unrolling）</h4>
+          <p>把循环体复制几份，减少判断与跳转次数，顺便暴露并行</p>
+          <div class="cbody"><p>展开后一次迭代干 <code>k</code> 倍的活，判断次数变成 1/k。代价是代码体积变大，
+指令缓存可能装不下。<mark class="mk-blue">展开得太多会把向量化要的形状毁掉。</mark></p>
+</div>
+          
+        </div><div class="ccard tone-muted">
+          <span class="tag tone-muted">前提：依赖分析证明交换不改变结果</span>
+          <h4>循环交换（interchange）</h4>
+          <p>交换嵌套循环的内外层，让内存访问顺着行方向走</p>
+          <div class="cbody"><p>对行优先存储的矩阵，<code>for i for j a[i][j]</code> 是一条缓存行用满；
+换成 <code>for j for i a[i][j]</code> 就变成每一步跳一整行。交换回去就恢复了。</p>
+</div>
+          
+        </div><div class="ccard tone-muted">
+          <span class="tag tone-muted">前提：块内数据量 ≤ 缓存</span>
+          <h4>循环分块（blocking / tiling）</h4>
+          <p>把大矩阵切成能装进缓存的小块，块内一次用完</p>
+          <div class="cbody"><p>交换只能改顺序，改不了&quot;整个矩阵装不进缓存&quot;这个事实。分块是把它切小：
+每一块在缓存里做完，再换下一块。</p>
+</div>
+          
+        </div><div class="ccard tone-muted">
+          <span class="tag tone-muted">前提：迭代间无依赖 + 别名证明</span>
+          <h4>向量化（vectorization）</h4>
+          <p>一次处理 4 / 8 / 16 个元素，用 SIMD 指令</p>
+          <div class="cbody"><p>依赖分析证明第 i 次和第 i+1 次不互相干扰，别名分析证明数组不重叠，
+成本模型再判断&quot;打包拆包的开销是不是白花&quot;。</p>
+</div>
+          
+        </div></div><h2 id="交换和分块让一次取回的数据被用满"><span class="num">03</span>交换和分块：让一次取回的数据被用满</h2>
+<p>这两种优化讲的其实是同一件事的两个层面。假设矩阵按行存储，一行 1000 个 <code>int</code>，一条缓存行装 16 个。按行遍历时，取回一条缓存行，接下来 15 次访问都命中它，缓存利用率 100%。按列遍历时，每次访问都跳到下一行，也就是下一条缓存行：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>遍历方式</th><th>每条缓存行被用几次</th><th>结果</th></tr></thead><tbody><tr><th>行优先，按行遍历</th><td data-label="每条缓存行被用几次"><span class="tag tone-green">16 次</span></td><td data-label="结果">一次未命中换来 16 次命中</td></tr><tr><th>行优先，按列遍历（1000×1000）</th><td data-label="每条缓存行被用几次"><span class="tag tone-red">1 次</span></td><td data-label="结果">每一步都跨到下一行；一列要碰 1000 条缓存行、约 64 KB，超过 L1，回来时已经失效</td></tr><tr><th>分块之后按块遍历</th><td data-label="每条缓存行被用几次"><span class="tag tone-green">接近 16 次</span></td><td data-label="结果">块内的行在缓存里待到用完为止</td></tr></tbody></table></div><p><strong>循环交换</strong>解决的是&quot;顺序不对&quot;：把内外层换一下，访问就回到行方向。<strong>循环分块</strong>解决的是&quot;整块装不下&quot;：即使顺序对了，如果数据总量远超缓存，下一次回来时还是要重新读。分块把它切成小方块，一块在缓存里做完再换下一块。</p>
+<p>块的大小是算出来的，不是拍的。三个 <code>n×n</code> 矩阵各取一个 <code>B×B</code> 块，同时活着的元素是 <code>3 × B²</code>，每个 8 字节（double），要装进缓存：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">3 × B² × 8 ≤ 缓存容量  →  B ≈ sqrt(缓存容量 / 24)
+</code></pre></div>
+<p>L1 只有几十 KB 时，这个式子给出个位数的 <code>B</code>；用 L2 的容量能得到十几到几十。取多大最终还是要靠实测——缓存是组相联的，块大小刚好和组数共振时会互相踢出，这就是 Lam 等人在 1991 年专门分析过的&quot;自冲突&quot;。</p>
+<h2 id="内联收益和代价都要算"><span class="num">04</span>内联：收益和代价都要算</h2>
+<p>函数内联是最能说明&quot;成本模型&quot;的优化，因为它的收益和代价都很具体：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>维度</th><th>具体是什么</th></tr></thead><tbody><tr><th>收益 · 去掉调用开销</th><td data-label="具体是什么">参数传递、栈帧建立、返回跳转都不用了</td></tr><tr><th>收益 · 暴露新机会</th><td data-label="具体是什么">实参是常量时可以常量传播；调用者上下文可以做死代码删除；跨函数优化有了视野</td></tr><tr><th>代价 · 代码体积</th><td data-label="具体是什么">每个调用点复制一份函数体，指令缓存压力上升</td></tr><tr><th>代价 · 寄存器压力</th><td data-label="具体是什么">内联后活着的变量变多，可能从寄存器溢出到栈上</td></tr><tr><th>代价 · 编译时间</th><td data-label="具体是什么">函数体进入更多上下文，后面的 pass 要处理更多代码</td></tr></tbody></table></div><p>所以内联的判断长这样：<strong>这个调用点值不值得</strong>，而不是<strong>这个函数值不值得</strong>。同一个函数，热路径上调用一次值得内联，冷路径上调用二十次可能不值得；实参是常量时更值得，参数多到要压栈时更不值得；递归函数几乎不内联，除非能证明深度有限。</p>
+<p>编译器为此准备了一堆旋钮：函数多大以内无条件内联、超过多少只看调用次数、整体代码增长的上限是多少。这些阈值不是真理，是工程折中：调大一点性能可能涨，代码体积和编译时间也一起涨。</p>
+<div class="callout tone-amber">
+      <span class="ic">⚖</span>
+      <div><p><mark class="mk-blue">内联不是「越多越好」，是「在预算内挑最值的那几个」。</mark></p>
+<p>代码体积和编译时间都是有限资源。把整个程序内联成一个大函数，
+通常换来的是指令缓存颠簸和更慢的编译，而不是更快的程序。</p>
+</div>
+    </div><h2 id="pass-顺序机会是被前一个-pass-造出来的"><span class="num">05</span>pass 顺序：机会是被前一个 pass 造出来的</h2>
+<p>看一段很小的代码：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-c">int add1(int x) { return x + 1; }
+int y = add1(2);
+</code></pre></div>
+<p>先内联，再常量折叠，三步就能化成常量：</p>
+<div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-muted">① 原始</span>
+            <span class="name">IR</span>
+            <span class="spacer"></span>
+            
+          </div>
+          
+          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>int add1(int x) { return x + 1; }
+int y = add1(2);
+</pre></div>
+          <p class="jnote">一个函数调用，实参是常量。</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">先内联<span class="note">顺序反过来，后面两步都看不到</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-blue">② 内联之后</span>
+            <span class="name">IR</span>
+            <span class="spacer"></span>
+            
+          </div>
+          
+          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>int y = (2) + 1;
+</pre></div>
+          <p class="jnote">调用没了，加法两侧都成了常量。</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">再折叠<span class="note">两边的值都不依赖运行时</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-violet">③ 常量折叠</span>
+            <span class="name">IR</span>
+            <span class="spacer"></span>
+            
+          </div>
+          
+          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>int y = 3;
+</pre></div>
+          <p class="jnote">加法没了。</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">清理<span class="note">没有调用者的函数留着也是负担</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-green">④ 死代码删除</span>
+            <span class="name">IR</span>
+            <span class="spacer"></span>
+            
+          </div>
+          
+          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>// add1 没有调用者了，整个函数删掉
+</pre></div>
+          <p class="jnote">又腾出一次新的内联机会，如果它的调用者也被删了。</p>
+        </div><p>把顺序换一下，结果完全不同：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>顺序</th><th>每一步看到什么</th><th>最终结果</th></tr></thead><tbody><tr><th>内联 → 常量折叠 → 死代码删除</th><td data-label="每一步看到什么">内联造出 <code>2 + 1</code>；折叠把它变成常量；删除清掉空函数</td><td data-label="最终结果"><span class="tag tone-muted"></span></td></tr><tr><th>常量折叠 → 死代码删除 → 内联</th><td data-label="每一步看到什么"><span class="tag tone-amber">折叠看不到函数体里的 <code>x + 1</code>，删除也删不掉调用</span></td><td data-label="最终结果"><span class="tag tone-muted"></span></td></tr><tr><th>先展开循环再向量化</th><td data-label="每一步看到什么">展开后循环体变大，依赖关系却没变</td><td data-label="最终结果">常常更难向量化</td></tr><tr><th>先向量化再展开</th><td data-label="每一步看到什么"><span class="tag tone-blue">向量化已经把 4 个元素打包了，再展开是复制向量体</span></td><td data-label="最终结果">通常更合适</td></tr></tbody></table></div><p>这就是著名的 <strong>phase ordering problem（阶段顺序问题）</strong>：一个 pass 的输出是下一个 pass 的输入，前一个 pass 既能创造机会，也能破坏机会。理论上穷举顺序不现实，实际的做法是：</p>
+<ol>
+<li>定一个经验顺序，把&quot;造机会&quot;的 pass 放前面（内联、常量传播、规范化），&quot;清理&quot;的放后面（DCE、CFG 化简）。</li>
+<li>包在一个循环里，跑到不动点为止。</li>
+<li>用编译时间预算把这层循环卡住——真实项目里往往就是&quot;再跑一轮 pass 流水线，直到没有变化或者超时&quot;。</li>
+</ol>
+<p><mark class="mk-amber">不动点这个说法很漂亮，落地时是个预算问题。</mark> 每一轮都要重新算分析、重新跑 pass，编译时间随轮数线性涨。所以实践里常见的是&quot;跑两轮然后停&quot;，而不是数学意义上的收敛。</p>
+<h2 id="成本模型为什么难"><span class="num">06</span>成本模型为什么难</h2>
+<p>成本模型要回答的是&quot;在目标机器上，这段代码会多快&quot;。它能看到的是静态信息：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>成本模型看到的</th><th>真实机器上还受什么影响</th></tr></thead><tbody><tr><th>指令条数与指令类型</th><td data-label="真实机器上还受什么影响">乱序执行能把无关指令重叠掉，实际瓶颈可能是一条依赖链</td></tr><tr><th>静态估的缓存代价</th><td data-label="真实机器上还受什么影响">缓存是否命中取决于数据大小、访问顺序、同核上另一条线程在干什么</td></tr><tr><th>分支的静态概率</th><td data-label="真实机器上还受什么影响">真实分支行为由输入决定，预测器还会自己学习</td></tr><tr><th>函数体大小</th><td data-label="真实机器上还受什么影响">指令缓存、uop 缓存、对齐、解码宽度都会改变结果</td></tr><tr><th>目标 CPU 的定值参数</th><td data-label="真实机器上还受什么影响">同一份二进制在不同微架构上表现不同，一次编译要照顾一族机器</td></tr></tbody></table></div><p>于是成本模型天生只能近似。它的价值不在于&quot;算得准&quot;，而在于<strong>方向对</strong>：让热路径上的优化更容易通过、冷路径上的优化更容易被拒绝。算错一次的后果是&quot;白忙一场&quot;，而不是&quot;编错程序&quot;——这也是它为什么敢用估算。</p>
+<p>也正因为它是估算，很多优化问题不是&quot;能不能做&quot;，而是几个连续量的取舍：做多大、做几次、在哪个位置做、对哪些函数做、速度和体积怎么换。</p>
+<h2 id="速查"><span class="num">07</span>速查</h2>
+<ul class="check"><li>经典规则给候选，成本模型给结论；同一条规则在不同机器上收益可以差一个数量级</li><li>强度削弱在今天可能零收益（LEA 一条就够），它的价值转移到了「步长运行时才知道」和「帮忙向量化」</li><li>循环五件套各有前提：LICM 要别名、交换要依赖、分块要容量、向量化要无依赖且不重叠</li><li>分块尺寸是算出来的：<code>3 × B² × 8 ≤ 缓存</code>；但组相联带来的自冲突只能靠实测</li><li>内联的判断单位是「这个调用点」，不是「这个函数」</li><li>pass 顺序决定机会：内联造常量、常量造死代码、删代码又造内联机会</li><li>不动点在工程上是「跑两轮然后停」，编译时间预算才是真正的边界</li></ul><h2 id="自测"><span class="num">08</span>自测</h2>
+<div class="quiz"><details>
+        <summary><code>i * 4</code> 改成 <code>x += 4</code> 在今天的 x86-64 上为什么可能一点也没变快？</summary>
+        <div class="a"><p>因为 <code>i * 4</code> 常常被编译成一条 LEA：<code>base + index*4</code> 是地址计算的常见形式，
+延迟 1 个周期，和加法相同。指令数没减少，延迟也没减少。</p>
+<p>这条规则真正有价值的场景是：步长只有运行时才知道（必须真乘）、
+或者削弱之后能暴露向量化。是否采用由目标相关的成本模型决定。</p>
+</div>
+      </details><details>
+        <summary>循环交换和循环分块分别在解决什么问题？</summary>
+        <div class="a"><p>交换解决「顺序不对」：行优先存储的矩阵被按列遍历，每一步都跳一整行，
+交换内外层就回到行方向。</p>
+<p>分块解决「装不下」：即使顺序对了，数据总量远超缓存时下一次回来还得重读。
+分块把它切成能装进缓存的小块，块内一次用完。块大小由缓存容量算出，但要实测确认。</p>
+</div>
+      </details><details>
+        <summary>为什么内联的判断单位是「调用点」而不是「函数」？</summary>
+        <div class="a"><p>收益和代价都发生在调用点上：热路径上的一次调用，内联收益大、体积代价摊得薄；
+冷路径上二十次调用，体积代价乘二十、收益几乎为零。</p>
+<p>所以判断要带上上下文：调用次数、实参是否是常量、函数体大小、是否递归、
+以及当前函数的整体增长预算。</p>
+</div>
+      </details><details>
+        <summary>同一个内联和折叠，换个顺序结果就变了，这说明什么？</summary>
+        <div class="a"><p>说明 pass 之间有依赖：内联创造 <code>2 + 1</code> 这个机会，折叠才看得到它。
+这就是阶段顺序问题——前一个 pass 既能创造机会也能破坏机会。</p>
+<p>实践上的做法是定一个经验顺序，包进循环跑到不动点，再用编译时间预算卡住。</p>
+</div>
+      </details><details>
+        <summary>成本模型算错了会怎样？为什么优化器敢用它？</summary>
+        <div class="a"><p>算错的后果只是「这次变换白做」，不是编错程序——合法性由另一道闸保证。
+所以它可以只求方向对：热路径更容易通过，冷路径更容易被拒绝。</p>
+</div>
+      </details></div>
+
+    <footer>
+      <span>变换与代价：强度削弱、循环五件套、成本模型与 pass 顺序</span>
+      <span>最后更新 2026-10-26 · 单文件可离线打开</span>
+    </footer>
+  </main>
+</div>
+
+<script src="../../assets/app.js?v=757eed9a2d"></script>
+</body>
+</html>

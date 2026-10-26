@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-has-toc="1">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>一次优化要过两道闸：as-if、合法性，和「证明不了就不做」</title>
+<meta name="description" content="x = a + 0 能删，x = f() * 0 未必能删 —— 差别不在算术，在「删掉之后程序还看不看得出来」。这篇把优化拆成两个必须分开问的问题：这次变换是否合法（Legality），以及它是否值得（Profitability）。附 C11 的 as-if 原文与「循环可被假设终止」这一条、别名的三个值、两类错误为什么代价不对称，以及 UB 把证明责任推回给程序员之后，编译器为什么会突然变胆大。" />
+<link rel="stylesheet" href="../../assets/theme.css?v=b918ec5c83" />
+  <link rel="stylesheet" href="../../assets/blocks.css?v=1af3923321" />
+  <link rel="stylesheet" href="../../assets/archify-embed.css?v=68fec0b81b" />
+</head>
+<body>
+<div id="progress"></div>
+<div id="tocScrim"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
+    <a class="brand" href="../../index.html"><span class="dot"></span>知识笔记</a>
+    
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="toc" id="toc">
+      <p class="toc-title">目录</p>
+      <a href="../../index.html" class="sub">← 全部笔记</a>
+      <a href="#两行代码一个能删一个不能">两行代码，一个能删一个不能</a>
+      <a href="#一次优化要过两道闸">一次优化要过两道闸</a>
+      <a href="#as-if可观察行为是一张清单">as-if：可观察行为是一张清单</a>
+      <a href="#同一个式子三种命运">同一个式子，三种命运</a>
+      <a href="#合法性从哪来每种变换都要一份证据">合法性从哪来：每种变换都要一份证据</a>
+      <a href="#保守近似三个值而不是一个猜测">保守近似：三个值，而不是一个猜测</a>
+      <a href="#两种错误的代价不对称">两种错误的代价不对称</a>
+      <a href="#契约的另一面ub-让编译器变胆大">契约的另一面：UB 让编译器变胆大</a>
+      <a href="#速查">速查</a>
+      <a href="#自测">自测</a>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow">● 编译 · 优化</span>
+      <h1>一次优化要过两道闸：as-if、合法性，和「证明不了就不做」</h1>
+      <p class="lede">x = a + 0 能删，x = f() * 0 未必能删 —— 差别不在算术，在「删掉之后程序还看不看得出来」。这篇把优化拆成两个必须分开问的问题：这次变换是否合法（Legality），以及它是否值得（Profitability）。附 C11 的 as-if 原文与「循环可被假设终止」这一条、别名的三个值、两类错误为什么代价不对称，以及 UB 把证明责任推回给程序员之后，编译器为什么会突然变胆大。</p>
+    </div>
+
+
+    <div class="provenance"><span><b>来源</b> C11 草案 N1570 §5.1.2.3 程序执行（实现不必求值一个子表达式，只要它能推出该值没被使用、且没有产生需要的副作用——包括调用函数与访问 volatile 对象）https://port70.net/~nsz/c/c11/n1570.html · C11 草案 N1570 §6.8.5 迭代语句（控制表达式非常量、体内无 I/O、不访问 volatile、不做同步或原子操作时，循环可以被实现假设会终止）https://port70.net/~nsz/c/c11/n1570.html · cppreference · The as-if rule（C++ [intro.abstract]：相同输入下，可观察行为必须是该输入可能出现的可观察行为之一；UB 的输入不受此保证）https://en.cppreference.com/w/cpp/language/as_if · GCC 手册 · Optimize Options（-O2 打开 -fdelete-null-pointer-checks、-ffinite-loops、-fstrict-aliasing；-ffast-math 连带关闭 errno 与 NaN 相关语义）https://gcc.gnu.org/onlinedocs/gcc/Optimize-Options.html · Wikipedia · Alias analysis（may-alias / must-alias / 无法判定三态；不能确定时只能按可能别名处理）https://en.wikipedia.org/wiki/Alias_analysis · Diwan, McKinley, Moss · Type-Based Alias Analysis (PLDI'98)（按类型划分别名类，不同别名类必不别名）https://scholarworks.umass.edu/cs_faculty_pubs/18 · Lerner, Millstein, Chambers · Automatically Proving the Correctness of Compiler Optimizations (PLDI'03)（一条优化 = 变换模式 + 合法性条件 + 收益启发式）http://web.cs.ucla.edu/~todd/research/pldi03.pdf · LLVM 博客 · What Every C Programmer Should Know About Undefined Behavior（UB 让编译器有权假设某些情形不会发生，从而删掉相应检查）https://blog.llvm.org/2011/05/what-every-c-programmer-should-know.html · LWN · Fun with NULL pointers（-O2 下判空检查被当作恒假删除，内核改用 -fno-delete-null-pointer-checks）https://lwn.net/Articles/342330/ · CompCert 项目主页（语义保持不是口号：把编译器正确性写成机器检查的证明）https://compcert.org/ · Muchnick · Advanced Compiler Design and Implementation（合法性与收益性作为变换前的两道判断） · stefansf · Non-Termination Considered Harmful in C and C++（C11 允许假设循环终止，由此死循环不再必须保留）https://stefansf.de/post/non-termination-considered-harmful</span><span><b>生成</b> 2026-10-26</span><span><b>模型</b> deepseek-v4.1-flash-1017</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">编译器</span> <span class="tag tone-muted">as-if</span> <span class="tag tone-muted">优化</span> <span class="tag tone-muted">别名分析</span> <span class="tag tone-muted">未定义行为</span> <span class="tag tone-muted">语义保持</span></span></div>
+
+<p>你写了两行差不多的代码，编译器删掉了第一行，却不敢动第二行：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-c">x = a + 0;      // 被改成 x = a
+x = f() * 0;    // 依然是一次函数调用
+</code></pre></div>
+<p>从算术看，两个式子都在说「值等于零」。差别不在数学，在<strong>删掉之后程序还看不看得出来</strong>：<code>f()</code> 可能打印一行字、可能改全局变量、可能根本不返回。这篇讲的就是编译器在这一步上到底在算什么，以及它为什么经常选择「什么也不做」。</p>
+<h2 id="两行代码一个能删一个不能"><span class="num">01</span>两行代码，一个能删一个不能</h2>
+<p>先把两个例子的结局摆在一起。<code>+ 0</code> 是恒等式，<code>f()</code> 是不是恒等，取决于 <code>f</code> 做了什么：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-c">int f() {
+    printf(&quot;hello\n&quot;);
+    return 10;
+}
+
+int a = 3;
+x = a + 0;    // → x = 3，删掉加法
+y = f() * 0;  // → 不能直接写 y = 0，那会少打印一行
+</code></pre></div>
+<p><mark class="mk-amber">「值等于零」和「行为等于原来」不是一回事。</mark> 优化改动的是指令，而程序要对得上的东西是<strong>外部能观测到的结果</strong>：打印了什么、写了哪些文件、最终返回什么。前者是算术，后者是契约。</p>
+<p>这一节先把契约写清楚，后面所有优化都在这份契约里面活动。</p>
+<h2 id="一次优化要过两道闸"><span class="num">02</span>一次优化要过两道闸</h2>
+<p>编译器内部把这件事拆成两个独立的问题，各有各的名字：</p>
+<ul>
+<li><strong>合法性（Legality）</strong>：变换之后，程序的可观察行为是否和原来一致？这是个<strong>证明题</strong>，只有「证得出来」和「证不出来」。</li>
+<li><strong>收益性（Profitability）</strong>：在目标机器上，变换后是不是真的更快/更小？这是个<strong>估算题</strong>，靠成本模型。</li>
+</ul>
+<p>两道闸串起来，才是「应用一条优化」：</p>
+<div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;cand&quot;,&quot;to&quot;:&quot;legal&quot;},{&quot;from&quot;:&quot;legal&quot;,&quot;to&quot;:&quot;drop1&quot;,&quot;label&quot;:&quot;否&quot;},{&quot;from&quot;:&quot;legal&quot;,&quot;to&quot;:&quot;profit&quot;,&quot;label&quot;:&quot;是&quot;},{&quot;from&quot;:&quot;profit&quot;,&quot;to&quot;:&quot;drop2&quot;,&quot;label&quot;:&quot;否&quot;},{&quot;from&quot;:&quot;profit&quot;,&quot;to&quot;:&quot;apply&quot;,&quot;label&quot;:&quot;是&quot;,&quot;anim&quot;:true}]" style="--flow-marker:url(#fa-1)">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa-1" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-blue" data-id="cand">
+              
+              
+              <b>候选变换</b>
+              <small>模式匹配命中：a + 0、f() * 0</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-violet shape-note" data-id="legal">
+              
+              
+              <b>合法性</b>
+              <small>能不能证明语义不变</small>
+            </div><div class="fnode tone-muted" data-id="drop1">
+              
+              
+              <b>放弃这次变换</b>
+              <small>记一笔 missed optimization</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-amber shape-note" data-id="profit">
+              
+              
+              <b>收益判断</b>
+              <small>按目标机成本模型估算</small>
+            </div><div class="fnode tone-muted" data-id="drop2">
+              
+              
+              <b>放弃这次变换</b>
+              <small>合法但不划算</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="apply">
+              
+              
+              <b>新 IR，交给下一轮</b>
+              <small>后面还会被别的 pass 看到</small>
+            </div></div></div>
+      
+    </div><p>两道闸的顺序不是随便排的。<mark class="mk-blue">合法性永远先问，而且它的答案不是「大概没问题」，是「有证明」。</mark> 证不出来就走左边的出口，这一次优化就没了，程序照旧能跑。</p>
+<p>这也解释了为什么优化器经常显得笨：它手里没有「我觉得这里应该没事」这个选项。收益算错只是白忙一场，合法性判错就是<strong>编错程序</strong>，而错编译的 bug 极难定位：用户看到的是一段自己没写过的代码在出错。</p>
+<h2 id="as-if可观察行为是一张清单"><span class="num">03</span>as-if：可观察行为是一张清单</h2>
+<p>「语义不变」听着抽象，标准给了它一个可操作的边界，也就是常说的 <strong>as-if 规则</strong>。C11 的原话是这样（§5.1.2.3）：</p>
+<blockquote>
+<p>实际实现不必求值一个子表达式，只要它能推算出：这个值没有被使用，而且没有产生需要的副作用——包括调用函数、访问 volatile 对象所引起的副作用。</p>
+</blockquote>
+<p>C++ 的说法更直白：<strong>对于相同的输入，程序的可观察行为必须是该输入下可能出现的可观察行为之一。</strong>（[intro.abstract]）</p>
+<p>注意这句话里没有「代码形状」「指令条数」「变量还在不在」。这些都不受保护。受保护的是下面这一列：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>程序里的东西</th><th>算不算「可观察」</th><th>编译器能不能动</th></tr></thead><tbody><tr><th>中间变量、临时值、寄存器分配</th><td data-label="算不算「可观察」"><span class="tag tone-muted">不算</span></td><td data-label="编译器能不能动">随便改，只要用它的地方还算得对</td></tr><tr><th>没有依赖关系的两条语句的先后</th><td data-label="算不算「可观察」"><span class="tag tone-muted">不算</span></td><td data-label="编译器能不能动">可以换序，结果一致就行</td></tr><tr><th><code>printf</code> 的次数和顺序</th><td data-label="算不算「可观察」"><span class="tag tone-green">算</span></td><td data-label="编译器能不能动">不能少、不能改序</td></tr><tr><th>对 <code>volatile</code> 对象的读写</th><td data-label="算不算「可观察」"><span class="tag tone-green">算</span></td><td data-label="编译器能不能动">一次都不能多、不能少</td></tr><tr><th>原子操作与同步</th><td data-label="算不算「可观察」"><span class="tag tone-green">算</span></td><td data-label="编译器能不能动">改了就是改了内存模型</td></tr><tr><th>程序是否终止、返回什么</th><td data-label="算不算「可观察」"><span class="tag tone-amber">部分算</span></td><td data-label="编译器能不能动">见下面这一条</td></tr></tbody></table></div><p>最后一行是个反直觉的地方。C11 §6.8.5 补了一条：如果一个循环的控制表达式不是常量、循环体里不做 I/O、不访问 volatile、不做同步或原子操作，那么<strong>实现可以假设它一定会终止</strong>。换句话说，<code>while (1) { i++; }</code> 这种「什么也不干的死循环」不保证被保留下来，编译器有权把它整个删掉。</p>
+<p>这条规则对得上现实：GCC 在 <code>-O2</code> 就打开了 <code>-ffinite-loops</code>，正是这个假设的实现。</p>
+<p><mark class="mk-amber">把「可观察行为」理解成「我看到的东西」会出错。</mark> 它指的是标准列出的那些东西：I/O、volatile 访问、原子操作、程序终止状态。你调试时看到变量被优化没了、断点跳来跳去，那些都不在清单上。</p>
+<h2 id="同一个式子三种命运"><span class="num">04</span>同一个式子，三种命运</h2>
+<p>回到 <code>f() * 0</code>。它最后会变成什么，取决于编译器手里有多少信息。点下面几个按钮看它一步步走：</p>
+<div class="demo" data-widget="stepper" data-config="{&quot;steps&quot;:[{&quot;label&quot;:&quot;看到模式&quot;,&quot;code&quot;:&quot;x = f() * 0;&quot;,&quot;note&quot;:&quot;乘零：值一定是 0。真正的问题变成——f() 这次调用能不能一起删掉。&quot;},{&quot;label&quot;:&quot;只有声明&quot;,&quot;code&quot;:&quot;int f(void);   // 定义在另一个编译单元\ny = f() * 0;&quot;,&quot;note&quot;:&quot;看不到函数体。它可能写全局变量、可能打印、可能死循环。合法性这一步直接卡住。&quot;},{&quot;label&quot;:&quot;看到定义&quot;,&quot;code&quot;:&quot;static int f(void) { return 10; }\ny = f() * 0;&quot;,&quot;note&quot;:&quot;体内只读局部量、必然返回。现在可以证明：无副作用、不会有意外分支。&quot;},{&quot;label&quot;:&quot;加上属性&quot;,&quot;code&quot;:&quot;int f(void) __attribute__((pure));\ny = f() * 0;&quot;,&quot;note&quot;:&quot;跨编译单元时，用属性的方式把「只读、无副作用」这条承诺交给编译器。&quot;},{&quot;label&quot;:&quot;过收益关&quot;,&quot;code&quot;:&quot;// 少一次 call、少一次乘\ny = 0;&quot;,&quot;note&quot;:&quot;调用与乘法的开销是明确的，成本模型判定划算，才真正落地。&quot;},{&quot;label&quot;:&quot;证不出来时&quot;,&quot;code&quot;:&quot;y = f() * 0;   // 原样保留&quot;,&quot;note&quot;:&quot;这不是编译器偷懒，是它在没有证明的情况下拒绝下注。&quot;}]}">
+      <div class="demo-head">
+        <span class="title">x = f() * 0 走到哪一步就停下了</span>
+        <span class="status" data-status></span>
+        <span class="spacer"></span>
+        
+      </div>
+      <div class="demo-body custom" data-mount></div>
+    </div><p>三行代码，三种命运，可以并排看：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>写法</th><th>结果</th><th>为什么</th></tr></thead><tbody><tr><th><code>x = a + 0</code></th><td data-label="结果"><span class="tag tone-green">改成 <code>x = a</code></span></td><td data-label="为什么">整数加零没有副作用，也不改变后续任何可观察行为</td></tr><tr><th><code>x = 42 * 0</code></th><td data-label="结果"><span class="tag tone-green">直接折成 <code>x = 0</code></span></td><td data-label="为什么">两边都是编译期常量，折叠连一次运行都不花</td></tr><tr><th><code>x = f() * 0</code></th><td data-label="结果"><span class="tag tone-amber">只有在证明 <code>f</code> 无副作用且必返回时才删</span></td><td data-label="为什么">删掉调用等于删掉它的副作用，这必须证明，不能假设</td></tr><tr><th><code>x = *p * 0</code>（<code>p</code> 可能为空）</th><td data-label="结果"><span class="tag tone-red">通常不删</span></td><td data-label="为什么">空指针解引用在 C 里是 UB，但删掉这次读会改变出错时的表现，多数编译器在这里选择保守</td></tr></tbody></table></div><p>最后一行值得单独说：<strong>「删掉一次调用」要同时证明三件事</strong>——它没有副作用、它一定会被执行到（不是死代码）、它一定会返回（不陷入死循环、不触发陷阱）。三件里缺一件，合法的变换就变成错的。</p>
+<h2 id="合法性从哪来每种变换都要一份证据"><span class="num">05</span>合法性从哪来：每种变换都要一份证据</h2>
+<p>合法性不是靠直觉，是靠<strong>分析</strong>（analysis）给出的结论。不同的变换要的证据不一样，所以要的分析也不一样：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>想做的变换</th><th>必须先证明什么</th><th>靠哪份分析</th></tr></thead><tbody><tr><th>删掉一条赋值</th><td data-label="必须先证明什么">这个值后面没人用</td><td data-label="靠哪份分析">活跃变量分析</td></tr><tr><th>把 <code>a * b</code> 提到循环外</th><td data-label="必须先证明什么">每轮算出来都一样，循环里没人改 <code>a</code>、<code>b</code></td><td data-label="靠哪份分析">循环识别 + 别名分析 + 副作用分析</td></tr><tr><th>交换 <code>*p = 10</code> 和 <code>x = *q</code> 的顺序</th><td data-label="必须先证明什么"><code>p</code> 和 <code>q</code> 不指向同一处</td><td data-label="靠哪份分析">别名分析</td></tr><tr><th>把 <code>x + 0</code> 折成 <code>x</code></th><td data-label="必须先证明什么">没有隐式转换或异常语义被改变</td><td data-label="靠哪份分析">类型信息 + 常量传播</td></tr><tr><th>把两次相同表达式合成一次</th><td data-label="必须先证明什么">两次之间没有东西改过它的操作数</td><td data-label="靠哪份分析">公共子表达式分析（可用表达式）</td></tr><tr><th>把 <code>if</code> 的一个分支删掉</th><td data-label="必须先证明什么">条件恒真，或那个分支不可达</td><td data-label="靠哪份分析">常量传播 + 可达性</td></tr></tbody></table></div><p>第三条是这篇里最值得记住的一条：<strong>两行内存访问能不能换顺序，编译器自己看不出来，得先证明两块内存不重叠。</strong> 这就是别名分析（alias analysis）要回答的问题，下一节展开。第 3 篇会把这张表里的分析一个个拆开。</p>
+<div class="callout tone-violet">
+      <span class="ic">🧾</span>
+      <div><p><strong>「证不出来」不是失败，是正常输出。</strong></p>
+<p>优化器的每次判断都会落到三个结果之一：证得出（做）、证得出但不划算（不做）、证不出（不做）。
+第三种情况在编译器内部叫 <strong>missed optimization</strong>，它会被记录、被测试用例覆盖，
+但不会被当成 bug，因为它换来的是「不会编错」。</p>
+</div>
+    </div><h2 id="保守近似三个值而不是一个猜测"><span class="num">06</span>保守近似：三个值，而不是一个猜测</h2>
+<p>别名分析是最能说明「保守」长什么样的例子。面对</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-c">*p = 10;
+x = *q;
+</code></pre></div>
+<p>编译器真正需要回答的是：<code>p</code> 和 <code>q</code> 会不会指向同一块内存。这个问题的答案只有三种：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>分析结论</th><th>对这两行的处理</th><th>代价</th></tr></thead><tbody><tr><th>一定别名（must-alias）</th><td data-label="对这两行的处理"><span class="tag tone-blue">必须保持顺序，甚至可以认为 <code>*q</code> 就是 10</span></td><td data-label="代价">没有代价，只是很少能判出来</td></tr><tr><th>一定不别名（no-alias）</th><td data-label="对这两行的处理"><span class="tag tone-green">可以换序、可以缓存 <code>*q</code> 的值</span></td><td data-label="代价">这是优化最想要的结果</td></tr><tr><th>可能别名（may-alias）</th><td data-label="对这两行的处理"><span class="tag tone-amber">按「会冲突」处理：不换序、不合并</span></td><td data-label="代价">少一次优化，但不会错</td></tr><tr><th>完全无法判定</th><td data-label="对这两行的处理"><span class="tag tone-amber">同「可能别名」</span></td><td data-label="代价">同上</td></tr></tbody></table></div><p>关键在于：<mark class="mk-blue">「可能别名」这个答案是<strong>故意不精确</strong>的，它把「也许」当成「是」来处理。</mark> 这样做的后果只是少做一次优化；反过来的处理方式——把「也许」当成「不是」——会让编译器在一半的情况下改坏别人的数据。</p>
+<p>这也解释了为什么 C 的指针别名问题这么难缠：一次 <code>char *</code> 类型的写入、一次函数调用、一个取地址操作，都可能让大片结论退化成「可能别名」。<strong>你写代码时用的类型越模糊，编译器能证明的东西越少。</strong></p>
+<h2 id="两种错误的代价不对称"><span class="num">07</span>两种错误的代价不对称</h2>
+<p>把两类错误放在一起看，就能理解优化器为什么偏保守：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>犯的错</th><th>后果</th><th>谁来发现</th><th>修起来多难</th></tr></thead><tbody><tr><th>该优化没优化（漏）</th><td data-label="后果"><span class="tag tone-amber">慢一点</span></td><td data-label="谁来发现">性能测试可能发现，也可能永远没人注意</td><td data-label="修起来多难">改一行成本模型或代码写法</td></tr><tr><th>不该优化却优化了（错编译）</th><td data-label="后果"><span class="tag tone-red">程序算错</span></td><td data-label="谁来发现">通常只有特定输入才触发</td><td data-label="修起来多难">从一条错误的结果反推一条 pass，可能要几天</td></tr></tbody></table></div><p>两类错误的<strong>收益</strong>也不对称：一次漏优化只损失一点点性能，一次错编译可能让整个团队几天找不到原因。所以工程上的选择很清楚：宁可漏，不可错。</p>
+<p><mark class="mk-amber">「我的代码这么写明明是对的，编译器凭什么删」——这句话在讨论的是源码意图，不是标准定义的行为。</mark> 一旦一段代码落进未定义行为，编译器就有权假设它不会发生，接下来的推导全部建立在那个假设上。</p>
+<h2 id="契约的另一面ub-让编译器变胆大"><span class="num">08</span>契约的另一面：UB 让编译器变胆大</h2>
+<p>as-if 保护的是<strong>有定义的行为</strong>。反过来，标准里那些<strong>未定义行为（undefined behavior, UB）</strong> 等于给编译器发了一张通行证：既然你说这种情况不会发生，我就按它不发生来推。</p>
+<p>最出名的一次是空指针检查。内核里长期有这种写法：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-c">if (!p) return -EINVAL;
+int v = p-&gt;field;      // 如果 p 是 NULL，这一行已经是 UB
+</code></pre></div>
+<p>在 <code>-O2</code> 下，<code>-fdelete-null-pointer-checks</code> 会认为「既然这里解引用了 <code>p</code>，那 <code>p</code> 一定非空」，于是前面那个 <code>if</code> 恒假、整段删掉。2009 年这次发现直接促成了内核在构建时关掉这个优化。</p>
+<p>同样的机制还在几个地方：有符号整数溢出是 UB（所以 <code>x + 1 &gt; x</code> 不保证为真）、违反严格别名规则是 UB（所以 <code>int*</code> 和 <code>float*</code> 指向同一块内存的写法会被重排）、把可能为空的指针当有效指针用是 UB。三个开关能把其中一部分还回来：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>开关</th><th>换回什么</th><th>代价</th></tr></thead><tbody><tr><th><code>-fno-strict-aliasing</code></th><td data-label="换回什么">跨类型的指针别名按「可能别名」处理</td><td data-label="代价">少一批优化</td></tr><tr><th><code>-fwrapv</code></th><td data-label="换回什么">有符号溢出按二进制补码回绕</td><td data-label="代价"><code>x + 1 &gt; x</code> 重获保证</td></tr><tr><th><code>-fno-delete-null-pointer-checks</code></th><td data-label="换回什么">判空检查按普通代码保留</td><td data-label="代价">一处安全检查不再被删</td></tr><tr><th><code>-O0</code></th><td data-label="换回什么"><span class="tag tone-red">上述问题基本消失</span></td><td data-label="代价">顺带把所有优化一起关掉</td></tr></tbody></table></div><p><mark class="mk-green">更划算的做法通常是<strong>把契约写清楚</strong>，而不是关开关。</mark> 该用 <code>unsigned</code> 的地方别用 <code>signed</code>、该用 <code>memcpy</code> 的地方别用指针强转、能用 <code>__attribute__((pure))</code> 或 <code>restrict</code> 表达的性质就标出来——这些都是把「我知道的事实」交给编译器，让它有东西可以证明。</p>
+<div class="callout tone-amber">
+      <span class="ic">⚠</span>
+      <div><p><mark class="mk-blue">优化器不是不信任你，它只是不接受没有依据的信任。</mark></p>
+<p>你写 <code>f() * 0</code> 时心里知道 <code>f</code> 无害，但代码里没有一处写着这句话。
+想让它变成 <code>0</code>，就要么把定义给它看，要么用属性把承诺写下来。</p>
+</div>
+    </div><h2 id="速查"><span class="num">09</span>速查</h2>
+<ul class="check"><li>先问法律问题，再问收益问题：两次判断分开做，结论才稳定</li><li>「语义不变」的口径是可观察行为（I/O、volatile、原子、终止状态），不是代码形状</li><li>删一次调用要同时证明：没副作用、会执行到、一定会返回</li><li>分析给的是三态结论；「可能别名」按冲突处理，这是设计而不是缺陷</li><li>漏优化的代价是速度，错编译的代价是正确性，两者不能放在同一杆秤上</li><li>想关掉某个优化之前，先看能不能把契约写清楚（类型、属性、<code>restrict</code>）</li></ul><h2 id="自测"><span class="num">10</span>自测</h2>
+<div class="quiz"><details>
+        <summary>为什么 <code>x = f() * 0</code> 不总能改成 <code>x = 0</code>？</summary>
+        <div class="a"><p>因为乘零只保证值相等，不保证行为相等。<code>f()</code> 可能有副作用（打印、写全局变量），
+也可能不返回。删掉这次调用，程序的可观察行为就变了。</p>
+<p>只有能证明 <code>f</code> 无副作用、一定会被执行到、一定会返回时，这次变换才合法。
+证明的来源可以是函数定义、也可以是 <code>pure</code> / <code>const</code> 这类属性承诺。</p>
+</div>
+      </details><details>
+        <summary>as-if 规则保护的「可观察行为」具体指什么？</summary>
+        <div class="a"><p>C11 §5.1.2.3 的口径：I/O、对 volatile 对象的访问、原子与同步操作、
+程序终止状态等。中间变量、寄存器分配、没有依赖的语句顺序都不在里面。</p>
+<p>所以「我调试时变量不见了」不是违规；「printf 少了一次」才是。</p>
+</div>
+      </details><details>
+        <summary>别名分析回答「可能别名」时，编译器为什么按冲突处理？</summary>
+        <div class="a"><p>因为它没有证明「一定不别名」。按冲突处理最多丢一次优化；
+按不冲突处理，一旦真的重叠就是错编译。两类代价不对称，所以选保守的那一边。</p>
+</div>
+      </details><details>
+        <summary>为什么 <code>-O2</code> 下有的死循环会消失？</summary>
+        <div class="a"><p>C11 §6.8.5 允许实现假设：控制表达式不是常量、体内不做 I/O、不访问 volatile、
+不做同步或原子操作的循环一定会终止。GCC 的 <code>-ffinite-loops</code>（<code>-O2</code> 打开）
+就是这条假设的实现，循环如果最终没有可观察结果，就会被删掉。</p>
+</div>
+      </details><details>
+        <summary>有符号溢出为什么会拖累像 <code>x + 1 &gt; x</code> 这种判断？</summary>
+        <div class="a"><p>因为有符号溢出在 C 里是 UB，编译器有权假设它不发生，于是 <code>x + 1</code> 一定大于 <code>x</code>，
+这个比较恒真。要保留回绕语义，用 <code>-fwrapv</code>，或者改用无符号类型。</p>
+</div>
+      </details></div>
+
+    <footer>
+      <span>一次优化要过两道闸：as-if、合法性，和「证明不了就不做」</span>
+      <span>最后更新 2026-10-26 · 单文件可离线打开</span>
+    </footer>
+  </main>
+</div>
+
+<script src="../../assets/app.js?v=757eed9a2d"></script>
+</body>
+</html>

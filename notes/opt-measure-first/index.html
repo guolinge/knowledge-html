@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-has-toc="1">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>先测量再优化：阿姆达尔定律决定上限，局部性决定下限</title>
+<meta name="description" content="十秒里九秒半花在函数 A，把只占 0.1 秒的函数 C 优化到零，整体只从 10 秒变 9.9 秒。这篇讲优化收益从哪来：阿姆达尔定律给出的上限、算法与数据结构的收益梯度、热点路径为什么要连续排列、以及现代机器上「少一条指令」和「少一次缓存未命中」的差距。附 Knuth 那句「过早优化」的原话与它常被漏掉的后半句、三种 profiler 各自能看到什么。" />
+<link rel="stylesheet" href="../../assets/theme.css?v=b918ec5c83" />
+  <link rel="stylesheet" href="../../assets/blocks.css?v=1af3923321" />
+  <link rel="stylesheet" href="../../assets/archify-embed.css?v=68fec0b81b" />
+</head>
+<body>
+<div id="progress"></div>
+<div id="tocScrim"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
+    <a class="brand" href="../../index.html"><span class="dot"></span>知识笔记</a>
+    
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="toc" id="toc">
+      <p class="toc-title">目录</p>
+      <a href="../../index.html" class="sub">← 全部笔记</a>
+      <a href="#十秒钟里哪一百毫秒值得动">十秒钟里，哪一百毫秒值得动</a>
+      <a href="#阿姆达尔定律上限由没动的那部分决定">阿姆达尔定律：上限由没动的那部分决定</a>
+      <a href="#过早优化是万恶之源的原话和它没说的后半句">「过早优化是万恶之源」的原话，和它没说的后半句</a>
+      <a href="#从猜测到测量profiler-能告诉你什么">从猜测到测量：profiler 能告诉你什么</a>
+      <a href="#收益梯度算法-内存-并行-指令">收益梯度：算法 &gt; 内存 &gt; 并行 &gt; 指令</a>
+      <a href="#热点路径99-的那条路应该连续">热点路径：99% 的那条路应该连续</a>
+      <a href="#局部性少一条加法可能不值一次缓存未命中">局部性：少一条加法，可能不值一次缓存未命中</a>
+      <a href="#速查">速查</a>
+      <a href="#自测">自测</a>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow">● 编译 · 优化</span>
+      <h1>先测量再优化：阿姆达尔定律决定上限，局部性决定下限</h1>
+      <p class="lede">十秒里九秒半花在函数 A，把只占 0.1 秒的函数 C 优化到零，整体只从 10 秒变 9.9 秒。这篇讲优化收益从哪来：阿姆达尔定律给出的上限、算法与数据结构的收益梯度、热点路径为什么要连续排列、以及现代机器上「少一条指令」和「少一次缓存未命中」的差距。附 Knuth 那句「过早优化」的原话与它常被漏掉的后半句、三种 profiler 各自能看到什么。</p>
+    </div>
+
+<aside class="needs">
+      <p class="needs-title">读这篇之前，你需要先知道</p>
+      <a class="need" href="../opt-legality/">← <b>1. 一次优化要过两道闸</b><span>as-if 只保护可观察行为；合法性与收益性分开判断；别名分析的三个值；为什么「证明不了就不做」</span></a>
+    </aside>
+    <div class="provenance"><span><b>来源</b> Knuth · Structured Programming with go to Statements, ACM Computing Surveys 6(4), 1974（「我们应当忘掉小的效率，大约 97% 的场合：过早优化是万恶之源。但也不要放过那关键 3% 里的机会」）https://dl.acm.org/doi/10.1145/356635.356640 · Amdahl · Validity of the single processor approach to achieving large scale computing capabilities, AFIPS 1967（整体加速比受未优化部分限制）https://en.wikipedia.org/wiki/Amdahl%27s_law · Wikipedia · Amdahl's law（Speedup = 1 / ((1-P) + P/S)；P 是优化部分占原时间的比例，S 是这部分的加速倍数）https://en.wikipedia.org/wiki/Amdahl%27s_law · Drepper · What Every Programmer Should Know About Memory (2007)（缓存层级、预取、数组与链表的访问差异；DRAM 延迟是数量级更大的代价）https://people.freebsd.org/~lstewart/articles/cpumemory.pdf · Intel SDM Vol.1（x86-64 的缓存行是 64 字节；缓存层级由 L1/L2/L3 到内存逐级放大容量与延迟）https://www.intel.com/content/www/us/en/developer/articles/technical/intel-sdm.html · GCC 手册 · Optimize Options（-O3 追加 -ftree-loop-vectorize、-ftree-slp-vectorize、-floop-interchange、-fpeel-loops 等；-O2 用 very-cheap 的向量化成本模型）https://gcc.gnu.org/onlinedocs/gcc/Optimize-Options.html · LLVM 文档 · Auto-Vectorization in LLVM（循环向量化与 SLP 向量化两种来源，依赖对依赖距离与成本的判断）https://llvm.org/docs/Vectorizers.html · perf wiki（Linux 上的采样与硬件性能计数器接口）https://perf.wiki.kernel.org/index.php/Main_Page · Brendan Gregg · Flame Graphs（把采样栈聚合成一张图，宽度就是占比）https://www.brendangregg.com/flamegraphs.html · Google Benchmark 用户指南（基准测试为什么要重复、取中位数、防止被优化掉）https://github.com/google/benchmark/blob/main/docs/user_guide.md · Wikipedia · Branch predictor（分支预测失败要清空流水线，代价是几十个周期量级）https://en.wikipedia.org/wiki/Branch_predictor · Agner Fog · Optimizing subroutines in assembly language（指令延迟、吞吐与缓存层次的实际取值，成本模型的现实依据）https://www.agner.org/optimize/</span><span><b>生成</b> 2026-10-26</span><span><b>模型</b> deepseek-v4.1-flash-1017</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">性能优化</span> <span class="tag tone-muted">阿姆达尔定律</span> <span class="tag tone-muted">profiler</span> <span class="tag tone-muted">缓存局部性</span> <span class="tag tone-muted">基准测试</span></span></div>
+
+<p>一个程序跑十秒，你想让它变快。此时手里有十几种优化手段，全都「看起来有用」。真正的问题不是哪一条更聪明，而是<strong>这十秒花在哪</strong>。这篇按这个顺序讲：先看时间分布，再算收益上限，然后才谈手段，包括那些看起来跟编译器无关的手段（算法、数据结构、内存布局）。</p>
+<h2 id="十秒钟里哪一百毫秒值得动"><span class="num">01</span>十秒钟里，哪一百毫秒值得动</h2>
+<p>假设这十秒的分布是这样：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">函数 A   9.5s   ← 一个热点循环
+函数 B   0.4s   ← 批量转换
+函数 C   0.1s   ← 启动时建了一个表
+</code></pre></div>
+<p>三种努力，换来的整体收益差得很远：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>你做的事</th><th>新总耗时</th><th>整体提升</th></tr></thead><tbody><tr><th>把 C 优化到完全不花时间</th><td data-label="新总耗时"><span class="tag tone-muted">9.9s</span></td><td data-label="整体提升">1.0%，几乎不可测</td></tr><tr><th>把 B 快一倍</th><td data-label="新总耗时"><span class="tag tone-amber">9.8s</span></td><td data-label="整体提升">2.0%</td></tr><tr><th>把 A 快一倍</th><td data-label="新总耗时"><span class="tag tone-green">5.25s</span></td><td data-label="整体提升">47.5%</td></tr></tbody></table></div><p><mark class="mk-blue">C 已经优化到「零成本」这种极端程度，也只值 1%。</mark> 而 A 只要快一倍，整体就快一半。这就是为什么「先测量」不是习惯问题，而是算术问题：<strong>在没测之前，你不知道自己正在优化的是 A 还是 C。</strong></p>
+<p>同一件事换个角度看更清楚：一次优化能带来的整体收益，上限由它占的时间比例决定。这就是下一节的定律。</p>
+<h2 id="阿姆达尔定律上限由没动的那部分决定"><span class="num">02</span>阿姆达尔定律：上限由没动的那部分决定</h2>
+<p>把「占总时间的比例」记作 P，把这部分加速的倍数记作 S，整体加速比是：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">Speedup = 1 / ( (1 - P) + P / S )
+</code></pre></div>
+<p>拖这根滑块看：热点占比越高，能被放大的空间越大；而不管 S 给多大，上限都死死卡在 <code>1/(1-P)</code>。</p>
+<div class="demo" data-widget="tuner" data-config="{&quot;param&quot;:{&quot;label&quot;:&quot;热点占比 P&quot;,&quot;unit&quot;:&quot;%，往右拖&quot;,&quot;values&quot;:[20,40,60,80,95]},&quot;outputs&quot;:[{&quot;label&quot;:&quot;把这块快 2 倍&quot;,&quot;unit&quot;:&quot;倍&quot;,&quot;values&quot;:[1.11,1.25,1.43,1.67,1.9]},{&quot;label&quot;:&quot;快 4 倍&quot;,&quot;unit&quot;:&quot;倍&quot;,&quot;values&quot;:[1.18,1.43,1.82,2.5,3.48]},{&quot;label&quot;:&quot;快到不花时间（S = ∞）&quot;,&quot;unit&quot;:&quot;倍&quot;,&quot;values&quot;:[1.25,1.67,2.5,5,20],&quot;tone&quot;:&quot;amber&quot;}]}">
+      <div class="demo-head">
+        <span class="title">同样的加速倍数，落在不同占比上</span>
+        <span class="status" data-status></span>
+        <span class="spacer"></span>
+        
+      </div>
+      <div class="demo-body custom" data-mount></div>
+    </div><p>几个可以直接读出来的结论：</p>
+<ul>
+<li>占比 20% 的代码，<strong>即使优化到零耗时，整体也只快 25%</strong>。这是上限，不是估算。</li>
+<li>占比 1% 的代码，再怎么努力都停在 1% 附近。多花的力气不会变成结果。</li>
+<li>反过来，占比 95% 的热点，只要快一倍，整体就快近一倍。这也是为什么编译器把力气全砸在循环上。</li>
+</ul>
+<div class="callout tone-amber">
+      <span class="ic">⚠</span>
+      <div><p><mark class="mk-blue">阿姆达尔定律说的是「上限」，它不告诉你「能不能做到」。</mark></p>
+<p>占比 95% 的热点里，可能有 60% 的时间在等一次网络往返。那部分即使你把循环优化到极致，
+也不会变快。先测时间去哪了，再测<strong>这些时间在等什么</strong>，顺序不能反。</p>
+</div>
+    </div><h2 id="过早优化是万恶之源的原话和它没说的后半句"><span class="num">03</span>「过早优化是万恶之源」的原话，和它没说的后半句</h2>
+<p>这句话出自 Knuth 1974 年的《Structured Programming with go to Statements》，原句比流传的版本长：</p>
+<blockquote>
+<p>We should forget about small efficiencies, say about 97% of the time: premature optimization is the root of all evil. Yet we should not pass up our opportunities in that critical 3%.</p>
+</blockquote>
+<p>翻过来是两句话：<strong>大约 97% 的场合该忘掉小的效率</strong>；<strong>但不要放过关键 3% 里的机会</strong>。流传时几乎总是只剩前半句，于是它被读成「不要优化」。</p>
+<p>Knuth 当时反对的不是优化，是在<strong>不知道瓶颈在哪</strong>的时候，为了想象中的性能去牺牲结构、可读性、正确性。他给的理由很具体：那些改动会让程序更难理解、更难改，而换来的收益在 97% 的情况下根本测不出来。</p>
+<p><mark class="mk-amber">「这段代码我猜是瓶颈」和「这段代码在 profiler 里占 62%」是两种完全不同的信息。</mark> 前一种只能靠事后验证，而后验证的成本通常比一开始就测一遍高得多。</p>
+<h2 id="从猜测到测量profiler-能告诉你什么"><span class="num">04</span>从猜测到测量：profiler 能告诉你什么</h2>
+<p>工具分三类，各自回答不同的问题：</p>
+<div class="pipe"><div class="lane tone-blue">
+        <div class="lane-meta">
+          <span class="ln">采样</span>
+          <b>采样式 profiler</b>
+          <small>每隔几毫秒中断一次，记下当时的调用栈</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>perf record / py-spy</b>
+        <small>看栈顶落点</small>
+        <span class="tag tone-blue">低开销</span>
+      </div><div class="pnode">
+        <b>火焰图</b>
+        <small>宽度 = 占比</small>
+        <span class="tag tone-blue">找热点</span>
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">知道时间落在哪些函数<span class="note">不告诉你为什么慢</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-violet">
+        <div class="lane-meta">
+          <span class="ln">插桩</span>
+          <b>插桩式 profiler</b>
+          <small>在函数出入口塞计时器或计数器</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>gprof / 自定义埋点</b>
+        <small>调用次数 + 累计耗时</small>
+        <span class="tag tone-violet">精确计数</span>
+      </div><div class="pnode tone-amber">
+        <b>代价</b>
+        <small>调用密集时开销很大</small>
+        <span class="tag tone-amber">会改变时序</span>
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">知道每个函数被调了多少次<span class="note">高频小函数会被放大</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-green">
+        <div class="lane-meta">
+          <span class="ln">硬件计数</span>
+          <b>硬件性能计数器</b>
+          <small>直接读 CPU 里的计数器，回答「为什么慢」</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b><code>perf stat</code></b>
+        <small>IPC、cache-miss、分支失败</small>
+        <span class="tag tone-green">靠 PMU</span>
+      </div><div class="pnode">
+        <b>判读</b>
+        <small>IPC 低 + L1 miss 高 → 在等内存</small>
+        <span class="tag tone-green">需要经验</span>
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">知道流水线在等什么<span class="note">不告诉你业务上该不该这么写</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div></div><div class="compare-wrap"><table class="compare"><thead><tr><th>你看到的现象</th><th>先看哪个指标</th><th>典型原因</th></tr></thead><tbody><tr><th>热点函数自己算得很多</th><td data-label="先看哪个指标">IPC、指令数</td><td data-label="典型原因">计算密集，或者循环里有冗余计算</td></tr><tr><th>热点函数没算多少但很慢</th><td data-label="先看哪个指标">L1/LLC miss、stalled cycles</td><td data-label="典型原因">在等内存，或者别名导致的假依赖</td></tr><tr><th>时间均匀散在很多函数里</th><td data-label="先看哪个指标">调用次数、栈深度</td><td data-label="典型原因">可能是抽象层太厚，或每次调用都在做重复工作</td></tr><tr><th>单线程快、多线程不涨</th><td data-label="先看哪个指标">CPU 利用率、锁等待</td><td data-label="典型原因">串行部分没消掉（回到阿姆达尔）</td></tr><tr><th>延迟高但 CPU 不高</th><td data-label="先看哪个指标">off-CPU 时间、I/O 等待</td><td data-label="典型原因">在等锁、等磁盘、等网络</td></tr></tbody></table></div><p>关键是最后一栏：profiler 告诉你<strong>时间在哪</strong>，不告诉你<strong>为什么在那</strong>。火焰图上最宽的那一块可能是 <code>memcpy</code>，原因却可能是你按列遍历了一个行优先存储的矩阵，那是下一节的下半部分要讲的。</p>
+<h2 id="收益梯度算法-内存-并行-指令"><span class="num">05</span>收益梯度：算法 &gt; 内存 &gt; 并行 &gt; 指令</h2>
+<p>同一份代码，能从不同层次变快。层次越靠上，倍数越大，但也越依赖人来判断：</p>
+<div class="pipe"><div class="lane tone-green">
+        <div class="lane-meta">
+          <span class="ln">第一层</span>
+          <b>算法与数据结构</b>
+          <small>换掉解法，复杂度变了</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>嵌套循环 → 哈希表</b>
+        <small>O(n²) → O(n)</small>
+        <span class="tag tone-green">10~1000×</span>
+      </div><div class="pnode">
+        <b>重复排序 → 一次排序</b>
+        <small>每轮都排一遍</small>
+        <span class="tag tone-green">常数级删减</span>
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">倍数最大<span class="note">需要业务语义，编译器做不了</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-blue">
+        <div class="lane-meta">
+          <span class="ln">第二层</span>
+          <b>内存访问方式</b>
+          <small>数据怎么排、按什么顺序碰</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>行优先遍历</b>
+        <small>顺着缓存行走</small>
+        <span class="tag tone-blue">2~10×</span>
+      </div><div class="pnode">
+        <b>结构体拆成并行数组</b>
+        <small>AoS → SoA</small>
+        <span class="tag tone-blue">也是向量化的前提</span>
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">经常比算法更值得动<span class="note">要看数据规模和缓存大小</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-violet">
+        <div class="lane-meta">
+          <span class="ln">第三层</span>
+          <b>并行与向量化</b>
+          <small>同一时刻干更多份活</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>多线程 / 分片</b>
+        <small>上限受串行部分限制</small>
+        <span class="tag tone-violet">回到阿姆达尔</span>
+      </div><div class="pnode">
+        <b>SIMD</b>
+        <small>一次 4/8/16 个元素</small>
+        <span class="tag tone-violet">编译器可自动做</span>
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">要结构配合<span class="note">数据有依赖时做不了</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-muted">
+        <div class="lane-meta">
+          <span class="ln">第四层</span>
+          <b>局部指令优化</b>
+          <small>少几条指令、少一次跳转</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>强度削弱、常量折叠</b>
+        <small>编译器自动</small>
+        <span class="tag tone-muted">几个百分点</span>
+      </div><div class="pnode">
+        <b>手写内联汇编</b>
+        <small>通常不值得</small>
+        <span class="tag tone-muted">极少</span>
+      </div></div>
+      </div></div><p>为什么编译器不替你跳到第一层？把 <code>for i for j if (a[i]==b[j])</code> 改成哈希表，要决定哈希函数、要接受内存上涨、要处理相等语义和顺序，这些是<strong>业务决策</strong>，不是语义保持的变换。<mark class="mk-blue">编译器只能在「不改变你写下的行为」这个圈里活动，算法在圈外。</mark></p>
+<p>所以分工是清楚的：<strong>算法与数据结构由人选，具体实现由编译器优化。</strong> 你写冒泡排序，它最多帮你把冒泡排得更快一点，不会帮你换成快排。</p>
+<h2 id="热点路径99-的那条路应该连续"><span class="num">06</span>热点路径：99% 的那条路应该连续</h2>
+<p>程序里的路径不是等价的。一个请求 99.9% 走成功分支，0.1% 走错误处理，两条路的待遇不该一样：</p>
+<div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;in&quot;,&quot;to&quot;:&quot;check&quot;},{&quot;from&quot;:&quot;check&quot;,&quot;to&quot;:&quot;hot&quot;,&quot;label&quot;:&quot;99.9%&quot;},{&quot;from&quot;:&quot;check&quot;,&quot;to&quot;:&quot;cold&quot;,&quot;label&quot;:&quot;0.1%&quot;},{&quot;from&quot;:&quot;hot&quot;,&quot;to&quot;:&quot;ret&quot;},{&quot;from&quot;:&quot;cold&quot;,&quot;to&quot;:&quot;ret&quot;,&quot;dashed&quot;:true}]" style="--flow-marker:url(#fa-1)">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa-1" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-blue" data-id="in">
+              
+              
+              <b>一次调用</b>
+              <small>拿到的参数绝大多数合法</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-violet shape-note" data-id="check">
+              
+              
+              <b>校验</b>
+              <small>长度、边界、类型</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="hot">
+              
+              
+              <b>正常路径</b>
+              <small>紧接在校验之后，跳转最少</small>
+            </div><div class="fnode tone-amber" data-id="cold">
+              
+              
+              <b>错误路径</b>
+              <small>挪到函数尾部，独立一段</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-muted" data-id="ret">
+              
+              
+              <b>返回</b>
+              <small>两条路都汇到这里</small>
+            </div></div></div>
+      
+    </div><p>把常见路径放在一起，换来的是四件事：指令缓存的命中更稳定、跳转次数更少、分支预测器更容易学对、编译器更愿意把这条路上的调用内联。低频路径挪远，代价只是它在真的发生时多跳一次。</p>
+<p>这也是为什么带了频率信息的 CFG 比不带更有用：同样一张图，边上写着 99.9% 和 0.1% 时，布局和优化优先级就完全不同了。PGO 采集的正是这些数字（第 5 篇）。</p>
+<div class="callout tone-red">
+      <span class="ic">⚠</span>
+      <div><p><mark class="mk-amber">「罕见」不要写成「不可能」。</mark></p>
+<p>把错误路径标成「不可达」等于告诉编译器「这里不会发生」。一旦真的发生，
+程序的行为就落到未定义行为里，而不是「多跳一次」。优化假设要写成承诺，
+就得确认它真的永远成立。</p>
+</div>
+    </div><h2 id="局部性少一条加法可能不值一次缓存未命中"><span class="num">07</span>局部性：少一条加法，可能不值一次缓存未命中</h2>
+<p>到这一层，成本的数量级差得很远。下面这些数字是<strong>数量级</strong>，具体机器各不相同，但相互之间的比例关系稳定：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>一次操作</th><th>大致代价</th><th>说明</th></tr></thead><tbody><tr><th>寄存器里的加法</th><td data-label="大致代价"><span class="tag tone-green">约 1 个周期</span></td><td data-label="说明">现代 CPU 一个周期能并行做好几条</td></tr><tr><th>L1 命中</th><td data-label="大致代价"><span class="tag tone-green">约 4 个周期</span></td><td data-label="说明">每核几十 KB</td></tr><tr><th>L2 命中</th><td data-label="大致代价"><span class="tag tone-blue">十几到二十个周期</span></td><td data-label="说明">每核几百 KB 到 1 MB</td></tr><tr><th>L3 命中</th><td data-label="大致代价"><span class="tag tone-amber">几十个周期</span></td><td data-label="说明">多核共享，几 MB 到几十 MB</td></tr><tr><th>主存一次访问</th><td data-label="大致代价"><span class="tag tone-red">约上百纳秒</span></td><td data-label="说明">相当于几百个周期</td></tr><tr><th>分支预测失败</th><td data-label="大致代价"><span class="tag tone-amber">几十个周期</span></td><td data-label="说明">要清空流水线重来</td></tr></tbody></table></div><p>表里最关键的一行是最后两行的对比：<mark class="mk-blue">一次缓存未命中的代价，够你在寄存器里做几百次加法。</mark> 所以「少执行一条加法」和「少一次未命中」不在同一个量级上，后者通常更值钱。</p>
+<p>三种局部性对应三种不同的改法：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>局部性</th><th>它要求什么</th><th>典型改法</th></tr></thead><tbody><tr><th>时间局部性</th><td data-label="它要求什么">刚碰过的数据，尽快再碰一次</td><td data-label="典型改法">复用一个中间结果，而不是重新算；把循环拆成「先算完再统一用」</td></tr><tr><th>空间局部性</th><td data-label="它要求什么">尽量碰相邻的地址</td><td data-label="典型改法">数组按行遍历；把一起用的字段放进同一个结构体；结构体数组改成数组结构体</td></tr><tr><th>指令局部性</th><td data-label="它要求什么">常一起执行的代码放在一起</td><td data-label="典型改法">热冷分离；错误处理挪到函数末尾；避免为了小分支把热路径切碎</td></tr></tbody></table></div><p>一个最小的例子。同样是遍历 100 万个整数：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-c">// 数组：每 16 个元素才碰到一条新的缓存行（64 字节 / 4 字节）
+for (int i = 0; i &lt; n; i++) sum += a[i];
+
+// 链表：每个节点都可能是一次新的缓存行，还要先读指针再读数据
+for (Node *p = head; p; p = p-&gt;next) sum += p-&gt;value;
+</code></pre></div>
+<p>数组版本除了第一个元素之外，后面 15 次访问都落在已经取回来的那条缓存行里；链表版本每个节点至少一次未命中，而且「读 <code>p-&gt;next</code> 才能知道下一个在哪」这件事让预取器也无从下手。<strong>两种写法在指令条数上差不多，实际耗时可能差一个数量级。</strong></p>
+<h2 id="速查"><span class="num">08</span>速查</h2>
+<ul class="check"><li>先拿到时间分布，再决定动哪里；没测之前，一切「看起来是瓶颈」都只是假设</li><li>用 <code>1/((1-P)+P/S)</code> 算上限：占比 20% 的热点，优化到零也只有 1.25 倍</li><li>「过早优化」反对的是「不知瓶颈就动手」，不是「优化」；那关键的 3% 要抓</li><li>profiler 只告诉你时间落在哪，不告诉你为什么；「为什么」要靠硬件计数器和代码结构去推</li><li>收益梯度自上而下：算法 → 内存布局 → 并行/向量化 → 局部指令；越往下倍数越小</li><li>热点路径要连续，冷路径要挪远；但「罕见」不等于「不可能」</li><li>一次缓存未命中的量级，抵得上几百条 ALU 指令</li><li>每次改完都要重测：优化之间会互相影响，测的是端到端</li></ul><h2 id="自测"><span class="num">09</span>自测</h2>
+<div class="quiz"><details>
+        <summary>一段代码占总时间 20%，把它优化到耗时为零，整体能快多少？</summary>
+        <div class="a"><p><code>1 / (1 - 0.2) = 1.25</code>，也就是最多 25%。这是阿姆达尔定律给的上限，
+不是「大概能到」，而是「再强的优化也超不过」。</p>
+<p>占比越大，上限越高；这也是为什么先测时间分布比先学优化手段更重要。</p>
+</div>
+      </details><details>
+        <summary>Knuth 那句话被漏掉的后半句是什么？为什么重要？</summary>
+        <div class="a"><p>后半句是「但不要放过那关键 3% 里的机会」。他只反对「在不知道瓶颈时为了想象中的性能
+牺牲结构」，不反对在真正的热点上做优化。</p>
+<p>少了后半句，这句话很容易被读成「优化不重要」，而真实结论恰好相反：
+优化的力气要集中在测出来的那 3% 上。</p>
+</div>
+      </details><details>
+        <summary>为什么把错误处理挪到函数末尾、正常路径连续排列会更快？</summary>
+        <div class="a"><p>常见路径的指令挨在一起，指令缓存命中更稳定，跳转更少，分支预测器更容易学对，
+编译器也更愿意内联。低频路径挪远后，它真的发生时才多付一次跳转。</p>
+<p>前提是知道哪条路常见。没有实测或 profile 数据时，这个判断很容易搞反。</p>
+</div>
+      </details><details>
+        <summary>数组遍历和链表遍历，指令条数差不多，为什么耗时能差一个数量级？</summary>
+        <div class="a"><p>缓存行是 64 字节。数组一次未命中就把后面十几个元素一起取回来，后续访问都命中；
+链表每个节点都可能跨在一条新缓存行上，而且必须读到 <code>next</code> 才知道下个地址，
+预取器无法提前工作。瓶颈在内存，不在算术。</p>
+</div>
+      </details><details>
+        <summary>为什么编译器不会把一个 O(n²) 的循环自动改成哈希表？</summary>
+        <div class="a"><p>因为那不是语义保持的变换：要选哈希函数、要接受额外内存、要定义元素相等语义、
+还要决定顺序是否重要。这些是业务决策。</p>
+<p>编译器只能在「不改变可观察行为」的范围内做变换，算法选择在这个范围之外，
+所以它由人选，具体实现由编译器优化。</p>
+</div>
+      </details></div>
+
+    <footer>
+      <span>先测量再优化：阿姆达尔定律决定上限，局部性决定下限</span>
+      <span>最后更新 2026-10-26 · 单文件可离线打开</span>
+    </footer>
+  </main>
+</div>
+
+<script src="../../assets/app.js?v=757eed9a2d"></script>
+</body>
+</html>

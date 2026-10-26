@@ -1,0 +1,428 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-has-toc="1">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>运行信息与闭环：PGO、JIT 去优化，和「测量—变换—验证」</title>
+<meta name="description" content="静态编译器只看得到代码，看不到这次运行的分支概率、参数类型和间接调用目标。PGO 用一次真实运行把这些填上，JIT 则在运行时边跑边改，还敢下更激进的假设——代价是必须能安全退回。这篇讲这两种「用运行行为指导优化」的做法、为什么去优化是必需而不是兜底，以及把「看起来更快」变成「确实更快且仍然正确」的那套流程：基线、热点、假设、单变量改动、正确性测试、性能回归。" />
+<link rel="stylesheet" href="../../assets/theme.css?v=b918ec5c83" />
+  <link rel="stylesheet" href="../../assets/blocks.css?v=1af3923321" />
+  <link rel="stylesheet" href="../../assets/archify-embed.css?v=68fec0b81b" />
+</head>
+<body>
+<div id="progress"></div>
+<div id="tocScrim"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
+    <a class="brand" href="../../index.html"><span class="dot"></span>知识笔记</a>
+    
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="toc" id="toc">
+      <p class="toc-title">目录</p>
+      <a href="../../index.html" class="sub">← 全部笔记</a>
+      <a href="#静态看不到的三件事">静态看不到的三件事</a>
+      <a href="#pgo先跑一遍再编译一遍">PGO：先跑一遍，再编译一遍</a>
+      <a href="#jit先跑起来再优化">JIT：先跑起来，再优化</a>
+      <a href="#去优化激进的假设必须能安全撤回">去优化：激进的假设必须能安全撤回</a>
+      <a href="#闭环让变快了变成可复现的结论">闭环：让「变快了」变成可复现的结论</a>
+      <a href="#测试体系优化器最危险的错误是悄悄的">测试体系：优化器最危险的错误是悄悄的</a>
+      <a href="#谁该做什么把分工定清楚">谁该做什么：把分工定清楚</a>
+      <a href="#工具与理解判断不能被外包">工具与理解：判断不能被外包</a>
+      <a href="#速查">速查</a>
+      <a href="#自测">自测</a>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow">● 编译 · 优化</span>
+      <h1>运行信息与闭环：PGO、JIT 去优化，和「测量—变换—验证」</h1>
+      <p class="lede">静态编译器只看得到代码，看不到这次运行的分支概率、参数类型和间接调用目标。PGO 用一次真实运行把这些填上，JIT 则在运行时边跑边改，还敢下更激进的假设——代价是必须能安全退回。这篇讲这两种「用运行行为指导优化」的做法、为什么去优化是必需而不是兜底，以及把「看起来更快」变成「确实更快且仍然正确」的那套流程：基线、热点、假设、单变量改动、正确性测试、性能回归。</p>
+    </div>
+
+<aside class="needs">
+      <p class="needs-title">读这篇之前，你需要先知道</p>
+      <a class="need" href="../opt-transforms-cost/">← <b>4. 变换与代价</b><span>强度削弱为什么不再是稳赚；循环五件套各自解决什么；内联的成本模型；pass 顺序为什么会互相创造和破坏机会</span></a><a class="need" href="../opt-measure-first/">← <b>2. 先测量，再优化</b><span>过早优化的原话与没说出口的后半句；阿姆达尔定律决定上限；算法、内存、并行、指令的收益梯度；热点路径与缓存局部性</span></a>
+    </aside>
+    <div class="provenance"><span><b>来源</b> LLVM 文档 · How To Build Clang and LLVM with Profile-Guided Optimizations（两阶段：插桩收集 profile，再用 profile 重编）https://llvm.org/docs/HowToBuildWithPGO.html · LLVM 博客 · The many faces of LLVM PGO and FDO（插桩式 PGO 与采样式（AutoFDO）两条路线，各自的输入与流程）https://aaupov.github.io/blog/2023/07/09/pgo · GCC 手册 · Optimize Options（-fprofile-generate / -fprofile-use；-fbranch-probabilities 用运行数据指导分支与布局）https://gcc.gnu.org/onlinedocs/gcc/Optimize-Options.html · V8 博客 · Maglev（分层编译：解释器之外加一层开销更低的优化编译器，热了再上 TurboFan）https://v8.dev/blog/maglev · doar-e · Introduction to TurboFan（类型假设失败时去优化：重建解释器状态，回到字节码继续执行）https://doar-e.github.io/blog/2019/01/28/introduction-to-turbofan · Yang, Chen, Eide, Regehr · Finding and Understanding Bugs in C Compilers, PLDI 2011（Csmith 随机生成合法 C 程序做差分测试，报出 325 个以上编译器 bug，其中 GCC 79 个、LLVM 202 个）https://users.cs.utah.edu/~regehr/papers/pldi11-preprint.pdf · CompCert 项目主页（编译器正确性可以被机器检查地证明：语义保持不是靠测试抽样）https://compcert.org/ · Sun, Le, Zhang, Su · Toward Understanding Compiler Bugs in GCC and LLVM, ISSTA 2016（优化相关 bug 的分布与触发条件）https://people.inf.ethz.ch/suz/publications/issta16-compiler-bug-study.pdf · Google Benchmark 用户指南（基准为什么要重复、取中位数、防止被测代码被优化掉）https://github.com/google/benchmark/blob/main/docs/user_guide.md · Rustc 手册 · Profile-guided Optimization（三段式：instrument → 跑负载 → use，附工作目录与环境变量的注意事项）https://doc.rust-lang.org/beta/rustc/profile-guided-optimization.html · LLVM 文档 · Auto-Vectorization in LLVM（profile 信息影响向量化的成本判断与循环展开次数）https://llvm.org/docs/Vectorizers.html · Brendan Gregg · Flame Graphs（采样栈聚合成一张图，宽度就是占比，用来定位热点而不是猜热点）https://www.brendangregg.com/flamegraphs.html</span><span><b>生成</b> 2026-10-26</span><span><b>模型</b> deepseek-v4.1-flash-1017</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">编译器</span> <span class="tag tone-muted">PGO</span> <span class="tag tone-muted">JIT</span> <span class="tag tone-muted">去优化</span> <span class="tag tone-muted">性能测试</span> <span class="tag tone-muted">差分测试</span></span></div>
+
+<p>后面三篇讲的都是「编译器能证明什么」。但有一类信息，编译器无论如何都证明不了，因为答案根本不在代码里，它取决于这次运行喂了什么数据。</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-c">if (type == TYPE_A) { ... }     // 99% 的请求走这里
+else if (type == TYPE_B) { ... } // 剩下 1%
+</code></pre></div>
+<p>静态看，两个分支一样重。真实运行时，一个占 99%，一个占 1%。这一篇讲两件事：怎么把这类信息交给优化器（PGO 和 JIT），以及怎么确认优化真的有效、真的没把程序改坏。</p>
+<h2 id="静态看不到的三件事"><span class="num">01</span>静态看不到的三件事</h2>
+<p>编译器手里只有代码和类型声明。有三类信息它拿不到，而这三类恰好最值钱：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>拿不到的信息</th><th>为什么拿不到</th><th>拿到之后能量什么</th></tr></thead><tbody><tr><th>分支与路径的概率</th><td data-label="为什么拿不到">取决于输入分布，代码里没写</td><td data-label="拿到之后能量什么">基本块布局、热冷分离、内联倾向、寄存器分配</td></tr><tr><th>变量的真实类型</th><td data-label="为什么拿不到">静态类型是声明，运行时可能是子类、可能是 union 的另一支</td><td data-label="拿到之后能量什么">去虚化、类型特化、直接内联目标</td></tr><tr><th>间接调用的目标</th><td data-label="为什么拿不到">函数指针、虚函数、闭包，目标在运行时才确定</td><td data-label="拿到之后能量什么">把间接调用变成直接调用，进而内联</td></tr><tr><th>值的范围与对齐</th><td data-label="为什么拿不到">输入约束没有写在类型里</td><td data-label="拿到之后能量什么">去掉边界检查、选择更窄的指令、判断能否向量化</td></tr></tbody></table></div><p>注意最后一行：这四类信息都有一个共同点：<strong>它们不是语义事实，是运行分布的统计</strong>。<code>type == TYPE_A</code> 占 99% 这件事明天可能变成 50%，编译器如果把它当成永远成立，就是在赌。所以后面两节讲的两条路线，差别正在于「敢赌到什么程度」。</p>
+<h2 id="pgo先跑一遍再编译一遍"><span class="num">02</span>PGO：先跑一遍，再编译一遍</h2>
+<p><strong>PGO（profile-guided optimization，基于剖析的优化）</strong> 的做法朴素得有点意外：把程序编译两遍。第一遍插桩，跑真实负载，把计数器落盘；第二遍读这些数据，重新编译。</p>
+<div class="pipe"><div class="lane tone-blue">
+        <div class="lane-meta">
+          <span class="ln">第一遍</span>
+          <b>插桩编译</b>
+          <small>每个基本块、每条边、每个调用点塞一个计数器</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>gcc -fprofile-generate</b>
+        <small>或者 clang -fprofile-instr-generate</small>
+        <span class="tag tone-blue">比平时慢</span>
+      </div><div class="pnode">
+        <b>产物带 .gcda / .profraw</b>
+        <small>运行结束后写出计数</small>
+        <span class="tag tone-blue">可合并</span>
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">拿到「这次跑了什么」<span class="note">还没开始优化</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-amber">
+        <div class="lane-meta">
+          <span class="ln">运行</span>
+          <b>跑真实负载</b>
+          <small>用生产环境的输入跑一遍代表性场景</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>输入要有代表性</b>
+        <small>测试用例覆盖不到的路径，profile 里是 0</small>
+        <span class="tag tone-amber">关键前提</span>
+      </div><div class="pnode">
+        <b>多份 profile 可以合并</b>
+        <small>把几次运行的计数加在一起</small>
+        <span class="tag tone-amber">摊平偏差</span>
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">合并成一份 profile<span class="note">覆盖率决定这次优化的上限</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-green">
+        <div class="lane-meta">
+          <span class="ln">第二遍</span>
+          <b>带 profile 重编</b>
+          <small>分支概率、调用次数、间接目标全都知道了</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>热路径排在一起</b>
+        <small>基本块布局按实际走向重排</small>
+        <span class="tag tone-green">指令缓存</span>
+      </div><div class="pnode">
+        <b>热函数更愿意内联</b>
+        <small>成本模型拿到真实调用次数</small>
+        <span class="tag tone-green">代码体积花在刀刃上</span>
+      </div><div class="pnode">
+        <b>冷代码分到独立段</b>
+        <small>-freorder-blocks-and-partition</small>
+        <span class="tag tone-green">减少热区污染</span>
+      </div></div>
+      </div></div><p>得到的还是同一个源程序，只是这份二进制贴着真实负载。代价是构建流程多了两步。</p>
+<p>PGO 的价值来自一个简单事实：<mark class="mk-blue">优化的收益取决于「哪些代码真的在跑」，而这只能测出来。</mark> 一份 profile 让成本模型从「猜」变成「按实测分配预算」。</p>
+<p>但它的前提也很硬：<strong>负载要有代表性</strong>。用一份只覆盖登录流程的 profile 去优化整个服务，结果是登录路径被优化到极致，支付路径被当成冷代码扔到远处，那反而更慢。这就是为什么工程上强调「用生产流量的采样，而不是用单元测试跑出来的 profile」。</p>
+<p>采样式 PGO（sample-based，例如 AutoFDO）绕开了插桩：直接用 <code>perf</code> 采样生产进程，把采样地址映射回代码位置当权重。精度低一些，但不需要专门的插桩构建，也不需要在生产环境跑一个慢几倍的二进制。</p>
+<h2 id="jit先跑起来再优化"><span class="num">03</span>JIT：先跑起来，再优化</h2>
+<p>JIT（just-in-time）把「测量」挪进了运行时。它不需要你先跑一遍负载，因为程序本身就在跑：</p>
+<div class="seqd" data-seq data-n="4"
+      style="--seq-fill:url(#s-fill-1);--seq-open:url(#s-fill-1-open)">
+      <svg class="seqd-svg" aria-hidden="true">
+        <defs>
+          <marker id="s-fill-1" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+          <marker id="s-fill-1-open" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10" fill="none" stroke="currentColor" stroke-width="1.4"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="seqd-head"><div class="scell"><div class="spart tone-blue" data-id="i">
+          <b>解释器</b>
+        </div></div><div class="scell"><div class="spart tone-violet" data-id="fb">
+          <b>类型反馈</b>
+        </div></div><div class="scell"><div class="spart tone-amber" data-id="jit">
+          <b>优化编译器</b>
+        </div></div><div class="scell"><div class="spart tone-green" data-id="hot">
+          <b>优化后的代码</b>
+        </div></div></div>
+      <div class="seqd-body"><div class="smsg" data-from="i" data-to="fb" data-kind="sync" data-i="1" data-note="1"><span class="snote">1</span><span class="slabel">记录这次的参数类型</span></div><div class="smsg" data-from="fb" data-to="jit" data-kind="sync" data-i="2" data-note="2"><span class="snote">2</span><span class="slabel">这个函数够热了</span></div><div class="smsg" data-from="jit" data-to="hot" data-kind="sync" data-i="3" data-note="3"><span class="snote">3</span><span class="slabel">编译：假设参数都是 number</span></div><div class="smsg" data-from="hot" data-to="i" data-kind="reply" data-i="4" data-note="4"><span class="snote">4</span><span class="slabel">遇到 string，去优化</span></div><div class="smsg" data-from="i" data-to="jit" data-kind="sync" data-i="5" data-note="5"><span class="snote">5</span><span class="slabel">用「可能是任意类型」再编译</span></div><div class="smsg" data-from="jit" data-to="hot" data-kind="reply" data-i="6" data-note="6"><span class="snote">6</span><span class="slabel">换上新版本</span></div></div>
+    </div><p>三代浏览器引擎都走这条路，只是层数不同：先解释执行（V8 的 Ignition），热起来换一个更快的编译器（Sparkplug / Maglev），再热就上最激进的优化编译器（TurboFan）。每一层都比上一层更依赖假设，也都更需要一条退路。</p>
+<p>JIT 相比静态编译多出来的两件事，恰好是静态编译做不到的：</p>
+<table>
+<thead>
+<tr>
+<th>JIT 能做</th>
+<th>为什么静态编译做不到</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>按实际类型特化</td>
+<td>同一个函数在程序里被不同类型调用，静态只能生成通用版本；JIT 可以生成「number 专用版」</td>
+</tr>
+<tr>
+<td>按实际分支概率重排</td>
+<td>需要真实运行数据，而静态编译时程序还没跑</td>
+</tr>
+<tr>
+<td>换掉已加载的函数</td>
+<td>代码在内存里，可以重新编译、原地替换</td>
+</tr>
+<tr>
+<td>假设失效时退回</td>
+<td>需要运行时状态，解释器一直在旁边待命</td>
+</tr>
+</tbody>
+</table>
+<h2 id="去优化激进的假设必须能安全撤回"><span class="num">04</span>去优化：激进的假设必须能安全撤回</h2>
+<p>第 3 步那句「假设参数都是 number」是整个流程的收益来源，也是风险来源。收益在于：知道是 number 就不用装箱、不用查类型、不用走通用路径。风险在于：这个假设<strong>可能不成立</strong>，而且不成立的时候程序不能崩，得继续算对。</p>
+<p>所以 JIT 必须保留两样东西：</p>
+<ul>
+<li><strong>类型反馈（type feedback）</strong>：这个函数过去被哪些类型调用过。够纯才敢特化。</li>
+<li><strong>去优化（deoptimization）的能力</strong>：在进入优化代码的每个「假设点」埋一个守卫（guard）；守卫失败就抛出一个信号，运行时把当前状态<strong>重建</strong>成解释器能理解的样子（局部变量、操作数栈、程序计数器），然后从那条字节码继续执行。</li>
+</ul>
+<p><mark class="mk-amber">去优化不是出错兜底，是设计里的一等公民。</mark> 没有它，JIT 就不敢做任何激进假设；有了它，JIT 才敢「先按最常见的类型编译，错了再退」。</p>
+<p>这也解释了为什么 JIT 的性能曲线常常是锯齿状的：一段代码被优化、遇到新类型退回、重新优化成更通用的版本、再遇到新类型……<strong>优化器在运行时不停地做「猜—验证—修正」</strong>，和人在做性能优化时的动作是一样的。</p>
+<div class="callout tone-violet">
+      <span class="ic">🔁</span>
+      <div><p><mark class="mk-blue">去优化把「正确性」和「激进程度」解耦了。</mark></p>
+<p>静态编译器两个都要，所以只能在保守的那条线上选一个点。
+JIT 把「激进」放在快路径、「保守」放在慢路径，于是两边都拿到了：
+常见情况按最理想的假设跑，罕见情况退回解释器，结果仍然正确。</p>
+</div>
+    </div><h2 id="闭环让变快了变成可复现的结论"><span class="num">05</span>闭环：让「变快了」变成可复现的结论</h2>
+<p>PGO 和 JIT 是编译器自己的闭环。你自己做优化时，闭环长这样：每一步的产出都是下一步的输入。</p>
+<div class="pipe"><div class="lane tone-muted">
+        <div class="lane-meta">
+          <span class="ln">第 1 步</span>
+          <b>建立基线</b>
+          <small>先有一个能重复的数字</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>固定输入与机器状态</b>
+        <small>同一份数据、同一台机器、关掉别的负载</small>
+        <span class="tag tone-muted">可复现</span>
+      </div><div class="pnode">
+        <b>多轮取中位数</b>
+        <small>跑 5 次看离散度，不看单次最好成绩</small>
+        <span class="tag tone-muted">排除抖动</span>
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">拿到「现在多快」<span class="note">没有基线，后面所有结论都不成立</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-blue">
+        <div class="lane-meta">
+          <span class="ln">第 2 步</span>
+          <b>找热点</b>
+          <small>用 profiler，不用直觉</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>火焰图看占比</b>
+        <small>最宽的那块才是热点</small>
+        <span class="tag tone-blue">采样</span>
+      </div><div class="pnode">
+        <b>计数器看为什么</b>
+        <small>IPC、cache miss、分支失败</small>
+        <span class="tag tone-blue">归因</span>
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">落到具体函数与行<span class="note">注意：热点常常不是你写的代码（如 memcpy）</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-violet">
+        <div class="lane-meta">
+          <span class="ln">第 3 步</span>
+          <b>提一个可证伪的假设</b>
+          <small>「为什么慢」要说成一句话</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>好假设</b>
+        <small>列遍历导致每条缓存行只用 1/16</small>
+        <span class="tag tone-violet">可验证</span>
+      </div><div class="pnode">
+        <b>坏假设</b>
+        <small>这里应该能优化一下</small>
+        <span class="tag tone-violet">无法验证</span>
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">知道这次要改什么、预期变多少<span class="note">预期变不动的，就是假设错了</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-amber">
+        <div class="lane-meta">
+          <span class="ln">第 4 步</span>
+          <b>一次只改一件事</b>
+          <small>否则测出来的数字无法归因</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>保留 diff 与原因</b>
+        <small>为什么这么改，预期多少</small>
+        <span class="tag tone-amber">便于回滚</span>
+      </div><div class="pnode">
+        <b>顺手改的三处要拆开</b>
+        <small>一次一个变量</small>
+        <span class="tag tone-amber">归因</span>
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">得到一份可以单独回滚的改动<span class="note">接下来先问对不对，再问快不快</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-red">
+        <div class="lane-meta">
+          <span class="ln">第 5 步</span>
+          <b>先验正确性</b>
+          <small>优化改坏程序时，测试往往是唯一发现它的地方</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>单元 + 回归</b>
+        <small>覆盖边界值、空输入、并发</small>
+        <span class="tag tone-red">必过</span>
+      </div><div class="pnode">
+        <b>差分对比</b>
+        <small>新旧两版对同一输入比结果</small>
+        <span class="tag tone-red">最灵敏</span>
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">确认结果不变<span class="note">这一步不过，后面测什么都白搭</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-green">
+        <div class="lane-meta">
+          <span class="ln">第 6 步</span>
+          <b>再验性能 + 回归</b>
+          <small>端到端，不是那个局部指标</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>同一套基准重跑</b>
+        <small>看的是整体耗时，不是某条指令</small>
+        <span class="tag tone-green">阿姆达尔</span>
+      </div><div class="pnode">
+        <b>其它场景有没有变慢</b>
+        <small>优化常常是此消彼长</small>
+        <span class="tag tone-green">防回退</span>
+      </div></div>
+      </div></div><p>走完第 6 步之后有三种结局：保留、回滚，或者回到第 1 步再来一轮，直到收益不再显著。</p>
+<p>这套流程里最容易被跳过的是第 5 步。优化改坏程序的典型症状不是崩溃，而是<strong>某些输入下结果不一样</strong>——它在测试里可能刚好没被覆盖到。</p>
+<h2 id="测试体系优化器最危险的错误是悄悄的"><span class="num">06</span>测试体系：优化器最危险的错误是悄悄的</h2>
+<p>编译器项目的测试比普通项目重得多，因为「编出来的程序算错」这种 bug，只能靠对比来发现：</p>
+<div class="cards" data-cols="2"><div class="ccard tone-muted">
+          <span class="tag tone-muted">定位最快</span>
+          <h4>单元测试</h4>
+          <p>每条 pass 有自己的输入输出用例</p>
+          <div class="cbody"><p>一个 pass 一段 IR，断言输出长什么样。好处是失败时范围极小，
+坏处是只覆盖「想得到的情况」。</p>
+</div>
+          
+        </div><div class="ccard tone-muted">
+          <span class="tag tone-muted">防复发</span>
+          <h4>回归测试</h4>
+          <p>每个修过的 bug 都要留下一个用例</p>
+          <div class="cbody"><p>优化 bug 的复现条件常常很怪（某个常量、某条边的顺序）。
+不留下用例，下次重构就会原样再犯一次。</p>
+</div>
+          
+        </div><div class="ccard tone-muted">
+          <span class="tag tone-muted">抓错编译</span>
+          <h4>差分测试</h4>
+          <p>同一份程序，两个编译器（或两个 -O 级别）结果必须一致</p>
+          <div class="cbody"><p>Csmith 就是用随机生成合法 C 程序的办法做这件事：
+把 <code>-O0</code> 和 <code>-O3</code> 的输出对比，不一致就是其中一个错了。
+论文里报出 325 个以上 GCC / LLVM 的 bug，绝大多数是错编译。</p>
+</div>
+          
+        </div><div class="ccard tone-muted">
+          <span class="tag tone-muted">覆盖组合爆炸</span>
+          <h4>随机程序测试</h4>
+          <p>让生成器去覆盖人想不到的组合</p>
+          <div class="cbody"><p>前提是生成器保证程序合法（无 UB），否则差异无法归因：
+程序本身有未定义行为时，两边结果不同是允许的。</p>
+</div>
+          
+        </div><div class="ccard tone-muted">
+          <span class="tag tone-muted">端到端</span>
+          <h4>性能基准</h4>
+          <p>既防变慢，也防「优化了但没收益」的 pass 常驻</p>
+          <div class="cbody"><p>基准要能重复、能归因。单点抖动大时看中位数和分布，
+而不是挑一次最好成绩写进报告。</p>
+</div>
+          
+        </div><div class="ccard tone-muted">
+          <span class="tag tone-muted">容易被忽略</span>
+          <h4>编译时间 / 代码体积基准</h4>
+          <p>优化是有预算的</p>
+          <div class="cbody"><p>多一轮 pass 换来 1% 运行时间、编译时间涨 20%，多数项目不会接受。
+体积同理：内联和展开都会让二进制变大。</p>
+</div>
+          
+        </div><div class="ccard tone-muted">
+          <span class="tag tone-muted">最彻底</span>
+          <h4>形式化验证</h4>
+          <p>把「语义保持」写成机器检查的证明</p>
+          <div class="cbody"><p>CompCert 走的就是这条路：编译器的正确性有证明，不是靠测试抽样。
+代价是要限制编译器能做什么，所以它不做最激进的优化。</p>
+</div>
+          
+        </div></div><h2 id="谁该做什么把分工定清楚"><span class="num">07</span>谁该做什么：把分工定清楚</h2>
+<p>前六节讲的是编译器怎么优化。回到你自己的代码，分工其实很清楚：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>谁</th><th>负责什么</th><th>不适合做什么</th></tr></thead><tbody><tr><th>你</th><td data-label="负责什么">选择算法与数据结构、定义清楚约束（类型、<code>restrict</code>、<code>noexcept</code>）、保持结构可维护、标明哪些是热路径</td><td data-label="不适合做什么">手工模仿编译器的内联与寄存器分配</td></tr><tr><th>编译器</th><td data-label="负责什么">内联、寄存器分配、指令选择、删冗余、按目标机做局部优化</td><td data-label="不适合做什么">替你换算法、替你判断业务语义</td></tr><tr><th>运行信息</th><td data-label="负责什么">提供真实分支概率、类型分布、调用热度</td><td data-label="不适合做什么">替你想清楚「该不该慢」这件事</td></tr></tbody></table></div><p>有一类改动要特别警惕：<strong>为了让编译器生成更好的代码，把源码写得更难懂</strong>。比如手动展开循环、手动把函数拆成三段、手动把判断挪到循环外。这些做法在 1990 年代是必要的，现在多数已经被编译器接管，而它们留下的成本——可读性、可维护性、改需求时的阻力——是确定的。</p>
+<p><mark class="mk-green">只有在测量证明必要的时候，才把源码改成机器喜欢的样子。</mark> 那时候它就不叫「优化风格」，叫「有依据的妥协」，应该在注释里写清原因和数字。</p>
+<h2 id="工具与理解判断不能被外包"><span class="num">08</span>工具与理解：判断不能被外包</h2>
+<p>现代工具能做的事很多：profiler 告诉你时间在哪，编译器告诉你为什么没向量化（<code>-fopt-info-vec</code>、<code>-Rpass=loop-vectorize</code>），AI 能帮你写基准、读汇编、提候选。但下面这些判断仍然要自己做：</p>
+<ul>
+<li>这次跑出来的热点，是不是<strong>生产环境的</strong>热点（负载代表性）。</li>
+<li>这个优化有没有改变可观察行为（第 1 篇那张清单）。</li>
+<li>基准测的是不是你真正关心的东西（端到端还是局部）。</li>
+<li>这份 profile 是不是已经过时（业务变了，分布就变了）。</li>
+<li>这段代码的「慢」是不是本来就应该接受（比如一次必须的加密）。</li>
+</ul>
+<p><mark class="mk-blue">工具能缩短「找到候选」的时间，缩短不了「判断该不该做」的时间。</mark> 后者需要知道这个系统在业务上承诺了什么。</p>
+<h2 id="速查"><span class="num">09</span>速查</h2>
+<ul class="check"><li>静态编译拿不到分支概率、真实类型、间接调用目标；这三样恰好最值钱</li><li>PGO = 插桩跑一遍 + 带 profile 重编；成败取决于负载是否有代表性</li><li>采样式 PGO 用 perf 采样代替插桩，精度低但不用改构建</li><li>JIT 的分层：解释 → 基线 → 优化，越往后越依赖假设</li><li>去优化是设计的一部分：守卫失败时重建解释器状态，继续算对</li><li>自己的闭环：基线 → 热点 → 可证伪的假设 → 单变量改动 → 正确性 → 性能回归</li><li>优化器 bug 靠差分测试抓（Csmith 那一类方法）；自己改代码靠回归与差分对比抓</li><li>性能是多目标：运行时间、编译时间、代码体积都要看</li></ul><h2 id="自测"><span class="num">10</span>自测</h2>
+<div class="quiz"><details>
+        <summary>为什么静态编译器需要 PGO 才能把热路径排在一起？</summary>
+        <div class="a"><p>因为「哪条路径热」取决于输入分布，代码里没有这个信息。
+基本块布局、内联倾向、寄存器分配都要按热度分配预算，没有 profile 只能靠静态启发式猜。</p>
+<p>PGO 用一次真实运行把这些数字填上；前提是那次运行要有代表性。</p>
+</div>
+      </details><details>
+        <summary>PGO 的 profile 没有代表性会怎样？</summary>
+        <div class="a"><p>覆盖率低的路径会被当成冷代码：排到远处、不内联、不做优化。
+如果生产流量恰好主要走这些路径，程序会比不做 PGO 更慢。</p>
+<p>所以工程上用生产流量的采样，而不是用单元测试跑出来的 profile。</p>
+</div>
+      </details><details>
+        <summary>JIT 为什么必须支持去优化？没有它会怎样？</summary>
+        <div class="a"><p>因为 JIT 的收益来自激进假设（比如「参数都是 number」）。假设可能失效，
+而程序不能因此算错。去优化在守卫失败时重建解释器状态，从对应字节码继续执行。</p>
+<p>没有它，JIT 就不敢特化，也就失去了相对静态编译的优势。</p>
+</div>
+      </details><details>
+        <summary>优化改坏了程序，为什么单元测试可能发现不了？</summary>
+        <div class="a"><p>错编译的症状往往不是崩溃，而是某些特定输入下结果不同。
+单元测试覆盖的是想得到的情况，组合爆炸的地方容易漏。</p>
+<p>更灵敏的做法是差分：同一输入，新旧两版（或 -O0 与 -O3）对比结果。
+Csmith 就是用随机生成合法程序 + 差分对比，找出了几百个编译器 bug。</p>
+</div>
+      </details><details>
+        <summary>什么时候值得把源码改成「机器喜欢的样子」？</summary>
+        <div class="a"><p>只有测量证明必要时。现代编译器已经接管了内联、展开、寄存器分配这类工作，
+手工模仿换来的是确定的维护成本，和不确定的收益。</p>
+<p>真要做，就要留下依据：改了什么、预期多少、实测多少、为什么其它写法不行。</p>
+</div>
+      </details></div>
+
+    <footer>
+      <span>运行信息与闭环：PGO、JIT 去优化，和「测量—变换—验证」</span>
+      <span>最后更新 2026-10-26 · 单文件可离线打开</span>
+    </footer>
+  </main>
+</div>
+
+<script src="../../assets/app.js?v=757eed9a2d"></script>
+</body>
+</html>
