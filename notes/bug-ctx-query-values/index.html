@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-has-toc="1">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>只回来一条：重复的 query 参数在哪一环被吃掉</title>
+<meta name="description" content="?values=a&amp;values=b 只回一条。链条完整走一遍：解析器保留了数组，ctx.query 把它压成一个值。讲清为什么框架要准备两套读法、为什么这个 bug 活了很久，以及修法背后那条更普遍的规矩。" />
+<link rel="stylesheet" href="../../assets/theme.css?v=b918ec5c83" />
+  <link rel="stylesheet" href="../../assets/blocks.css?v=1af3923321" />
+  <link rel="stylesheet" href="../../assets/archify-embed.css?v=68fec0b81b" />
+</head>
+<body>
+<div id="progress"></div>
+<div id="tocScrim"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
+    <a class="brand" href="../../index.html"><span class="dot"></span>知识笔记</a>
+    
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="toc" id="toc">
+      <p class="toc-title">目录</p>
+      <a href="../../index.html" class="sub">← 全部笔记</a>
+      <a href="#三方都说自己没错">三方都说自己没错</a>
+      <a href="#把这条链走一遍">把这条链走一遍</a>
+      <a href="#同一份-url两种读法">同一份 URL，两种读法</a>
+      <a href="#差的那一行">差的那一行</a>
+      <a href="#为什么框架要准备两套">为什么框架要准备两套</a>
+      <a href="#为什么它活了很久">为什么它活了很久</a>
+      <a href="#修法与防线">修法与防线</a>
+      <a href="#速查">速查</a>
+      <a href="#一句话" class="sub">一句话</a>
+      <a href="#自测">自测</a>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow">● Bug 复盘 · 参数读取</span>
+      <h1>只回来一条：重复的 query 参数在哪一环被吃掉</h1>
+      <p class="lede">?values=a&amp;values=b 只回一条。链条完整走一遍：解析器保留了数组，ctx.query 把它压成一个值。讲清为什么框架要准备两套读法、为什么这个 bug 活了很久，以及修法背后那条更普遍的规矩。</p>
+    </div>
+
+
+    <div class="provenance"><span><b>来源</b> 本仓 server/app/controller/crowd.ts:147（出问题的读取点）与 7a2f868 的修复 diff · 本仓 client/src/api/crowd.ts:71-77 的 lookupValues（for...append 逐个追加 values） · egg 3.27.1 源码 app/extend/request.js：query → firstValue、queries → arrayValue，两者共用 querystring.parse（node_modules/.pnpm/egg@3.27.1/.../request.js:160-272） · Node v22.23.2 本机实测：querystring.parse 对 ?a=1&amp;a=2 返回数组、对方括号写法返回 'a[]' 键 · Node.js 官方文档 · Query string https://nodejs.org/api/querystring.html（重复参数解析为数组） · @futupb/crm-data-admin-service@3.0.3 生成类型：IGetCrowdResolverOptionsReq.values?: string[]（下游本来就是数组） · OWASP WSTG · Testing for HTTP Parameter Pollution https://wstg.owasp.org/v4.2/4-Web_Application_Security_Testing/07-Input_Validation_Testing/04-Testing_for_HTTP_Parameter_Pollution · CAPEC-460 · HTTP Parameter Pollution https://capec.mitre.org/data/definitions/460.html · egg 源码里引用的 koajs/qs issue #5 https://github.com/koajs/qs/issues/5（改成 querystring 的动机）</span><span><b>生成</b> 2026-10-27</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">bug</span> <span class="tag tone-muted">egg</span> <span class="tag tone-muted">query</span> <span class="tag tone-muted">HTTP 参数</span> <span class="tag tone-muted">静默失败</span></span></div>
+
+<blockquote>
+<p>一个 <code>?values=a&amp;values=b</code> 的请求，回来只有一条。</p>
+<p>前端说「我传了两个」，下游说「我只收到一个」，中间那段代码看起来还「考虑过数组」。
+这一篇把这条链走一遍，指出坏点落在第几环，再讲它为什么能活得这么久。</p>
+</blockquote>
+<h2 id="三方都说自己没错"><span class="num">01</span>三方都说自己没错</h2>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>谁</th><th>他看到的</th><th>真实情况</th></tr></thead><tbody><tr><th>浏览器</th><td data-label="他看到的">URL 里有两个 values</td><td data-label="真实情况">对，原样发出去了两个</td></tr><tr><th>BFF 控制器</th><td data-label="他看到的"><code>queryList</code> 里写了数组判断</td><td data-label="真实情况"><span class="tag tone-red">那个分支永远走不到</span></td></tr><tr><th>Data Admin</th><td data-label="他看到的">收到的 values 只有一项</td><td data-label="真实情况">对，它就按一项办事</td></tr><tr><th>用户</th><td data-label="他看到的">只显示了第一个名称</td><td data-label="真实情况"><span class="tag tone-red">数据在 BFF 就读丢了一个</span></td></tr></tbody></table></div><p>四行里没有一行是「报错」。丢数据发生在<strong>读参数</strong>这一步，而读参数不报错——它只是安静地给了你一个合法值。</p>
+<div class="callout tone-red">
+      <span class="ic">⚠</span>
+      <div><p><mark class="mk-blue">静默丢一半，比抛异常难查十倍。</mark></p>
+<p>异常会给你一个堆栈；静默丢数据只给你一个「看起来正常」的结果 ——
+于是排查方向从一开始就是错的。</p>
+</div>
+    </div><h2 id="把这条链走一遍"><span class="num">02</span>把这条链走一遍</h2>
+<div class="seqd has-grid" data-seq data-n="3"
+      style="--seq-fill:url(#s-fill-1);--seq-open:url(#s-fill-1-open)">
+      <svg class="seqd-svg" aria-hidden="true">
+        <defs>
+          <marker id="s-fill-1" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+          <marker id="s-fill-1-open" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10" fill="none" stroke="currentColor" stroke-width="1.4"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="seqd-head"><div class="scell"><div class="spart tone-blue" data-id="b">
+          <b>浏览器</b>
+        </div></div><div class="scell"><div class="spart tone-violet" data-id="s">
+          <b>audience BFF</b>
+        </div></div><div class="scell"><div class="spart tone-green" data-id="d">
+          <b>Data Admin</b>
+        </div></div></div>
+      <div class="seqd-body"><div class="smsg" data-from="b" data-to="s" data-kind="sync" data-i="1" data-note="1"><span class="snote">1</span><span class="slabel">GET ?values=a&amp;values=b</span></div><div class="smsg is-self" data-from="s" data-to="s" data-kind="self" data-i="2" data-note="2"><span class="snote">2</span><span class="slabel">解析</span></div><div class="smsg is-self" data-from="s" data-to="s" data-kind="self" data-i="3" data-tone="red" data-note="3"><span class="snote">3</span><span class="slabel">取第一个</span></div><div class="smsg" data-from="s" data-to="d" data-kind="sync" data-i="4" data-tone="red" data-note="4"><span class="snote">4</span><span class="slabel">values: ['a']</span></div><div class="smsg" data-from="d" data-to="s" data-kind="reply" data-i="5" data-note="5"><span class="snote">5</span><span class="slabel">只回来 1 条</span></div><div class="smsg" data-from="s" data-to="b" data-kind="reply" data-i="6" data-note="6"><span class="snote">6</span><span class="slabel">只回来 1 条</span></div></div>
+    </div><p>第 ② 步是对的：解析器把两个同名参数<strong>堆成了数组</strong>，一个都没丢。
+第 ③ 步把数组压成了一个值。从这一步开始，下游再怎么正确都救不回来——它压根不知道曾经有两个。</p>
+<div class="callout tone-violet quote">
+      <span class="ic">💡</span>
+      <div><p><mark class="mk-blue">下游没救，是因为上游没递。</mark></p>
+<p>「结果少了一条」这类现象，第一反应通常是查下游；但判断根因有一个更快的办法：
+<strong>先看下游实际收到的入参是什么形状</strong>，而不是看它返回了什么。</p>
+</div>
+    </div><h2 id="同一份-url两种读法"><span class="num">03</span>同一份 URL，两种读法</h2>
+<p>egg 从同一份解析结果出发，给你两个 getter。它们的区别只有一个「过滤函数」：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>形态</th><th>ctx.query</th><th>ctx.queries</th></tr></thead><tbody><tr><th>值的类型</th><td data-label="ctx.query">字符串</td><td data-label="ctx.queries">字符串数组</td></tr><tr><th>传一个 values</th><td data-label="ctx.query"><code>'a'</code></td><td data-label="ctx.queries"><code>['a']</code></td></tr><tr><th>传两个 values</th><td data-label="ctx.query"><span class="tag tone-red"><code>'a'</code> —— 第二个没了</span></td><td data-label="ctx.queries"><code>['a','b']</code></td></tr><tr><th>适合谁</th><td data-label="ctx.query">只会出现一次的参数</td><td data-label="ctx.queries">可能重复出现的参数</td></tr></tbody></table></div><p>底层解析用的是 Node 内置模块，它的规则只有一条：<strong>同一个 key 出现多次，就把值堆成数组</strong>。本机实测（Node v22.23.2）：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-js">querystring.parse('resolverKey=security&amp;values=a&amp;values=b')
+// { resolverKey: 'security', values: [ 'a', 'b' ] }      ← 已经两个都在
+
+querystring.parse('values=a')
+// { values: 'a' }                                        ← 只出现一次，就是一个字符串
+
+querystring.parse('values[]=a&amp;values[]=b')
+// { 'values[]': [ 'a', 'b' ] }                           ← 方括号写法，key 名不同
+</code></pre></div>
+<p>所以<strong>参数叫什么名字完全不影响结果</strong>。把 <code>values</code> 换成 <code>foo</code>，行为分毫不差。决定形状的是「这个 key 出现了几次」，不是它叫 <code>values</code>。</p>
+<div class="callout tone-amber">
+      <span class="ic">⚠</span>
+      <div><p>方括号那种写法还有第二个坑：<code>values[]=a</code> 走 <code>ctx.query</code> 会<strong>完全取不到</strong>——
+因为 key 实际是 <code>values[]</code>，而你去读 <code>values</code> 自然是 <code>undefined</code>。</p>
+</div>
+    </div><h2 id="差的那一行"><span class="num">04</span>差的那一行</h2>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-ts">// egg 3.27.1 · app/extend/request.js
+get query()   { return this._customQuery(_querycache,   firstValue); }
+get queries() { return this._customQuery(_queriesCache, arrayValue); }
+
+function firstValue(v) { return Array.isArray(v) ? v[0] : v; }   // 只留第一个
+function arrayValue(v) { return Array.isArray(v) ? v : [ v ]; }  // 统一成数组
+
+// 两个 getter 共用同一份解析结果，只是喂给不同的过滤函数：
+const query = str ? querystring.parse(str) : {};
+</code></pre></div>
+<p>出问题的那一行读的是 <code>ctx.query</code>（<code>server/app/controller/crowd.ts:147</code>），于是拿到的是 <code>firstValue</code> 过滤之后的字符串。</p>
+<p>更值得注意的是它旁边那个「体贴」的兜底：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-ts">const raw = Array.isArray(value) ? value : value == null ? [] : [ value ];
+//          ↑ 看着很稳，实际是死代码
+</code></pre></div>
+<p><code>ctx.query</code> 永远不会把数组交给它，所以 <code>Array.isArray</code> 那一路永远走不到。<strong>这段兜底不但没帮上忙，还让读代码的人以为「这里已经处理过重复参数了」。</strong></p>
+<div class="callout tone-red">
+      <span class="ic">⚠</span>
+      <div><p><mark class="mk-blue">看起来防御性的代码，可能只是把错误包装得更像正确。</mark></p>
+<p>判断标准很简单：这个分支能不能被走到？走不到的类型判断，比没有更危险。</p>
+</div>
+    </div><h2 id="为什么框架要准备两套"><span class="num">05</span>为什么框架要准备两套</h2>
+<div class="cards" data-cols="3"><div class="ccard tone-green">
+          <span class="tag tone-green">主因</span>
+          <h4>默认安全</h4>
+          <p>重复参数是攻击面，扁平化等于「只认第一个」</p>
+          
+          
+        </div><div class="ccard tone-muted">
+          
+          <h4>好用</h4>
+          <p>绝大多数参数只出现一次，谁都希望它直接是字符串</p>
+          
+          
+        </div><div class="ccard tone-muted">
+          
+          <h4>兼容</h4>
+          <p>query 是老 API，补能力时新增 queries 而不是改掉旧行为</p>
+          
+          
+        </div></div><p>第一条是最实在的动机。重复参数（HTTP Parameter Pollution）是经典攻击面：不同框架对「同名参数取哪个」处理方式不同，攻击者就利用这个差异，让校验层取到的值和业务层取到的值不一样。</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">?resolverKey=security&amp;resolverKey=evil
+        ↓ ctx.query 只取第一个
+{ resolverKey: 'security' }     ← 攻击者塞的第二个进不来
+</code></pre></div>
+<p>如果框架默认就交给你一个数组，那<strong>每个接口</strong>都得自己写 <code>Array.isArray</code> 判一下再决定取哪个，漏一个就是漏洞。默认扁平 = 默认安全；要保真就显式用 <code>ctx.queries</code>。</p>
+<p>代价也很明确：<strong>两套 API 长得很像，拿错的后果是静默少数据</strong>，而且类型上看不出任何异常——<code>ctx.query.values</code> 就是 <code>string</code>，天经地义。</p>
+<h2 id="为什么它活了很久"><span class="num">06</span>为什么它活了很久</h2>
+<div class="cards" data-cols="2"><div class="ccard tone-amber">
+          
+          <h4>单选场景完全不现形</h4>
+          <p>回显 1 个值时 <code>['a']</code> 和 <code>'a'</code> 都能用，只有多选才炸</p>
+          
+          
+        </div><div class="ccard tone-amber">
+          
+          <h4>死代码替它挡枪</h4>
+          <p>那个 Array.isArray 分支让读代码的人以为已处理</p>
+          
+          
+        </div><div class="ccard tone-amber">
+          
+          <h4>症状指向反方向</h4>
+          <p>返回条数少，第一反应是查下游，而下游一直是对的</p>
+          
+          
+        </div><div class="ccard tone-red">
+          
+          <h4>没有多值测试</h4>
+          <p>测试里只有单值回显和关键词搜索，多值这条路从来没跑过</p>
+          
+          
+        </div></div><p>四条里最后一条才是根因级别的。前三条解释了「为什么难发现」，第四条解释了「为什么一直没人发现」。</p>
+<h2 id="修法与防线"><span class="num">07</span>修法与防线</h2>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-diff">- const values = queryList(this.ctx.query, 'values');
++ const values = queryList(this.ctx.queries, 'values');
+
+- function queryList(query: unknown, key: string): string[] {
+-   const value = (query as Record&lt;string, unknown&gt;)[key];
+-   const raw = Array.isArray(value) ? value : value == null ? [] : [ value ];
+-   return raw.filter(...).map(...).filter(Boolean);
++ function queryList(queries: Record&lt;string, unknown[]&gt;, key: string): string[] {
++   const value = queries[key];
++   return Array.isArray(value) ? value.filter(...).map(...).filter(Boolean) : [];
+</code></pre></div>
+<p>三处改动，价值递增：</p>
+<ul class="check"><li>换数据源：<code>ctx.query</code> → <code>ctx.queries</code>，重复的 key 全部保留</li><li>把约定写进类型：参数从 <code>unknown</code> 改成 <code>Record&lt;string, unknown[]&gt;</code>，以后谁再传错，编译期就报错</li><li>删掉「贴心兜底」：读不到就返回空数组，宁可一个都不显示，也不悄悄只显示一半</li></ul><p>第三条是这次最值得学的：<strong>兜底要往「少给」的方向兜，不能往「凑一个」的方向兜。</strong></p>
+<div class="callout tone-green">
+      <span class="ic">✅</span>
+      <div><p>但这三道防线都还是「靠人记住」。真正的防线是<strong>一条测试</strong>：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-ts">it('values 传多个时全部转发给下游', async () =&gt; {
+  // 断言下游收到的 values 长度是 2，而不是 1
+});
+</code></pre></div>
+<p><mark class="mk-blue">这个 bug 活了那么久，不是因为难查，是因为没人测那条路。</mark></p>
+</div>
+    </div><h2 id="速查"><span class="num">08</span>速查</h2>
+<div class="summary">
+      <h3 id="一句话">一句话</h3>
+      <p>HTTP 的 query string 里<strong>没有数组这个类型</strong>，数组只能靠约定表达。
+<code>ctx.query</code> 是「精简版」（重复 key 只留第一个），<code>ctx.queries</code> 是「完整版」（每个 key 都是数组）。
+<strong>参数名不重要，重要的是它会不会出现多次。</strong></p>
+
+    </div><table>
+<thead>
+<tr>
+<th>要读的参数</th>
+<th>用什么</th>
+<th>顺手做什么</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>只可能出现一次（<code>page</code>、<code>keyword</code>）</td>
+<td><code>ctx.query</code></td>
+<td>校验一下类型，别假设它一定是字符串</td>
+</tr>
+<tr>
+<td>可能出现多次（<code>values</code>、<code>ids</code>、<code>tags</code>）</td>
+<td><code>ctx.queries</code></td>
+<td>参数类型写死成数组，读不到就返回空</td>
+</tr>
+</tbody>
+</table>
+<p>两条工程建议，来自这个 bug：</p>
+<ul>
+<li><strong>一个 endpoint 别同时承载「全单值」和「天然多值」两种语义</strong>。搜索（<code>keyword</code>）和批量回显（<code>values</code>）挤在一起，就注定有人会踩到重复参数。拆成 GET 搜索 + POST body 回显，数组只出现在 body 里，这类问题从根上消失。</li>
+<li><strong>多值参数本来就有长度上限</strong>。几十个值拼进 URL，网关或浏览器一截断，丢的不是一个，是一整段。批量操作走 POST body，不只是洁癖。</li>
+</ul>
+<h2 id="自测"><span class="num">09</span>自测</h2>
+<div class="quiz"><details>
+        <summary>请求是 <code>?ids=1&amp;ids=2&amp;ids=3</code>，用 <code>ctx.query.ids</code> 拿到什么？</summary>
+        <div class="a"><p>拿到字符串 <code>'1'</code> —— 后两个被 <code>firstValue</code> 丢掉了。
+<code>ctx.queries.ids</code> 才是 <code>['1','2','3']</code>。</p>
+</div>
+      </details><details>
+        <summary>把参数名从 <code>ids</code> 改成 <code>id</code>，行为会变吗？</summary>
+        <div class="a"><p>不会。解析器不认识参数名，它只按「同一个 key 出现了几次」决定数组还是标量。
+真正影响结果的是「调用方会不会重复传」。</p>
+</div>
+      </details><details>
+        <summary>为什么 <code>ctx.query</code> 要设计成只取第一个，而不是给数组？</summary>
+        <div class="a"><p>默认安全。重复参数是经典攻击面（同名参数让校验层和业务层各取到一个值）。
+扁平化等于「只认第一个」，攻击者塞的第二个进不来；要保真的场景显式用 <code>ctx.queries</code>。</p>
+</div>
+      </details><details>
+        <summary>代码里写了 <code>Array.isArray(value) ? value : [value]</code>，为什么还是丢了一个？</summary>
+        <div class="a"><p>因为 <code>ctx.query</code> 永远只给标量，那个数组分支是死代码。
+防御性写法如果走不到，就只是把错误包装得更像正确 —— 比不写更危险。</p>
+</div>
+      </details></div>
+
+    <footer>
+      <span>只回来一条：重复的 query 参数在哪一环被吃掉</span>
+      <span>最后更新 2026-10-27 · 单文件可离线打开</span>
+    </footer>
+  </main>
+</div>
+
+<script src="../../assets/app.js?v=757eed9a2d"></script>
+</body>
+</html>
