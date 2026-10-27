@@ -481,6 +481,34 @@ items:
 
 同一时刻只允许展开一题，避免一口气看完答案。
 
+## 14b · popquote —— 原文收进悬浮弹窗
+
+点下面这块小卡，会弹出一层可滚动的原文。Esc、点背景、右上角都能关。
+
+````popquote
+label: 这次的问答原文
+sub: 示意 · 两小段
+tone: violet
+note: 示意内容；只把标题降了一级，避免打乱本页目录。
+text: |
+  #### 问
+
+  为什么 `ptrace` 的四个参数看起来对不上？
+
+  #### 答
+
+  因为 `request` 决定另外三个参数的含义。同一个 `addr`，在 `PEEKDATA` 里是目标进程的地址，
+  在 `ATTACH` 里根本不用；同一个 `data`，在 `GETREGS` 里是调试器的缓冲区，在 `POKEDATA` 里是数值本身。
+
+  ```c
+  ptrace(PTRACE_PEEKDATA, pid, addr, NULL);   // 读：值从返回值出来
+  ptrace(PTRACE_POKEDATA, pid, addr, value);  // 写：值从 data 进去
+  ```
+````
+
+和 `quiz` 的区别：`quiz` 是原地展开，适合一段补充说明；`popquote` 是悬浮层，
+适合读者可能想通读、但不该占主线的原文。
+
 ## 15 · demo —— 可交互模拟
 
 **只在「静态图讲不清」时用。** 判据：用一句话说不清「A 和 B 差在哪」，

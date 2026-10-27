@@ -15,6 +15,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import YAML from 'yaml';
+import MarkdownIt from 'markdown-it';
 import { applyNodeBodies } from './node-body.mjs';
 import { applyArchFrames, archWidth, namespaceFigureIds, resetFigureIds } from './arch-frames.mjs';
 
@@ -26,11 +27,14 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 let flowSeq = 0;
 /* 同一页里时序图的箭头 id 靠它保持唯一 */
 let seqSeq = 0;
+/* 同一页里原文弹窗的 id 靠它保持唯一 */
+let popSeq = 0;
 
 /** 每页渲染开始前清一次（见 arch-frames.mjs 里的同名接口） */
 export function resetInlineIds() {
   flowSeq = 0;
   seqSeq = 0;
+  popSeq = 0;
   resetFigureIds();
 }
 
@@ -59,6 +63,12 @@ export { slugify };
    ==同一份东西抄两遍，改的时候一定漏。== */
 let REGISTERED_BLOCKS = [];
 export const blockNames = () => REGISTERED_BLOCKS;
+
+/* popquote 的正文单独用一份 markdown-it：打开 breaks，让原文里的换行真的换行。
+   原文常常是聊天记录，一行就是一行；用默认的 soft break 会把一段代码压成一行。 */
+const popMd = new MarkdownIt({ html: true, linkify: true, breaks: true });
+inlineMarksPlugin(popMd);
+cjkStrongPlugin(popMd);
 
 /* ---------- 插件 ---------- */
 
@@ -232,6 +242,38 @@ export function blocksPlugin(md) {
       </details>`,
       )
       .join('')}</div>`;
+  }
+
+
+  /* ===== 积木 · popquote =====
+  把一段长原文收进「收起只占一行、点开是悬浮弹窗」的控件里。
+  收起态是一个小按钮，不抢主线；弹窗用原生 <dialog>，Esc / 点背景 / 右上角都能关，
+  正文在构建期渲染好，打开后自己滚动。 */
+  function popquote(body) {
+    const cfg = YAML.parse(body) || {};
+    popSeq += 1;
+    const id = `pq-${popSeq}`;
+    const tone = cfg.tone || 'violet';
+    const label = cfg.label || '原文';
+    const sub = cfg.sub || '';
+    const note = cfg.note || '';
+    return `<div class="pq tone-${tone}">
+      <button class="pq-open" type="button" data-pq-open="${id}" aria-haspopup="dialog" aria-controls="${id}">
+        <span class="pq-ic" aria-hidden="true">▤</span>
+        <span class="pq-txt"><b>${inline(label)}</b>${sub ? `<span class="pq-sub">${inline(sub)}</span>` : ''}</span>
+        <span class="pq-hint">点开阅读 →</span>
+      </button>
+      <dialog class="pq-dialog" id="${id}" aria-labelledby="${id}-t">
+        <div class="pq-panel" tabindex="-1">
+          <div class="pq-head">
+            <div class="pq-ht"><b id="${id}-t">${inline(label)}</b>${sub ? `<span class="pq-sub">${inline(sub)}</span>` : ''}</div>
+            <button class="pq-close" type="button" data-pq-close aria-label="关闭">✕</button>
+          </div>
+          ${note ? `<p class="pq-note">${inline(note)}</p>` : ''}
+          <div class="pq-body">${popMd.render(String(cfg.text || ''))}</div>
+        </div>
+      </dialog>
+    </div>`;
   }
 
   /* ===== 积木 7 · demo =====
@@ -846,6 +888,7 @@ const KIND_TONE = {
     callout,
     checklist,
     quiz,
+    popquote,
     demo,
     memmap,
     shot,

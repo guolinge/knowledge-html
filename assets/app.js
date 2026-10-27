@@ -12217,6 +12217,57 @@ WIDGETS['mysql-2pc-crash'] = (root) => {
     draw(Number(range.value));
   };
 
+  /* ---------- 8. 原文弹窗（popquote） ----------
+     收起时是一块小卡；点开用原生 <dialog> 悬浮，Esc / 点背景 / 右上角都能关。
+     正文在构建期就渲染好了，这里只负责开关、背景点击和滚动锁。 */
+  (function popquote() {
+    document.addEventListener('click', (ev) => {
+      const t = ev.target;
+      if (!(t instanceof Element)) return;
+
+      /* 原文里的相对链接（例如原平台的 [6](ai_center_quote)）在弹窗里没有基准，
+         点一下会把整页导航走。原文不改，只在这里拦掉。 */
+      const dead = t.closest('.pq-body a');
+      if (dead) {
+        const href = dead.getAttribute('href') || '';
+        if (!/^(https?:|#|mailto:)/.test(href)) ev.preventDefault();
+      }
+
+      const opener = t.closest('[data-pq-open]');
+      if (opener) {
+        const id = opener.getAttribute('data-pq-open');
+        const dlg = id ? document.getElementById(id) : null;
+        if (!dlg) return;
+        if (typeof dlg.showModal === 'function') {
+          dlg.showModal();
+          /* 焦点先落在面板上，别一打开就把蓝框套在关闭按钮上 */
+          const panel = dlg.querySelector('.pq-panel');
+          if (panel) panel.focus();
+        } else dlg.setAttribute('open', '');
+        return;
+      }
+
+      const closer = t.closest('[data-pq-close]');
+      if (closer) {
+        const dlg = closer.closest('dialog');
+        if (!dlg) return;
+        if (typeof dlg.close === 'function') dlg.close();
+        else dlg.removeAttribute('open');
+      }
+    });
+
+    document.querySelectorAll('dialog.pq-dialog').forEach((dlg) => {
+      /* 点背景：dialog 自身铺满面板外的那圈，点到它就关 */
+      dlg.addEventListener('click', (ev) => {
+        if (ev.target === dlg && typeof dlg.close === 'function') dlg.close();
+      });
+      /* open 属性变化就是打开/关闭的唯一信号（Esc 也走这里） */
+      new MutationObserver(() => {
+        document.documentElement.classList.toggle('pq-lock', dlg.open);
+      }).observe(dlg, { attributes: true, attributeFilter: ['open'] });
+    });
+  })();
+
   /* ---------- 挂载 ---------- */
   document.querySelectorAll('[data-widget]').forEach((root) => {
     var name = root.getAttribute('data-widget');

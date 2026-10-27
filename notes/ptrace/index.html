@@ -1,0 +1,1460 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-has-toc="1">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ptrace：一个函数，四个参数，和一个被按住的进程</title>
+<meta name="description" content="从一条让人摸不着头脑的函数声明出发：request 怎么决定另外三个参数、addr 属于谁、PEEKDATA 的值去了哪、ATTACH 到底做了什么，以及调试器怎么在「停—看—走」之间观察一个活着的进程。" />
+<link rel="stylesheet" href="../../assets/theme.css?v=b918ec5c83" />
+  <link rel="stylesheet" href="../../assets/blocks.css?v=e2b24e4d18" />
+  <link rel="stylesheet" href="../../assets/archify-embed.css?v=68fec0b81b" />
+</head>
+<body>
+<div id="progress"></div>
+<div id="tocScrim"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
+    <a class="brand" href="../../index.html"><span class="dot"></span>知识笔记</a>
+    
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="toc" id="toc">
+      <p class="toc-title">目录</p>
+      <a href="../../index.html" class="sub">← 全部笔记</a>
+      <a href="#原文这次的四轮问答">原文：这次的四轮问答</a>
+      <a href="#一个函数四个参数为什么像在猜谜">一个函数，四个参数，为什么像在猜谜</a>
+      <a href="#全局地图两个进程中间隔着内核">全局地图：两个进程，中间隔着内核</a>
+      <a href="#addr-是谁的地址内核替它翻页表">addr 是谁的地址：内核替它翻页表</a>
+      <a href="#peekdata-的值到底去哪了">PEEKDATA 的值到底去哪了</a>
+      <a href="#attach-不是读一个值是把一条线程挂到调试器名下">ATTACH 不是「读一个值」，是把一条线程挂到调试器名下</a>
+      <a href="#目标一直在跑怎么实时看">目标一直在跑，怎么「实时」看</a>
+      <a href="#一次迭代长什么样" class="sub">一次迭代长什么样</a>
+      <a href="#断点不是-cpu-的特殊功能" class="sub">断点不是 CPU 的特殊功能</a>
+      <a href="#边界谁能用代价是什么还能用什么">边界：谁能用、代价是什么、还能用什么</a>
+      <a href="#带走">带走</a>
+      <a href="#五句话带走" class="sub">五句话带走</a>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow">● 操作系统 · 调试与观测</span>
+      <h1>ptrace：一个函数，四个参数，和一个被按住的进程</h1>
+      <p class="lede">从一条让人摸不着头脑的函数声明出发：request 怎么决定另外三个参数、addr 属于谁、PEEKDATA 的值去了哪、ATTACH 到底做了什么，以及调试器怎么在「停—看—走」之间观察一个活着的进程。</p>
+    </div>
+
+
+    <div class="provenance"><span><b>来源</b> <a href="https://man7.org/linux/man-pages/man2/ptrace.2.html" target="_blank" rel="noopener">man7.org/linux/man-pages/man2/ptrace.2.html</a> · <a href="https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/plain/kernel/ptrace.c" target="_blank" rel="noopener">git.kernel.org/pub/scm/linux/kernel/git/torvalds</a> · <a href="https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/plain/include/uapi/linux/ptrace.h" target="_blank" rel="noopener">git.kernel.org/pub/scm/linux/kernel/git/torvalds</a> · <a href="https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/plain/kernel/signal.c" target="_blank" rel="noopener">git.kernel.org/pub/scm/linux/kernel/git/torvalds</a> · <a href="https://man7.org/linux/man-pages/man2/process_vm_readv.2.html" target="_blank" rel="noopener">man7.org/linux/man-pages/man2/process_vm_readv.2</a> · <a href="https://docs.kernel.org/admin-guide/LSM/Yama.html" target="_blank" rel="noopener">docs.kernel.org/admin-guide/LSM/Yama.html</a> · <a href="https://sourceware.org/git/?p=binutils-gdb.git;a=blob_plain;f=gdb/linux-nat.c;hb=HEAD" target="_blank" rel="noopener">sourceware.org/git/?p=binutils-gdb.git;a=blob_pl</a> · <a href="https://sourceware.org/git/?p=binutils-gdb.git;a=blob_plain;f=gdb/i386-tdep.c;hb=HEAD" target="_blank" rel="noopener">sourceware.org/git/?p=binutils-gdb.git;a=blob_pl</a> · <a href="https://github.com/strace/strace/blob/master/src/strace.c" target="_blank" rel="noopener">github.com/strace/strace/blob/master/src/strace.</a> · <a href="https://en.wikipedia.org/wiki/DWARF" target="_blank" rel="noopener">en.wikipedia.org/wiki/DWARF</a> · <a href="https://en.wikipedia.org/wiki/X86_calling_conventions" target="_blank" rel="noopener">en.wikipedia.org/wiki/X86_calling_conventions</a> · <a href="https://docs.kernel.org/userspace-api/seccomp_filter.html" target="_blank" rel="noopener">docs.kernel.org/userspace-api/seccomp_filter.htm</a> · <a href="https://man7.org/linux/man-pages/man5/proc_pid_maps.5.html" target="_blank" rel="noopener">man7.org/linux/man-pages/man5/proc_pid_maps.5.ht</a> · <a href="https://en.wikipedia.org/wiki/Ptrace" target="_blank" rel="noopener">en.wikipedia.org/wiki/Ptrace</a></span><span><b>生成</b> 2026-10-27</span><span><b>模型</b> deepseek-v4.1-flash-1017</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">Linux</span> <span class="tag tone-muted">ptrace</span> <span class="tag tone-muted">调试器</span> <span class="tag tone-muted">进程</span> <span class="tag tone-muted">内核</span> <span class="tag tone-muted">gdb</span></span></div>
+
+<h2 id="原文这次的四轮问答"><span class="num">00</span>原文：这次的四轮问答</h2>
+<div class="pq tone-violet">
+      <button class="pq-open" type="button" data-pq-open="pq-1" aria-haspopup="dialog" aria-controls="pq-1">
+        <span class="pq-ic" aria-hidden="true">▤</span>
+        <span class="pq-txt"><b>这次讨论的原文</b><span class="pq-sub">4 轮问答 · 约 1 万字符</span></span>
+        <span class="pq-hint">点开阅读 →</span>
+      </button>
+      <dialog class="pq-dialog" id="pq-1" aria-labelledby="pq-1-t">
+        <div class="pq-panel" tabindex="-1">
+          <div class="pq-head">
+            <div class="pq-ht"><b id="pq-1-t">这次讨论的原文</b><span class="pq-sub">4 轮问答 · 约 1 万字符</span></div>
+            <button class="pq-close" type="button" data-pq-close aria-label="关闭">✕</button>
+          </div>
+          <p class="pq-note">原文照录；只把标题降了级，避免打乱本页目录，其余未改。原文里的 <code>[n](ai_center_quote)</code> 是原平台的引用标记，保留原样。</p>
+          <div class="pq-body"><p>问：“long ptrace(enum __ptrace_request request,<br>
+pid_t pid,<br>
+void *addr,<br>
+void *data);</p>
+<p>以简单的方式来解释上面代码”<br>
+答：“<br>
+这是一条 <strong>函数声明</strong>，表示系统提供了一个叫 <code>ptrace</code> 的函数，用来让一个进程“观察、控制另一个进程”。它常用于调试器，例如 <code>gdb</code>。</p>
+<pre><code class="language-c">long ptrace(enum __ptrace_request request,
+            pid_t pid,
+            void *addr,
+            void *data);
+</code></pre>
+<p>可以简单理解为：</p>
+<blockquote>
+<p>对进程 <code>pid</code> 执行一种由 <code>request</code> 指定的调试操作，操作时可能需要地址 <code>addr</code> 和额外数据 <code>data</code>。</p>
+</blockquote>
+<p>各部分含义：</p>
+<ul>
+<li>
+<p><code>long</code></p>
+<ul>
+<li>函数的返回值类型。</li>
+<li>成功时通常返回操作结果；失败时通常返回 <code>-1</code>，并设置 <code>errno</code> 来说明错误原因。</li>
+</ul>
+</li>
+<li>
+<p><code>ptrace</code></p>
+<ul>
+<li>函数名称。</li>
+<li>名字来自 “process trace”，即“进程跟踪”。</li>
+</ul>
+</li>
+<li>
+<p><code>enum __ptrace_request request</code></p>
+<ul>
+<li>要执行什么操作。</li>
+<li>例如：
+<ul>
+<li>附加到某个进程；</li>
+<li>读取目标进程的内存；</li>
+<li>修改目标进程的寄存器；</li>
+<li>让暂停的目标进程继续运行等。</li>
+</ul>
+</li>
+</ul>
+</li>
+<li>
+<p><code>pid_t pid</code></p>
+<ul>
+<li>目标进程的进程号（PID）。</li>
+<li>例如进程号是 <code>1234</code>，就表示要操作进程 <code>1234</code>。</li>
+</ul>
+</li>
+<li>
+<p><code>void *addr</code></p>
+<ul>
+<li>地址参数。</li>
+<li>某些操作中表示目标进程内存中的地址。</li>
+<li>如果当前操作不需要地址，通常传 <code>NULL</code> 或 <code>0</code>。</li>
+</ul>
+</li>
+<li>
+<p><code>void *data</code></p>
+<ul>
+<li>附加数据。</li>
+<li>可能用于传入要写入的数据、保存读取结果的地址等。</li>
+<li>如果不需要，也可以传 <code>NULL</code>。</li>
+</ul>
+</li>
+</ul>
+<p>例如，调试器要“附加”到 PID 为 <code>1234</code> 的进程，可能会调用类似：</p>
+<pre><code class="language-c">ptrace(PTRACE_ATTACH, 1234, NULL, NULL);
+</code></pre>
+<p>意思是：</p>
+<blockquote>
+<p>请求系统：让我开始调试/跟踪进程 <code>1234</code>。</p>
+</blockquote>
+<p>注意：<code>ptrace</code> 是 Linux/Unix 中较底层、权限敏感的接口，普通程序通常不需要直接使用它。<br>
+”</p>
+<p>问：“<br>
+没太明白 enum __ptrace_request request 是什么意思</p>
+<p>”</p>
+<p>答：“</p>
+<pre><code class="language-c">enum __ptrace_request request
+</code></pre>
+<p>可以拆成两部分理解：</p>
+<pre><code class="language-c">enum __ptrace_request   // 参数的数据类型
+request                 // 参数的名字
+</code></pre>
+<p>它的意思是：</p>
+<blockquote>
+<p><code>request</code> 是一个“操作类型”，用来告诉 <code>ptrace</code>：你到底想对目标进程做什么。</p>
+</blockquote>
+<hr>
+<h5>1. <code>enum</code> 是什么？</h5>
+<p><code>enum</code> 是 C 语言里的“枚举类型”。</p>
+<p>可以把它理解成：<strong>只能从一组预先定义好的选项中选择一个值</strong>。</p>
+<p>例如：</p>
+<pre><code class="language-c">enum Color {
+    RED,
+    GREEN,
+    BLUE
+};
+</code></pre>
+<p>这里 <code>Color</code> 类型的变量只能表示：</p>
+<pre><code class="language-c">RED
+GREEN
+BLUE
+</code></pre>
+<p>而不是随便写一个没有意义的内容。</p>
+<hr>
+<h5>2. <code>__ptrace_request</code> 是什么？</h5>
+<p><code>__ptrace_request</code> 是 Linux 系统定义的一组 <code>ptrace</code> 操作选项。</p>
+<p>概念上大概像这样：</p>
+<pre><code class="language-c">enum __ptrace_request {
+    PTRACE_TRACEME,     // 声明“我要被调试”
+    PTRACE_PEEKTEXT,    // 读取目标进程内存
+    PTRACE_POKETEXT,    // 写入目标进程内存
+    PTRACE_CONT,        // 让目标进程继续运行
+    PTRACE_ATTACH,      // 附加到一个正在运行的进程
+    PTRACE_DETACH       // 解除附加
+};
+</code></pre>
+<p>实际 Linux 定义可能比这个更多，但理解上就是一组“操作命令”。</p>
+<p>所以：</p>
+<pre><code class="language-c">enum __ptrace_request request
+</code></pre>
+<p>就是：</p>
+<blockquote>
+<p><code>request</code> 变量保存一条 <code>ptrace</code> 命令，例如“附加进程”“读取内存”“继续执行”。</p>
+</blockquote>
+<hr>
+<h5>3. 调用时的例子</h5>
+<pre><code class="language-c">ptrace(PTRACE_ATTACH, 1234, NULL, NULL);
+</code></pre>
+<p>这里：</p>
+<pre><code class="language-c">PTRACE_ATTACH
+</code></pre>
+<p>就是传给 <code>request</code> 的值。</p>
+<p>完整意思是：</p>
+<table>
+<thead>
+<tr>
+<th>参数</th>
+<th>值</th>
+<th>意义</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>request</code></td>
+<td><code>PTRACE_ATTACH</code></td>
+<td>要执行“附加/开始跟踪”操作</td>
+</tr>
+<tr>
+<td><code>pid</code></td>
+<td><code>1234</code></td>
+<td>要操作的进程号</td>
+</tr>
+<tr>
+<td><code>addr</code></td>
+<td><code>NULL</code></td>
+<td>这个操作不需要地址</td>
+</tr>
+<tr>
+<td><code>data</code></td>
+<td><code>NULL</code></td>
+<td>这个操作不需要额外数据</td>
+</tr>
+</tbody>
+</table>
+<p>也可以写成变量形式：</p>
+<pre><code class="language-c">enum __ptrace_request request = PTRACE_ATTACH;
+
+ptrace(request, 1234, NULL, NULL);
+</code></pre>
+<hr>
+<h5>4. 类比</h5>
+<p>把 <code>ptrace</code> 想成一个“遥控器函数”：</p>
+<pre><code class="language-c">ptrace(操作命令, 目标进程, 地址, 附加数据);
+</code></pre>
+<p>其中：</p>
+<pre><code class="language-c">enum __ptrace_request request
+</code></pre>
+<p>就相当于遥控器上的按钮，决定你按的是：</p>
+<ul>
+<li>“暂停”</li>
+<li>“继续”</li>
+<li>“读取内存”</li>
+<li>“写入内存”</li>
+<li>“开始跟踪”</li>
+</ul>
+<p>例如：</p>
+<pre><code class="language-c">ptrace(PTRACE_CONT, 1234, NULL, NULL);
+</code></pre>
+<p>意思是：</p>
+<blockquote>
+<p>让进程 <code>1234</code> 继续运行。</p>
+</blockquote>
+<p><code>__ptrace_request</code> 前面的两个下划线 <code>__</code> 通常表示它是系统库内部定义的类型名称；实际使用时，你更常接触的是其中的值，如 <code>PTRACE_ATTACH</code>、<code>PTRACE_CONT</code> 等。<br>
+”</p>
+<p>问：“<br>
+其实这个函数挺有意思的，但是这个定义呢又让人摸不着头脑<br>
+1、比如第三个参数，地址，哪里的地址，哪个进程的地址，栈地址还是堆地址，要地址来干什么<br>
+2、data，这个data是调试进程用户态上的数据还是内核里的数据<br>
+3、比如我执行了PTRACE_PEEKTEXT，然后呢，返回一个long，然后呢，我不是要读取内存吗，读到哪里去了，这个函数都没有交代</p>
+<p>上面的你简单的方式来解释<br>
+”</p>
+<p>答：“<br>
+你的疑惑非常正常，因为 <code>ptrace</code> 的 4 个参数并不是固定含义，而是：</p>
+<blockquote>
+<p>第一个参数 <code>request</code> 决定后面三个参数分别是什么意思。</p>
+</blockquote>
+<p>它像一个“万能接口”，不同命令对 <code>addr</code> 和 <code>data</code> 的解释不同，所以单看函数声明确实很难理解。</p>
+<hr>
+<h5>1. <code>addr</code> 是哪里的地址？</h5>
+<p>对于读取/修改内存的操作，例如：</p>
+<pre><code class="language-c">PTRACE_PEEKTEXT
+PTRACE_PEEKDATA
+PTRACE_POKETEXT
+PTRACE_POKEDATA
+</code></pre>
+<p><code>addr</code> 通常是：</p>
+<blockquote>
+<p>被调试进程 <code>pid</code> 的虚拟内存地址。</p>
+</blockquote>
+<p>例如：</p>
+<pre><code class="language-c">ptrace(PTRACE_PEEKDATA, 1234, (void *)0x7fff12345678, NULL);
+</code></pre>
+<p>意思是：</p>
+<blockquote>
+<p>从进程 <code>1234</code> 的虚拟地址 <code>0x7fff12345678</code> 读取数据。</p>
+</blockquote>
+<p>这个地址可以属于：</p>
+<ul>
+<li>代码区；</li>
+<li>栈；</li>
+<li>堆；</li>
+<li>动态库；</li>
+<li>其他已经映射的内存区域。</li>
+</ul>
+<p>所以它并不固定是栈地址或堆地址，具体是什么取决于你传入的地址。</p>
+<p>但并非所有命令都使用 <code>addr</code>。例如某些命令中它会被忽略：</p>
+<pre><code class="language-c">ptrace(PTRACE_ATTACH, pid, NULL, NULL);
+</code></pre>
+<p>这里不需要内存地址，所以传 <code>NULL</code>。</p>
+<hr>
+<h5>2. <code>data</code> 是谁的数据？</h5>
+<p>通常，调用 <code>ptrace</code> 的进程叫：</p>
+<ul>
+<li><strong>调试进程</strong>：tracer，例如 <code>gdb</code></li>
+<li><strong>被调试进程</strong>：tracee，例如你正在调试的程序</li>
+</ul>
+<p><code>data</code> 参数由调试进程传给内核，但它的具体含义同样由 <code>request</code> 决定。</p>
+<h6>情况一：作为调试进程里的缓冲区地址</h6>
+<p>例如读取目标进程的寄存器：</p>
+<pre><code class="language-c">struct user_regs_struct regs;
+
+ptrace(PTRACE_GETREGS, pid, NULL, &amp;regs);
+</code></pre>
+<p>这里：</p>
+<pre><code class="language-c">&amp;regs
+</code></pre>
+<p>是调试进程自己的用户态地址。</p>
+<p>内核会把目标进程的寄存器信息复制到调试进程的 <code>regs</code> 变量里：</p>
+<pre><code class="language-text">被调试进程的寄存器
+        ↓
+       内核
+        ↓
+调试进程的 regs 变量
+</code></pre>
+<h6>情况二：直接携带一个数值</h6>
+<p>例如向目标进程写入一个机器字：</p>
+<pre><code class="language-c">long value = 123;
+
+ptrace(PTRACE_POKEDATA, pid, target_addr, (void *)value);
+</code></pre>
+<p>虽然参数类型写的是 <code>void *</code>，这里的 <code>data</code> 实际上被当成一个数值使用。</p>
+<p>这看起来很别扭，是因为 <code>ptrace</code> 是一个历史悠久的通用接口，用一个 <code>void *</code> 兼容了多种用途。</p>
+<hr>
+<h5>3. <code>PTRACE_PEEKTEXT</code> 读到的数据在哪里？</h5>
+<p>对于：</p>
+<pre><code class="language-c">PTRACE_PEEKTEXT
+PTRACE_PEEKDATA
+</code></pre>
+<p>读到的数据直接通过 <code>ptrace</code> 的返回值返回。</p>
+<p>例如：</p>
+<pre><code class="language-c">errno = 0;
+
+long value = ptrace(
+    PTRACE_PEEKTEXT,
+    pid,
+    target_addr,
+    NULL
+);
+
+if (value == -1 &amp;&amp; errno != 0) {
+    perror(&quot;ptrace&quot;);
+}
+</code></pre>
+<p>这里从目标进程读取的数据放进了：</p>
+<pre><code class="language-c">value
+</code></pre>
+<p>通常一次读取 <code>sizeof(long)</code> 个字节：</p>
+<ul>
+<li>64 位系统通常是 8 字节；</li>
+<li>32 位系统通常是 4 字节。</li>
+</ul>
+<p>所以可以理解为：</p>
+<pre><code class="language-c">long value = 目标进程中从 target_addr 开始的一小块数据;
+</code></pre>
+<p><code>PTRACE_PEEKTEXT</code> 中的 <code>data</code> 参数一般不使用，因此传 <code>NULL</code>。</p>
+<hr>
+<h5>一个完整例子</h5>
+<pre><code class="language-c">errno = 0;
+
+long value = ptrace(
+    PTRACE_PEEKDATA,  // 做什么：读取内存
+    pid,              // 读哪个进程
+    target_addr,      // 读目标进程的哪个地址
+    NULL              // 这个操作不需要 data
+);
+
+if (value == -1 &amp;&amp; errno != 0) {
+    perror(&quot;ptrace&quot;);
+} else {
+    printf(&quot;读取结果：0x%lx\n&quot;, value);
+}
+</code></pre>
+<p>可以翻译成一句话：</p>
+<blockquote>
+<p>请内核从进程 <code>pid</code> 的虚拟地址 <code>target_addr</code> 中读取一个 <code>long</code> 大小的数据，并通过返回值交给我。</p>
+</blockquote>
+<hr>
+<h5>为什么它的定义这么让人摸不着头脑？</h5>
+<p>因为它实际上把很多不同功能塞进了同一个函数：</p>
+<pre><code class="language-c">ptrace(命令, 目标进程, 参数1, 参数2);
+</code></pre>
+<p>更接近这样的思维：</p>
+<table>
+<thead>
+<tr>
+<th><code>request</code></th>
+<th><code>addr</code> 的含义</th>
+<th><code>data</code> 的含义</th>
+<th>结果在哪里</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>PTRACE_PEEKDATA</code></td>
+<td>目标进程地址</td>
+<td>不使用</td>
+<td>函数返回值</td>
+</tr>
+<tr>
+<td><code>PTRACE_POKEDATA</code></td>
+<td>目标进程地址</td>
+<td>要写入的值</td>
+<td>返回成功/失败</td>
+</tr>
+<tr>
+<td><code>PTRACE_GETREGS</code></td>
+<td>不使用</td>
+<td>调试进程的缓冲区地址</td>
+<td><code>data</code> 指向的变量</td>
+</tr>
+<tr>
+<td><code>PTRACE_CONT</code></td>
+<td>通常不使用</td>
+<td>要传递的信号编号</td>
+<td>返回成功/失败</td>
+</tr>
+<tr>
+<td><code>PTRACE_ATTACH</code></td>
+<td>不使用</td>
+<td>不使用</td>
+<td>返回成功/失败</td>
+</tr>
+</tbody>
+</table>
+<p>所以，不能单独问：</p>
+<blockquote>
+<p><code>addr</code> 和 <code>data</code> 是什么意思？</p>
+</blockquote>
+<p>必须问：</p>
+<blockquote>
+<p>在某个具体的 <code>request</code> 下，<code>addr</code> 和 <code>data</code> 分别是什么意思？</p>
+</blockquote>
+<p>最后特别注意：读取结果也可能真的等于 <code>-1</code>，所以不能只根据返回值是否为 <code>-1</code> 判断失败，还需要同时检查 <code>errno</code>。<br>
+”</p>
+<p>问：“<br>
+简单的方式说明<br>
+1、调试进程怎么拿到addr的，它又没有目标进程的页表 ，而且，就算它拿到了地址，它怎么知道这个地址里放的什么东西，放的东西是不是它想要的，就算拿到了想要的，怎么知道能一次性拿回来，是不是得仿佛调用<br>
+2、PTRACE_ATTACH 是什么意思，拿地址上的值，拿寄存器我还能理解，你这个“附加”是什么动作，就算附加成功了又能怎样，目标进程是一直执行的，你怎么读取它实时的状态做出反应</p>
+<p>诶呀，好多不懂，希望你能像讲故事一样娓娓道来<br>
+”</p>
+<p>答：“<br>
+可以把 <strong>调试进程（比如 GDB）</strong> 想成一个侦探，把 <strong>目标进程</strong> 想成一栋正在运转的楼。</p>
+<ul>
+<li>目标进程有自己的房间编号、自己的布局、自己的物品；</li>
+<li>调试进程站在楼外，不能直接走进去翻东西；</li>
+<li>但它可以向 <strong>内核这个物业管理员</strong> 申请“调试权限”；</li>
+<li><code>ptrace</code> 就是侦探和物业之间的一套办事窗口。</li>
+</ul>
+<hr>
+<h4>1. 调试进程没有目标进程的页表，怎么知道 <code>addr</code>？</h4>
+<p>你的想法是对的：</p>
+<blockquote>
+<p>调试进程不能拿自己的地址去访问目标进程的内存。</p>
+</blockquote>
+<p>例如同一个数值地址：</p>
+<pre><code class="language-text">0x7fff12340000
+</code></pre>
+<p>在调试进程中，可能根本没映射；在目标进程中，却可能是它栈上的一块内存。</p>
+<p>关键是：<strong>调试进程不需要拥有目标进程的页表。</strong></p>
+<p>它只是把“房间号”告诉内核：</p>
+<pre><code class="language-text">请读取 PID=1234 进程里，虚拟地址 0x7fff12340000 的内容。
+</code></pre>
+<p>内核知道 PID <code>1234</code> 对应哪套页表，于是用<strong>目标进程自己的地址空间</strong>去翻译这个地址、读取对应内存，再把结果交给调试进程。</p>
+<p>所以：</p>
+<pre><code class="language-c">ptrace(PTRACE_PEEKDATA, 1234, (void *)addr, NULL);
+</code></pre>
+<p>中的 <code>addr</code> 是：</p>
+<blockquote>
+<p>按照 <strong>PID 1234 的虚拟地址空间</strong>解释的地址，绝不是按调试进程自己的地址空间解释。</p>
+</blockquote>
+<p><code>ptrace</code> 本来就是让一个进程在内核许可和检查下，观察另一进程的内存、寄存器与执行状态的接口。<a href="ai_center_quote">6</a></p>
+<hr>
+<h5>那调试器最开始从哪里获得地址？</h5>
+<p>侦探不会凭空知道“重要文件放在 501 房”。地址一般来自下面几种线索。</p>
+<h6>情况 A：程序有调试信息</h6>
+<p>假设你自己编译程序：</p>
+<pre><code class="language-c">int score = 100;
+</code></pre>
+<p>并加上调试选项：</p>
+<pre><code class="language-bash">gcc -g app.c -o app
+</code></pre>
+<p>生成的可执行文件会带有调试信息，告诉 GDB：</p>
+<pre><code class="language-text">变量 score 在哪里；
+函数 main 在哪里；
+某行源代码对应哪条机器指令；
+某个局部变量相对栈指针的偏移是多少。
+</code></pre>
+<p>于是你可以说：</p>
+<pre><code class="language-gdb">p score
+</code></pre>
+<p>GDB 根据调试信息和当前寄存器，算出 <code>score</code> 此刻所在的目标进程地址，再通过 <code>ptrace</code> 读取它。</p>
+<hr>
+<h6>情况 B：先看进程的“楼层平面图”</h6>
+<p>Linux 为每个进程提供：</p>
+<pre><code class="language-text">/proc/&lt;pid&gt;/maps
+</code></pre>
+<p>里面记录该进程有哪些内存区域，例如：</p>
+<pre><code class="language-text">代码段在哪
+堆在哪
+栈在哪
+动态库在哪
+</code></pre>
+<p><code>/proc/&lt;pid&gt;/maps</code> 反映的是<strong>目标进程</strong>的地址空间布局；而 <code>/proc/&lt;pid&gt;/mem</code> 可按指定偏移访问目标进程对应地址的内存。<a href="ai_center_quote">2</a></p>
+<p>例如概念上：</p>
+<pre><code class="language-text">555555554000-555555556000   程序代码
+7ffffffde000-7ffffffff000   栈
+</code></pre>
+<p>这至少让调试器知道：</p>
+<blockquote>
+<p>哪些地址有效、哪些是栈、哪些是堆、哪些来自动态库。</p>
+</blockquote>
+<hr>
+<h6>情况 C：从寄存器和运行过程里顺藤摸瓜</h6>
+<p>比如程序刚调用一个函数，寄存器可能保存着参数地址；栈上可能保存着局部变量、返回地址；一个对象里可能保存着指针，指向另一块堆内存。</p>
+<p>调试器先读取寄存器：</p>
+<pre><code class="language-text">栈指针 RSP = 0x7fffffffd000
+</code></pre>
+<p>然后读取目标进程栈附近的内存；发现一个指针：</p>
+<pre><code class="language-text">0x5555555592a0
+</code></pre>
+<p>再去读这个地址，逐层追踪。</p>
+<p>这就像侦探先拿到“你现在位于 10 楼”，然后翻桌上的便签，找到“文件在仓库 3”，再去仓库 3 查看。</p>
+<hr>
+<h5>地址里的东西，调试器怎么知道它是什么？</h5>
+<p>这里有一个很关键的事实：</p>
+<blockquote>
+<p><strong>只读内存本身，调试器只能得到字节，不会天然知道这些字节的“含义”。</strong></p>
+</blockquote>
+<p>假设读回 8 字节：</p>
+<pre><code class="language-text">01 00 00 00 00 00 00 00
+</code></pre>
+<p>这可能是：</p>
+<ul>
+<li>整数 <code>1</code>；</li>
+<li><code>bool</code> 值 <code>true</code>；</li>
+<li>枚举值；</li>
+<li>指针的一部分；</li>
+<li>某个结构体的前几个字段；</li>
+<li>一条机器指令的数据。</li>
+</ul>
+<p><strong>字节没有自带标签。</strong></p>
+<p>所以“它是什么”主要依赖：</p>
+<ol>
+<li><strong>源代码和调试信息</strong>：知道变量叫 <code>score</code>，类型是 <code>int</code>；</li>
+<li><strong>程序二进制与符号表</strong>：知道函数、全局变量的大概位置；</li>
+<li><strong>调用约定与寄存器规则</strong>：知道参数通常在哪些寄存器；</li>
+<li><strong>人工分析</strong>：没有符号时，只能猜测、反汇编、结合上下文判断。</li>
+</ol>
+<p>这也是为什么调试自己带 <code>-g</code> 编译的程序时，GDB 能展示：</p>
+<pre><code class="language-gdb">p user.name
+</code></pre>
+<p>而面对没有符号信息的陌生程序时，往往只能看到：</p>
+<pre><code class="language-text">0x7fff...:  0x00000001
+</code></pre>
+<hr>
+<h5>能不能一次读完？</h5>
+<p>通常<strong>不能，也不应该假设能一次读完</strong>。</p>
+<p>传统的：</p>
+<pre><code class="language-c">PTRACE_PEEKDATA
+</code></pre>
+<p>一次通常只取一个 <code>long</code>：</p>
+<ul>
+<li>64 位系统一般是 8 字节；</li>
+<li>32 位系统一般是 4 字节。</li>
+</ul>
+<p>如果想读取 100 字节，调试器就要反复读取：</p>
+<pre><code class="language-text">读 addr + 0
+读 addr + 8
+读 addr + 16
+……
+</code></pre>
+<p>直到读完 100 字节，或遇到无效地址、权限问题等。</p>
+<p>所以你的“是不是得反复调用”完全正确：<strong>传统 <code>PTRACE_PEEK*</code> 的确通常需要循环调用。</strong></p>
+<hr>
+<h4>2. <code>PTRACE_ATTACH</code> 到底是什么？</h4>
+<p>继续用侦探和大楼的故事。</p>
+<p>目标进程原本正在运行：</p>
+<pre><code class="language-text">运行 → 运行 → 运行 → 运行……
+</code></pre>
+<p>调试进程如果想认真查看它，不能一边让它高速变化，一边随手读取；否则刚看完一个变量，它可能已经变了，寄存器和内存也不再对应同一个时刻。</p>
+<p>于是调试器发出：</p>
+<pre><code class="language-c">ptrace(PTRACE_ATTACH, pid, NULL, NULL);
+</code></pre>
+<p>可以理解为：</p>
+<blockquote>
+<p>内核，请把这个正在运行的进程交给我调试，并先让它停下来。</p>
+</blockquote>
+<p><code>PTRACE_ATTACH</code> 会把目标进程变成当前调试进程的 tracee（被跟踪者），并向它发送 <code>SIGSTOP</code>；但函数返回时它未必已经停止，因此还需要用 <code>waitpid()</code> 等待真正的停止事件。<a href="ai_center_quote">6</a></p>
+<p>概念流程是：</p>
+<pre><code class="language-text">目标进程：        正在运行
+调试器：          发出 PTRACE_ATTACH
+内核：            向目标进程发送 SIGSTOP
+目标进程：        停止
+调试器：          waitpid() 得知“它停了”
+调试器：          读取寄存器、栈、内存等
+</code></pre>
+<p>所以“附加”不是读取一个值，而是：</p>
+<blockquote>
+<p>建立“我正在调试它”的关系，并让内核把它的停止、信号、断点等事件通知给调试器。</p>
+</blockquote>
+<p>调试器如 GDB 会使用 <code>ptrace</code> 来控制被调试进程的执行，以及检查或修改其内存和寄存器。<a href="ai_center_quote">2</a></p>
+<hr>
+<h5>附加成功以后能做什么？</h5>
+<p>目标停住后，调试器就获得一个相对一致的“现场快照”。</p>
+<p>可以查看：</p>
+<pre><code class="language-text">当前执行到哪条指令
+各寄存器是什么
+当前调用栈是什么
+当前线程有哪些
+变量当前值是什么
+某段内存内容是什么
+</code></pre>
+<p>例如 GDB：</p>
+<pre><code class="language-gdb">attach 1234
+</code></pre>
+<p>之后可以：</p>
+<pre><code class="language-gdb">bt        # 查看调用栈
+info reg  # 查看寄存器
+p value   # 查看变量
+x/16gx 地址 # 查看内存
+</code></pre>
+<p>GDB 可以通过 <code>attach pid</code> 附加到已有进程，并在附加后控制其执行。<a href="ai_center_quote">3</a></p>
+<hr>
+<h4>3. “目标进程一直执行”，怎么实时观察并反应？</h4>
+<p>核心答案是：</p>
+<blockquote>
+<p>调试器不是一直盯着一个高速变化的进程；它通过“让进程停下 → 查看状态 → 决定下一步 → 再让它运行”的循环工作。</p>
+</blockquote>
+<p>流程像这样：</p>
+<pre><code class="language-text">① 进程运行
+② 出现调试器关心的事件
+③ 内核暂停目标进程，并通知调试器
+④ 调试器读取现场、做判断
+⑤ 调试器要求它继续执行
+⑥ 回到①
+</code></pre>
+<hr>
+<h5>什么事件会让它停下来？</h5>
+<p>常见有：</p>
+<ul>
+<li>刚刚 <code>PTRACE_ATTACH</code>；</li>
+<li>命中断点；</li>
+<li>收到信号，例如 <code>SIGSEGV</code>（段错误）；</li>
+<li>单步执行完一条机器指令；</li>
+<li>进入或退出系统调用；</li>
+<li>调试器主动要求中断它。</li>
+</ul>
+<p>例如你给函数 <code>foo</code> 设置断点：</p>
+<pre><code class="language-text">进程运行
+   ↓
+执行到 foo 的入口
+   ↓
+触发断点，进程暂停
+   ↓
+GDB 得到通知
+   ↓
+你查看参数、变量、调用栈
+   ↓
+continue
+   ↓
+进程继续运行
+</code></pre>
+<p>于是所谓“实时”不是每个 CPU 时钟周期都查看，而是：</p>
+<blockquote>
+<p>在关键事件发生时，暂停并检查一致的状态。</p>
+</blockquote>
+<hr>
+<h5>如果它一直运行，能直接读取吗？</h5>
+<p>有些情况下可以尝试读取，但你可能看到不一致的数据：</p>
+<pre><code class="language-text">刚读完变量 A
+目标进程立刻修改了变量 B
+你再读 B
+</code></pre>
+<p>于是 A、B 并不属于同一个时刻的状态。</p>
+<p>因此调试器经常采用“停住再读”的方式。尤其对于多个线程的程序，情况更复杂：你停住一个线程，不代表其他线程一定也同时停住；调试器需要额外处理线程状态。<code>ptrace</code> 的附加和后续命令本质上是按线程进行的。<a href="ai_center_quote">6</a></p>
+<hr>
+<h4>一句话总结</h4>
+<pre><code class="language-text">PTRACE_ATTACH：
+“内核，把这个进程交给我调试，先让它停住，并把它之后的重要事件告诉我。”
+
+addr：
+“按目标进程自己的虚拟地址空间解释的地址。”
+
+调试器如何懂地址中的内容：
+“靠调试信息、符号、寄存器、内存布局和上下文；原始内存只有字节，自己不会说明类型。”
+
+实时调试：
+“不是永远盯着它跑，而是在断点、信号、单步等事件处暂停它，查看现场、做决定，再恢复运行。”
+</code></pre>
+<p>”</p>
+</div>
+        </div>
+      </dialog>
+    </div><p>上面是这次讨论的原文。四轮问答从一条函数声明开始，一路问到「ATTACH 到底是什么」。原文已经说清了两件最关键的事：<code>request</code> 决定另外三个参数的含义，<code>addr</code> 按 tracee 的地址空间解释。</p>
+<p>这篇在它上面补三层原文没有展开的东西：内核里实际走的那条路径、GDB 和 strace 这类真实工具的做法、以及这条路的边界。凡是原文的说法需要补充或纠正的地方，都会在对应章节里标出来。</p>
+<h2 id="一个函数四个参数为什么像在猜谜"><span class="num">01</span>一个函数，四个参数，为什么像在猜谜</h2>
+<p>先看声明本身：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-c">long ptrace(enum __ptrace_request request,
+            pid_t pid,
+            void *addr,
+            void *data);
+</code></pre></div>
+<p><code>ptrace</code> 的名字来自 process trace。它让一个进程（tracer）观察、控制另一个进程（tracee），读写它的内存和寄存器，让它停、让它走。GDB 的断点、strace 的系统调用记录，底下都是这套接口。</p>
+<p>四个参数让人摸不着头脑，是因为它们没有固定含义。<code>request</code> 是动词，<code>pid</code> 是宾语，<code>addr</code> 和 <code>data</code> 是这次动作用到的两个槽位。同一个槽位，在一条命令里是目标地址，在另一条命令里是缓冲区指针，在第三条命令里干脆被忽略。</p>
+<table>
+<thead>
+<tr>
+<th><code>request</code></th>
+<th><code>addr</code></th>
+<th><code>data</code></th>
+<th>结果在哪里</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>PTRACE_ATTACH</code></td>
+<td>不用</td>
+<td>不用</td>
+<td>返回值 <code>0</code> / <code>-1</code></td>
+</tr>
+<tr>
+<td><code>PTRACE_PEEKDATA</code></td>
+<td>tracee 的虚拟地址</td>
+<td>C 层传 <code>NULL</code>；内核实际把结果写到 glibc 的临时变量（见 §04）</td>
+<td>返回值：一个机器字</td>
+</tr>
+<tr>
+<td><code>PTRACE_POKEDATA</code></td>
+<td>tracee 的虚拟地址</td>
+<td>要写入的那个字</td>
+<td>返回值 <code>0</code> / <code>-1</code></td>
+</tr>
+<tr>
+<td><code>PTRACE_GETREGSET</code></td>
+<td><code>NT_PRSTATUS</code> 之类的选择子</td>
+<td>tracer 里 <code>struct iovec *</code>（缓冲区 + 长度）</td>
+<td><code>iovec</code> 指向的缓冲区</td>
+</tr>
+<tr>
+<td><code>PTRACE_CONT</code></td>
+<td>不用</td>
+<td>要注入的信号编号（<code>0</code> = 不注入）</td>
+<td>返回值 <code>0</code> / <code>-1</code></td>
+</tr>
+<tr>
+<td><code>PTRACE_SETOPTIONS</code></td>
+<td>不用</td>
+<td><code>PTRACE_O_*</code> 位掩码</td>
+<td>返回值 <code>0</code> / <code>-1</code></td>
+</tr>
+<tr>
+<td><code>PTRACE_PEEKUSER</code></td>
+<td><strong>USER 区的偏移</strong>，不是 tracee 地址</td>
+<td>不用</td>
+<td>返回值：一个机器字</td>
+</tr>
+</tbody>
+</table>
+<p>所以不能单独问「<code>addr</code> 和 <code>data</code> 是什么意思」。必须先问：在哪个 <code>request</code> 下？</p>
+<p><mark class="mk-blue">参数的含义由 <code>request</code> 决定，函数签名只是四个通用的槽位。</mark></p>
+<p>这些命令在头文件里就是一组数字。<code>glibc</code> 的 <code>sys/ptrace.h</code> 把它们声明成 <code>enum __ptrace_request</code>，内核的 <code>include/uapi/linux/ptrace.h</code> 里是同一组数字的 <code>#define</code>：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-c">#define PTRACE_TRACEME     0
+#define PTRACE_PEEKTEXT    1
+#define PTRACE_PEEKDATA    2
+#define PTRACE_POKEDATA    5
+#define PTRACE_CONT        7
+#define PTRACE_SINGLESTEP  9
+#define PTRACE_ATTACH     16
+#define PTRACE_DETACH     17
+#define PTRACE_SYSCALL    24
+
+#define PTRACE_SETOPTIONS 0x4200
+#define PTRACE_GETREGSET  0x4204
+#define PTRACE_SEIZE      0x4206
+#define PTRACE_INTERRUPT  0x4207
+</code></pre></div>
+<p>0 到 24 这一段沿用了早期 Unix 的编号方式，<code>0x42xx</code> 是后来加「架构无关命令」时开的一段。看到一个陌生请求号，先查它属于哪一段，通常就知道它大概是老接口还是新接口。</p>
+<div class="callout tone-amber">
+      <span class="ic">ℹ</span>
+      <div><p><code>glibc</code> 头文件里 <code>ptrace</code> 其实是<strong>可变参数</strong>声明：只有第一个参数的类型是固定的。
+<code>ptrace(2)</code> 的建议是<strong>永远传满四个参数</strong>，用不到的写 <code>0L</code> 或 <code>(void *)0</code>。</p>
+</div>
+    </div><h2 id="全局地图两个进程中间隔着内核"><span class="num">02</span>全局地图：两个进程，中间隔着内核</h2>
+<p>现在把四个参数放进真实的位置里。这张图有三层：左边是 tracer 的用户态，中间是内核，右边是 tracee 的用户态。内核里又有一份 tracee 的「档案」，每次操作都要先按 <code>pid</code> 找到它。</p>
+<figure class="archfig" data-arch style="--arch-max-width:1560px" data-boundaries="nested" data-pano data-parts='{"tracer":{"label":"tracer · 调试器进程","sub":"gdb / strace","detail":"它有自己的地址空间和页表。读 tracee 时，它只把 `pid` 和一个数字地址交给内核，自己不碰目标内存。\n"},"tbuf":{"label":"tracer 自己的缓冲区","sub":"data 指向这里","detail":"当 `request` 的意思是「把结果给我」时，`data` 是这块 tracer 用户态内存里的地址。\n"},"dispatch":{"label":"ptrace_request()","sub":"内核里的总入口","detail":"按 `request` 分发。大多数命令要求 tracee 已经停在 ptrace-stop，否则返回 `ESRCH`。\n"},"access":{"label":"ptrace_access_vm()","sub":"内存类请求的必经之路","detail":"先 `get_task_mm()` 拿到 tracee 的 mm，再 `access_remote_vm()` 用那张页表翻译 `addr`。读写的临时缓冲在内核里，最后由 `put_user` 交给 tracer。\n"},"task":{"label":"tracee 的 task_struct","sub":"一条线程","detail":"`ptrace_link()` 会把它 `parent` 指针暂时改成 tracer；`state` 在停住时是 `TASK_TRACED`。\n"},"regs":{"label":"停住时的寄存器","sub":"struct pt_regs","detail":"用户寄存器在停住时保存在内核里的 `pt_regs`；`PTRACE_GETREGS` 把它们拷到 tracer 的 `data` 缓冲区。\n"},"mm":{"label":"mm_struct + 页表","sub":"tracee 的地址空间描述","detail":"每个进程（线程组）一份。页表根和 VMA 集合都挂在它名下；tracee 换了地址空间，换的是它。\n"},"vas":{"label":"tracee 的虚拟地址空间","sub":"代码 / 堆 / 栈 / 动态库","detail":"这些段由 `mm` 描述。`addr` 只是一个数字；它落在哪一段，取决于你传的值。\n"}}' data-tours='[{"id":"peek","label":"一次 PEEKDATA 走哪条路","steps":[{"at":["tracer","dispatch"],"text":"调试器把 `request`、`pid`、`addr` 交给内核。此时 tracee 必须已经停住。"},{"at":["access"],"text":"`ptrace_access_vm()` 先按 pid 找到 task，再取它的 mm。"},{"at":["mm"],"text":"用 tracee 的页表翻译 `addr`，不是 tracer 的。"},{"at":["vas"],"text":"地址落在哪一段，由 `addr` 的值决定：栈、堆、代码段或库。"},{"at":["dispatch","tbuf"],"text":"读到的字先回到内核缓冲，再经 `data` 指针写进 tracer；glibc 把它做成返回值。"}]},{"id":"regs","label":"读一次寄存器","steps":[{"at":["tracer","dispatch"],"text":"`PTRACE_GETREGSET` 带着 `NT_PRSTATUS` 和一块 iovec 进来。"},{"at":["task"],"text":"按 pid 找到 task；停住时它的用户寄存器在 `pt_regs` 里。"},{"at":["regs","tbuf"],"text":"内核把 `pt_regs` 拷进 tracer 的缓冲区。`data` 是这块缓冲区的地址。"}]},{"id":"why","label":"为什么 tracer 不需要 tracee 的页表","steps":[{"at":["tracer"],"text":"tracer 手里只有 pid 和一个数字地址。"},{"at":["access","mm"],"text":"翻译发生在内核里，用的是 tracee 的 mm。"},{"at":["vas"],"text":"所以同一个数字，在 tracer 和 tracee 里可以是完全不同的东西。"}]}]' data-frames='[{"id":"tracer","boundary":0,"kind":"logical","label":"tracer 用户态 · 它是另一个进程","detail":"tracer 有自己的地址空间和自己的页表。它读 tracee 的内存时，用的不是这张页表。\n","members":["tracer","tbuf"],"depth":1},{"id":"kernel","boundary":1,"kind":"classification","label":"内核态 · 所有请求先到这里","detail":"用户态只能通过系统调用进来。命令的分发、权限检查、地址翻译都在这一层。\n","members":["dispatch","access","task","regs","mm"],"depth":1},{"id":"archive","boundary":2,"parent":"kernel","kind":"contains","label":"tracee 的内核侧档案 · 按 pid 定位","detail":"这些对象属于 tracee，不属于 tracer。tracer 只是拿着 pid 来借阅。\n","members":["task","regs","mm"],"depth":2},{"id":"tracee","boundary":3,"kind":"logical","label":"tracee 用户态 · 另一张地址空间","detail":"这是 tracee 自己看到的地址空间。同一个 `0x7fff…` 在 tracer 里可能根本没有映射。\n","members":["vas"],"depth":1}]'>
+      <div class="arch-boundary-ui">
+          <div class="arch-boundary-toolbar"><span class="arch-boundary-label">边界</span>
+            <button type="button" data-boundary-mode="nested" aria-pressed="true">多层归属框</button>
+            <button type="button" data-boundary-mode="flat" aria-pressed="false">只留一层分区</button>
+            <button type="button" data-arch-reset>恢复全图</button>
+          </div>
+          <div class="arch-address-box" aria-live="polite"><div data-arch-address>点一个零件，看完整归属路径；点一个区域标题，看这一层的含义。</div>
+            <div data-arch-frame-detail>最外框表示逻辑资源域，不表示所有对象在一块内存里。每层边界的标题说明分组依据。</div></div>
+        </div>
+      <div class="arch-canvas"><svg viewBox="0 0 1560 860" role="img" aria-labelledby="ptrace-map-archify-diagram-title ptrace-map-archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
+        <title id="ptrace-map-archify-diagram-title">ptrace 的全貌：一个进程借内核之手，读另一个进程</title>
+        <desc id="ptrace-map-archify-diagram-description">A architecture diagram generated by Archify.</desc>
+        <!-- Definitions -->
+        <defs>
+          <marker id="ptrace-map-arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-default" />
+          </marker>
+          <marker id="ptrace-map-arrowhead-emphasis" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-emphasis" />
+          </marker>
+          <marker id="ptrace-map-arrowhead-security" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-security" />
+          </marker>
+          <marker id="ptrace-map-arrowhead-dashed" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-dashed" />
+          </marker>
+          <pattern id="ptrace-map-grid" width="40" height="40" patternUnits="userSpaceOnUse">
+            <path d="M 40 0 L 0 0 0 40" class="c-grid" stroke-width="0.5"/>
+          </pattern>
+        </defs>
+
+        <!-- Background Grid -->
+        <rect width="100%" height="100%" fill="url(#ptrace-map-grid)" />
+
+        <!-- Boundaries (behind everything) -->
+        <g class="arch-frame" data-frame="tracer" data-depth="1" data-frame-flat="false" data-frame-kind="logical" role="button" tabindex="0" aria-pressed="false" aria-label="tracer 用户态 · 它是另一个进程"><title>tracer 有自己的地址空间和自己的页表。它读 tracee 的内存时，用的不是这张页表。
+</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="0" data-frame-members="tracer tbuf" x="34" y="104" width="352" height="432" rx="12" class="c-region" stroke-width="1"/>
+        <text x="42" y="122" class="t-cloud" font-size="9" font-weight="600">tracer 用户态 · 它是另一个进程</text></g>
+
+        <g class="arch-frame" data-frame="kernel" data-depth="1" data-frame-flat="false" data-frame-kind="classification" role="button" tabindex="0" aria-pressed="false" aria-label="内核态 · 所有请求先到这里"><title>用户态只能通过系统调用进来。命令的分发、权限检查、地址翻译都在这一层。
+</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="1" data-frame-members="dispatch access task regs mm" x="432" y="92" width="761" height="676" rx="12" class="c-region" stroke-width="1"/>
+        <text x="440" y="110" class="t-cloud" font-size="9" font-weight="600">内核态 · 所有请求先到这里</text></g>
+
+        <g class="arch-frame" data-frame="archive" data-depth="2" data-frame-flat="false" data-frame-kind="contains" role="button" tabindex="0" aria-pressed="false" aria-label="tracee 的内核侧档案 · 按 pid 定位"><title>这些对象属于 tracee，不属于 tracer。tracer 只是拿着 pid 来借阅。
+</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="2" data-frame-members="task regs mm" x="773" y="118" width="404" height="634" rx="12" class="c-region" stroke-width="1"/>
+        <text x="781" y="136" class="t-cloud" font-size="9" font-weight="600">tracee 的内核侧档案 · 按 pid 定位</text></g>
+
+        <g class="arch-frame" data-frame="tracee" data-depth="1" data-frame-flat="false" data-frame-kind="logical" role="button" tabindex="0" aria-pressed="false" aria-label="tracee 用户态 · 另一张地址空间"><title>这是 tracee 自己看到的地址空间。同一个 `0x7fff…` 在 tracer 里可能根本没有映射。
+</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="3" data-frame-members="vas" x="1285" y="260" width="260" height="360" rx="12" class="c-region" stroke-width="1"/>
+        <text x="1293" y="278" class="t-cloud" font-size="9" font-weight="600">tracee 用户态 · 另一张地址空间</text></g>
+
+        <!-- Connection paths (before components for correct z-order) -->
+        <path data-edge-from="tracer" data-edge-to="dispatch" data-edge-label="系统调用" data-edge-key="0" data-edge-id="call" data-composition-points="350,215;480,215" d="M 350 215 L 480 215" class="a-default" stroke-width="1.5" marker-end="url(#ptrace-map-arrowhead)"/>
+        <path data-edge-from="dispatch" data-edge-to="task" data-edge-label="pid → task" data-edge-key="1" data-edge-id="find" data-composition-points="700,215;724,215;724,246;781,246;781,230;805,230" d="M 700 215 L 716 215 Q 724 215 724 223 L 724 238 Q 724 246 732 246 L 773 246 Q 781 246 781 238 L 781 238 Q 781 230 789 230 L 805 230" class="a-default" stroke-width="1.5" marker-end="url(#ptrace-map-arrowhead)"/>
+        <path data-edge-from="dispatch" data-edge-to="access" data-edge-label="PEEK / POKE" data-edge-key="2" data-edge-id="peek" data-composition-points="590,290;590,350" d="M 590 290 L 590 350" class="a-default" stroke-width="1.5" marker-end="url(#ptrace-map-arrowhead)"/>
+        <path data-edge-from="access" data-edge-to="mm" data-edge-label="翻译地址" data-edge-key="3" data-edge-id="translate" data-composition-points="700,425;752.5,425;752.5,635;805,635" d="M 700 425 L 744.5 425 Q 752.5 425 752.5 433 L 752.5 627 Q 752.5 635 760.5 635 L 805 635" class="a-default" stroke-width="1.5" marker-end="url(#ptrace-map-arrowhead)"/>
+        <path data-edge-from="mm" data-edge-to="vas" data-edge-label="同一页表" data-edge-key="4" data-edge-id="pt" data-composition-points="1145,635;1230,635;1230,440;1315,440" d="M 1145 635 L 1222 635 Q 1230 635 1230 627 L 1230 448 Q 1230 440 1238 440 L 1315 440" class="a-default" stroke-width="1.5" marker-end="url(#ptrace-map-arrowhead)"/>
+        <path data-edge-from="task" data-edge-to="regs" data-edge-label="停住的现场" data-edge-key="5" data-edge-id="saved" data-composition-points="975,310;975,350" d="M 975 310 L 975 350" class="a-default" stroke-width="1.5" marker-end="url(#ptrace-map-arrowhead)"/>
+        <path data-edge-from="tracer" data-edge-to="tbuf" data-edge-label="data 指向这里" data-edge-key="6" data-edge-id="data" data-composition-points="210,290;210,370" d="M 210 290 L 210 370" class="a-default" stroke-width="1.5" marker-end="url(#ptrace-map-arrowhead)"/>
+
+        <!-- Components -->
+        <g id="ptrace-map-node-tracer" data-nb="1" data-node-id="tracer" data-node-label="tracer · 调试器进程" tabindex="0" role="button" aria-label="Focus tracer · 调试器进程, gdb / strace, tracer 用户态 · 它是另一个进程" aria-pressed="false" data-node-kind="backend" data-node-sublabel="gdb / strace" data-node-context="tracer 用户态 · 它是另一个进程">
+          <title>tracer · 调试器进程 · gdb / strace · tracer 用户态 · 它是另一个进程</title>
+          <rect x="70" y="140" width="280" height="150" rx="6" class="c-mask"/>
+          <rect x="70" y="140" width="280" height="150" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(76 146) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <rect class="nb-badge" x="268.4" y="148" width="69.6" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="303.2" y="159" font-size="8" text-anchor="middle">循环里的两步</text>
+          <text class="nb-title" x="104" y="161" font-size="10.5" font-weight="600">tracer · 调试器进程</text>
+          <line class="nb-hr" x1="78" y1="168" x2="342" y2="168"/>
+          <text class="nb-k" x="82" y="211" font-size="9">pid</text><text class="nb-v" x="107.2" y="211" font-size="9">1234（内核眼里是 TID）</text>
+          <text class="nb-k" x="82" y="225" font-size="9">等</text><text class="nb-v" x="107.2" y="225" font-size="9">waitpid(pid, &amp;st, __WALL)</text>
+          <text class="nb-k" x="82" y="239" font-size="9">看</text><text class="nb-v" x="107.2" y="239" font-size="9">WIFSTOPPED → 读；WIFEXITED → 收工</text>
+          <text class="nb-note" x="82" y="282" font-size="8">ptrace 只是它循环里的一步</text>
+        </g>
+
+        <g id="ptrace-map-node-tbuf" data-nb="1" data-node-id="tbuf" data-node-label="tracer 自己的缓冲区" tabindex="0" role="button" aria-label="Focus tracer 自己的缓冲区, &amp;regs / char buf[N], tracer 用户态 · 它是另一个进程" aria-pressed="false" data-node-kind="external" data-node-sublabel="&amp;regs / char buf[N]" data-node-context="tracer 用户态 · 它是另一个进程">
+          <title>tracer 自己的缓冲区 · &amp;regs / char buf[N] · tracer 用户态 · 它是另一个进程</title>
+          <rect x="70" y="370" width="280" height="130" rx="6" class="c-mask"/>
+          <rect x="70" y="370" width="280" height="130" rx="6" class="c-external" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="external" class="semantic-sigil s-external" transform="translate(76 376) scale(0.6875)">
+            <rect x="2.5" y="5" width="8.5" height="8" rx="1.5"/>
+            <path d="M8 2.5h5.5V8M13.5 2.5 7.5 8.5"/>
+          </g>
+          <text class="nb-title" x="104" y="391" font-size="10.5" font-weight="600">tracer 自己的缓冲区</text>
+          <line class="nb-hr" x1="78" y1="398" x2="342" y2="398"/>
+          <text class="nb-k" x="82" y="438" font-size="9">regs</text><text class="nb-v" x="112.6" y="438" font-size="9">struct user_regs_struct</text>
+          <text class="nb-k" x="82" y="452" font-size="9">buf</text><text class="nb-v" x="112.6" y="452" font-size="9">char buf[4096]</text>
+          <text class="nb-note" x="82" y="492" font-size="8">data 传地址时，内核把结果写到这里</text>
+        </g>
+
+        <g id="ptrace-map-node-dispatch" data-nb="1" data-node-id="dispatch" data-node-label="ptrace_request()" tabindex="0" role="button" aria-label="Focus ptrace_request(), request 决定另外三个参数, 内核态 · 所有请求先到这里" aria-pressed="false" data-node-kind="security" data-node-sublabel="request 决定另外三个参数" data-node-context="内核态 · 所有请求先到这里">
+          <title>ptrace_request() · request 决定另外三个参数 · 内核态 · 所有请求先到这里</title>
+          <rect x="480" y="140" width="220" height="150" rx="6" class="c-mask"/>
+          <rect x="480" y="140" width="220" height="150" rx="6" class="c-security" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="security" class="semantic-sigil s-security" transform="translate(486 146) scale(0.6875)">
+            <path d="M8 2.2 13 4v3.5c0 3.1-1.8 5.4-5 6.5-3.2-1.1-5-3.4-5-6.5V4Z"/>
+            <path d="m5.8 8 1.5 1.5 3-3"/>
+          </g>
+          <text class="nb-title" x="514" y="161" font-size="10.5" font-weight="600">ptrace_request()</text>
+          <line class="nb-hr" x1="488" y1="168" x2="692" y2="168"/>
+          <text class="nb-k" x="492" y="201.5" font-size="9">request</text><text class="nb-v" x="560.4" y="201.5" font-size="9">这次要做什么（命令号）</text>
+          <text class="nb-k" x="492" y="215.5" font-size="9">pid</text><text class="nb-v" x="560.4" y="215.5" font-size="9">哪条线程（TID）</text>
+          <text class="nb-k" x="492" y="229.5" font-size="9">addr / data</text><text class="nb-v" x="560.4" y="229.5" font-size="9">由 request 解释</text>
+          <text class="nb-code" x="492" y="248.5" font-size="7.5">long ptrace(request, pid, addr, data);</text>
+          <text class="nb-note" x="492" y="282" font-size="8">返回值：PEEK 的字 / 0 / -1</text>
+        </g>
+
+        <g id="ptrace-map-node-access" data-nb="1" data-node-id="access" data-node-label="ptrace_access_vm()" tabindex="0" role="button" aria-label="Focus ptrace_access_vm(), 用 tracee 的 mm 取内存, 内核态 · 所有请求先到这里" aria-pressed="false" data-node-kind="security" data-node-sublabel="用 tracee 的 mm 取内存" data-node-context="内核态 · 所有请求先到这里">
+          <title>ptrace_access_vm() · 用 tracee 的 mm 取内存 · 内核态 · 所有请求先到这里</title>
+          <rect x="480" y="350" width="220" height="150" rx="6" class="c-mask"/>
+          <rect x="480" y="350" width="220" height="150" rx="6" class="c-security" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="security" class="semantic-sigil s-security" transform="translate(486 356) scale(0.6875)">
+            <path d="M8 2.2 13 4v3.5c0 3.1-1.8 5.4-5 6.5-3.2-1.1-5-3.4-5-6.5V4Z"/>
+            <path d="m5.8 8 1.5 1.5 3-3"/>
+          </g>
+          <text class="nb-title" x="514" y="371" font-size="10.5" font-weight="600">ptrace_access_vm()</text>
+          <line class="nb-hr" x1="488" y1="378" x2="692" y2="378"/>
+          <text class="nb-k" x="492" y="421" font-size="9">①</text><text class="nb-v" x="506.4" y="421" font-size="9">get_task_mm(task)</text>
+          <text class="nb-k" x="492" y="435" font-size="9">②</text><text class="nb-v" x="506.4" y="435" font-size="9">access_remote_vm(mm, addr, …)</text>
+          <text class="nb-k" x="492" y="449" font-size="9">③</text><text class="nb-v" x="506.4" y="449" font-size="9">拷进内核缓冲，再交给 tracer</text>
+          <text class="nb-note" x="492" y="492" font-size="8">只在 ptrace-stop 里可用（否则 ESRCH）</text>
+        </g>
+
+        <g id="ptrace-map-node-task" data-nb="1" data-node-id="task" data-node-label="tracee 的 task_struct" tabindex="0" role="button" aria-label="Focus tracee 的 task_struct, pid 指向的那条线程, 内核态 · 所有请求先到这里 › tracee 的内核侧档案 · 按 pid 定位" aria-pressed="false" data-node-kind="database" data-node-sublabel="pid 指向的那条线程" data-node-context="内核态 · 所有请求先到这里 › tracee 的内核侧档案 · 按 pid 定位">
+          <title>tracee 的 task_struct · pid 指向的那条线程 · 内核态 · 所有请求先到这里 › tracee 的内核侧档案 · 按 pid 定位</title>
+          <rect x="805" y="150" width="340" height="160" rx="6" class="c-mask"/>
+          <rect x="805" y="150" width="340" height="160" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(811 156) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <rect class="nb-badge" x="1068.2" y="158" width="64.8" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="1100.6" y="169" font-size="8" text-anchor="middle">按 pid 找到</text>
+          <text class="nb-title" x="839" y="171" font-size="10.5" font-weight="600">tracee 的 task_struct</text>
+          <line class="nb-hr" x1="813" y1="178" x2="1137" y2="178"/>
+          <text class="nb-k" x="817" y="226" font-size="9">ptrace</text><text class="nb-v" x="858.4" y="226" font-size="9">PT_PTRACED / PT_SEIZED（内核标记）</text>
+          <text class="nb-k" x="817" y="240" font-size="9">parent</text><text class="nb-v" x="858.4" y="240" font-size="9">= tracer（ptrace_link）</text>
+          <text class="nb-k" x="817" y="254" font-size="9">state</text><text class="nb-v" x="858.4" y="254" font-size="9">TASK_TRACED（停住）</text>
+          <text class="nb-note" x="817" y="302" font-size="8">mm 指针指向同一份 mm_struct</text>
+        </g>
+
+        <g id="ptrace-map-node-regs" data-nb="1" data-node-id="regs" data-node-label="停住时的寄存器" tabindex="0" role="button" aria-label="Focus 停住时的寄存器, struct pt_regs, 内核态 · 所有请求先到这里 › tracee 的内核侧档案 · 按 pid 定位" aria-pressed="false" data-node-kind="database" data-node-sublabel="struct pt_regs" data-node-context="内核态 · 所有请求先到这里 › tracee 的内核侧档案 · 按 pid 定位">
+          <title>停住时的寄存器 · struct pt_regs · 内核态 · 所有请求先到这里 › tracee 的内核侧档案 · 按 pid 定位</title>
+          <rect x="805" y="350" width="340" height="130" rx="6" class="c-mask"/>
+          <rect x="805" y="350" width="340" height="130" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(811 356) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <text class="nb-title" x="839" y="371" font-size="10.5" font-weight="600">停住时的寄存器</text>
+          <line class="nb-hr" x1="813" y1="378" x2="1137" y2="378"/>
+          <text class="nb-k" x="817" y="411" font-size="9">rip</text><text class="nb-v" x="842.2" y="411" font-size="9">下一条要执行的指令</text>
+          <text class="nb-k" x="817" y="425" font-size="9">rsp</text><text class="nb-v" x="842.2" y="425" font-size="9">栈顶</text>
+          <text class="nb-k" x="817" y="439" font-size="9">rax</text><text class="nb-v" x="842.2" y="439" font-size="9">返回值 / 系统调用号</text>
+          <text class="nb-note" x="817" y="472" font-size="8">运行时不在这里；停下才保存</text>
+        </g>
+
+        <g id="ptrace-map-node-mm" data-nb="1" data-node-id="mm" data-node-label="mm_struct + 页表" tabindex="0" role="button" aria-label="Focus mm_struct + 页表, tracee 的地址空间描述, 内核态 · 所有请求先到这里 › tracee 的内核侧档案 · 按 pid 定位" aria-pressed="false" data-node-kind="database" data-node-sublabel="tracee 的地址空间描述" data-node-context="内核态 · 所有请求先到这里 › tracee 的内核侧档案 · 按 pid 定位">
+          <title>mm_struct + 页表 · tracee 的地址空间描述 · 内核态 · 所有请求先到这里 › tracee 的内核侧档案 · 按 pid 定位</title>
+          <rect x="805" y="550" width="340" height="170" rx="6" class="c-mask"/>
+          <rect x="805" y="550" width="340" height="170" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(811 556) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <text class="nb-title" x="839" y="571" font-size="10.5" font-weight="600">mm_struct + 页表</text>
+          <line class="nb-hr" x1="813" y1="578" x2="1137" y2="578"/>
+          <text class="nb-k" x="817" y="631" font-size="9">owner</text><text class="nb-v" x="853.0" y="631" font-size="9">task-&gt;mm（线程组共享）</text>
+          <text class="nb-k" x="817" y="645" font-size="9">页表</text><text class="nb-v" x="853.0" y="645" font-size="9">根在 mm 里，逐级翻译 VA</text>
+          <text class="nb-k" x="817" y="659" font-size="9">范围</text><text class="nb-v" x="853.0" y="659" font-size="9">只描述这一个进程</text>
+          <text class="nb-note" x="817" y="712" font-size="8">内核拿它替 tracee 翻地址</text>
+        </g>
+
+        <g id="ptrace-map-node-vas" data-nb="1" data-node-id="vas" data-node-label="tracee 的虚拟地址空间" tabindex="0" role="button" aria-label="Focus tracee 的虚拟地址空间, 代码 / 堆 / 栈 / 动态库, tracee 用户态 · 另一张地址空间" aria-pressed="false" data-node-kind="frontend" data-node-sublabel="代码 / 堆 / 栈 / 动态库" data-node-context="tracee 用户态 · 另一张地址空间">
+          <title>tracee 的虚拟地址空间 · 代码 / 堆 / 栈 / 动态库 · tracee 用户态 · 另一张地址空间</title>
+          <rect x="1315" y="290" width="200" height="300" rx="6" class="c-mask"/>
+          <rect x="1315" y="290" width="200" height="300" rx="6" class="c-frontend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="frontend" class="semantic-sigil s-frontend" transform="translate(1321 296) scale(0.6875)">
+            <rect x="2" y="3" width="12" height="10" rx="2"/>
+            <path d="M2 6.5h12"/>
+            <circle cx="4.1" cy="4.8" r=".7" class="sigil-fill"/>
+            <circle cx="6.3" cy="4.8" r=".7" class="sigil-fill"/>
+          </g>
+          <rect class="nb-badge" x="1443.0" y="298" width="60.0" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="1473.0" y="309" font-size="8" text-anchor="middle">由 mm 描述</text>
+          <text class="nb-title" x="1349" y="311" font-size="8.5" font-weight="600">tracee 的虚拟地址空间</text>
+          <line class="nb-hr" x1="1323" y1="318" x2="1507" y2="318"/>
+          <rect class="nb-seg" data-tone="blue" x="1327" y="416" width="176.0" height="12" rx="3"/><text class="nb-seg-t" data-tone="blue" x="1334" y="425" font-size="8">栈</text><text class="nb-note" x="1496" y="425" font-size="7.5" text-anchor="end">0x7fff…</text>
+          <rect class="nb-seg" x="1327" y="431" width="176.0" height="12" rx="3"/><text class="nb-seg-t" x="1334" y="440" font-size="8">动态库</text><text class="nb-note" x="1496" y="440" font-size="7.5" text-anchor="end">0x7f…</text>
+          <rect class="nb-seg" x="1327" y="446" width="176.0" height="12" rx="3"/><text class="nb-seg-t" x="1334" y="455" font-size="8">堆</text><text class="nb-note" x="1496" y="455" font-size="7.5" text-anchor="end">0x5555…</text>
+          <rect class="nb-seg" data-tone="amber" x="1327" y="461" width="176.0" height="12" rx="3"/><text class="nb-seg-t" data-tone="amber" x="1334" y="470" font-size="8">代码段</text><text class="nb-note" x="1496" y="470" font-size="7.5" text-anchor="end">0x5555…</text>
+          <text class="nb-note" x="1327" y="582" font-size="8">addr 落在哪一段，由你传的值决定</text>
+        </g>
+
+        <!-- Connection labels -->
+        <g data-detail="context" data-edge-from="tracer" data-edge-to="dispatch" data-edge-label="系统调用" data-edge-key="0" data-edge-id="call">
+          <rect x="390.8" y="195" width="48.4" height="14" rx="3" class="c-mask"/>
+          <text x="415" y="205" class="t-muted" font-size="8" text-anchor="middle">系统调用</text>
+        </g>
+        <g data-detail="context" data-edge-from="dispatch" data-edge-to="task" data-edge-label="pid → task" data-edge-key="1" data-edge-id="find">
+          <rect x="723" y="186" width="58" height="14" rx="3" class="c-mask"/>
+          <text x="752" y="196" class="t-muted" font-size="8" text-anchor="middle">pid → task</text>
+        </g>
+        <g data-detail="context" data-edge-from="dispatch" data-edge-to="access" data-edge-label="PEEK / POKE" data-edge-key="2" data-edge-id="peek">
+          <rect x="598.6" y="310" width="62.8" height="14" rx="3" class="c-mask"/>
+          <text x="630" y="320" class="t-muted" font-size="8" text-anchor="middle">PEEK / POKE</text>
+        </g>
+        <g data-detail="context" data-edge-from="access" data-edge-to="mm" data-edge-label="翻译地址" data-edge-key="3" data-edge-id="translate">
+          <rect x="713.8" y="395" width="48.4" height="14" rx="3" class="c-mask"/>
+          <text x="738" y="405" class="t-muted" font-size="8" text-anchor="middle">翻译地址</text>
+        </g>
+        <g data-detail="context" data-edge-from="mm" data-edge-to="vas" data-edge-label="同一页表" data-edge-key="4" data-edge-id="pt">
+          <rect x="1230.8" y="410" width="48.4" height="14" rx="3" class="c-mask"/>
+          <text x="1255" y="420" class="t-muted" font-size="8" text-anchor="middle">同一页表</text>
+        </g>
+        <g data-detail="context" data-edge-from="task" data-edge-to="regs" data-edge-label="停住的现场" data-edge-key="5" data-edge-id="saved">
+          <rect x="1001" y="320" width="58" height="14" rx="3" class="c-mask"/>
+          <text x="1030" y="330" class="t-muted" font-size="8" text-anchor="middle">停住的现场</text>
+        </g>
+        <g data-detail="context" data-edge-from="tracer" data-edge-to="tbuf" data-edge-label="data 指向这里" data-edge-key="6" data-edge-id="data">
+          <rect x="213.8" y="320" width="72.4" height="14" rx="3" class="c-mask"/>
+          <text x="250" y="330" class="t-muted" font-size="8" text-anchor="middle">data 指向这里</text>
+        </g>
+
+        <!-- Legend -->
+        <g data-legend data-legend-bridge>
+          <text x="40" y="824" class="t-primary" font-size="12" font-weight="650">Legend</text>
+          <g data-legend-semantic-kind="frontend" data-legend-kind="frontend" data-legend-label="Frontend" data-legend-x="40" data-legend-baseline="844" data-legend-width="83">
+            <rect x="40" y="835" width="16" height="10" rx="2.5" class="c-frontend" stroke-width="1"/>
+            <text x="62" y="844" class="t-muted" font-size="10" font-weight="500">Frontend</text>
+          </g>
+          <g data-legend-semantic-kind="backend" data-legend-kind="backend" data-legend-label="Backend" data-legend-x="145" data-legend-baseline="844" data-legend-width="78">
+            <rect x="145" y="835" width="16" height="10" rx="2.5" class="c-backend" stroke-width="1"/>
+            <text x="167" y="844" class="t-muted" font-size="10" font-weight="500">Backend</text>
+          </g>
+          <g data-legend-semantic-kind="database" data-legend-kind="database" data-legend-label="Database" data-legend-x="245" data-legend-baseline="844" data-legend-width="83">
+            <rect x="245" y="835" width="16" height="10" rx="2.5" class="c-database" stroke-width="1"/>
+            <text x="267" y="844" class="t-muted" font-size="10" font-weight="500">Database</text>
+          </g>
+          <g data-legend-semantic-kind="security" data-legend-kind="security" data-legend-label="Security" data-legend-x="350" data-legend-baseline="844" data-legend-width="83">
+            <rect x="350" y="835" width="16" height="10" rx="2.5" class="c-security" stroke-width="1"/>
+            <text x="372" y="844" class="t-muted" font-size="10" font-weight="500">Security</text>
+          </g>
+          <g data-legend-semantic-kind="external" data-legend-kind="external" data-legend-label="External" data-legend-x="455" data-legend-baseline="844" data-legend-width="83">
+            <rect x="455" y="835" width="16" height="10" rx="2.5" class="c-external" stroke-width="1"/>
+            <text x="477" y="844" class="t-muted" font-size="10" font-weight="500">External</text>
+          </g>
+        </g>
+      </svg></div>
+      <figcaption>从 <code>ptrace_request()</code> 进内核：找 <code>task</code>、读寄存器走上面；读内存走下面的 <code>ptrace_access_vm()</code>。图里只画静态归属，ATTACH 的先后顺序在 §05 的时序图。</figcaption>
+      <div class="pano-ui"></div>
+      <p class="arch-hint"><span class="idle">点头上的任意一个框看它的关系，点区域标题看分组含义，点零件看完整归属路径</span><span class="focused">再点一次空白处取消</span></p>
+    </figure><p>这张图只解决「谁在哪、谁属于谁」。真正让 tracee 停下来的顺序，是下一节之后的事。</p>
+<h2 id="addr-是谁的地址内核替它翻页表"><span class="num">03</span>addr 是谁的地址：内核替它翻页表</h2>
+<p>原文说的是对的：<code>addr</code> 是 tracee 的虚拟地址。它没有展开的是，tracer 没有这张页表，为什么还能读。</p>
+<p>因为读的动作根本不发生在 tracer 里。<code>ptrace</code> 是一句请求，翻译由内核完成。内核按 <code>pid</code> 找到 tracee 的 <code>task_struct</code>，取出它的 <code>mm_struct</code>，再用这张 mm 里的页表把 <code>addr</code> 翻成物理页。</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-c">/* kernel/ptrace.c，删掉了错误处理 */
+int ptrace_access_vm(struct task_struct *tsk, unsigned long addr,
+                     void *buf, int len, unsigned int gup_flags)
+{
+    struct mm_struct *mm = get_task_mm(tsk);
+    ...
+    ret = access_remote_vm(mm, addr, buf, len, gup_flags);
+    mmput(mm);
+    return ret;
+}
+
+/* PEEKDATA 最后落到这里：读一个 unsigned long，再写到 tracer 的 data 指针 */
+int generic_ptrace_peekdata(struct task_struct *tsk, unsigned long addr,
+                            unsigned long data)
+{
+    unsigned long tmp;
+    int copied = ptrace_access_vm(tsk, addr, &amp;tmp, sizeof(tmp), FOLL_FORCE);
+    if (copied != sizeof(tmp))
+        return -EIO;
+    return put_user(tmp, (unsigned long __user *)data);
+}
+</code></pre></div>
+<p>三步：按 pid 找 task，取它的 mm，用这张 mm 翻译地址。<code>access_remote_vm()</code> 里走的是 <code>get_user_pages</code> 那一套，和内核读自己的用户态内存是同一条路，只是换了一张页表。</p>
+<div class="callout tone-blue">
+      <span class="ic">🧭</span>
+      <div><p><mark class="mk-blue">tracer 不需要拥有 tracee 的页表。</mark></p>
+<p>它交出去的是一个数字。<code>mm</code> 在内核里，属于 tracee；翻译也在内核里发生。
+这就是为什么 GDB 不需要先把目标进程的页表「拿过来」。</p>
+</div>
+    </div><p><code>addr</code> 可以落在任何一段已经映射的区域：栈、堆、代码段、动态库、<code>mmap</code> 出来的匿名区。它不「是」栈地址或堆地址；它就是一个虚拟地址，落在哪一段由你传的值决定。</p>
+<figure class="memmap" data-memmap>
+      <figcaption class="mm-title">tracee 的一张虚拟地址空间<span class="mm-cap-sub">Linux x86-64 · 示意布局</span></figcaption>
+      <div class="mm-stack"><div class="mm-seg tone-blue" style="--mm-size:2.4">
+        <div class="mm-body">
+          <div class="mm-head"><b>栈</b><span class="mm-dir mm-down" title="向下增长">↓ 向下长</span></div>
+          <p class="mm-sub">局部变量、返回地址</p>
+        </div>
+        <div class="mm-side">
+              <span class="mm-addr">0x7fff…</span>
+              <span class="mm-mark">addr 可以指这里</span>
+            </div>
+      </div><div class="mm-seg tone-muted" style="--mm-size:1.8">
+        <div class="mm-body">
+          <div class="mm-head"><b>动态库 / vdso</b></div>
+          <p class="mm-sub">libc、<a href="http://ld.so">ld.so</a>、内核提供的 vdso</p>
+        </div>
+        <div class="mm-side">
+              <span class="mm-addr">0x7f…</span>
+              <span class="mm-mark">addr 可以指这里</span>
+            </div>
+      </div><div class="mm-seg tone-violet" style="--mm-size:2.8">
+        <div class="mm-body">
+          <div class="mm-head"><b>堆</b><span class="mm-dir mm-up" title="向上增长">↑ 向上长</span></div>
+          <p class="mm-sub">malloc / new</p>
+        </div>
+        <div class="mm-side">
+              <span class="mm-addr">0x5555…</span>
+              <span class="mm-mark">addr 可以指这里</span>
+            </div>
+      </div><div class="mm-seg tone-green" style="--mm-size:1.6">
+        <div class="mm-body">
+          <div class="mm-head"><b>代码段</b></div>
+          <p class="mm-sub">只读、可执行；断点的 0xCC 写在这里</p>
+        </div>
+        <div class="mm-side">
+              <span class="mm-addr">0x5555…</span>
+              <span class="mm-mark">addr 可以指这里</span>
+            </div>
+      </div></div>
+      <div class="mm-ends">
+            <span class="mm-end">高地址 0x7fff_ffff_ffff</span>
+            <span class="mm-end">低地址 0x0000_0000_0000</span>
+          </div>
+      <p class="mm-note">一张图里只有一张地址空间。<strong>同一个 <code>0x7fff…</code> 在 tracer 里可能是另一块内存，也可能根本没映射。</strong></p>
+    </figure><p>同一个数字，在两个进程里可以是完全不同的东西。这不是 <code>ptrace</code> 的特殊规则，而是虚拟内存的常态：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>同一个地址 0x7fff12340000</th><th>在 tracer 里</th><th>在 tracee 里</th></tr></thead><tbody><tr><th>它是什么</th><td data-label="在 tracer 里">可能是 tracer 自己栈上的某个变量，也可能是空的</td><td data-label="在 tracee 里">tracee 栈上的某个变量（如果这个地址在它的 maps 里）</td></tr><tr><th>谁翻译它</th><td data-label="在 tracer 里">CPU 用 tracer 的页表（x86 上由 CR3 指向）</td><td data-label="在 tracee 里">内核用 tracee 的 mm 里那套页表</td></tr><tr><th>翻译失败会怎样</th><td data-label="在 tracer 里">tracer 自己收到 SIGSEGV</td><td data-label="在 tracee 里"><code>ptrace</code> 返回 <code>-1</code>，<code>errno</code> 是 <code>EIO</code> 或 <code>EFAULT</code></td></tr></tbody></table></div><p>那么地址最初是从哪来的？原文给了三条线索，这里补上它们各自能回答什么、不能回答什么：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>线索</th><th>它告诉你什么</th><th>它不告诉你什么</th></tr></thead><tbody><tr><th>调试信息（DWARF，<code>gcc -g</code>）</th><td data-label="它告诉你什么">变量叫什么、什么类型、位置表达式；某条指令对应哪一行源码</td><td data-label="它不告诉你什么">变量此刻的值；运行时才分配的地址</td></tr><tr><th><code>/proc/&lt;pid&gt;/maps</code></th><td data-label="它告诉你什么">哪些地址段被映射、权限、文件偏移；栈和堆大致在哪</td><td data-label="它不告诉你什么">哪块内存里放的是哪个变量</td></tr><tr><th>符号表（<code>nm</code> / <code>objdump</code>）</th><td data-label="它告诉你什么">函数、全局变量的名字和链接地址</td><td data-label="它不告诉你什么">类型信息；局部变量；PIE（位置无关可执行文件）的加载基址（要从 maps 里取）</td></tr><tr><th>寄存器和栈</th><td data-label="它告诉你什么">运行到这一刻，参数、栈顶、返回地址是什么</td><td data-label="它不告诉你什么">这些值是整数、指针，还是碰巧长得像指针的字节</td></tr></tbody></table></div><p>原文说得最准的是这一句：<strong>字节没有自带标签</strong>。<code>01 00 00 00 00 00 00 00</code> 可能是整数 <code>1</code>、<code>true</code>、枚举值、结构体的第一个字段，也可能是一条指令的一部分。GDB 能把 <code>p user.name</code> 显示成人能读的东西，是因为它在读内存之外，还读了 DWARF 里的类型和位置信息；面对一个没有符号的陌生程序，它也只能给你一串十六进制。</p>
+<h2 id="peekdata-的值到底去哪了"><span class="num">04</span>PEEKDATA 的值到底去哪了</h2>
+<p>原文说「读到的数据通过返回值返回」。这句话在 C 语言这一层是对的，但它遮住了 <code>data</code> 参数真正的用途。</p>
+<p>在系统调用这一层，<code>PEEKDATA</code> 的 <code>data</code> 是一个<strong>指针</strong>：内核把读到的机器字写到这个地址。<code>glibc</code> 的包装函数在中间放了一个临时变量，把内核写进来的值再作为返回值交给你。所以你看到的 <code>long value = ptrace(...)</code>，底下是这么一趟：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">tracee 的页
+   │  get_user_pages + copy
+   ▼
+内核里的 unsigned long tmp
+   │  put_user(tmp, (unsigned long __user *)data)
+   ▼
+glibc 包装函数里的临时变量
+   │  return tmp
+   ▼
+你的 long value
+</code></pre></div>
+<p><code>ptrace(2)</code> 的 NOTES 把这件事写得很直白：在系统调用层，<code>PEEKTEXT</code> / <code>PEEKDATA</code> / <code>PEEKUSER</code> 把结果存放在 <code>data</code> 指向的地址，返回值只表示成功或失败；是 <code>glibc</code> 的包装函数把它变成了「结果从返回值出来」。这也解释了为什么 <code>PEEKDATA</code> 的 <code>data</code> 看起来「不用」，内核却仍然要读它。</p>
+<p>顺带一个必须记住的坑：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-c">errno = 0;
+long value = ptrace(PTRACE_PEEKDATA, pid, addr, NULL);
+
+if (value == -1 &amp;&amp; errno != 0) {
+    perror(&quot;ptrace&quot;);
+} else {
+    printf(&quot;读到的字：0x%lx\n&quot;, value);
+}
+</code></pre></div>
+<p><code>-1</code> 是一个合法的数据值（八个字节全是 <code>0xff</code>）。只判断 <code>value == -1</code> 会把一次成功的读取当成失败。</p>
+<p>一次能读多少？<code>PEEKDATA</code> 一次只搬一个机器字。64 位 Linux 上是 8 字节（内核里就是 <code>sizeof(unsigned long)</code>），32 位上是 4 字节。读 100 字节要 13 次：前 12 次各 8 字节，最后一次从偏移 96 开始读 8 字节，只用前 4 个。</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-c">size_t left = 100, off = 0;
+while (left) {
+    errno = 0;
+    long w = ptrace(PTRACE_PEEKDATA, pid, (char *)addr + off, NULL);
+    if (w == -1 &amp;&amp; errno) break;
+    size_t n = left &lt; sizeof(w) ? left : sizeof(w);
+    memcpy(buf + off, &amp;w, n);
+    off += n;
+    left -= n;
+}
+</code></pre></div>
+<p><mark class="mk-amber">最后几个字节如果正好贴着映射边界，最后一次 8 字节读可能跨进未映射页而失败 —— 哪怕你要的那 4 个字节本身是有效的。</mark></p>
+<p>这就是为什么真实的调试器不这么读内存。</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>读法</th><th>一次搬多少</th><th>要不要停住</th><th>权限</th><th>谁在用</th></tr></thead><tbody><tr><th><code>PTRACE_PEEKDATA</code></th><td data-label="一次搬多少">一个机器字（64 位 8 字节）</td><td data-label="要不要停住">要，必须在 ptrace-stop 里</td><td data-label="权限">已 attach 的 tracer</td><td data-label="谁在用">老调试器；理解 <code>data</code> 用</td></tr><tr><th><code>/proc/&lt;pid&gt;/mem</code></th><td data-label="一次搬多少">一次 <code>read()</code> 想读多少读多少</td><td data-label="要不要停住">不用；线程在跑也能读</td><td data-label="权限">打开时做 <code>PTRACE_MODE_ATTACH</code> 检查</td><td data-label="谁在用"><mark class="mk-blue">GDB 首选</mark>；能写只读页，用来下断点</td></tr><tr><th><code>process_vm_readv</code></th><td data-label="一次搬多少">一次多个 iovec，按页搬</td><td data-label="要不要停住">不用</td><td data-label="权限"><code>PTRACE_MODE_ATTACH_REALCREDS</code></td><td data-label="谁在用">批量读写的工具；写只读页不行</td></tr></tbody></table></div><p>GDB 的源码里有一段很清楚的说明：它<strong>优先用 <code>/proc/PID/mem</code></strong>，只有在 <code>/proc/PID/mem</code> 不可写时才退回 <code>PTRACE_PEEKTEXT/POKETEXT</code>。理由列了四条，其中三条正好回答这篇的问题：</p>
+<ul>
+<li>一次 <code>read</code>/<code>write</code> 就搬一段，不用一个词一个词地敲 <code>ptrace</code>。</li>
+<li><code>/proc/PID/mem</code> 能写只读页，GDB 需要这个能力来放断点指令；<code>process_vm_writev</code> 不行。</li>
+<li>所有线程都在跑的时候也能访问内存；<code>PTRACE_PEEK*</code> 则必须传一个停住的 tid。</li>
+</ul>
+<p>所以原文那句「停住再读」是经典路径，不是今天的全部。<strong>要读得一致，仍然要停住；只是想读，现代调试器可以在目标运行时读。</strong></p>
+<div class="callout tone-amber">
+      <span class="ic">⚠</span>
+      <div><p>运行时读到的内容可能不属于同一个时刻：刚读完变量 A，目标进程就改了变量 B，你再读 B。
+多个线程时更明显。要一份一致的现场，还是得让相关线程停下来。</p>
+</div>
+    </div><h2 id="attach-不是读一个值是把一条线程挂到调试器名下"><span class="num">05</span>ATTACH 不是「读一个值」，是把一条线程挂到调试器名下</h2>
+<p>原文把 ATTACH 解释成「让目标停下」，方向对，但动作不止这一下。它做了三件事：检查权限、在内核里建立一条「谁在跟踪谁」的关系、再让目标停住。停下来只是结果，关系才是后面所有命令能用的前提。</p>
+<div class="seqd has-grid" data-seq data-n="3" data-segs="[{&quot;from&quot;:1,&quot;to&quot;:6,&quot;label&quot;:&quot;attach 的握手&quot;},{&quot;from&quot;:7,&quot;to&quot;:9,&quot;label&quot;:&quot;开始干活&quot;}]"
+      style="--seq-fill:url(#s-fill-1);--seq-open:url(#s-fill-1-open)">
+      <svg class="seqd-svg" aria-hidden="true">
+        <defs>
+          <marker id="s-fill-1" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+          <marker id="s-fill-1-open" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10" fill="none" stroke="currentColor" stroke-width="1.4"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="seqd-head"><div class="scell"><div class="spart tone-green" data-id="g">
+          <b>tracer · gdb</b>
+        </div></div><div class="scell"><div class="spart tone-violet" data-id="k">
+          <b>内核</b>
+        </div></div><div class="scell"><div class="spart tone-blue" data-id="t">
+          <b>tracee · 一条线程</b>
+        </div></div></div>
+      <div class="seqd-body"><div class="smsg" data-from="g" data-to="k" data-kind="sync" data-i="1" data-note="1"><span class="snote">1</span><span class="slabel">PTRACE_ATTACH(pid)</span></div><div class="smsg is-self" data-from="k" data-to="k" data-kind="self" data-i="2" data-note="2"><span class="snote">2</span><span class="slabel">__ptrace_may_access + 记关系</span></div><div class="smsg is-self" data-from="k" data-to="k" data-kind="self" data-i="3" data-note="3"><span class="snote">3</span><span class="slabel">ptrace_link：task-&gt;parent = tracer</span></div><div class="smsg" data-from="k" data-to="t" data-kind="async" data-i="4" data-note="4"><span class="snote">4</span><span class="slabel">SIGSTOP</span></div><div class="smsg is-self" data-from="t" data-to="t" data-kind="self" data-i="5" data-note="5"><span class="snote">5</span><span class="slabel">→ TASK_TRACED</span></div><div class="smsg" data-from="k" data-to="g" data-kind="reply" data-i="6" data-note="6"><span class="snote">6</span><span class="slabel">waitpid 返回 WIFSTOPPED</span></div><div class="smsg" data-from="g" data-to="k" data-kind="sync" data-i="7" data-note="7"><span class="snote">7</span><span class="slabel">PTRACE_GETREGS</span></div><div class="smsg" data-from="k" data-to="g" data-kind="reply" data-i="8" data-note="8"><span class="snote">8</span><span class="slabel">regs</span></div><div class="smsg" data-from="g" data-to="k" data-kind="sync" data-i="9" data-note="9"><span class="snote">9</span><span class="slabel">PTRACE_CONT(0)</span></div></div>
+    </div><p>第 2 步的权限检查会看 uid、<code>dumpable</code>、<code>CAP_SYS_PTRACE</code>，再让 Yama 之类的 LSM 过一遍。第 3 步是很多人不知道的：内核把 tracee 的 <code>parent</code> 指针暂时改成 tracer（<code>real_parent</code> 不变），所以调试器能用 <code>waitpid</code> 收它的停止和退出事件。</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-c">/* kernel/ptrace.c: ptrace_attach() 摘录 */
+task-&gt;ptrace = flags;              /* PT_PTRACED（或 PT_SEIZED） */
+ptrace_link(task, current);        /* task-&gt;parent = tracer */
+ptrace_set_stopped(task, seize);   /* ATTACH 时向 tracee 发 SIGSTOP */
+</code></pre></div>
+<p><code>PTRACE_ATTACH</code> 返回的时候，目标不一定已经停了。它只是把 <code>SIGSTOP</code> 发出去了；真正的同步点在 <code>waitpid</code>。</p>
+<div class="callout tone-red">
+      <span class="ic">⚠</span>
+      <div><p><mark class="mk-blue"><code>ptrace(PTRACE_ATTACH, pid, 0, 0)</code> 返回 0，不等于「已经停住」。</mark></p>
+<p>接下来必须 <code>waitpid(pid, &amp;status, __WALL)</code>，等到 <code>WIFSTOPPED(status)</code> 为真，才能读寄存器。
+另外，<code>PTRACE_ATTACH</code> 只挂<strong>一条线程</strong>：<code>pid</code> 在内核眼里是 tid（线程 ID）。</p>
+</div>
+    </div><p>三种把进程变成 tracee 的方式，差别在这里：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>做法</th><th>谁发起</th><th>会不会立刻停</th><th>典型用途</th></tr></thead><tbody><tr><th><code>PTRACE_TRACEME</code></th><td data-label="谁发起">tracee 自己</td><td data-label="会不会立刻停">不会；通常接一个 <code>raise(SIGSTOP)</code>，让父进程收到停止事件</td><td data-label="典型用途">自己启动的子进程；<code>gdb ./a.out</code> 这条路</td></tr><tr><th><code>PTRACE_ATTACH</code></th><td data-label="谁发起">tracer</td><td data-label="会不会立刻停">发 <code>SIGSTOP</code>，但返回时不一定已停，要 <code>waitpid</code></td><td data-label="典型用途">attach 一个已经在跑的进程</td></tr><tr><th><code>PTRACE_SEIZE</code></th><td data-label="谁发起">tracer</td><td data-label="会不会立刻停">不会；要停时用 <code>PTRACE_INTERRUPT</code>，还可以 <code>PTRACE_LISTEN</code></td><td data-label="典型用途">现代调试器、需要细粒度控制的场景</td></tr><tr><th><code>PTRACE_O_TRACECLONE</code></th><td data-label="谁发起">tracer（在父 tracee 上设选项）</td><td data-label="会不会立刻停">新 clone 出来的线程自动挂到同一个 tracer，并先停住等它</td><td data-label="典型用途">追多线程程序；不用手动一条条 attach</td></tr></tbody></table></div><p>把这套握手写成代码，最短的 tracer 是这样：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-c">#include &lt;stdio.h&gt;
+#include &lt;sys/ptrace.h&gt;
+#include &lt;sys/wait.h&gt;
+#include &lt;sys/user.h&gt;
+#include &lt;unistd.h&gt;
+
+int main(void) {
+    pid_t child = fork();
+    if (child == 0) {
+        ptrace(PTRACE_TRACEME, 0, 0, 0);
+        execl(&quot;./target&quot;, &quot;target&quot;, NULL);
+        _exit(127);
+    }
+
+    int status;
+    waitpid(child, &amp;status, 0);            /* execve 后的 SIGTRAP */
+    struct user_regs_struct regs;
+    ptrace(PTRACE_GETREGS, child, 0, &amp;regs);
+    printf(&quot;entry: rip = 0x%llx\n&quot;, regs.rip);
+
+    ptrace(PTRACE_CONT, child, 0, 0);
+    waitpid(child, &amp;status, 0);            /* 下一次停止 / 退出 */
+}
+</code></pre></div>
+<p>这段是 x86-64 的写法（<code>struct user_regs_struct</code>）；换架构时，<code>PTRACE_GETREGS</code> 换成 <code>PTRACE_GETREGSET</code> + <code>NT_PRSTATUS</code>。</p>
+<p>这里只走到目标程序的第一条指令。后面要单步、下断点、看系统调用，都是在这个「等停 → 读现场 → 继续」的循环里换 <code>request</code>。</p>
+<p>多线程程序的规则要单独说：<strong>attach 是按线程算的</strong>。<code>ptrace(2)</code> 的原话是「tracee 永远指一条线程，不是一个多线程进程」。你想看所有线程，就得遍历 <code>/proc/&lt;pid&gt;/task</code> 一条条挂，或者在挂上主线程时打开 <code>PTRACE_O_TRACECLONE</code>，让之后新建的线程自动进来。已经存在的线程不会因为主线程被 attach 就自动停下。</p>
+<p>还有两条边界：一条线程同时只能有一个 tracer（再 attach 会 <code>EPERM</code>）；同一个线程组里的线程不能互相 attach。</p>
+<h2 id="目标一直在跑怎么实时看"><span class="num">06</span>目标一直在跑，怎么「实时」看</h2>
+<p>原文的答案是「停 → 看 → 走」。这一节把它拆成可核对的机制：谁让谁停、<code>waitpid</code> 里看到的是什么、断点到底是怎么生效的。</p>
+<h3 id="一次迭代长什么样">一次迭代长什么样</h3>
+<div class="seqd has-grid" data-seq data-n="3" data-segs="[{&quot;from&quot;:1,&quot;to&quot;:3,&quot;label&quot;:&quot;出事 → 停下 → 通知&quot;},{&quot;from&quot;:4,&quot;to&quot;:7,&quot;label&quot;:&quot;看现场 → 放它走&quot;}]"
+      style="--seq-fill:url(#s-fill-2);--seq-open:url(#s-fill-2-open)">
+      <svg class="seqd-svg" aria-hidden="true">
+        <defs>
+          <marker id="s-fill-2" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+          <marker id="s-fill-2-open" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10" fill="none" stroke="currentColor" stroke-width="1.4"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="seqd-head"><div class="scell"><div class="spart tone-blue" data-id="t">
+          <b>tracee</b>
+        </div></div><div class="scell"><div class="spart tone-violet" data-id="k">
+          <b>内核</b>
+        </div></div><div class="scell"><div class="spart tone-green" data-id="g">
+          <b>tracer · gdb</b>
+        </div></div></div>
+      <div class="seqd-body"><div class="smsg" data-from="t" data-to="k" data-kind="async" data-i="1" data-note="1"><span class="snote">1</span><span class="slabel">断点 / 信号 / 单步 / syscall</span></div><div class="smsg is-self" data-from="k" data-to="k" data-kind="self" data-i="2" data-note="2"><span class="snote">2</span><span class="slabel">ptrace_stop()：TASK_TRACED</span></div><div class="smsg" data-from="k" data-to="g" data-kind="reply" data-i="3" data-note="3"><span class="snote">3</span><span class="slabel">waitpid → WIFSTOPPED</span></div><div class="smsg" data-from="g" data-to="k" data-kind="sync" data-i="4" data-note="4"><span class="snote">4</span><span class="slabel">GETREGS / PEEKDATA</span></div><div class="smsg" data-from="k" data-to="g" data-kind="reply" data-i="5" data-note="5"><span class="snote">5</span><span class="slabel">现场</span></div><div class="smsg" data-from="g" data-to="k" data-kind="sync" data-i="6" data-note="6"><span class="snote">6</span><span class="slabel">PTRACE_CONT(sig)</span></div><div class="smsg" data-from="k" data-to="t" data-kind="async" data-i="7" data-note="7"><span class="snote">7</span><span class="slabel">恢复运行</span></div></div>
+    </div><p>这段会重复到 <code>PTRACE_DETACH</code> 或 tracee 退出。所谓「实时」，是在这些事件点上拿到一致的现场，不是每个时钟周期都盯着它。</p>
+<p>tracee 停下来的原因不止一种，但 <code>waitpid</code> 都用同一个 <code>WIFSTOPPED</code> 报给你。要区分它们，得看 <code>status</code> 的高位：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-c">int status;
+pid_t pid = waitpid(tracee, &amp;status, __WALL);
+
+if (WIFSTOPPED(status)) {
+    int sig   = WSTOPSIG(status);   /* (status &gt;&gt; 8) &amp; 0xff */
+    int event = status &gt;&gt; 8;        /* 低 8 位是停止信号，高 8 位是事件号 */
+
+    if (event == (SIGTRAP | (PTRACE_EVENT_CLONE &lt;&lt; 8))) {
+        /* 新线程被 clone 出来 */
+    } else if (sig == (SIGTRAP | 0x80)) {
+        /* 系统调用停：设了 PTRACE_O_TRACESYSGOOD 才有 0x80 这一位 */
+    }
+}
+</code></pre></div>
+<table>
+<thead>
+<tr>
+<th>停下来的原因</th>
+<th><code>waitpid</code> 看到什么</th>
+<th>怎么确认</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>信号投递（signal-delivery-stop）</td>
+<td><code>WIFSTOPPED</code>，<code>WSTOPSIG</code> 是那个信号</td>
+<td>信号还没投递给 tracee，tracer 可以压制或换一个</td>
+</tr>
+<tr>
+<td>组停（group-stop）</td>
+<td><code>WSTOPSIG</code> 是 <code>SIGSTOP</code> / <code>SIGTSTP</code> / <code>SIGTTIN</code> / <code>SIGTTOU</code></td>
+<td><code>PTRACE_GETSIGINFO</code> 返回 <code>EINVAL</code> 就是组停</td>
+</tr>
+<tr>
+<td>系统调用停（syscall-stop）</td>
+<td><code>SIGTRAP</code>；设了 <code>PTRACE_O_TRACESYSGOOD</code> 后是 <code>SIGTRAP|0x80</code></td>
+<td>进入 / 退出系统调用各停一次</td>
+</tr>
+<tr>
+<td><code>PTRACE_EVENT</code> 停</td>
+<td><code>status &gt;&gt; 8 == (SIGTRAP | (PTRACE_EVENT_xxx &lt;&lt; 8))</code></td>
+<td>fork / clone / exec / exit / seccomp 等事件</td>
+</tr>
+<tr>
+<td>单步停</td>
+<td><code>SIGTRAP</code></td>
+<td>上一条命令是 <code>PTRACE_SINGLESTEP</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="断点不是-cpu-的特殊功能">断点不是 CPU 的特殊功能</h3>
+<p>GDB 在 x86 上放软件断点，做的事非常朴素：把目标地址的第一个字节改成 <code>0xCC</code>。<code>0xCC</code> 是 <code>int3</code> 指令，CPU 执行到它就会触发一个陷阱，内核把它变成 <code>SIGTRAP</code> 交给 tracer。</p>
+<div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-blue">① 下断点</span>
+            <span class="name">0x401136</span>
+            <span class="spacer"></span>
+            <span class="tag tone-warn">写一个字节</span>
+          </div>
+          <div class="rec"><div class="">
+            <b>原字节</b><span>0x55</span><em>push rbp</em></div><div class="warn">
+            <b>新字节</b><span>0xCC</span><em>int3</em></div></div>
+          <div class="code-wrap" style="margin:0"><button class="copy" data-copy>复制</button><pre>long w = ptrace(PTRACE_PEEKDATA, pid, 0x401136, NULL);  /* 先按 §04 检查 errno */
+w = (w &amp; ~0xffL) | 0xCC;                    /* 只换最低字节 */
+ptrace(PTRACE_POKEDATA, pid, 0x401136, (void *)w);
+</pre></div>
+          <p class="jnote"><code>POKEDATA</code> 一次写一个机器字，所以要先读、改最低字节、再整字写回；内核带 <code>FOLL_FORCE</code>，只读代码段也写得进去。</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">tracee 继续跑<span class="note">它并不知道这个字节被换了</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-red">② 命中</span>
+            <span class="name">0x401136</span>
+            <span class="spacer"></span>
+            <span class="tag tone-red">SIGTRAP</span>
+          </div>
+          <div class="rec"><div class="warn">
+            <b>执行到</b><span>0xCC</span><em>int3</em></div><div class="">
+            <b>内核</b><span>转成 SIGTRAP</span></div><div class="">
+            <b>tracee</b><span>TASK_TRACED</span></div></div>
+          
+          <p class="jnote">断点命中时，<code>rip</code> 指向 <code>0x401136</code> 之后的那条指令（x86 的 <code>int3</code> 长度是 1）。</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">tracer 撤掉断点<span class="note">把 0x55 写回去，才能执行原指令</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-violet">③ 单步</span>
+            <span class="name">0x401136</span>
+            <span class="spacer"></span>
+            <span class="tag tone-violet">执行原指令</span>
+          </div>
+          <div class="rec"><div class="">
+            <b>原字节</b><span>0x55</span><em>已写回</em></div><div class="">
+            <b>方式</b><span>PTRACE_SINGLESTEP</span></div></div>
+          
+          <p class="jnote">执行完这一条，tracee 又停在 <code>0x401137</code>。</p>
+        </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">装回 0xCC<span class="note">下次再经过这里还会命中</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="jcard">
+          <div class="jcard-head">
+            <span class="tag tone-green">④ 继续</span>
+            <span class="name">0x401136</span>
+            <span class="spacer"></span>
+            <span class="tag tone-green">断点还在</span>
+          </div>
+          <div class="rec"><div class="">
+            <b>断点</b><span>0xCC</span><em>重新写回</em></div><div class="">
+            <b>状态</b><span>继续运行</span></div></div>
+          
+          <p class="jnote">断点重新装回这条指令的开头。GDB 默认走「撤掉 → 单步 → 装回」；某些平台会用 displaced stepping，把原指令挪到别处执行，省掉这一来一回。</p>
+        </div><p>这段也回答了「ATTACH 之后能做什么」：能读能写寄存器、能读能写内存、能单步、能设断点、能收发信号、能决定它什么时候继续。<mark class="mk-blue">所有这些动作都要求 tracee 停在 ptrace-stop 里</mark>；在它跑的时候发 <code>PEEK</code> / <code>GETREGS</code>，内核会返回 <code>ESRCH</code>。</p>
+<p>多线程下还有一个容易忽略的差别：你停住的只是被 attach 的那条线程。其他线程可能还在跑，还在改内存。GDB 默认的 all-stop 模式会把所有线程都停下来，再给你一份一致的现场；如果只停一条，你看到的是「这一条线程停下的瞬间，别人还在动」。</p>
+<h2 id="边界谁能用代价是什么还能用什么"><span class="num">07</span>边界：谁能用、代价是什么、还能用什么</h2>
+<p><code>ptrace</code> 能读别人的内存、改别人的寄存器、把别人的系统调用改掉，所以它从设计上就是权限敏感的。Linux 在能力检查之外，还叠了 <code>dumpable</code> 和 LSM（Linux Security Module）。Yama 是其中最常见的一层：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>ptrace_scope</th><th>允许谁 attach</th><th>典型场景</th></tr></thead><tbody><tr><th><code>0</code> classic</th><td data-label="允许谁 attach">同 uid、目标可 dump 的进程</td><td data-label="典型场景">老式桌面；最宽松</td></tr><tr><th><code>1</code> restricted（Yama 默认）</th><td data-label="允许谁 attach">只允许自己的后代（tracee 是 tracer 的后代），或有 <code>CAP_SYS_PTRACE</code>，或被目标用 <code>PR_SET_PTRACER</code> 点名</td><td data-label="典型场景"><code>gdb ./a.out</code> / <code>strace ./a.out</code> 正常；<code>gdb -p 别人的 pid</code> 被挡</td></tr><tr><th><code>2</code> admin-only</th><td data-label="允许谁 attach">只有 <code>CAP_SYS_PTRACE</code></td><td data-label="典型场景">服务器；调试要提权</td></tr><tr><th><code>3</code> no attach</th><td data-label="允许谁 attach">谁都不行，且写下去就改不回来</td><td data-label="典型场景">高安全环境</td></tr></tbody></table></div><p><code>dumpable</code> 是另一条线：目标如果执行过 setuid / setgid 程序，或者自己调了 <code>prctl(PR_SET_DUMPABLE, 0)</code>，普通 tracer 就 attach 不上。<code>ssh-agent</code> 用这个办法防止别人通过 ptrace 偷密钥。容器里还要注意：新建 user namespace 可能削弱 Yama 的保护，<code>ptrace(2)</code> 专门写了这件事。</p>
+<p>还有一条控制边界：tracer 自己崩掉时，Linux 会自动 detach 所有 tracee 并让它们继续跑（正停在 group-stop 里的除外）；做沙箱或监牢的进程会打开 <code>PTRACE_O_EXITKILL</code>，让 tracer 一死就把 tracee 一起杀掉，避免它逃出控制。</p>
+<p>代价也很具体。每次 <code>ptrace</code> 调用都是一次系统调用，读一个机器字就要来回一趟；<code>PTRACE_PEEK*</code> 还要把 tracee 停在 ptrace-stop 里。GDB 之所以能流畅地刷一屏内存，是因为它绕开了逐字 <code>PEEK</code>，改用 <code>/proc/PID/mem</code> 一次读一段。strace 则是另一种用法：它用 <code>PTRACE_SEIZE</code> 挂上，靠 <code>PTRACE_O_TRACESYSGOOD</code> 和 <code>PTRACE_GET_SYSCALL_INFO</code> 记录每次系统调用的进出，不需要逐字读内存。</p>
+<p>所以今天要观测一个进程，ptrace 不是唯一的路：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>手段</th><th>能做什么</th><th>不能做什么</th><th>典型工具</th></tr></thead><tbody><tr><th>ptrace</th><td data-label="能做什么">停 / 走 / 单步 / 读写寄存器和内存 / 收发信号；控制力最全</td><td data-label="不能做什么">逐次调用，逐字读很慢；默认要停住</td><td data-label="典型工具">gdb、strace、ltrace、rr</td></tr><tr><th><code>/proc/&lt;pid&gt;/mem</code></th><td data-label="能做什么">批量读写内存；能写只读页；线程运行时也能读</td><td data-label="不能做什么">不能控制执行；打开要 attach 权限</td><td data-label="典型工具">GDB 读内存的首选</td></tr><tr><th><code>process_vm_readv</code> / <code>writev</code></th><td data-label="能做什么">一次多个 iovec、按页搬；比逐字 PEEK 快</td><td data-label="不能做什么">不能控制执行；写只读页不行</td><td data-label="典型工具">批量注入 / 转储工具</td></tr><tr><th>eBPF / uprobes</th><td data-label="能做什么">在内核里挂探针，统计调用、延迟、参数；不拦停整个进程</td><td data-label="不能做什么">改控制弱；需要较新的内核和权限</td><td data-label="典型工具">bpftrace、perf</td></tr><tr><th>seccomp user notification</th><td data-label="能做什么">过滤器把某个系统调用交给用户态进程处理</td><td data-label="不能做什么">只覆盖系统调用；不是通用调试器</td><td data-label="典型工具">容器运行时、沙箱</td></tr></tbody></table></div><p><code>ptrace</code> 从 Unix V6 时代就在了（名字就是 process trace）。它带着那个年代的印子：一个函数、一堆命令号、一个 <code>void *</code> 兼容多种用途。今天的调试器仍然用它，但只在需要「停住并控制」的时候用；读内存、读系统调用这些事，已经有更合适的接口。</p>
+<h2 id="带走"><span class="num">08</span>带走</h2>
+<div class="summary">
+      <h3 id="五句话带走">五句话带走</h3>
+      <ol>
+<li><code>request</code> 是动词，<code>pid</code> 是宾语，<code>addr</code> / <code>data</code> 的含义由它决定。</li>
+<li><code>addr</code> 是 tracee 的虚拟地址；翻译由内核用 tracee 的 mm 完成，tracer 不需要它的页表。</li>
+<li><code>PEEKDATA</code> 一次读一个机器字；系统调用层把结果写进 <code>data</code> 指针，glibc 把它变成返回值；<code>-1</code> 可能是合法数据，要看 <code>errno</code>。</li>
+<li><code>ATTACH</code> 先建关系（<code>task-&gt;parent = tracer</code>）再发 <code>SIGSTOP</code>；返回不等于停了，要 <code>waitpid</code>。它挂的是一条线程。</li>
+<li>观察是「停 → 看 → 走」的循环；断点就是写进代码段的 <code>0xCC</code>。现代调试器读内存走 <code>/proc/pid/mem</code>，不逐字 <code>PEEK</code>。</li>
+</ol>
+
+    </div><div class="quiz"><details>
+        <summary>为什么 <code>ptrace(PTRACE_ATTACH, pid, 0, 0)</code> 返回 0 之后，还不能马上读寄存器？</summary>
+        <div class="a"><p>因为 ATTACH 只是把 <code>SIGSTOP</code> 发给目标，函数返回时目标不一定已经停在 ptrace-stop 里。
+要 <code>waitpid(pid, &amp;status, __WALL)</code> 等到 <code>WIFSTOPPED(status)</code>，才能发 <code>GETREGS</code> / <code>PEEKDATA</code>。</p>
+</div>
+      </details><details>
+        <summary><code>addr</code> 是 tracer 的地址还是 tracee 的地址？tracer 没有 tracee 的页表，为什么能读？</summary>
+        <div class="a"><p>是 tracee 的虚拟地址。翻译发生在内核里：<code>ptrace_access_vm()</code> 先用 <code>get_task_mm()</code> 拿到 tracee 的 mm，
+再用 <code>access_remote_vm()</code> 走那张页表。tracer 只交了一个数字，不需要拥有目标页表。</p>
+</div>
+      </details><details>
+        <summary>为什么不能只用 <code>if (value == -1)</code> 判断 <code>PEEKDATA</code> 失败？</summary>
+        <div class="a"><p>因为读到的八个字节全是 <code>0xff</code> 时，返回值也是 <code>-1</code>。必须先 <code>errno = 0</code>，
+调用后检查 <code>value == -1 &amp;&amp; errno != 0</code>。</p>
+</div>
+      </details><details>
+        <summary>读 100 字节，<code>PEEKDATA</code> 要调用几次？为什么 GDB 不这么干？</summary>
+        <div class="a"><p>每次读 8 字节，要 13 次（最后一次只用到 4 个字节）。GDB 优先用 <code>/proc/PID/mem</code>，
+一次 <code>read()</code> 读一段，还能在线程运行时读、能写只读页来放断点。</p>
+</div>
+      </details></div>
+
+    <footer>
+      <span>ptrace：一个函数，四个参数，和一个被按住的进程</span>
+      <span>最后更新 2026-10-27 · 单文件可离线打开</span>
+    </footer>
+  </main>
+</div>
+
+<script src="../../assets/app.js?v=3f7078c3e5"></script>
+</body>
+</html>
