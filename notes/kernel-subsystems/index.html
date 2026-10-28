@@ -1,0 +1,1680 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-has-toc="1">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>内核子系统：谁拥有这个条件，谁负责叫醒</title>
+<meta name="description" content="等待队列不是按磁盘、网络、锁分成标准类型。线程等的是某个对象上的条件，对象归某个子系统；子系统用最适合的等待结构（通用等待队列、专用链表、completion、定时器或状态位），条件满足时自己唤醒。" />
+<link rel="stylesheet" href="../../assets/theme.css?v=19aa345f51" />
+  <link rel="stylesheet" href="../../assets/blocks.css?v=e2b24e4d18" />
+  <link rel="stylesheet" href="../../assets/archify-embed.css?v=68fec0b81b" />
+</head>
+<body>
+<div id="progress"></div>
+<div id="tocScrim"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
+    <a class="brand" href="../../index.html"><span class="dot"></span>知识笔记</a>
+    
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="toc" id="toc">
+      <p class="toc-title">目录</p>
+      <a href="../../index.html" class="sub">← 全部笔记</a>
+      <a href="#子系统不是一个进程">子系统不是一个进程</a>
+      <a href="#一张树对象拥有等待结构">一张树：对象拥有等待结构</a>
+      <a href="#十二种等待挂在什么上">十二种等待，挂在什么上</a>
+      <a href="#一条唤醒链socket-收包">一条唤醒链：socket 收包</a>
+      <a href="#磁盘读线程可能睡在哪一层">磁盘读：线程可能睡在哪一层</a>
+      <a href="#子系统会互相借道nfs-read">子系统会互相借道：NFS read</a>
+      <a href="#驱动子系统调度器等待结构">驱动、子系统、调度器、等待结构</a>
+      <a href="#不是所有等都在等待队列里">不是所有「等」都在等待队列里</a>
+      <a href="#五条判断">五条判断</a>
+      <a href="#一句话" class="sub">一句话</a>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow">● 操作系统 · 内核子系统</span>
+      <h1>内核子系统：谁拥有这个条件，谁负责叫醒</h1>
+      <p class="lede">等待队列不是按磁盘、网络、锁分成标准类型。线程等的是某个对象上的条件，对象归某个子系统；子系统用最适合的等待结构（通用等待队列、专用链表、completion、定时器或状态位），条件满足时自己唤醒。</p>
+    </div>
+
+
+    <div class="provenance"><span><b>来源</b> Linux 主线 master（Makefile 7.3.0，2026-10-28 读）：include/linux/wait.h、include/linux/swait.h —— wait_queue_head_t、wait_queue_entry、swait_queue_head · 同版本：include/linux/sched/signal.h、kernel/exit.c —— signal_struct.wait_chldexit、__wake_up_parent · 同版本：include/linux/net.h、include/net/sock.h、net/core/sock.c —— socket_wq.wait、sock_def_readable() · 同版本：mm/filemap.c —— folio_wait_table（PAGE_WAIT_TABLE_BITS=8，256 个哈希队列）、wait_on_page_bit · 同版本：block/bio.c —— submit_bio_wait() → bio_await() → complete()、bio_endio() · 同版本：include/linux/mutex_types.h、include/linux/rwsem.h、include/linux/semaphore.h —— first_waiter 等专用等待者结构 · 同版本：kernel/futex/core.c —— futex_queues 哈希桶与 futex_wait_queue_me · 同版本：include/linux/completion.h —— swait_queue_head + done · 同版本：include/linux/pipe_fs_i.h、fs/pipe.c —— rd_wait / wr_wait、wake_up_interruptible_sync_poll · 同版本：fs/eventpoll.c —— struct eventpoll.wq、ep_poll_callback 与各 fd 的 poll wait · 同版本：kernel/time/hrtimer.c —— hrtimer_wakeup() → wake_up_process() · 同版本：kernel/sched/core.c、kernel/sched/wait.c —— wake_up()/try_to_wake_up()、TASK_RUNNING、rq · docs.kernel.org/filesystems/vfs.html —— VFS 的分层与 inode / dentry / page cache · docs.kernel.org/driver-api/driver-model/overview.html —— 设备模型与驱动的职责 · man 2 wait、man 2 poll、man 2 epoll_wait、man 2 futex —— 系统调用语义（本机 man 页）</span><span><b>生成</b> 2026-10-28</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">操作系统</span> <span class="tag tone-muted">Linux</span> <span class="tag tone-muted">内核</span> <span class="tag tone-muted">子系统</span> <span class="tag tone-muted">等待队列</span></span></div>
+
+<div class="quiz"><details>
+        <summary>等待队列到底有几种？还有，“子系统”到底指什么？（点开看这次两问两答的原文）</summary>
+        <div class="a"><blockquote>
+<p>下面是这次讨论的原文：先按“线程在等什么”列出常见情况，再解释“子系统”这个词。正文把两问合成一条线：对象 → 子系统 → 唤醒者。原文里的标题降成了小标题，其余没改。</p>
+</blockquote>
+<h4>问</h4>
+<p>等待队列有哪几种情况，磁盘 i/o、网络数据、定时器、锁，还有吗？</p>
+<h4>答</h4>
+<p>有很多种，但要先抓住一个核心：</p>
+<blockquote>
+<p><strong>等待队列不是按“磁盘队列、网络队列、锁队列”固定分成几种标准类型。</strong>
+它本质上是一种通用机制：线程因为某个条件不满足而不能继续执行，就挂到“负责这个条件的对象”的等待队列上。</p>
+</blockquote>
+<p>所以更准确地说，是：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">线程在等什么，就可能有对应的等待队列。
+</code></pre></div>
+<p>你列的这几种已经覆盖了最常见的大类：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">磁盘 / IO
+网络数据
+定时器
+锁
+</code></pre></div>
+<p>下面按“等待的事件”来整理。</p>
+<h4>总览图</h4>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">线程执行时发现条件不满足
+             │
+             ▼
+       进入相应等待队列
+             │
+             ▼
+  条件满足后，由相关子系统唤醒
+             │
+             ▼
+    线程重新进入 CPU 运行队列
+</code></pre></div>
+<p>常见等待原因：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">┌──────────────────────────────┐
+│ 1. 等 IO 完成                 │
+│ 2. 等网络事件                 │
+│ 3. 等锁或同步条件             │
+│ 4. 等时间到                   │
+│ 5. 等进程/线程状态变化        │
+│ 6. 等 IPC 消息或数据          │
+│ 7. 等内存或资源可用           │
+│ 8. 等设备或驱动事件           │
+│ 9. 等文件系统或页面数据准备好 │
+│ 10. 等用户指定的事件          │
+└──────────────────────────────┘
+</code></pre></div>
+<h4>1. 等磁盘或其他块设备 IO</h4>
+<p>这是你提到的“磁盘 I/O”。</p>
+<p>例如线程调用：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-c">read(fd, buf, size);
+</code></pre></div>
+<p>但数据不在内存页缓存中，必须从 SSD、硬盘或其他块设备读取：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">线程 A 调用 read()
+       │
+       ▼
+数据不在内存中，需要设备读取
+       │
+       ▼
+线程 A 睡眠，等待 IO 完成
+       │
+       ▼
+设备完成读取，中断/驱动通知内核
+       │
+       ▼
+唤醒线程 A
+</code></pre></div>
+<p>图：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">线程 A
+  │
+  ├── 发起磁盘读取请求
+  │
+  ▼
+磁盘 / SSD / 块设备请求
+  │
+  ▼
+线程 A 在 IO 相关等待队列中睡眠
+  │
+  ▼
+IO 完成
+  │
+  ▼
+唤醒 A → A 回到 CPU 运行队列
+</code></pre></div>
+<p>这里不只包括物理磁盘，也可能是：</p>
+<ul>
+<li>SSD、NVMe；</li>
+<li>USB 存储设备；</li>
+<li>网络块设备；</li>
+<li>虚拟磁盘；</li>
+<li>RAID；</li>
+<li>文件系统底层读写；</li>
+<li>交换分区（swap）读写。</li>
+</ul>
+<p>但要注意：</p>
+<blockquote>
+<p>现代 Linux 中，线程不一定是“直接等磁盘请求”；它也可能在等页面加载、页锁、文件系统操作或 IO 完成通知。</p>
+</blockquote>
+<h4>2. 等网络数据或网络状态</h4>
+<p>最典型的是 Socket。</p>
+<p>例如：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-c">recv(fd, buf, size, 0);
+</code></pre></div>
+<p>如果 socket 接收缓冲区中没有数据：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">线程 A 调用 recv()
+       │
+       ▼
+Socket 没有可读数据
+       │
+       ▼
+A 加入该 socket 的接收等待队列
+       │
+       ▼
+A 睡眠
+       │
+       ▼
+网卡收到数据包
+       │
+       ▼
+网络协议栈把数据放入 socket 接收缓冲区
+       │
+       ▼
+唤醒 A
+</code></pre></div>
+<p>图：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">Socket 接收缓冲区：空
+
+线程 A ── recv() ──&gt; Socket 的“可读等待队列”
+                              │
+                              ▼
+                           A 睡眠
+
+
+网络包到达
+   │
+   ▼
+Socket 接收缓冲区：有数据
+   │
+   ▼
+wake_up()
+   │
+   ▼
+线程 A 重新可运行
+</code></pre></div>
+<p>网络等待不只有“等数据到来”，还包括：</p>
+<table>
+<thead>
+<tr>
+<th>等待的事件</th>
+<th>常见系统调用或场景</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>等待读数据</td>
+<td><code>recv()</code>、<code>read(socket)</code></td>
+</tr>
+<tr>
+<td>等待可写</td>
+<td>socket 发送缓冲区满，等待可发送</td>
+</tr>
+<tr>
+<td>等待新连接</td>
+<td>服务端 <code>accept()</code></td>
+</tr>
+<tr>
+<td>等待连接完成</td>
+<td><code>connect()</code> 非阻塞或相关状态等待</td>
+</tr>
+<tr>
+<td>等待连接关闭</td>
+<td>等待对端 FIN、错误或超时</td>
+</tr>
+<tr>
+<td>等待网络事件</td>
+<td><code>poll()</code>、<code>select()</code>、<code>epoll_wait()</code></td>
+</tr>
+</tbody>
+</table>
+<h4>3. 等锁</h4>
+<p>线程访问共享数据时，可能要先拿锁。</p>
+<p>例如：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-c">mutex_lock(&amp;lock);
+</code></pre></div>
+<p>如果锁已经被别的线程持有：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">线程 A 想拿锁
+   │
+   ▼
+锁被线程 B 持有
+   │
+   ▼
+A 加入该锁的等待者队列
+   │
+   ▼
+A 睡眠
+   │
+   ▼
+B 解锁
+   │
+   ▼
+唤醒 A 或其他等待者
+</code></pre></div>
+<p>图：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">mutex L：
+
+持有者：线程 B
+
+等待者队列：
+[线程 A] -&gt; [线程 C] -&gt; [线程 D]
+
+
+线程 B 解锁
+   │
+   ▼
+从等待者中选择可获得锁的线程
+   │
+   ▼
+唤醒 A
+</code></pre></div>
+<p>常见的同步等待包括：</p>
+<table>
+<thead>
+<tr>
+<th>等待对象</th>
+<th>含义</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>mutex</code></td>
+<td>等互斥锁</td>
+</tr>
+<tr>
+<td><code>rwsem</code> / 读写锁</td>
+<td>等读锁或写锁</td>
+</tr>
+<tr>
+<td><code>futex</code></td>
+<td>用户态锁竞争时进入内核等待</td>
+</tr>
+<tr>
+<td><code>completion</code></td>
+<td>等待某个内核任务完成</td>
+</tr>
+<tr>
+<td>条件变量</td>
+<td>等待某个条件变为真</td>
+</tr>
+<tr>
+<td>信号量 semaphore</td>
+<td>等待可用计数大于 0</td>
+</tr>
+<tr>
+<td>文件锁</td>
+<td>等待文件区域锁可用</td>
+</tr>
+<tr>
+<td>pipe 缓冲区</td>
+<td>等待读端或写端满足条件</td>
+</tr>
+</tbody>
+</table>
+<p>注意：</p>
+<blockquote>
+<p>自旋锁（spinlock）通常不是“睡眠等待队列”模式。
+拿不到自旋锁时，CPU 往往会短暂循环等待，因为持有自旋锁的时间应该很短，并且持锁期间不能睡眠。</p>
+</blockquote>
+<h4>4. 等定时器、超时或延迟结束</h4>
+<p>线程有时不是等外部资源，而是单纯“等时间到”。</p>
+<p>例如：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-c">sleep(1);
+usleep(100000);
+nanosleep(...);
+</code></pre></div>
+<p>流程：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">线程 A 调用 sleep(1)
+       │
+       ▼
+设置一个 1 秒后的定时器
+       │
+       ▼
+A 进入定时等待状态
+       │
+       ▼
+1 秒到了
+       │
+       ▼
+定时器回调唤醒 A
+       │
+       ▼
+A 回到运行队列
+</code></pre></div>
+<p>图：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">当前时间：10:00:00
+
+线程 A：
+“请在 10:00:01 后叫醒我”
+       │
+       ▼
+定时器系统 / timer wheel
+       │
+       ▼
+A 睡眠
+
+
+当前时间：10:00:01
+       │
+       ▼
+定时器到期
+       │
+       ▼
+唤醒 A
+</code></pre></div>
+<p>很多“等待事件”的操作也会附带超时：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">等网络数据，但最多等 5 秒；
+等锁，但最多等 100ms；
+等子进程退出，但最多等 10 秒。
+</code></pre></div>
+<p>这时线程实际是在等两个条件中的任意一个：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">事件发生
+    或
+超时到期
+</code></pre></div>
+<h4>5. 等子进程退出、停止或状态变化</h4>
+<p>父进程可以调用：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-c">wait();
+waitpid();
+waitid();
+</code></pre></div>
+<p>等待子进程发生状态变化，例如：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">子进程退出；
+子进程被停止；
+子进程被继续执行；
+子进程因信号终止。
+</code></pre></div>
+<p>图：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">父进程 P
+   │
+   ├── waitpid(child)
+   │
+   ▼
+子进程 C 还在运行
+   │
+   ▼
+父进程 P 睡眠，等待 C 的状态变化
+
+
+子进程 C 退出
+   │
+   ▼
+内核记录 C 的退出状态
+   │
+   ▼
+唤醒父进程 P
+   │
+   ▼
+P 获得退出码并回收子进程资源
+</code></pre></div>
+<p>这也是等待队列思想，只是等的不是硬件 IO，而是另一个进程的生命周期事件。</p>
+<h4>6. 等 IPC 消息、管道数据或共享资源</h4>
+<p>进程间通信（IPC）也经常需要等待。</p>
+<p>常见例子：</p>
+<table>
+<thead>
+<tr>
+<th>IPC 类型</th>
+<th>可能等待什么</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Pipe / FIFO</td>
+<td>等待读到数据；等待缓冲区有空间可写</td>
+</tr>
+<tr>
+<td>Unix Domain Socket</td>
+<td>等数据、等连接、等发送空间</td>
+</tr>
+<tr>
+<td>消息队列</td>
+<td>等待新消息到达</td>
+</tr>
+<tr>
+<td>POSIX 消息队列</td>
+<td>等待消息或等待队列空间</td>
+</tr>
+<tr>
+<td>共享内存 + futex</td>
+<td>等另一个进程修改状态并唤醒</td>
+</tr>
+<tr>
+<td>eventfd</td>
+<td>等计数器变为非 0</td>
+</tr>
+<tr>
+<td>信号量</td>
+<td>等资源数量大于 0</td>
+</tr>
+</tbody>
+</table>
+<p>以 pipe 为例：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">读进程：pipe 中没有数据
+   │
+   ▼
+读进程睡眠，等 pipe 可读
+
+
+写进程：写入数据
+   │
+   ▼
+pipe 中有数据了
+   │
+   ▼
+唤醒读进程
+</code></pre></div>
+<p>反过来，写 pipe 时如果 pipe 缓冲区满了：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">写进程睡眠
+   │
+   ▼
+等待读进程读走一部分数据
+   │
+   ▼
+pipe 有空间后被唤醒
+</code></pre></div>
+<h4>7. 等文件系统或内存页面准备好</h4>
+<p>这和磁盘 IO 有关，但层次更高，不一定直接等设备。</p>
+<p>例如一个文件的内容对应某个内存页面：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">线程 A 要读取文件的某一页
+   │
+   ▼
+发现该页不在内存中
+   │
+   ▼
+启动页面读取
+   │
+   ▼
+A 等待“该页变为有效”
+</code></pre></div>
+<p>也可能发生在缺页异常（page fault）时：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">线程 A 访问一个虚拟地址
+   │
+   ▼
+对应内存页不在 RAM 中
+   │
+   ▼
+需要从文件或 swap 读回
+   │
+   ▼
+A 等待页面加载完成
+</code></pre></div>
+<p>可理解为：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">等待“内存页可用”
+</code></pre></div>
+<p>而不是简单地说：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">等待“磁盘”
+</code></pre></div>
+<p>文件系统中还可能等待：</p>
+<ul>
+<li>inode 锁；</li>
+<li>目录项或元数据加载；</li>
+<li>写回完成；</li>
+<li>文件锁；</li>
+<li>设备或远程文件系统响应；</li>
+<li>FUSE 用户态文件系统返回结果。</li>
+</ul>
+<h4>8. 等内存或其他内核资源</h4>
+<p>有些情况下，线程想申请资源，但资源暂时不足。</p>
+<p>例如：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">内存不够；
+某个对象池空了；
+某种内核资源达到上限；
+cgroup 资源配额暂时不足。
+</code></pre></div>
+<p>线程可能选择：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">立刻失败；
+短暂重试；
+进入等待，等资源释放；
+触发内存回收后再继续。
+</code></pre></div>
+<p>例如内存分配时，如果使用允许睡眠的分配方式，内核可能会：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">尝试回收内存
+   │
+   ▼
+等待回收或写回过程推进
+   │
+   ▼
+拿到可用内存后继续
+</code></pre></div>
+<p>但不是所有资源不足都会让线程睡眠；有的场景必须立即失败，例如中断上下文中不能睡眠。</p>
+<h4>9. 等设备事件</h4>
+<p>除了磁盘和网卡，很多设备都可能让线程等待：</p>
+<table>
+<thead>
+<tr>
+<th>设备或子系统</th>
+<th>线程等待什么</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>键盘</td>
+<td>等按键输入</td>
+</tr>
+<tr>
+<td>鼠标 / 触摸屏</td>
+<td>等输入事件</td>
+</tr>
+<tr>
+<td>终端 TTY</td>
+<td>等字符输入、等输出缓冲区可写</td>
+</tr>
+<tr>
+<td>摄像头</td>
+<td>等下一帧图像</td>
+</tr>
+<tr>
+<td>声卡</td>
+<td>等音频缓冲区可写或播放完成</td>
+</tr>
+<tr>
+<td>GPU</td>
+<td>等 GPU 任务完成、栅栏 fence 信号</td>
+</tr>
+<tr>
+<td>USB</td>
+<td>等设备响应或数据到达</td>
+</tr>
+<tr>
+<td>串口</td>
+<td>等数据到达、等发送完成</td>
+</tr>
+<tr>
+<td>GPIO</td>
+<td>等引脚电平变化</td>
+</tr>
+<tr>
+<td>虚拟化设备</td>
+<td>等宿主机或虚拟设备完成请求</td>
+</tr>
+</tbody>
+</table>
+<p>例如读键盘：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">程序调用 read(/dev/input/...)
+   │
+   ▼
+暂时没有按键事件
+   │
+   ▼
+程序睡眠，等输入设备事件
+   │
+   ▼
+用户按键
+   │
+   ▼
+驱动收到中断，产生输入事件
+   │
+   ▼
+唤醒程序
+</code></pre></div>
+<h4>10. 等 <code>poll</code>、<code>select</code>、<code>epoll</code> 监控的任一事件</h4>
+<p>这类很重要，因为它本质上是在：</p>
+<blockquote>
+<p>同时等待多个对象中的任意一个变得“可处理”。</p>
+</blockquote>
+<p>例如：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-c">epoll_wait(epfd, events, maxevents, timeout);
+</code></pre></div>
+<p>线程可能同时关心：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">Socket A 有没有数据；
+Socket B 能不能写；
+Pipe C 有没有数据；
+eventfd D 是否被通知；
+定时器是否到期。
+</code></pre></div>
+<p>图：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">                  Socket A 可读？
+                 /
+线程 T ── epoll_wait
+                 \
+                  Pipe C 可读？
+                 /
+                eventfd D 有信号？
+                 \
+                  超时到了？
+</code></pre></div>
+<p>当其中任意一个事件发生：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">任意一个事件触发
+      │
+      ▼
+唤醒 epoll_wait 中的线程 T
+</code></pre></div>
+<p>严格说，<code>epoll</code> 不是自己“等网络”或“等 pipe”，而是把自己挂接到多个对象的事件通知机制上。</p>
+<h4>11. 等信号、调试器或进程控制事件</h4>
+<p>线程也可能因为进程控制原因停止或等待：</p>
+<ul>
+<li>等待信号；</li>
+<li>被 <code>SIGSTOP</code> 停止；</li>
+<li>被调试器 <code>ptrace</code> 暂停；</li>
+<li>等待继续执行；</li>
+<li>等待某个信号处理流程完成。</li>
+</ul>
+<p>例如调试器单步执行时，目标进程经常处于：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">TASK_TRACED
+</code></pre></div>
+<p>它不是在等磁盘、网络或锁，而是在等调试器发出下一步指令。</p>
+<h4>12. 等内核后台任务完成</h4>
+<p>内核内部经常有“发起工作 → 等待结果”的模式。</p>
+<p>例如：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">线程 A 发起异步操作
+   │
+   ▼
+后台 worker / 驱动 / 另一个 CPU 执行工作
+   │
+   ▼
+A 等待 completion
+   │
+   ▼
+后台任务完成
+   │
+   ▼
+complete()
+   │
+   ▼
+唤醒 A
+</code></pre></div>
+<p>这种等待通常会使用：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">completion（完成量）
+</code></pre></div>
+<p>它很适合表示：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">“我不关心谁完成，只关心这件事完成后通知我。”
+</code></pre></div>
+<p>典型场景：</p>
+<ul>
+<li>设备初始化完成；</li>
+<li>驱动命令完成；</li>
+<li>内核工作线程完成某项任务；</li>
+<li>某个 CPU 完成跨 CPU 操作；</li>
+<li>模块加载或卸载流程；</li>
+<li>DMA 传输完成。</li>
+</ul>
+<h4>一张分类总表</h4>
+<table>
+<thead>
+<tr>
+<th>等待类别</th>
+<th>等待什么</th>
+<th>常见例子</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>块设备 / IO</td>
+<td>读写完成</td>
+<td>磁盘、SSD、NVMe、swap</td>
+</tr>
+<tr>
+<td>网络</td>
+<td>数据、连接、发送空间</td>
+<td><code>recv()</code>、<code>accept()</code>、<code>connect()</code></td>
+</tr>
+<tr>
+<td>锁与同步</td>
+<td>锁、条件、完成信号</td>
+<td>mutex、futex、semaphore、completion</td>
+</tr>
+<tr>
+<td>定时</td>
+<td>到某个时间、等待超时</td>
+<td><code>sleep()</code>、<code>nanosleep()</code></td>
+</tr>
+<tr>
+<td>进程管理</td>
+<td>子进程状态改变</td>
+<td><code>waitpid()</code></td>
+</tr>
+<tr>
+<td>IPC</td>
+<td>消息、pipe 数据、共享状态</td>
+<td>pipe、FIFO、消息队列、eventfd</td>
+</tr>
+<tr>
+<td>文件系统 / 内存</td>
+<td>页数据、页锁、文件元数据</td>
+<td>缺页、page cache、FUSE</td>
+</tr>
+<tr>
+<td>资源可用性</td>
+<td>内存、对象、配额等</td>
+<td>内存回收、对象池、资源限制</td>
+</tr>
+<tr>
+<td>设备事件</td>
+<td>输入、GPU、音频、串口等</td>
+<td>键盘、摄像头、声卡、GPU</td>
+</tr>
+<tr>
+<td>多路事件</td>
+<td>多个 fd 任一就绪</td>
+<td><code>select()</code>、<code>poll()</code>、<code>epoll_wait()</code></td>
+</tr>
+<tr>
+<td>控制类事件</td>
+<td>信号、调试器、停止/继续</td>
+<td><code>SIGSTOP</code>、<code>ptrace</code></td>
+</tr>
+<tr>
+<td>内核任务完成</td>
+<td>后台操作结束</td>
+<td>completion、驱动工作完成</td>
+</tr>
+</tbody>
+</table>
+<h4>最后一个很重要的补充</h4>
+<p>不是所有“等”都会进入等待队列。</p>
+<p>有些等待方式不同：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">自旋等待：
+    不睡眠，持续检查。
+    常用于自旋锁、极短时间等待。
+
+忙等：
+    用户或内核不断轮询。
+    通常浪费 CPU，除非等待极短或硬件场景需要。
+
+异步操作：
+    发起请求后不等待结果，之后再通过回调、事件或轮询获得结果。
+
+可运行但暂时没 CPU：
+    这不是等待队列，而是在 CPU 运行队列里等调度。
+</code></pre></div>
+<p>最简记忆方式：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">等“外部条件” → 通常进等待队列；
+等“CPU 时间”   → 进 CPU 运行队列；
+等得极短且不能睡 → 可能自旋；
+不想等结果      → 用异步通知。
+</code></pre></div>
+<h4>问</h4>
+<p>“条件满足后，由相关子系统唤醒”——等一下，什么叫子系统？我第一次听说这个概念。</p>
+<h4>答</h4>
+<p>“子系统”可以先理解成：</p>
+<blockquote>
+<p><strong>操作系统内核里，按职责划分的一组功能模块。</strong></p>
+</blockquote>
+<p>它不是一个进程，也不一定是一个单独的程序；更像是内核中的一个“部门”或“功能区域”。</p>
+<h5>1. 为什么需要“子系统”？</h5>
+<p>操作系统内核要做的事情太多：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">管理 CPU 调度
+管理内存
+管理文件
+管理磁盘
+管理网络
+管理设备
+管理进程
+管理进程间通信
+管理安全权限
+……
+</code></pre></div>
+<p>如果把所有功能混成一大团代码，会非常难维护。</p>
+<p>所以内核会按工作内容分工：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">Linux 内核
+│
+├── 调度子系统：决定哪个线程使用 CPU
+├── 内存管理子系统：管理内存、虚拟内存、缺页等
+├── 文件系统子系统：管理文件、目录、权限、缓存
+├── 网络子系统：处理 TCP/IP、Socket、网络包
+├── 块设备 / IO 子系统：处理磁盘、SSD 等读写请求
+├── 设备驱动子系统：和网卡、键盘、GPU、USB 等硬件打交道
+├── IPC 子系统：管道、消息队列、共享内存等
+├── 定时器子系统：sleep、超时、定时唤醒
+└── 同步机制：锁、futex、信号量、completion 等
+</code></pre></div>
+<p>这里的“子系统”，就是这些负责不同事情的内核组成部分。</p>
+<h5>2. 用公司部门类比</h5>
+<p>可以把内核想成一家公司：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">公司 = Linux 内核
+
+人事部       → 管理进程、线程生命周期
+调度部       → 决定谁使用 CPU
+仓储部       → 管理内存和缓存
+物流部       → 管理磁盘读写
+通信部       → 管理网络通信
+设备部       → 管理网卡、键盘、硬盘等硬件
+闹钟服务部   → 管理定时器、超时
+</code></pre></div>
+<p>线程就像员工。</p>
+<p>一个线程说：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">“我要读网络数据。”
+</code></pre></div>
+<p>那么它不是去找 CPU 调度器解决，而是由“网络相关部分”处理：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">网络子系统：
+    当前没数据？
+       那你先在这个 Socket 的等待队列里休息。
+
+数据来了：
+       把数据放进 Socket 缓冲区，
+       再通知调度器：这个线程可以重新参与 CPU 调度了。
+</code></pre></div>
+<h4>3. “由相关子系统唤醒”到底是什么意思？</h4>
+<p>更精确的说法其实是：</p>
+<blockquote>
+<p><strong>哪个内核组件发现“线程等待的条件已经满足”，哪个组件就负责发出唤醒。</strong></p>
+</blockquote>
+<p>它通常会调用类似这样的内核唤醒机制：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">wake_up(...)
+</code></pre></div>
+<p>或在更底层最终让线程变成：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">TASK_RUNNING
+</code></pre></div>
+<p>然后把线程放入某个 CPU 的运行队列。</p>
+<p>完整链条：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">线程在等待队列中睡眠
+        │
+        │ 条件终于满足
+        ▼
+发现条件满足的内核组件
+        │
+        │ 执行唤醒操作
+        ▼
+线程状态：睡眠 → TASK_RUNNING
+        │
+        ▼
+线程进入某个 CPU 的运行队列
+        │
+        ▼
+调度器未来选择它运行
+</code></pre></div>
+<p>注意：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">“唤醒线程”
+不等于
+“线程立刻开始执行”
+</code></pre></div>
+<p>唤醒后，它通常只是获得了“可以运行”的资格，还要等待 CPU 调度。</p>
+<h5>例 1：等待网络数据</h5>
+<p>线程执行：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-c">recv(sock, buf, size, 0);
+</code></pre></div>
+<p>但目前没有网络数据。</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">线程 A
+  │
+  ▼
+调用 recv()
+  │
+  ▼
+Socket 接收缓冲区为空
+  │
+  ▼
+网络子系统让 A 加入该 Socket 的等待队列
+  │
+  ▼
+A 睡眠
+</code></pre></div>
+<p>后来网络包到达：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">网卡
+ │
+ ▼
+网卡驱动收到数据 / 中断通知
+ │
+ ▼
+网络子系统处理以太网、IP、TCP 等协议
+ │
+ ▼
+找到对应 Socket
+ │
+ ▼
+把数据放进 Socket 接收缓冲区
+ │
+ ▼
+发现：“等这个 Socket 数据的线程可以继续了”
+ │
+ ▼
+唤醒线程 A
+</code></pre></div>
+<p>图：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">网卡
+ │
+ ▼
+网卡驱动
+ │
+ ▼
+网络子系统
+ │
+ ▼
+Socket 接收缓冲区有数据
+ │
+ ▼
+唤醒 recv() 中睡眠的线程 A
+ │
+ ▼
+CPU 运行队列
+</code></pre></div>
+<p>所以这个场景中，可以笼统地说：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">网络子系统唤醒线程。
+</code></pre></div>
+<h5>例 2：等待磁盘读取完成</h5>
+<p>线程读取文件：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-c">read(fd, buf, size);
+</code></pre></div>
+<p>但文件内容还没在内存中，需要从 SSD 读。</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">线程 A
+ │
+ ▼
+read()
+ │
+ ▼
+文件系统 / 内存页缓存发现数据不在 RAM
+ │
+ ▼
+发起磁盘 IO 请求
+ │
+ ▼
+线程 A 等待对应数据页或 IO 完成
+</code></pre></div>
+<p>之后：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">SSD 完成读取
+ │
+ ▼
+SSD / NVMe 控制器通知 CPU
+ │
+ ▼
+存储设备驱动处理完成事件
+ │
+ ▼
+块 IO 层、文件系统或内存管理部分得知：
+“数据已经可用了”
+ │
+ ▼
+唤醒线程 A
+</code></pre></div>
+<p>注意这里涉及多个部分：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">文件系统
+内存页缓存
+块 IO 层
+NVMe / 磁盘驱动
+</code></pre></div>
+<p>因此“由磁盘子系统唤醒”只是便于理解的简化说法。更准确地说：</p>
+<blockquote>
+<p>完成 IO 的驱动和内核 IO 路径，会一路通知到等待数据的地方，并唤醒等待者。</p>
+</blockquote>
+<h5>例 3：等待锁</h5>
+<p>线程 A 想拿一把互斥锁：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">mutex L 当前被线程 B 持有
+
+线程 A：
+    想拿 L
+      │
+      ▼
+    L 被占用
+      │
+      ▼
+    A 加入 L 的等待队列
+      │
+      ▼
+    A 睡眠
+</code></pre></div>
+<p>当 B 用完锁：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">线程 B：
+    mutex_unlock(L)
+       │
+       ▼
+    发现有人在等 L
+       │
+       ▼
+    唤醒等待 L 的线程 A
+</code></pre></div>
+<p>这里就不一定存在一个叫“锁子系统”的独立大部门。</p>
+<p>更准确地说：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">持有锁的线程 B 在解锁时，
+通过 mutex / futex 等同步机制，
+唤醒正在等待这把锁的线程 A。
+</code></pre></div>
+<p>所以“相关子系统”也可以是：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">某种内核同步机制
+</code></pre></div>
+<p>而不一定是网络、磁盘这种大模块。</p>
+<h5>例 4：等待定时器</h5>
+<p>线程调用：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-c">sleep(3);
+</code></pre></div>
+<p>流程：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">线程 A
+ │
+ ▼
+告诉定时器系统：
+“3 秒后唤醒我”
+ │
+ ▼
+A 睡眠
+ │
+ ▼
+3 秒到期
+ │
+ ▼
+定时器子系统发现定时器到期
+ │
+ ▼
+唤醒 A
+ │
+ ▼
+A 回到 CPU 运行队列
+</code></pre></div>
+<p>这里可以说：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">定时器子系统唤醒线程 A。
+</code></pre></div>
+<h5>例 5：等待子进程退出</h5>
+<p>父进程调用：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-c">waitpid(child_pid, ...);
+</code></pre></div>
+<p>但子进程还没退出。</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">父进程 P：
+    等子进程 C
+       │
+       ▼
+    P 睡眠
+</code></pre></div>
+<p>之后子进程退出：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">子进程 C 退出
+  │
+  ▼
+内核的进程管理部分记录其退出状态
+  │
+  ▼
+发现父进程 P 正在 waitpid()
+  │
+  ▼
+唤醒父进程 P
+</code></pre></div>
+<p>这里负责的是：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">进程管理相关的内核代码。
+</code></pre></div>
+<h4>5. 子系统之间不是完全隔离的</h4>
+<p>现实中一个操作经常会经过多个子系统。</p>
+<p>例如“读取网络文件”可能涉及：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">应用程序 read()
+   │
+   ▼
+文件系统
+   │
+   ▼
+网络文件系统，例如 NFS
+   │
+   ▼
+网络协议栈
+   │
+   ▼
+网卡驱动
+   │
+   ▼
+网卡硬件
+</code></pre></div>
+<p>完成后又反过来：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">网卡硬件
+   │
+   ▼
+网卡驱动
+   │
+   ▼
+网络协议栈
+   │
+   ▼
+NFS
+   │
+   ▼
+文件系统
+   │
+   ▼
+唤醒等待 read() 的线程
+</code></pre></div>
+<p>所以不要把“子系统”理解成彼此完全独立、互不联系的盒子。它们会协作，只是各自主要负责不同层面的事情。</p>
+<h4>6. 子系统、驱动、调度器三者的关系</h4>
+<p>这几个概念很容易混：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">硬件：网卡、SSD、键盘、GPU
+  │
+  ▼
+驱动程序：知道怎样和某类硬件通信
+  │
+  ▼
+内核子系统：负责某一类通用逻辑
+  │
+  ▼
+调度器：负责安排可运行线程使用 CPU
+</code></pre></div>
+<p>以网络数据到达为例：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">网卡硬件
+  │
+  ▼
+网卡驱动
+  │
+  ▼
+网络子系统
+  │
+  ▼
+Socket 变为可读
+  │
+  ▼
+唤醒等待 Socket 的线程
+  │
+  ▼
+调度器将它视为可运行线程
+  │
+  ▼
+某个 CPU 最终执行它
+</code></pre></div>
+<p>其中：</p>
+<table>
+<thead>
+<tr>
+<th>部分</th>
+<th>主要工作</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>网卡硬件</td>
+<td>真正接收电信号 / 网络包</td>
+</tr>
+<tr>
+<td>网卡驱动</td>
+<td>控制和读取网卡硬件</td>
+</tr>
+<tr>
+<td>网络子系统</td>
+<td>处理 TCP/IP、Socket、数据缓冲区</td>
+</tr>
+<tr>
+<td>等待队列机制</td>
+<td>记录哪些线程在等待该 Socket</td>
+</tr>
+<tr>
+<td>调度器</td>
+<td>决定被唤醒线程何时拿到 CPU</td>
+</tr>
+</tbody>
+</table>
+<h4>7. 最准确、最好记的一句话</h4>
+<p>你可以把之前那句话改记为：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">线程因为某个条件不成立而睡眠；
+谁负责检测这个条件，
+谁就在条件成立时通知并唤醒线程；
+被唤醒的线程再交给 CPU 调度器安排执行。
+</code></pre></div>
+<p>例如：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">网络数据到了 → 网络相关代码唤醒线程
+磁盘读取完成 → IO / 文件系统相关代码唤醒线程
+锁释放了     → 解锁代码唤醒线程
+定时器到期   → 定时器相关代码唤醒线程
+子进程退出   → 进程管理相关代码唤醒线程
+</code></pre></div>
+</div>
+      </details></div><hr>
+<h2 id="子系统不是一个进程"><span class="num">01</span>子系统不是一个进程</h2>
+<p>「由相关子系统唤醒」这句话里，「子系统」是最容易被当成一个东西的词。先把定义收紧：</p>
+<blockquote>
+<p>子系统是内核里按职责划分的一组代码和数据结构。它拥有一类对象，以及这些对象的操作；它不是一个进程，也不是一个单独的程序。</p>
+</blockquote>
+<p>网络子系统拥有 socket、协议栈、收发包路径；内存管理拥有 folio、页表、回收器；块层拥有 bio 和请求队列；同步机制拥有 mutex、futex、completion。它们都编在内核里，跟着内核一起跑。</p>
+<p><code>kswapd</code>、<code>kworker</code> 这些内核线程<strong>不是</strong>子系统本身：它们是某个子系统创建出来干活的线程。把子系统想成一个部门，线程是部门里的员工；部门不是一个员工。</p>
+<div class="callout tone-violet">
+      <span class="ic">🏢</span>
+      <div><p><strong>判断一个东西是不是子系统，看它是否同时满足两条：</strong></p>
+<ul>
+<li>它拥有一类<strong>对象</strong>（socket、folio、bio、mutex、task……）；</li>
+<li>它负责这些对象上的<strong>规则和状态</strong>，包括谁在等、什么时候唤醒。</li>
+</ul>
+<p>只有代码、没有对象和状态的，通常只是一个工具函数库；只有线程、没有对象的，通常只是它养的一个 worker。</p>
+</div>
+    </div><h2 id="一张树对象拥有等待结构"><span class="num">02</span>一张树：对象拥有等待结构</h2>
+<p>「等待队列有几种」这个问题，换成「线程等的对象归谁」，就有结构了。下面这棵树按<strong>所有权</strong>排，不按队列类型排：</p>
+<div class="tree" data-tree><ul class="tlist"><li class="has-kids">
+            <div class="tnode tone-violet" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>内核子系统</b>
+              <code>代码 + 对象 + 规则</code>
+              <span class="tnote">按“谁拥有对象”排，不按“队列类型”排</span>
+            </div>
+            <ul class="tlist"><li class="has-kids">
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>网络</b>
+              <code>net/</code>
+              <span class="tnote">拥有 socket、协议栈、收包路径</span>
+            </div>
+            <ul class="tlist"><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>struct sock / socket</b>
+              <code>sk_wq-&gt;wait</code>
+              <span class="tnote">可读 / 可写 / 连接变化；sock_def_readable() 唤醒</span>
+            </div>
+            
+          </li></ul>
+          </li><li class="has-kids">
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>内存管理</b>
+              <code>mm/</code>
+              <span class="tnote">拥有 folio、页表、回收器</span>
+            </div>
+            <ul class="tlist"><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>folio（页）</b>
+              <code>folio_wait_table</code>
+              <span class="tnote">等 uptodate / lock 位；读页完成或解锁时唤醒</span>
+            </div>
+            
+          </li></ul>
+          </li><li class="has-kids">
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>文件系统</b>
+              <code>fs/</code>
+              <span class="tnote">拥有 inode、dentry、页缓存</span>
+            </div>
+            <ul class="tlist"><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>inode</b>
+              <code>i_rwsem</code>
+              <span class="tnote">等 inode 锁 / 元数据；不是 wait_queue_head_t</span>
+            </div>
+            
+          </li></ul>
+          </li><li class="has-kids">
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>块 IO</b>
+              <code>block/</code>
+              <span class="tnote">拥有 bio、请求队列、完成路径</span>
+            </div>
+            <ul class="tlist"><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>bio</b>
+              <code>completion</code>
+              <span class="tnote">submit_bio_wait() 用 completion 等完成；驱动完成中断 → bio_endio</span>
+            </div>
+            
+          </li></ul>
+          </li><li class="has-kids">
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>同步</b>
+              <code>locking/ + kernel/futex/</code>
+              <span class="tnote">拥有 mutex、rwsem、semaphore、futex、completion</span>
+            </div>
+            <ul class="tlist"><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>mutex / rwsem / semaphore</b>
+              <code>自己的等待者链表</code>
+              <span class="tnote">unlock / up 的持有者直接唤醒</span>
+            </div>
+            
+          </li><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>futex</b>
+              <code>哈希桶上的 wait queue</code>
+              <span class="tnote">FUTEX_WAKE 或 unlock 时唤醒</span>
+            </div>
+            
+          </li><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>completion</b>
+              <code>swait_queue_head</code>
+              <span class="tnote">complete() → swake_up</span>
+            </div>
+            
+          </li></ul>
+          </li><li class="has-kids">
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>定时 / 时间</b>
+              <code>kernel/time/</code>
+              <span class="tnote">拥有 hrtimer、timer wheel</span>
+            </div>
+            <ul class="tlist"><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>hrtimer</b>
+              <code>回调</code>
+              <span class="tnote">hrtimer_wakeup() → wake_up_process；不走等待队列</span>
+            </div>
+            
+          </li></ul>
+          </li><li class="has-kids">
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>进程管理</b>
+              <code>kernel/exit.c</code>
+              <span class="tnote">拥有 task 状态、父子关系</span>
+            </div>
+            <ul class="tlist"><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>signal_struct</b>
+              <code>wait_chldexit</code>
+              <span class="tnote">wait4() / waitpid() 在这里等；子进程退出 __wake_up_parent</span>
+            </div>
+            
+          </li></ul>
+          </li><li class="has-kids">
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>IPC</b>
+              <code>ipc/ + fs/pipe.c</code>
+              <span class="tnote">拥有 pipe、消息队列、eventfd</span>
+            </div>
+            <ul class="tlist"><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>pipe_inode_info</b>
+              <code>rd_wait / wr_wait</code>
+              <span class="tnote">读端 / 写端各自等；对端读写后唤醒</span>
+            </div>
+            
+          </li></ul>
+          </li><li class="has-kids">
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>设备 / 驱动</b>
+              <code>drivers/</code>
+              <span class="tnote">拥有 input、TTY、GPU fence 等对象</span>
+            </div>
+            <ul class="tlist"><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>具体设备对象</b>
+              <code>各自的 wait queue / fence</code>
+              <span class="tnote">中断或完成回调唤醒</span>
+            </div>
+            
+          </li></ul>
+          </li><li class="has-kids">
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>调度</b>
+              <code>kernel/sched/</code>
+              <span class="tnote">拥有 rq、task 的调度状态</span>
+            </div>
+            <ul class="tlist"><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>struct rq</b>
+              <code>运行队列</code>
+              <span class="tnote">这里等的是 CPU 时间，不是某个条件；不叫等待队列</span>
+            </div>
+            
+          </li></ul>
+          </li></ul>
+          </li></ul></div><p>看到 <code>socket</code>，就知道队列是网络子系统的；看到 <code>folio</code>，就是内存管理的；看到 <code>inode</code>，就是文件系统的；看到 <code>mutex</code>，就是同步机制的。<mark class="mk-blue">队列不是一种全局资源，它是对象的一部分。</mark></p>
+<div class="callout tone-amber">
+      <span class="ic">🔀</span>
+      <div><p><strong>同一个线程会在不同分支之间移动。</strong> 等 socket 时在网络分支，等 folio 时在内存分支，等 CPU 时在调度分支。换对象就换队列，不是换了一种「队列类型」。</p>
+<p>最后一行 <code>rq</code> 是对照：它里面等的是 <strong>CPU 时间</strong>，不是某个条件。它和等待队列长得像，职责不同；展开在 <a href="../sched-queues/">线程此刻在哪排队</a>。</p>
+</div>
+    </div><h2 id="十二种等待挂在什么上"><span class="num">03</span>十二种等待，挂在什么上</h2>
+<p>原文按「等什么事件」列了 12 类。把每一类补上「谁拥有对象、用什么等、谁唤醒」，才是机制层面的答案：</p>
+<table>
+<thead>
+<tr>
+<th>等待的事</th>
+<th>谁拥有对象</th>
+<th>等待结构</th>
+<th>谁唤醒</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>块设备 IO 完成</td>
+<td>块层</td>
+<td>bio 上的 <code>completion</code>（<code>submit_bio_wait</code>）</td>
+<td>驱动完成 → <code>bio_endio</code> → <code>complete()</code></td>
+</tr>
+<tr>
+<td>文件页可用</td>
+<td>内存 / FS</td>
+<td><code>folio_wait_table</code> 哈希等待队列（等 uptodate / lock 位）</td>
+<td>读页完成 / 解锁 folio</td>
+</tr>
+<tr>
+<td>socket 可读、可写、连接变化</td>
+<td>网络</td>
+<td><code>sk_wq-&gt;wait</code>（<code>wait_queue_head_t</code>）</td>
+<td><code>sock_def_readable</code> / <code>sock_def_write_space</code> / 状态回调</td>
+</tr>
+<tr>
+<td>mutex / rwsem / semaphore</td>
+<td>同步</td>
+<td>各自的等待者链表</td>
+<td>unlock / up 的持有者</td>
+</tr>
+<tr>
+<td>futex</td>
+<td>同步</td>
+<td>futex 哈希桶上的 wait queue</td>
+<td><code>FUTEX_WAKE</code> 或 unlock</td>
+</tr>
+<tr>
+<td>completion</td>
+<td>同步</td>
+<td><code>swait_queue_head</code> + done 计数</td>
+<td><code>complete()</code> → <code>swake_up</code></td>
+</tr>
+<tr>
+<td><code>sleep()</code> / 超时</td>
+<td>定时</td>
+<td>hrtimer 回调直接 <code>wake_up_process</code>；带超时的 wait 是队列 + timer</td>
+<td>hrtimer 到期</td>
+</tr>
+<tr>
+<td>子进程状态</td>
+<td>进程管理</td>
+<td><code>signal-&gt;wait_chldexit</code></td>
+<td>子进程退出 → <code>__wake_up_parent</code></td>
+</tr>
+<tr>
+<td>pipe / FIFO</td>
+<td>IPC</td>
+<td><code>rd_wait</code> / <code>wr_wait</code></td>
+<td>对端读 / 写</td>
+</tr>
+<tr>
+<td>poll / select / epoll</td>
+<td>多路事件</td>
+<td><code>ep-&gt;wq</code> + 每个 fd 的 <code>poll</code> wait</td>
+<td>任一 fd 就绪的 poll 回调</td>
+</tr>
+<tr>
+<td>设备事件</td>
+<td>驱动</td>
+<td>input / TTY / GPU fence 各自的等待结构</td>
+<td>中断 / 完成回调</td>
+</tr>
+<tr>
+<td>控制事件（SIGSTOP、ptrace）</td>
+<td>进程管理</td>
+<td>不是队列：<code>TASK_STOPPED</code> / <code>TASK_TRACED</code> 状态位</td>
+<td>信号 / 调试器改状态</td>
+</tr>
+</tbody>
+</table>
+<div class="callout tone-violet">
+      <span class="ic">🧭</span>
+      <div><p><strong>按对象分是 12 种，按机制分只有 5 类：</strong></p>
+<ol>
+<li>通用等待队列（<code>wait_queue_head_t</code>）：socket、pipe、folio、子进程、eventfd、futex 哈希桶、epoll</li>
+<li>专用等待者链表：mutex、rwsem、semaphore</li>
+<li>completion（<code>swait_queue_head</code> + done）：bio、内核任务</li>
+<li>定时器回调：<code>sleep()</code>、hrtimer 到期</li>
+<li>状态位：<code>TASK_STOPPED</code>、<code>TASK_TRACED</code>，不是队列</li>
+</ol>
+<p><mark class="mk-blue">所以「等待队列有几种」没有标准答案，取决于按哪根轴分。</mark> 按业务事件分，可以列十几类；按内核机制分，只有这五类。</p>
+</div>
+    </div><h2 id="一条唤醒链socket-收包"><span class="num">04</span>一条唤醒链：socket 收包</h2>
+<p>把「谁唤醒」落到一条线上。下面把中断 / NAPI 的细节压成一条消息，只看责任：</p>
+<div class="seqd has-grid" data-seq data-n="5" data-segs="[{&quot;from&quot;:1,&quot;to&quot;:3,&quot;label&quot;:&quot;睡眠&quot;},{&quot;from&quot;:4,&quot;to&quot;:7,&quot;label&quot;:&quot;收包与唤醒&quot;}]"
+      style="--seq-fill:url(#s-fill-1);--seq-open:url(#s-fill-1-open)">
+      <svg class="seqd-svg" aria-hidden="true">
+        <defs>
+          <marker id="s-fill-1" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+          <marker id="s-fill-1-open" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10" fill="none" stroke="currentColor" stroke-width="1.4"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="seqd-head"><div class="scell"><div class="spart tone-blue" data-id="a">
+          <b>线程 A</b><small>TASK_INTERRUPTIBLE</small>
+        </div></div><div class="scell"><div class="spart tone-amber" data-id="wq">
+          <b>socket 等待队列</b><small>sk_wq-&gt;wait</small>
+        </div></div><div class="scell"><div class="spart tone-green" data-id="net">
+          <b>网络子系统</b><small>TCP/IP + socket</small>
+        </div></div><div class="scell"><div class="spart tone-muted" data-id="drv">
+          <b>网卡驱动</b><small>中断 / NAPI</small>
+        </div></div><div class="scell"><div class="spart tone-violet" data-id="sched">
+          <b>调度器 / rq</b><small>try_to_wake_up</small>
+        </div></div></div>
+      <div class="seqd-body"><div class="smsg" data-from="a" data-to="wq" data-kind="sync" data-i="1"><span class="slabel">recv()：缓冲区空</span></div><div class="smsg" data-from="a" data-to="wq" data-kind="sync" data-i="2"><span class="slabel">挂 entry，改状态</span></div><div class="smsg" data-from="a" data-to="sched" data-kind="sync" data-i="3"><span class="slabel">schedule()：让出 CPU</span></div><div class="smsg" data-from="drv" data-to="net" data-kind="async" data-i="4"><span class="slabel">收包，交给协议栈</span></div><div class="smsg" data-from="net" data-to="wq" data-kind="sync" data-i="5"><span class="slabel">数据入接收缓冲区</span></div><div class="smsg" data-from="net" data-to="sched" data-kind="sync" data-i="6"><span class="slabel">wake_up() → 入 rq</span></div><div class="smsg" data-from="sched" data-to="a" data-kind="sync" data-i="7"><span class="slabel">pick 到 A，恢复现场</span></div></div>
+    </div><p>这条链上三个角色各做各的：</p>
+<ul>
+<li><strong>网卡驱动</strong>把包从硬件搬到内存，交给协议栈；它不碰 socket 的等待队列。</li>
+<li><strong>网络子系统</strong>解析 TCP/IP，把数据放进 socket 接收缓冲区，再调 <code>sock_def_readable()</code> → <code>wake_up_interruptible_sync_poll(&amp;wq-&gt;wait, ...)</code>。</li>
+<li><strong>调度器</strong>把 A 从睡眠改成 <code>TASK_RUNNING</code>，放进某颗核的 rq；它不关心 A 等的是 socket 还是 pipe。</li>
+</ul>
+<p><mark class="mk-blue">唤醒不等于立刻执行。</mark> A 只是重新有资格被挑，什么时候上 CPU 由调度器决定。</p>
+<h2 id="磁盘读线程可能睡在哪一层"><span class="num">05</span>磁盘读：线程可能睡在哪一层</h2>
+<p><code>read()</code> 一个文件，不一定「睡在磁盘上」。下面这条栈里，线程可能停在不同的层，等待的对象也不同：</p>
+<div class="pipe"><div class="lane tone-muted">
+        <div class="lane-meta">
+          <span class="ln">L1</span>
+          <b>应用 / 系统调用</b>
+          <small>线程要文件里的第 N 页</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>read(fd, buf, n)</b>
+        <small>返回值要等数据</small>
+        <span class="tag tone-muted">用户态</span>
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">进入内核 <span class="en">VFS</span><span class="note">先看页缓存</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-blue">
+        <div class="lane-meta">
+          
+          <b>VFS / 文件系统</b>
+          <small>fd → file → inode → 页</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>generic_file_read_iter()</b>
+        <small>在 page cache 里找这一页</small>
+        <span class="tag tone-blue">可能命中</span>
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">缺页才往下 <span class="en">page cache miss</span><span class="note">命中就直接返回</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-amber">
+        <div class="lane-meta">
+          
+          <b>页缓存 / 内存管理</b>
+          <small>等 folio 的 uptodate / lock 位</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>folio_wait_table[hash]</b>
+        <small>线程挂在这页的等待队列上</small>
+        <span class="tag tone-amber">可能睡这里</span>
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">下发 IO <span class="en">block layer</span><span class="note">组 bio</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-green">
+        <div class="lane-meta">
+          
+          <b>块 IO 层</b>
+          <small>bio / request</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>submit_bio_wait()</b>
+        <small>同步读用 completion 等</small>
+        <span class="tag tone-green">也可能睡这里</span>
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">交给驱动 <span class="en">driver</span><span class="note">NVMe / SCSI / virtio</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-violet">
+        <div class="lane-meta">
+          
+          <b>驱动 / 硬件</b>
+          <small>完成中断 → bio_endio</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>bio_endio()</b>
+        <small>完成中断里调用</small>
+        <span class="tag tone-violet">唤醒者</span>
+      </div></div>
+      </div></div><p>如果页已经在 page cache 里，线程根本不会睡：VFS 层就返回了。只有缺页才会往下走。走到底之后，它可能睡在 folio 的等待队列上，也可能睡在同步读的 completion 上——取决于它停在哪一层。</p>
+<div class="callout tone-amber">
+      <span class="ic">🛏</span>
+      <div><p><strong>同一个 <code>read()</code> 可能睡在 folio 的 uptodate 位，也可能睡在 bio 的 completion 上。</strong> 看它走到哪一层。</p>
+<p>这不是实现细节：睡在 folio 上，唤醒者可能是读页完成的代码；睡在 bio 上，唤醒者是 <code>bio_endio()</code>。<mark class="mk-blue">「磁盘子系统唤醒」只是把这一串压成了一个名字。</mark></p>
+</div>
+    </div><h2 id="子系统会互相借道nfs-read"><span class="num">06</span>子系统会互相借道：NFS read</h2>
+<p>「子系统」不是几个互不相干的盒子。读一个 NFS 文件，请求会穿过好几层，完成再沿原路返回：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>层</th><th>它负责什么</th><th>这一层可能等什么</th></tr></thead><tbody><tr><th>应用 / read</th><td data-label="它负责什么">要文件内容，等 read 返回</td><td data-label="这一层可能等什么">返回值（数据或错误）</td></tr><tr><th>VFS</th><td data-label="它负责什么">fd → file → inode → 页缓存</td><td data-label="这一层可能等什么">inode 锁、页缓存</td></tr><tr><th>NFS client</th><td data-label="它负责什么">把读请求变成 RPC</td><td data-label="这一层可能等什么">RPC 回复</td></tr><tr><th>网络栈</th><td data-label="它负责什么">TCP/IP、socket 缓冲</td><td data-label="这一层可能等什么">socket 可读 / 可写</td></tr><tr><th>网卡驱动</th><td data-label="它负责什么">收发网络包</td><td data-label="这一层可能等什么">硬件中断 / 完成</td></tr><tr><th>服务端</th><td data-label="它负责什么">读它自己的磁盘</td><td data-label="这一层可能等什么">服务端自己的 IO</td></tr></tbody></table></div><p>线程最后睡在哪一层，就由那一层的代码唤醒。「网络子系统唤醒」只在这条链的某一层成立；它不是整条链的中央调度者。</p>
+<div class="callout tone-violet">
+      <span class="ic">🧩</span>
+      <div><p><strong>边界是责任，不是隔离。</strong> 一个 <code>read()</code> 可以穿过 VFS、NFS、网络栈、驱动，完成再沿原路返回。</p>
+<p><mark class="mk-blue">所以「哪个子系统唤醒」要看线程最后睡在哪一层，不能只看它调用了什么系统调用。</mark></p>
+</div>
+    </div><h2 id="驱动子系统调度器等待结构"><span class="num">07</span>驱动、子系统、调度器、等待结构</h2>
+<p>这几个概念最容易混。把「拥有什么 / 负责 / 不负责」拆开，边界就清楚了：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>角色</th><th>拥有什么</th><th>负责</th><th>不负责</th></tr></thead><tbody><tr><th>硬件</th><td data-label="拥有什么">电信号 / 网络包 / 磁盘块</td><td data-label="负责">真正执行 IO</td><td data-label="不负责">不懂线程、文件、socket</td></tr><tr><th>驱动</th><td data-label="拥有什么">设备寄存器、中断、DMA</td><td data-label="负责">和硬件对话，把数据搬进内核</td><td data-label="不负责">不懂 socket / 文件语义</td></tr><tr><th>子系统</th><td data-label="拥有什么">一类对象 + 规则 + 等待结构</td><td data-label="负责">维护对象、判断条件、唤醒等待者</td><td data-label="不负责">不决定线程何时上 CPU</td></tr><tr><th>等待结构</th><td data-label="拥有什么">等待者名单</td><td data-label="负责">记录谁在等</td><td data-label="不负责">不判断条件，也不选 CPU</td></tr><tr><th>调度器</th><td data-label="拥有什么">rq、task 的调度状态</td><td data-label="负责">把可运行线程放上 CPU</td><td data-label="不负责">不管条件是否满足</td></tr></tbody></table></div><p>把这张表和 §04 的链对上：驱动把包交给网络子系统；网络子系统改 socket 并唤醒；调度器只看到 A 变成可运行，不关心中间发生了什么。</p>
+<h2 id="不是所有等都在等待队列里"><span class="num">08</span>不是所有「等」都在等待队列里</h2>
+<p>原文最后把自旋、忙等、异步、等 CPU 单独点出来；这里补上纯 sleep，凑成五种：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>方式</th><th>线程在做什么</th><th>典型场景</th><th>代价</th></tr></thead><tbody><tr><th>睡眠等待</th><td data-label="线程在做什么">挂到对象的等待结构，让出 CPU</td><td data-label="典型场景">socket、pipe、mutex、bio</td><td data-label="代价">两次上下文切换 + 唤醒路径</td></tr><tr><th>自旋</th><td data-label="线程在做什么">不睡，循环检查</td><td data-label="典型场景">spinlock、极短临界区</td><td data-label="代价">占着 CPU，持锁期间不能睡</td></tr><tr><th>忙等</th><td data-label="线程在做什么">反复轮询</td><td data-label="典型场景">极短等待、部分硬件场景</td><td data-label="代价">浪费 CPU</td></tr><tr><th>异步</th><td data-label="线程在做什么">发起后不等，回调 / 事件通知</td><td data-label="典型场景">AIO、io_uring、信号</td><td data-label="代价">编程复杂，结果晚到</td></tr><tr><th>等 CPU</th><td data-label="线程在做什么">已可运行，在 rq 里排队</td><td data-label="典型场景">所有被唤醒的线程</td><td data-label="代价">不是等条件</td></tr></tbody></table></div><p>纯 <code>sleep()</code> 连等待队列都不一定用：hrtimer 回调 <code>hrtimer_wakeup()</code> 直接 <code>wake_up_process()</code>。只有 <code>wait_event_timeout()</code> 这类才是「等待队列 + 定时器」两个条件。</p>
+<h2 id="五条判断"><span class="num">09</span>五条判断</h2>
+<p>把前面所有内容收成五条，每条都对应一个具体机制：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>判断</th><th>落在哪个机制上</th></tr></thead><tbody><tr><th>子系统是职责边界，不是进程</th><td data-label="落在哪个机制上">代码 + 对象 + 规则；kswapd 是它养的线程</td></tr><tr><th>对象拥有等待结构</th><td data-label="落在哪个机制上">socket、folio、bio、mutex；换对象就换队列</td></tr><tr><th>谁检测条件，谁唤醒</th><td data-label="落在哪个机制上">协议栈、解锁者、驱动、定时器各自 wake_up；没有中央分发</td></tr><tr><th>机制随对象选</th><td data-label="落在哪个机制上">wait queue、专用链表、completion、timer、状态位</td></tr><tr><th>边界是责任，不是隔离</th><td data-label="落在哪个机制上">NFS 跨 VFS / 网络 / 驱动；完成沿原路返回</td></tr></tbody></table></div><div class="summary">
+      <h3 id="一句话">一句话</h3>
+      <p>等待队列不是一张类型表：线程等的是<strong>对象上的条件</strong>，对象归某个<strong>子系统</strong>；子系统用最适合的<strong>等待结构</strong>记录等待者，并在条件满足时自己唤醒。</p>
+
+    </div><div class="quiz"><details>
+        <summary>等待队列有几种标准类型？</summary>
+        <div class="a"><p>没有标准类型。按业务事件分，磁盘、网络、锁、定时、IPC、设备……可以列十几类；
+按内核机制分，只有五类：通用 wait queue、专用等待者链表、completion、定时器回调、状态位。</p>
+</div>
+      </details><details>
+        <summary><code>wake_up()</code> 之后线程立刻执行吗？</summary>
+        <div class="a"><p>不会。它只是被改成 <code>TASK_RUNNING</code>，进入某颗核的 rq；什么时候真正上 CPU，
+还要等调度器挑到它。唤醒是“重新有资格”，不是“立刻运行”。</p>
+</div>
+      </details><details>
+        <summary>网络包到了，谁唤醒 <code>recv()</code> 的线程？</summary>
+        <div class="a"><p>网卡驱动把包交给协议栈；协议栈把数据放进 socket 接收缓冲区后，
+调 <code>sock_def_readable()</code> → <code>wake_up(&amp;wq-&gt;wait, ...)</code>。驱动不直接碰
+socket 的等待队列，它只负责把包送进网络子系统。</p>
+</div>
+      </details><details>
+        <summary>为什么 <code>sleep(1)</code> 不一定用等待队列？</summary>
+        <div class="a"><p><code>sleep()</code> 走的是 hrtimer：到期回调 <code>hrtimer_wakeup()</code> 直接 <code>wake_up_process()</code>，
+没有“某个对象的等待队列”。<code>wait_event_timeout()</code> 才是“等待队列 + 定时器”两个条件。</p>
+</div>
+      </details><details>
+        <summary><code>mutex</code> 和 socket 的等待结构一样吗？</summary>
+        <div class="a"><p>不一样。mutex 用自己的等待者链表；socket 用 <code>sk_wq-&gt;wait</code>（<code>wait_queue_head_t</code>）；
+completion 又用 <code>swait_queue_head</code>。同一个“等待”概念，不同的对象选不同的结构。</p>
+</div>
+      </details></div>
+
+    <footer>
+      <span>内核子系统：谁拥有这个条件，谁负责叫醒</span>
+      <span>最后更新 2026-10-28 · 单文件可离线打开</span>
+    </footer>
+  </main>
+</div>
+
+<script src="../../assets/app.js?v=3f7078c3e5"></script>
+</body>
+</html>
