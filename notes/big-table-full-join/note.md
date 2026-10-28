@@ -361,7 +361,7 @@ items:
   nodes:
     - { title: chunk 0, sub: "hash % N = 0", tag: 盘上 }
     - { title: chunk 1, sub: "hash % N = 1" }
-    - { title: ……, sub: "MySQL 每个输入最多 128 个 chunk 文件" }
+    - { title: ……, sub: "MySQL 8.0.18：每个输入最多 128 个 chunk" }
   next: "probe 阶段 :: :: 同一套 hash，把 orders 也分到对应 chunk"
 
 - title: probe 阶段也分区
@@ -385,7 +385,7 @@ items:
 两个细节值得知道：
 
 - **MySQL 的实现里，分区和桶用了两套 hash 函数。** 如果同一套，同一个 chunk 里的行会全部落到同一个桶，哈希表退化成链表。
-- **chunk 数量有上限。** MySQL 每个输入最多 128 个 chunk 文件；如果内存太小、文件数超过 `open_files_limit`，查询会直接失败，而不是慢慢跑完。
+- **chunk 数量有上限。** MySQL 8.0.18 的实现里，每个输入最多 128 个 chunk 文件；如果内存太小、文件数超过 `open_files_limit`，查询会直接失败，而不是慢慢跑完（这一条写在 8.4 手册里）。
 
 落盘之后，同一批数据要多走三趟：读原表、写临时文件、从临时文件读回来。所以耗时不是线性增加，而是突然跳一个台阶 —— 这也是「昨天还好、今天突然慢十倍」的常见来路。
 
