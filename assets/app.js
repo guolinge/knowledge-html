@@ -12217,6 +12217,144 @@ WIDGETS['mysql-2pc-crash'] = (root) => {
     draw(Number(range.value));
   };
 
+  /* —— 控件：join-fanout-lab ——
+     一张主表挂两条一对多的子表，直接 join 再 SUM 会乘起来。
+     两个按钮从 config 里各取一条记录加进 jo，运行时不造数：
+     这样页面上出现的每个金额都能在 note 里对上。
+     左：join 后的明细（item × payment 的全组合）。
+     右：同一批数据两种算法的合计 —— 直接 SUM 和「先聚合再 join」。 */
+  WIDGETS['join-fanout-lab'] = (root) => {
+    const cfg = cfgOf(root);
+    const box = mountOf(root);
+    const statusEl = root.querySelector('[data-status]');
+    const ORDER = cfg.orderId ? String(cfg.orderId) : '1001';
+    const I = (cfg.items || []).map((x) => ({ name: String(x.name), amount: Number(x.amount) }));
+    const P = (cfg.payments || []).map((x) => ({ name: String(x.name), amount: Number(x.amount) }));
+    if (!I.length || !P.length) return;
+
+    const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, Number(n) || lo));
+    const START_I = clamp(cfg.startItems, 1, I.length);
+    const START_P = clamp(cfg.startPayments, 1, P.length);
+    let ni = START_I;
+    let np = START_P;
+
+    const fmt = (n) => String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+    const sum = (xs) => xs.reduce((a, x) => a + x.amount, 0);
+
+    /* 控件骨架 */
+    const wrap = el('div', 'jf-wrap');
+    const bar = el('div', 'jf-bar');
+    const btnI = el('button', 'jf-add', '+ 一条明细');
+    const btnP = el('button', 'jf-add', '+ 一笔支付');
+    const btnReset = el('button', 'jf-reset', '重置');
+    bar.append(btnI, btnP, btnReset);
+
+    const grid = el('div', 'jf-grid');
+
+    const left = el('div', 'jf-panel');
+    const leftHead = el('div', 'jf-panel-head');
+    leftHead.append(el('span', null, 'join 之后的明细'), el('span', 'jf-count', ''));
+    const tableWrap = el('div', 'jf-tablewrap');
+    const table = document.createElement('table');
+    table.className = 'jf-table';
+    const thead = document.createElement('thead');
+    const trh = document.createElement('tr');
+    ['order_id', '商品', '金额', '支付记录', '金额'].forEach((t, i) => {
+      const th = el('th', i >= 2 ? 'num' : null, t);
+      trh.append(th);
+    });
+    thead.append(trh);
+    const tbody = document.createElement('tbody');
+    table.append(thead, tbody);
+    tableWrap.append(table);
+    const formula = el('div', 'jf-formula');
+    left.append(leftHead, tableWrap, formula);
+
+    const right = el('div', 'jf-panel');
+    const rightHead = el('div', 'jf-panel-head');
+    rightHead.append(el('span', null, '同一批数据，两种算法'));
+    const cmpWrap = el('div', 'jf-cmpwrap');
+    const cmp = document.createElement('table');
+    cmp.className = 'jf-cmp';
+    const cThead = document.createElement('thead');
+    const cTrh = document.createElement('tr');
+    ['算法', '商品金额', '支付金额'].forEach((t, i) => cTrh.append(el('th', i ? 'num' : null, t)));
+    cThead.append(cTrh);
+    const cBody = document.createElement('tbody');
+    cmp.append(cThead, cBody);
+    cmpWrap.append(cmp);
+    const verdict = el('div', 'jf-verdict');
+    right.append(rightHead, cmpWrap, verdict);
+
+    grid.append(left, right);
+    wrap.append(bar, grid);
+    box.append(wrap);
+
+    function draw() {
+      const items = I.slice(0, ni);
+      const pays = P.slice(0, np);
+      const rows = [];
+      items.forEach((it) => pays.forEach((p) => rows.push({ it, p })));
+
+      const itemSum = sum(items);
+      const paySum = sum(pays);
+      const joinedItem = itemSum * pays.length;
+      const joinedPay = paySum * items.length;
+
+      fill(tbody, rows.map((r) => {
+        const tr = document.createElement('tr');
+        tr.append(
+          el('td', null, ORDER),
+          el('td', null, r.it.name),
+          el('td', 'num money-v', fmt(r.it.amount)),
+          el('td', null, r.p.name),
+          el('td', 'num money-b', fmt(r.p.amount)),
+        );
+        return tr;
+      }));
+
+      const cRows = [
+        { name: '直接 join 再 SUM', a: joinedItem, b: joinedPay, cls: 'bad' },
+        { name: '先聚合再 join', a: itemSum, b: paySum, cls: 'good' },
+      ];
+      fill(cBody, cRows.map((r) => {
+        const tr = document.createElement('tr');
+        tr.append(el('th', null, r.name), el('td', 'num ' + r.cls, fmt(r.a)), el('td', 'num ' + r.cls, fmt(r.b)));
+        return tr;
+      }));
+
+      leftHead.lastChild.textContent = `${rows.length} 行`;
+      formula.textContent = '';
+      const line1 = el('div');
+      richText(line1, `行数 = **${items.length}** 条明细 × **${pays.length}** 笔支付 = ==${rows.length} 行==`);
+      const line2 = el('div');
+      richText(line2, `商品金额 = ${itemSum} × ${pays.length} = **${joinedItem}**`);
+      formula.append(line1, line2);
+
+      verdict.textContent = '';
+      if (items.length > 1 && pays.length > 1) {
+        richText(verdict,
+          `两条子表都是一对多，==同一笔金额被复制了 ${pays.length} 遍==：` +
+          `每条明细都与 ${pays.length} 笔支付各配一次，商品合计从 ${itemSum} 涨到 ${joinedItem}；` +
+          `支付这边同理，从 ${paySum} 涨到 ${joinedPay}。`);
+      } else {
+        richText(verdict,
+          '只有一侧多于一条时，行数等于另一侧的行数，`SUM` 不会翻倍。' +
+          '==两边都是一对多，才会相乘。== 再加一条到另一侧试试。');
+      }
+
+      btnI.disabled = ni >= I.length;
+      btnP.disabled = np >= P.length;
+      if (statusEl) statusEl.textContent = `${items.length} × ${pays.length} = ${rows.length} 行`;
+    }
+
+    btnI.addEventListener('click', () => { if (ni < I.length) { ni += 1; draw(); } });
+    btnP.addEventListener('click', () => { if (np < P.length) { np += 1; draw(); } });
+    btnReset.addEventListener('click', () => { ni = START_I; np = START_P; draw(); });
+
+    draw();
+  };
+
   /* ---------- 8. 原文弹窗（popquote） ----------
      收起时是一块小卡；点开用原生 <dialog> 悬浮，Esc / 点背景 / 右上角都能关。
      正文在构建期就渲染好了，这里只负责开关、背景点击和滚动锁。 */

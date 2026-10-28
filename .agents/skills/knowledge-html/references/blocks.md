@@ -899,6 +899,31 @@ config:
 **注意**：`values` 是**离散档位**，不是公式。==不要指望它算数== ——
 你给什么值就显示什么值。这样设计是为了避免 `eval`，安全且可控。
 
+#### `join-fanout-lab` —— 一对多乘一对多
+
+**讲 join 的基数效应**：两张一对多的子表同时挂到主表上，行数相乘，`SUM` 被重复累加。
+两个按钮从 `config` 里各取一条记录加进去 —— 金额全部来自配置，控件运行时不造数，所以页面上每个数字都能在正文里对上。
+
+```demo
+widget: join-fanout-lab
+title: 一对多 × 一对多：行数乘出来，金额也跟着重复
+actions: false
+config:
+  items:
+    - { name: A 商品, amount: 100 }
+    - { name: B 商品, amount: 200 }
+    - { name: C 商品, amount: 50 }
+  payments:
+    - { name: 支付 1, amount: 150 }
+    - { name: 支付 2, amount: 150 }
+    - { name: 补款, amount: 50 }
+  startItems: 2
+  startPayments: 2
+```
+
+左边列出 join 后的全组合明细，右边并排给出「直接 join 再 SUM」和「先聚合再 join」的合计。
+`startItems` / `startPayments` 是初始条数；按钮加到底后自动置灰。
+
 #### `diff` —— 并排差异对比
 
 **讲「改前 vs 改后」**：行首写 `- ` / `+ ` 自动标红绿，悬停两边对应行联动高亮。

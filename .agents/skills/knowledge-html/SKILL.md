@@ -1694,7 +1694,7 @@ text: |
 | `summary` | 小结 |
 | `raw` | 直接写 HTML |
 
-**交互控件 70 个**（在 `assets/app.js` 的 `WIDGETS` 里，供 `demo` 积木引用）：
+**交互控件 71 个**（在 `assets/app.js` 的 `WIDGETS` 里，供 `demo` 积木引用）：
 `polling-vs-cdc` `combination-count` `join-lab` `on-vs-where` `knex-chain`
 `stepper` `tuner` `diff` `stream-modes` `operator-lab` `hashring` `partition-prune`
 `dsl-lab` `null-lab` `config-to-ui` `field-lineage` `count-dedup-lab`
@@ -1706,7 +1706,7 @@ text: |
 `tri-logic-lab` `uid-set-lab` `dist-lab` `storage-anatomy` `prune-lab` `innodb-visual-lab`
 `ls-cost-lab` `atomic-lab` `rtt-lab`
 `combination-control-lab` `combination-values-lab` `combination-build-lab` `cand-pipe-lab`
-`s3-list-lab` `ec-lab` `mysql-2pc-crash` `join-driver-lab` `i18n-lab` `i18n-lookup`
+`s3-list-lab` `ec-lab` `mysql-2pc-crash` `join-driver-lab` `join-fanout-lab` `i18n-lab` `i18n-lookup`
 `relation-negation-lab` `rn-compile-lab`
 `notin-lab` `times-readings-lab` `rbtree-lab` `call-stack-lab` `frame-anchor-lab` `micro-op-lab` `rip-lab`
 `gswitch-lab` `spawn-budget-lab`

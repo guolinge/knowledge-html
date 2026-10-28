@@ -1,0 +1,821 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-has-toc="1">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>大表全量 JOIN：两个上亿的表直接配对，底下发生了什么</title>
+<meta name="description" content="「全量 JOIN」不是 FULL OUTER JOIN，而是参与配对的行没被先筛小。这篇把两笔账分开算：读得太多、行数被乘大；再把页、缓冲池、哈希表、落盘和 Shuffle 各花在哪一层拆开。" />
+<link rel="stylesheet" href="../../assets/theme.css?v=19aa345f51" />
+  <link rel="stylesheet" href="../../assets/blocks.css?v=e60a2fecef" />
+  <link rel="stylesheet" href="../../assets/archify-embed.css?v=68fec0b81b" />
+</head>
+<body>
+<div id="progress"></div>
+<div id="tocScrim"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
+    <a class="brand" href="../../index.html"><span class="dot"></span>知识笔记</a>
+    
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="toc" id="toc">
+      <p class="toc-title">目录</p>
+      <a href="../../index.html" class="sub">← 全部笔记</a>
+      <a href="#判定三处没做就是全量">判定：三处没做，就是全量</a>
+      <a href="#第二笔账一对多接一对多">第二笔账：一对多接一对多</a>
+      <a href="#整体图一次全量-join-在机器里走一遍">整体图：一次全量 JOIN 在机器里走一遍</a>
+      <a href="#build-和-probe-里各发生了什么">Build 和 Probe 里各发生了什么</a>
+      <a href="#内存装不下分批哈希">内存装不下：分批哈希</a>
+      <a href="#分布式还要过一次网络">分布式：还要过一次网络</a>
+      <a href="#倾斜最慢的那个节点决定结束时间" class="sub">倾斜：最慢的那个节点决定结束时间</a>
+      <a href="#先过滤省了哪几笔没省哪几笔">先过滤：省了哪几笔，没省哪几笔</a>
+      <a href="#为什么有索引也可能不走">为什么有索引也可能不走</a>
+      <a href="#怎么确认它真的在全量扫">怎么确认它真的在全量扫</a>
+      <a href="#能改的六件事">能改的六件事</a>
+      <a href="#一句话" class="sub">一句话</a>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow">● 数据库 · SQL 性能</span>
+      <h1>大表全量 JOIN：两个上亿的表直接配对，底下发生了什么</h1>
+      <p class="lede">「全量 JOIN」不是 FULL OUTER JOIN，而是参与配对的行没被先筛小。这篇把两笔账分开算：读得太多、行数被乘大；再把页、缓冲池、哈希表、落盘和 Shuffle 各花在哪一层拆开。</p>
+    </div>
+
+
+    <div class="provenance"><span><b>来源</b> 用户提供的问答原文（AI 中台）：《什么是大表全量 join，举例子》《底层发生了什么》 · <a href="https://www.postgresql.org/docs/current/using-explain.html" target="_blank" rel="noopener">www.postgresql.org/docs/current/using-explain.ht</a> · <a href="https://www.postgresql.org/docs/current/runtime-config-query.html" target="_blank" rel="noopener">www.postgresql.org/docs/current/runtime-config-q</a> · <a href="https://www.postgresql.org/docs/current/runtime-config-resource.html" target="_blank" rel="noopener">www.postgresql.org/docs/current/runtime-config-r</a> · <a href="https://www.postgresql.org/docs/current/ddl-partitioning.html" target="_blank" rel="noopener">www.postgresql.org/docs/current/ddl-partitioning</a> · <a href="https://dev.mysql.com/doc/refman/8.4/en/hash-joins.html" target="_blank" rel="noopener">dev.mysql.com/doc/refman/8.4/en/hash-joins.html</a> · <a href="https://dev.mysql.com/blog-archive/hash-join-in-mysql-8" target="_blank" rel="noopener">dev.mysql.com/blog-archive/hash-join-in-mysql-8</a> · <a href="https://dev.mysql.com/doc/refman/8.4/en/nested-loop-joins.html" target="_blank" rel="noopener">dev.mysql.com/doc/refman/8.4/en/nested-loop-join</a> · <a href="https://dev.mysql.com/doc/refman/8.4/en/explain-output.html" target="_blank" rel="noopener">dev.mysql.com/doc/refman/8.4/en/explain-output.h</a> · <a href="https://dev.mysql.com/doc/refman/8.4/en/server-system-variables.html" target="_blank" rel="noopener">dev.mysql.com/doc/refman/8.4/en/server-system-va</a> · <a href="https://spark.apache.org/docs/latest/sql-performance-tuning.html" target="_blank" rel="noopener">spark.apache.org/docs/latest/sql-performance-tun</a> · <a href="https://spark.apache.org/docs/latest/rdd-programming-guide.html" target="_blank" rel="noopener">spark.apache.org/docs/latest/rdd-programming-gui</a> · <a href="https://doris.apache.org/docs/dev/query-data/join" target="_blank" rel="noopener">doris.apache.org/docs/dev/query-data/join</a> · <a href="https://doris.apache.org/docs/3.x/query-acceleration/optimization-technology-principle/runtime-filter" target="_blank" rel="noopener">doris.apache.org/docs/3.x/query-acceleration/opt</a></span><span><b>生成</b> 2026-10-28</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">SQL</span> <span class="tag tone-muted">JOIN</span> <span class="tag tone-muted">Hash Join</span> <span class="tag tone-muted">查询优化</span> <span class="tag tone-muted">Shuffle</span></span></div>
+
+<p>「大表全量 join」不是 SQL 里的 <code>FULL OUTER JOIN</code>。它说的是另一件更常见的事：</p>
+<blockquote>
+<p><mark class="mk-blue">参与配对的行没有被先筛小，两边整体拿去关联。</mark></p>
+</blockquote>
+<p>这句话底下压着两个问题，讨论时经常被混成一个：查询慢，和结果被算大。</p>
+<ul>
+<li>慢：读的行、建的表、探测的次数、搬的数据，全都按全量算。</li>
+<li>大：一对多接上一对多，行数相乘，<code>SUM</code> 被重复累加。</li>
+</ul>
+<p>两笔账要分开算，因为解法不一样。前者靠少读、少搬；后者靠先把一侧聚合到一行。</p>
+<div class="cards" data-cols="2"><div class="ccard tone-blue">
+          <span class="tag tone-blue">1 亿行 + 5000 万行</span>
+          <h4>账一 · 慢</h4>
+          
+          <div class="cbody"><p>两张表都按全量扫一遍，输出还是 1 亿量级。
+时间花在读页、建哈希表、逐行探测，以及后面的排序、聚合、网络。</p>
+</div>
+          
+        </div><div class="ccard tone-red">
+          <span class="tag tone-red">2 行 × 2 行 = 4 行</span>
+          <h4>账二 · 大</h4>
+          
+          <div class="cbody"><p>两条订单明细、两笔支付记录，直接 join 会配成 4 行。
+<code>SUM</code> 把每个金额多加了一遍，结果翻倍，而且不报警。</p>
+</div>
+          
+        </div></div><h2 id="判定三处没做就是全量"><span class="num">01</span>判定：三处没做，就是全量</h2>
+<p>「全量」不是一种 JOIN 语法，是这道查询的形状。看三处：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>看哪里</th><th>做了</th><th>没做会怎样</th></tr></thead><tbody><tr><th>扫描侧的条件</th><td data-label="做了">能少读页的过滤：分区裁剪、索引</td><td data-label="没做会怎样">表里每一页都要读一遍，过滤只减少往下一层传的行数</td></tr><tr><th>取哪些列</th><td data-label="做了">只取 join 之后真用得上的字段</td><td data-label="没做会怎样">每行带着文本、JSON 这类大字段走完整条链路，哈希表也跟着变大</td></tr><tr><th>一对多的表</th><td data-label="做了">先按 join key 聚合到一行</td><td data-label="没做会怎样">行数相乘，<code>SUM</code> / <code>COUNT</code> 被重复累加</td></tr></tbody></table></div><p><code>FULL OUTER JOIN</code> 管的是另一件事：配对之后，两边落单的行留不留。一段 <code>INNER JOIN</code> 完全可以是全量的，一段 <code>LEFT JOIN</code> 也可能只碰几十行。判断依据是「参与配对的行有多少」，不是关键字。</p>
+<p>先看第一种形态。假设（示意）<code>orders</code> 1 亿行、<code>users</code> 5000 万行，<code>users.user_id</code> 唯一，且每个订单都能找到用户：</p>
+<div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;orders&quot;,&quot;to&quot;:&quot;join&quot;,&quot;label&quot;:&quot;1 亿行 · 逐条探测&quot;,&quot;labelDx&quot;:-120},{&quot;from&quot;:&quot;users&quot;,&quot;to&quot;:&quot;join&quot;,&quot;label&quot;:&quot;5000 万行 · 建哈希表&quot;,&quot;labelDx&quot;:120},{&quot;from&quot;:&quot;join&quot;,&quot;to&quot;:&quot;out&quot;,&quot;label&quot;:&quot;≈ 1 亿行&quot;}]" style="--flow-marker:url(#fa-1)">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa-1" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-violet" data-id="orders">
+              
+              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="8" cy="4.2" rx="5" ry="1.9"/><path d="M3 4.2v7.6c0 1.05 2.24 1.9 5 1.9s5-.85 5-1.9V4.2"/></svg>
+              <b>orders · 1 亿行</b>
+              <small>order_id / user_id / amount</small>
+            </div><div class="fnode tone-blue" data-id="users">
+              
+              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="8" cy="4.2" rx="5" ry="1.9"/><path d="M3 4.2v7.6c0 1.05 2.24 1.9 5 1.9s5-.85 5-1.9V4.2"/></svg>
+              <b>users · 5000 万行</b>
+              <small>user_id / user_name</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="join">
+              
+              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5L3 8l3 4.5M10 3.5L13 8l-3 4.5"/></svg>
+              <b>Hash Join</b>
+              <small><code>o.user_id</code> = <code>u.user_id</code></small>
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="out">
+              
+              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="3" width="11" height="8.5" rx="1.5"/><path d="M2.5 6h11"/></svg>
+              <b>结果 ≈ 1 亿行</b>
+              <small>每条订单拼上一个用户名</small>
+            </div></div></div>
+      
+    </div><p>这条 SQL 让机器做的工作量是：读 1.5 亿行、建一张 5000 万行的哈希表、做 1 亿次探测，再交出约 1 亿行结果。</p>
+<p>如果你要的只是「最近 7 天已支付订单」，那 1 亿行里绝大多数是白干的。实际写的时候往往就是这样一句不带 <code>WHERE</code> 的关联，因为它在测试库上跑得很快。</p>
+<h2 id="第二笔账一对多接一对多"><span class="num">02</span>第二笔账：一对多接一对多</h2>
+<p>假设三张表：<code>orders</code>（订单主表）、<code>order_items</code>（商品明细）、<code>payments</code>（支付流水）。一个订单有多条明细，也可能有多笔支付 —— 支付、退款、补款。</p>
+<p>订单 <code>1001</code> 的两侧长这样：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">order_items                payments
+订单号  商品    金额        订单号  支付记录   金额
+1001    A 商品  100         1001    支付 1     150
+1001    B 商品  200         1001    支付 2     150
+</code></pre></div>
+<p>直接关联，再按订单聚合：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-sql">SELECT
+    o.order_id,
+    SUM(i.amount)      AS item_amount,
+    SUM(p.pay_amount)  AS pay_amount
+FROM orders o
+JOIN order_items i ON o.order_id = i.order_id
+JOIN payments p    ON o.order_id = p.order_id
+GROUP BY o.order_id;
+</code></pre></div>
+<p>数据库不会「聪明地」挑一组配另一组。<code>ON</code> 的条件是订单号，2 条明细和 2 笔支付两两组合，得到 4 行：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">订单号   商品金额   支付金额
+1001     100       150
+1001     100       150
+1001     200       150
+1001     200       150
+</code></pre></div>
+<p>于是聚合结果变成：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">商品金额：100 + 100 + 200 + 200 = 600   实际应为 300
+支付金额：150 + 150 + 150 + 150 = 600   实际应为 300
+</code></pre></div>
+<p>行数一多，性能也一起坏掉：2 万条明细 × 300 笔支付就是 600 万行，而这些行里没有一条是新信息。</p>
+<p>下面可以自己加明细、加支付，看行数和两个合计怎么跟着变：</p>
+<div class="demo" data-widget="join-fanout-lab" data-config="{&quot;items&quot;:[{&quot;name&quot;:&quot;A 商品&quot;,&quot;amount&quot;:100},{&quot;name&quot;:&quot;B 商品&quot;,&quot;amount&quot;:200},{&quot;name&quot;:&quot;C 商品&quot;,&quot;amount&quot;:50},{&quot;name&quot;:&quot;D 商品&quot;,&quot;amount&quot;:20}],&quot;payments&quot;:[{&quot;name&quot;:&quot;支付 1&quot;,&quot;amount&quot;:150},{&quot;name&quot;:&quot;支付 2&quot;,&quot;amount&quot;:150},{&quot;name&quot;:&quot;补款&quot;,&quot;amount&quot;:50}],&quot;startItems&quot;:2,&quot;startPayments&quot;:2}">
+      <div class="demo-head">
+        <span class="title">一对多 × 一对多：行数乘出来，金额也跟着重复</span>
+        <span class="status" data-status></span>
+        <span class="spacer"></span>
+        
+      </div>
+      <div class="demo-body custom" data-mount></div>
+    </div><p><mark class="mk-amber">注意 <code>SUM(DISTINCT ...)</code> 不是解法。</mark> 两条明细金额都是 100 时，它会把两条算成一条；正确的做法是让每个订单在每个子查询里只剩一行，然后再 join。</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-sql">WITH item_summary AS (
+    SELECT
+        order_id,
+        SUM(amount) AS item_amount
+    FROM order_items
+    GROUP BY order_id
+),
+payment_summary AS (
+    SELECT
+        order_id,
+        SUM(pay_amount) AS pay_amount
+    FROM payments
+    GROUP BY order_id
+)
+SELECT
+    o.order_id,
+    i.item_amount,
+    p.pay_amount
+FROM orders o
+LEFT JOIN item_summary   i ON o.order_id = i.order_id
+LEFT JOIN payment_summary p ON o.order_id = p.order_id;
+</code></pre></div>
+<p>先聚合之后，<code>item_summary</code> 和 <code>payment_summary</code> 里每个订单各只有一行，再 join 就不会相乘。代价是两边各多扫一遍、各做一次聚合；这笔开销是固定的，不会随另一侧的行数放大。</p>
+<h2 id="整体图一次全量-join-在机器里走一遍"><span class="num">03</span>整体图：一次全量 JOIN 在机器里走一遍</h2>
+<p>单机上，一次哈希连接只做两件事：把一侧变成哈希表，再让另一侧逐行来查。真正决定成本的是这两步各自要碰多少行。</p>
+<figure class="archfig" data-arch style="--arch-max-width:1600px" data-boundaries="nested" data-pano data-parts='{"orders_file":{"label":"orders 表文件","detail":"全表顺序扫描按页读，读的是整张表。有没有 WHERE 只影响扫描节点吐出多少行，不影响它读多少页 —— 除非过滤能靠索引或分区少读。"},"users_file":{"label":"users 表文件","detail":"同一套页结构。join 只需要 user_id 和 user_name，但页是按行存的，用不上的列照样被读进内存。"},"orders_pages":{"label":"orders 的页缓存","detail":"页被读进缓冲池后，重复访问不再走磁盘。缓存命中率高时 I/O 少，但解析行、算 hash、拼结果这些 CPU 工作一件都不少。"},"users_pages":{"label":"users 的页缓存","detail":"顺序扫描很少重复访问同一页，缓存对它的帮助有限；真正省时间的是「少读一些页」。"},"scan_o":{"label":"扫描 orders","detail":"输出 1 亿行，全部进入 probe。它不负责建表，只负责把行和需要的列取出来。"},"scan_u":{"label":"扫描 users","detail":"输出 5000 万行，全部进 build。选它做 build 侧，是因为它的字节数更小；行数少不等于字节少，优化器看的是估算的宽度。"},"build":{"label":"建哈希表","detail":"对每一行算一次 hash，按桶放进去。这一步是纯写，不能提前结束 —— 哈希表建完才知道哪些 key 存在。"},"hash":{"label":"哈希表","detail":"存 join key 和 probe 之后要输出的列，还要能处理冲突。它比原始数据更占内存，因为桶数组、指针、内存对齐都有开销。"},"probe":{"label":"探测","detail":"每条 orders 都算一次 hash、找一次桶、比一次 key。单次是常数级，但乘 1 亿次就是主成本之一。"},"result":{"label":"结果集","detail":"输出行数由基数关系决定：users.user_id 唯一时是 1 亿行；如果它不唯一，结果还会再乘。"}}' data-tours='[{"id":"build","label":"先建表","steps":[{"at":["users_file","users_pages","scan_u"],"text":"从 users 表读起：页进缓冲池，扫描节点把 5000 万行一条条交出去。"},{"at":["build","hash"],"text":"每行算一次 ==hash(user_id)==，放进哈希表的桶里。桶里存 key 和之后要用的列。"}]},{"id":"probe","label":"再逐条查","steps":[{"at":["orders_file","orders_pages","scan_o"],"text":"orders 也整张读一遍，输出 1 亿行。"},{"at":["probe","hash"],"text":"每条订单拿 user_id 去查表：先找桶，再比 key。命中的拼成一行。"},{"at":["result"],"text":"结果约 1 亿行，进入排序、聚合或网络传输 —— ==下一层还要按这个量级再干一遍==。"}]},{"id":"memory","label":"内存这条线","steps":[{"at":["scan_u","build","hash"],"text":"哈希表全在内存里，大小由 work_mem / join_buffer_size 限制。"},{"at":["hash","probe"],"text":"表放不下时，build 侧剩下的行和 probe 侧都要按 hash 写盘，改成成对处理（下一节）。"}]}]' data-frames='[{"id":"storage","boundary":0,"kind":"logical","label":"存储 · 表和它的页缓存","detail":"表在磁盘上按页存放；扫描时页先被读进缓冲池，命中就省掉一次物理读，但每行仍然要解析、判断可见性、取列。","members":["users_file","users_pages","orders_file","orders_pages"],"depth":1},{"id":"workmem","boundary":2,"kind":"contains","label":"工作内存 · 哈希表住在这里","detail":"哈希表的大小受 work_mem（PostgreSQL，默认 4MB，再乘 hash_mem_multiplier 2.0）或 join_buffer_size（MySQL，默认 256KB）限制；装不下就写临时文件。","members":["hash"],"depth":1},{"id":"ops","boundary":1,"kind":"classification","label":"算子 · 每条输入都被走一遍","detail":"两个扫描各读一遍自己那张表；build 只写哈希表，probe 每条订单查一次。这里没有「跳过」—— 行数就是次数。","members":["scan_u","build","scan_o","probe"],"depth":1}]'>
+      <div class="arch-boundary-ui">
+          <div class="arch-boundary-toolbar"><span class="arch-boundary-label">边界</span>
+            <button type="button" data-boundary-mode="nested" aria-pressed="true">多层归属框</button>
+            <button type="button" data-boundary-mode="flat" aria-pressed="false">只留一层分区</button>
+            <button type="button" data-arch-reset>恢复全图</button>
+          </div>
+          <div class="arch-address-box" aria-live="polite"><div data-arch-address>点一个零件，看完整归属路径；点一个区域标题，看这一层的含义。</div>
+            <div data-arch-frame-detail>最外框表示逻辑资源域，不表示所有对象在一块内存里。每层边界的标题说明分组依据。</div></div>
+        </div>
+      <div class="arch-canvas"><svg viewBox="0 0 1600 790" role="img" aria-labelledby="hash-join-machine-archify-diagram-title hash-join-machine-archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
+        <title id="hash-join-machine-archify-diagram-title">一次全量 JOIN 在机器里走一遍：两遍扫描、一张哈希表</title>
+        <desc id="hash-join-machine-archify-diagram-description">A architecture diagram generated by Archify.</desc>
+        <!-- Definitions -->
+        <defs>
+          <marker id="hash-join-machine-arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-default" />
+          </marker>
+          <marker id="hash-join-machine-arrowhead-emphasis" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-emphasis" />
+          </marker>
+          <marker id="hash-join-machine-arrowhead-security" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-security" />
+          </marker>
+          <marker id="hash-join-machine-arrowhead-dashed" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-dashed" />
+          </marker>
+          <pattern id="hash-join-machine-grid" width="40" height="40" patternUnits="userSpaceOnUse">
+            <path d="M 40 0 L 0 0 0 40" class="c-grid" stroke-width="0.5"/>
+          </pattern>
+        </defs>
+
+        <!-- Background Grid -->
+        <rect width="100%" height="100%" fill="url(#hash-join-machine-grid)" />
+
+        <!-- Boundaries (behind everything) -->
+        <g class="arch-frame" data-frame="storage" data-depth="1" data-frame-flat="false" data-frame-kind="logical" role="button" tabindex="0" aria-pressed="false" aria-label="存储 · 表和它的页缓存"><title>表在磁盘上按页存放；扫描时页先被读进缓冲池，命中就省掉一次物理读，但每行仍然要解析、判断可见性、取列。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="0" data-frame-members="users_file users_pages orders_file orders_pages" x="14" y="164" width="622" height="482" rx="12" class="c-region" stroke-width="1"/>
+        <text x="22" y="182" class="t-cloud" font-size="9" font-weight="600">存储 · 表和它的页缓存</text></g>
+
+        <g class="arch-frame" data-frame="ops" data-depth="1" data-frame-flat="false" data-frame-kind="classification" role="button" tabindex="0" aria-pressed="false" aria-label="算子 · 每条输入都被走一遍"><title>两个扫描各读一遍自己那张表；build 只写哈希表，probe 每条订单查一次。这里没有「跳过」—— 行数就是次数。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="1" data-frame-members="scan_u build scan_o probe" x="654" y="164" width="642" height="482" rx="12" class="c-region" stroke-width="1"/>
+        <text x="662" y="182" class="t-cloud" font-size="9" font-weight="600">算子 · 每条输入都被走一遍</text></g>
+
+        <g class="arch-frame" data-frame="workmem" data-depth="1" data-frame-flat="false" data-frame-kind="contains" role="button" tabindex="0" aria-pressed="false" aria-label="工作内存 · 哈希表住在这里"><title>哈希表的大小受 work_mem（PostgreSQL，默认 4MB，再乘 hash_mem_multiplier 2.0）或 join_buffer_size（MySQL，默认 256KB）限制；装不下就写临时文件。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="2" data-frame-members="hash" x="1310" y="160" width="270" height="210" rx="12" class="c-region" stroke-width="1"/>
+        <text x="1318" y="178" class="t-cloud" font-size="9" font-weight="600">工作内存 · 哈希表住在这里</text></g>
+
+        <!-- Connection paths (before components for correct z-order) -->
+        <path data-edge-from="users_file" data-edge-to="users_pages" data-edge-label="读页" data-edge-key="0" data-edge-id="read-users" data-composition-points="290,265;360,265" d="M 290 265 L 360 265" class="a-default" stroke-width="1.5" marker-end="url(#hash-join-machine-arrowhead)"/>
+        <path data-edge-from="users_pages" data-edge-to="scan_u" data-edge-label="命中就取" data-edge-key="1" data-edge-id="hit-users" data-composition-points="600,265;690,265" d="M 600 265 L 690 265" class="a-default" stroke-width="1.5" marker-end="url(#hash-join-machine-arrowhead)"/>
+        <path data-edge-from="scan_u" data-edge-to="build" data-edge-label="5000 万行" data-edge-key="2" data-edge-id="rows-users" data-composition-points="930,265;1010,265" d="M 930 265 L 1010 265" class="a-default" stroke-width="1.5" marker-end="url(#hash-join-machine-arrowhead)"/>
+        <path data-edge-from="build" data-edge-to="hash" data-edge-label="写入桶" data-edge-key="3" data-edge-id="write-hash" data-composition-points="1260,265;1340,265" d="M 1260 265 L 1340 265" class="a-default" stroke-width="1.5" marker-end="url(#hash-join-machine-arrowhead)"/>
+        <path data-edge-from="orders_file" data-edge-to="orders_pages" data-edge-label="读页" data-edge-key="4" data-edge-id="read-orders" data-composition-points="290,540;360,540" d="M 290 540 L 360 540" class="a-default" stroke-width="1.5" marker-end="url(#hash-join-machine-arrowhead)"/>
+        <path data-edge-from="orders_pages" data-edge-to="scan_o" data-edge-label="命中就取" data-edge-key="5" data-edge-id="hit-orders" data-composition-points="600,540;690,540" d="M 600 540 L 690 540" class="a-default" stroke-width="1.5" marker-end="url(#hash-join-machine-arrowhead)"/>
+        <path data-edge-from="scan_o" data-edge-to="probe" data-edge-label="1 亿行" data-edge-key="6" data-edge-id="rows-orders" data-composition-points="930,540;1010,540" d="M 930 540 L 1010 540" class="a-default" stroke-width="1.5" marker-end="url(#hash-join-machine-arrowhead)"/>
+        <path data-edge-from="probe" data-edge-to="hash" data-edge-label="按 user_id 查桶" data-edge-key="7" data-edge-id="lookup" data-composition-points="1135,470;1135,405;1445,405;1445,340" d="M 1135 470 L 1135 413 Q 1135 405 1143 405 L 1437 405 Q 1445 405 1445 397 L 1445 340" class="a-default" stroke-width="1.5" marker-end="url(#hash-join-machine-arrowhead)"/>
+        <path data-edge-from="probe" data-edge-to="result" data-edge-label="≈ 1 亿行" data-edge-key="8" data-edge-id="emit" data-composition-points="1260,540;1340,540" d="M 1260 540 L 1340 540" class="a-default" stroke-width="1.5" marker-end="url(#hash-join-machine-arrowhead)"/>
+
+        <!-- Components -->
+        <g id="hash-join-machine-node-users_file" data-nb="1" data-node-id="users_file" data-node-label="users 表文件" tabindex="0" role="button" aria-label="Focus users 表文件, 5000 万行 · 按页存放, 存储 · 表和它的页缓存" aria-pressed="false" data-node-kind="database" data-node-sublabel="5000 万行 · 按页存放" data-node-context="存储 · 表和它的页缓存">
+          <title>users 表文件 · 5000 万行 · 按页存放 · 存储 · 表和它的页缓存</title>
+          <rect x="50" y="200" width="240" height="130" rx="6" class="c-mask"/>
+          <rect x="50" y="200" width="240" height="130" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(56 206) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <rect class="nb-badge" x="222.8" y="208" width="55.2" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="250.4" y="219" font-size="8" text-anchor="middle">5000 万行</text>
+          <text class="nb-title" x="84" y="221" font-size="10.5" font-weight="600">users 表文件</text>
+          <line class="nb-hr" x1="58" y1="228" x2="282" y2="228"/>
+          <text class="nb-k" x="62" y="261" font-size="9">存放</text><text class="nb-v" x="114.2" y="261" font-size="9">按页切块</text>
+          <text class="nb-k" x="62" y="275" font-size="9">读法</text><text class="nb-v" x="114.2" y="275" font-size="9">顺序读整张表</text>
+          <text class="nb-k" x="62" y="289" font-size="9">用到的列</text><text class="nb-v" x="114.2" y="289" font-size="9">两列</text>
+          <text class="nb-note" x="62" y="322" font-size="8">页里其他列白读</text>
+        </g>
+
+        <g id="hash-join-machine-node-users_pages" data-nb="1" data-node-id="users_pages" data-node-label="users 的数据页" tabindex="0" role="button" aria-label="Focus users 的数据页, 读进缓冲池, 存储 · 表和它的页缓存" aria-pressed="false" data-node-kind="database" data-node-sublabel="读进缓冲池" data-node-context="存储 · 表和它的页缓存">
+          <title>users 的数据页 · 读进缓冲池 · 存储 · 表和它的页缓存</title>
+          <rect x="360" y="200" width="240" height="130" rx="6" class="c-mask"/>
+          <rect x="360" y="200" width="240" height="130" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(366 206) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <rect class="nb-badge" x="547.2" y="208" width="40.8" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="567.6" y="219" font-size="8" text-anchor="middle">内存里</text>
+          <text class="nb-title" x="394" y="221" font-size="10.5" font-weight="600">users 的数据页</text>
+          <line class="nb-hr" x1="368" y1="228" x2="592" y2="228"/>
+          <text class="nb-k" x="372" y="268" font-size="9">内容</text><text class="nb-v" x="402.6" y="268" font-size="9">users 最近读过的页</text>
+          <text class="nb-k" x="372" y="282" font-size="9">命中</text><text class="nb-v" x="402.6" y="282" font-size="9">省一次物理读</text>
+          <text class="nb-note" x="372" y="322" font-size="8">顺序扫描很少复用同一页</text>
+        </g>
+
+        <g id="hash-join-machine-node-scan_u" data-nb="1" data-node-id="scan_u" data-node-label="Seq Scan · users" tabindex="0" role="button" aria-label="Focus Seq Scan · users, 逐页取行、取两列, 算子 · 每条输入都被走一遍" aria-pressed="false" data-node-kind="backend" data-node-sublabel="逐页取行、取两列" data-node-context="算子 · 每条输入都被走一遍">
+          <title>Seq Scan · users · 逐页取行、取两列 · 算子 · 每条输入都被走一遍</title>
+          <rect x="690" y="200" width="240" height="130" rx="6" class="c-mask"/>
+          <rect x="690" y="200" width="240" height="130" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(696 206) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <rect class="nb-badge" x="872.4" y="208" width="45.6" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="895.2" y="219" font-size="8" text-anchor="middle">第 1 遍</text>
+          <text class="nb-title" x="724" y="221" font-size="10.5" font-weight="600">Seq Scan · users</text>
+          <line class="nb-hr" x1="698" y1="228" x2="922" y2="228"/>
+          <text class="nb-k" x="702" y="261" font-size="9">做什么</text><text class="nb-v" x="743.4" y="261" font-size="9">逐页取行、取列</text>
+          <text class="nb-k" x="702" y="275" font-size="9">输出</text><text class="nb-v" x="743.4" y="275" font-size="9">5000 万行</text>
+          <text class="nb-k" x="702" y="289" font-size="9">成本</text><text class="nb-v" x="743.4" y="289" font-size="9">页数 + 行数</text>
+          <text class="nb-note" x="702" y="322" font-size="8">输出全部进哈希表</text>
+        </g>
+
+        <g id="hash-join-machine-node-build" data-nb="1" data-node-id="build" data-node-label="Hash Build" tabindex="0" role="button" aria-label="Focus Hash Build, 算 hash(user_id), 算子 · 每条输入都被走一遍" aria-pressed="false" data-node-kind="backend" data-node-sublabel="算 hash(user_id)" data-node-context="算子 · 每条输入都被走一遍">
+          <title>Hash Build · 算 hash(user_id) · 算子 · 每条输入都被走一遍</title>
+          <rect x="1010" y="200" width="250" height="130" rx="6" class="c-mask"/>
+          <rect x="1010" y="200" width="250" height="130" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(1016 206) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <rect class="nb-badge" x="1226.4" y="208" width="21.6" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="1237.2" y="219" font-size="8" text-anchor="middle">写</text>
+          <text class="nb-title" x="1044" y="221" font-size="10.5" font-weight="600">Hash Build</text>
+          <line class="nb-hr" x1="1018" y1="228" x2="1252" y2="228"/>
+          <text class="nb-k" x="1022" y="261" font-size="9">输入</text><text class="nb-v" x="1052.6" y="261" font-size="9">5000 万行 users</text>
+          <text class="nb-k" x="1022" y="275" font-size="9">计算</text><text class="nb-v" x="1052.6" y="275" font-size="9">hash(user_id)</text>
+          <text class="nb-k" x="1022" y="289" font-size="9">写入</text><text class="nb-v" x="1052.6" y="289" font-size="9">桶数组 + 冲突链</text>
+          <text class="nb-note" x="1022" y="322" font-size="8">内存到顶就写 chunk 文件</text>
+        </g>
+
+        <g id="hash-join-machine-node-hash" data-nb="1" data-node-id="hash" data-node-label="哈希表" tabindex="0" role="button" aria-label="Focus 哈希表, 桶里：key + 输出列, 工作内存 · 哈希表住在这里" aria-pressed="false" data-node-kind="backend" data-node-sublabel="桶里：key + 输出列" data-node-context="工作内存 · 哈希表住在这里">
+          <title>哈希表 · 桶里：key + 输出列 · 工作内存 · 哈希表住在这里</title>
+          <rect x="1340" y="190" width="210" height="150" rx="6" class="c-mask"/>
+          <rect x="1340" y="190" width="210" height="150" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(1346 196) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <rect class="nb-badge" x="1487.6" y="198" width="50.4" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="1512.8" y="209" font-size="8" text-anchor="middle">工作内存</text>
+          <text class="nb-title" x="1374" y="211" font-size="10.5" font-weight="600">哈希表</text>
+          <line class="nb-hr" x1="1348" y1="218" x2="1542" y2="218"/>
+          <text class="nb-k" x="1352" y="261" font-size="9">桶里放</text><text class="nb-v" x="1393.4" y="261" font-size="9">key + 输出列</text>
+          <text class="nb-k" x="1352" y="275" font-size="9">为什么</text><text class="nb-v" x="1393.4" y="275" font-size="9">probe 靠它拼行</text>
+          <text class="nb-k" x="1352" y="289" font-size="9">装不下</text><text class="nb-v" x="1393.4" y="289" font-size="9">按 hash 写 chunk</text>
+          <text class="nb-note" x="1352" y="332" font-size="8">桶、指针、对齐都额外占内存</text>
+        </g>
+
+        <g id="hash-join-machine-node-orders_file" data-nb="1" data-node-id="orders_file" data-node-label="orders 表文件" tabindex="0" role="button" aria-label="Focus orders 表文件, 1 亿行 · 按页存放, 存储 · 表和它的页缓存" aria-pressed="false" data-node-kind="database" data-node-sublabel="1 亿行 · 按页存放" data-node-context="存储 · 表和它的页缓存">
+          <title>orders 表文件 · 1 亿行 · 按页存放 · 存储 · 表和它的页缓存</title>
+          <rect x="50" y="470" width="240" height="140" rx="6" class="c-mask"/>
+          <rect x="50" y="470" width="240" height="140" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(56 476) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <rect class="nb-badge" x="237.2" y="478" width="40.8" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="257.6" y="489" font-size="8" text-anchor="middle">1 亿行</text>
+          <text class="nb-title" x="84" y="491" font-size="10.5" font-weight="600">orders 表文件</text>
+          <line class="nb-hr" x1="58" y1="498" x2="282" y2="498"/>
+          <text class="nb-k" x="62" y="536" font-size="9">存放</text><text class="nb-v" x="92.6" y="536" font-size="9">按页切块</text>
+          <text class="nb-k" x="62" y="550" font-size="9">读法</text><text class="nb-v" x="92.6" y="550" font-size="9">顺序读整张表</text>
+          <text class="nb-k" x="62" y="564" font-size="9">过滤</text><text class="nb-v" x="92.6" y="564" font-size="9">WHERE 只减输出</text>
+          <text class="nb-note" x="62" y="602" font-size="8">没索引或分区时，读页省不掉</text>
+        </g>
+
+        <g id="hash-join-machine-node-orders_pages" data-nb="1" data-node-id="orders_pages" data-node-label="orders 的数据页" tabindex="0" role="button" aria-label="Focus orders 的数据页, 读进缓冲池, 存储 · 表和它的页缓存" aria-pressed="false" data-node-kind="database" data-node-sublabel="读进缓冲池" data-node-context="存储 · 表和它的页缓存">
+          <title>orders 的数据页 · 读进缓冲池 · 存储 · 表和它的页缓存</title>
+          <rect x="360" y="470" width="240" height="140" rx="6" class="c-mask"/>
+          <rect x="360" y="470" width="240" height="140" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(366 476) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <rect class="nb-badge" x="547.2" y="478" width="40.8" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="567.6" y="489" font-size="8" text-anchor="middle">内存里</text>
+          <text class="nb-title" x="394" y="491" font-size="10.5" font-weight="600">orders 的数据页</text>
+          <line class="nb-hr" x1="368" y1="498" x2="592" y2="498"/>
+          <text class="nb-k" x="372" y="536" font-size="9">内容</text><text class="nb-v" x="413.4" y="536" font-size="9">orders 最近读过的页</text>
+          <text class="nb-k" x="372" y="550" font-size="9">命中</text><text class="nb-v" x="413.4" y="550" font-size="9">省一次物理读</text>
+          <text class="nb-k" x="372" y="564" font-size="9">未命中</text><text class="nb-v" x="413.4" y="564" font-size="9">从磁盘读进来</text>
+          <text class="nb-note" x="372" y="602" font-size="8">缓存减少 I/O，不减少行数</text>
+        </g>
+
+        <g id="hash-join-machine-node-scan_o" data-nb="1" data-node-id="scan_o" data-node-label="Seq Scan · orders" tabindex="0" role="button" aria-label="Focus Seq Scan · orders, 逐页取行、取列, 算子 · 每条输入都被走一遍" aria-pressed="false" data-node-kind="backend" data-node-sublabel="逐页取行、取列" data-node-context="算子 · 每条输入都被走一遍">
+          <title>Seq Scan · orders · 逐页取行、取列 · 算子 · 每条输入都被走一遍</title>
+          <rect x="690" y="470" width="240" height="140" rx="6" class="c-mask"/>
+          <rect x="690" y="470" width="240" height="140" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(696 476) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <rect class="nb-badge" x="872.4" y="478" width="45.6" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="895.2" y="489" font-size="8" text-anchor="middle">第 1 遍</text>
+          <text class="nb-title" x="724" y="491" font-size="10.5" font-weight="600">Seq Scan · orders</text>
+          <line class="nb-hr" x1="698" y1="498" x2="922" y2="498"/>
+          <text class="nb-k" x="702" y="536" font-size="9">做什么</text><text class="nb-v" x="743.4" y="536" font-size="9">逐页取行、取列</text>
+          <text class="nb-k" x="702" y="550" font-size="9">输出</text><text class="nb-v" x="743.4" y="550" font-size="9">1 亿行</text>
+          <text class="nb-k" x="702" y="564" font-size="9">成本</text><text class="nb-v" x="743.4" y="564" font-size="9">页数 + 行数</text>
+          <text class="nb-note" x="702" y="602" font-size="8">每行判断是否对本次查询可见</text>
+        </g>
+
+        <g id="hash-join-machine-node-probe" data-nb="1" data-node-id="probe" data-node-label="Probe" tabindex="0" role="button" aria-label="Focus Probe, 每条订单查一次, 算子 · 每条输入都被走一遍" aria-pressed="false" data-node-kind="backend" data-node-sublabel="每条订单查一次" data-node-context="算子 · 每条输入都被走一遍">
+          <title>Probe · 每条订单查一次 · 算子 · 每条输入都被走一遍</title>
+          <rect x="1010" y="470" width="250" height="140" rx="6" class="c-mask"/>
+          <rect x="1010" y="470" width="250" height="140" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(1016 476) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <rect class="nb-badge" x="1207.2" y="478" width="40.8" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="1227.6" y="489" font-size="8" text-anchor="middle">1 亿次</text>
+          <text class="nb-title" x="1044" y="491" font-size="10.5" font-weight="600">Probe</text>
+          <line class="nb-hr" x1="1018" y1="498" x2="1252" y2="498"/>
+          <text class="nb-k" x="1022" y="536" font-size="9">每条订单</text><text class="nb-v" x="1074.2" y="536" font-size="9">算 hash → 找桶</text>
+          <text class="nb-k" x="1022" y="550" font-size="9">桶里</text><text class="nb-v" x="1074.2" y="550" font-size="9">比 key 真相等</text>
+          <text class="nb-k" x="1022" y="564" font-size="9">命中</text><text class="nb-v" x="1074.2" y="564" font-size="9">拼成一行</text>
+          <text class="nb-note" x="1022" y="602" font-size="8">找到桶不等于找到人</text>
+        </g>
+
+        <g id="hash-join-machine-node-result" data-nb="1" data-node-id="result" data-node-label="结果集" tabindex="0" role="button" aria-label="Focus 结果集, ≈ 1 亿行, Architecture component" aria-pressed="false" data-node-kind="frontend" data-node-sublabel="≈ 1 亿行" data-node-context="Architecture component">
+          <title>结果集 · ≈ 1 亿行 · Architecture component</title>
+          <rect x="1340" y="470" width="210" height="140" rx="6" class="c-mask"/>
+          <rect x="1340" y="470" width="210" height="140" rx="6" class="c-frontend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="frontend" class="semantic-sigil s-frontend" transform="translate(1346 476) scale(0.6875)">
+            <rect x="2" y="3" width="12" height="10" rx="2"/>
+            <path d="M2 6.5h12"/>
+            <circle cx="4.1" cy="4.8" r=".7" class="sigil-fill"/>
+            <circle cx="6.3" cy="4.8" r=".7" class="sigil-fill"/>
+          </g>
+          <rect class="nb-badge" x="1487.6" y="478" width="50.4" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="1512.8" y="489" font-size="8" text-anchor="middle">≈ 1 亿行</text>
+          <text class="nb-title" x="1374" y="491" font-size="10.5" font-weight="600">结果集</text>
+          <line class="nb-hr" x1="1348" y1="498" x2="1542" y2="498"/>
+          <text class="nb-k" x="1352" y="536" font-size="9">行数</text><text class="nb-v" x="1393.4" y="536" font-size="9">1 亿 × 1 个用户</text>
+          <text class="nb-k" x="1352" y="550" font-size="9">每行</text><text class="nb-v" x="1393.4" y="550" font-size="9">订单字段 + 用户字段</text>
+          <text class="nb-k" x="1352" y="564" font-size="9">下一站</text><text class="nb-v" x="1393.4" y="564" font-size="9">排序 / 聚合 / 返回</text>
+          <text class="nb-note" x="1352" y="602" font-size="8">输出也要内存与 CPU</text>
+        </g>
+
+        <!-- Connection labels -->
+        <g data-detail="context" data-edge-from="users_file" data-edge-to="users_pages" data-edge-label="读页" data-edge-key="0" data-edge-id="read-users">
+          <rect x="310" y="238" width="30" height="14" rx="3" class="c-mask"/>
+          <text x="325" y="248" class="t-muted" font-size="8" text-anchor="middle">读页</text>
+        </g>
+        <g data-detail="context" data-edge-from="users_pages" data-edge-to="scan_u" data-edge-label="命中就取" data-edge-key="1" data-edge-id="hit-users">
+          <rect x="620.8" y="238" width="48.4" height="14" rx="3" class="c-mask"/>
+          <text x="645" y="248" class="t-muted" font-size="8" text-anchor="middle">命中就取</text>
+        </g>
+        <g data-detail="context" data-edge-from="scan_u" data-edge-to="build" data-edge-label="5000 万行" data-edge-key="2" data-edge-id="rows-users">
+          <rect x="943.4" y="238" width="53.199999999999996" height="14" rx="3" class="c-mask"/>
+          <text x="970" y="248" class="t-muted" font-size="8" text-anchor="middle">5000 万行</text>
+        </g>
+        <g data-detail="context" data-edge-from="build" data-edge-to="hash" data-edge-label="写入桶" data-edge-key="3" data-edge-id="write-hash">
+          <rect x="1280.6" y="225" width="38.8" height="14" rx="3" class="c-mask"/>
+          <text x="1300" y="235" class="t-muted" font-size="8" text-anchor="middle">写入桶</text>
+        </g>
+        <g data-detail="context" data-edge-from="orders_file" data-edge-to="orders_pages" data-edge-label="读页" data-edge-key="4" data-edge-id="read-orders">
+          <rect x="310" y="508" width="30" height="14" rx="3" class="c-mask"/>
+          <text x="325" y="518" class="t-muted" font-size="8" text-anchor="middle">读页</text>
+        </g>
+        <g data-detail="context" data-edge-from="orders_pages" data-edge-to="scan_o" data-edge-label="命中就取" data-edge-key="5" data-edge-id="hit-orders">
+          <rect x="620.8" y="508" width="48.4" height="14" rx="3" class="c-mask"/>
+          <text x="645" y="518" class="t-muted" font-size="8" text-anchor="middle">命中就取</text>
+        </g>
+        <g data-detail="context" data-edge-from="scan_o" data-edge-to="probe" data-edge-label="1 亿行" data-edge-key="6" data-edge-id="rows-orders">
+          <rect x="950.6" y="495" width="38.8" height="14" rx="3" class="c-mask"/>
+          <text x="970" y="505" class="t-muted" font-size="8" text-anchor="middle">1 亿行</text>
+        </g>
+        <g data-detail="context" data-edge-from="probe" data-edge-to="hash" data-edge-label="按 user_id 查桶" data-edge-key="7" data-edge-id="lookup">
+          <rect x="1194" y="415" width="82" height="14" rx="3" class="c-mask"/>
+          <text x="1235" y="425" class="t-muted" font-size="8" text-anchor="middle">按 user_id 查桶</text>
+        </g>
+        <g data-detail="context" data-edge-from="probe" data-edge-to="result" data-edge-label="≈ 1 亿行" data-edge-key="8" data-edge-id="emit">
+          <rect x="1275.8" y="508" width="48.4" height="14" rx="3" class="c-mask"/>
+          <text x="1300" y="518" class="t-muted" font-size="8" text-anchor="middle">≈ 1 亿行</text>
+        </g>
+
+        <!-- Legend -->
+        <g data-legend data-legend-bridge>
+          <text x="40" y="754" class="t-primary" font-size="12" font-weight="650">Legend</text>
+          <g data-legend-semantic-kind="frontend" data-legend-kind="frontend" data-legend-label="结果：交给下一层" data-legend-x="40" data-legend-baseline="774" data-legend-width="123">
+            <rect x="40" y="765" width="16" height="10" rx="2.5" class="c-frontend" stroke-width="1"/>
+            <text x="62" y="774" class="t-muted" font-size="10" font-weight="500">结果：交给下一层</text>
+          </g>
+          <g data-legend-semantic-kind="backend" data-legend-kind="backend" data-legend-label="执行：扫描算子、哈希表、探测" data-legend-x="185" data-legend-baseline="774" data-legend-width="182">
+            <rect x="185" y="765" width="16" height="10" rx="2.5" class="c-backend" stroke-width="1"/>
+            <text x="207" y="774" class="t-muted" font-size="10" font-weight="500">执行：扫描算子、哈希表、探测</text>
+          </g>
+          <g data-legend-semantic-kind="database" data-legend-kind="database" data-legend-label="存储：表文件与缓冲池里的页" data-legend-x="389" data-legend-baseline="774" data-legend-width="172">
+            <rect x="389" y="765" width="16" height="10" rx="2.5" class="c-database" stroke-width="1"/>
+            <text x="411" y="774" class="t-muted" font-size="10" font-weight="500">存储：表文件与缓冲池里的页</text>
+          </g>
+        </g>
+      </svg></div>
+      <figcaption>从 users 表看起。它的 5000 万行被读进缓冲池、扫成哈希表；orders 的 1 亿行一页页读进来，逐条查这张表，配上的行拼成结果。</figcaption>
+      <div class="pano-ui"></div>
+      <p class="arch-hint"><span class="idle">点头上的任意一个框看它的关系，点区域标题看分组含义，点零件看完整归属路径</span><span class="focused">再点一次空白处取消</span></p>
+    </figure><p>读这张图只需要记住两条线：<strong>users 走 build，orders 走 probe</strong>。两条线各扫一遍自己的表，中间在哈希表处相遇。</p>
+<p>「数据都在缓存里」不等于「工作消失」。页命中只是省掉了磁盘读；解析行、判断这行对当前事务可见、算 hash、比 key、拼结果，这些都在 CPU 上，按行数计价。</p>
+<h2 id="build-和-probe-里各发生了什么"><span class="num">04</span>Build 和 Probe 里各发生了什么</h2>
+<p>伪代码只有两段：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text"># build：把 users 变成一张按 user_id 索引的表
+for user in users:                        # 5000 万次
+    bucket = hash(user.user_id) % N
+    hash_table[bucket].append(user)
+
+# probe：每条订单去查一次
+for order in orders:                      # 1 亿次
+    bucket = hash(order.user_id) % N
+    for user in hash_table[bucket]:       # 桶里通常很短
+        if order.user_id == user.user_id:
+            emit(order, user)
+</code></pre></div>
+<p>三件容易被略过的事：</p>
+<div class="cards" data-cols="3"><div class="ccard tone-amber">
+          <span class="tag tone-amber">内存比想象的大</span>
+          <h4>桶里不只放 hash 值</h4>
+          
+          <div class="cbody"><p>probe 命中后要拼输出，所以桶里得留着 join key 和要输出的列（这里是 <code>user_id</code>、<code>user_name</code>），还要有冲突链或指针。
+哈希表占的内存通常大于「这些列的原始大小」：桶数组、指针、对齐都得算。</p>
+</div>
+          
+        </div><div class="ccard tone-violet">
+          <span class="tag tone-violet">必须再比一次 key</span>
+          <h4>找到桶不等于找到人</h4>
+          
+          <div class="cbody"><p>不同 <code>user_id</code> 可能落到同一个桶（哈希冲突）。所以 <code>if</code> 那一行不能省：<mark class="mk-blue">桶里有东西，只说明「可能匹配」</mark>。</p>
+</div>
+          
+        </div><div class="ccard tone-blue">
+          <span class="tag tone-blue">1 亿次</span>
+          <h4>单次查找便宜，次数不便宜</h4>
+          
+          <div class="cbody"><p>每次探测是常数级：算 hash、取桶、比几个 key。但乘上 1 亿行，就是 1 亿次 hash 加 1 亿次比较，再加 1 亿次输出拼接。</p>
+</div>
+          
+        </div></div><p>谁做 build 侧由优化器定，通常挑<strong>字节数较小</strong>的一侧（MySQL 官方博客的说法是按字节，不是按行数）。所以「users 只有 5000 万行」不代表它一定更小：如果它每行带一个大 JSON，orders 反而可能更适合建表。</p>
+<h2 id="内存装不下分批哈希"><span class="num">05</span>内存装不下：分批哈希</h2>
+<p>5000 万行的哈希表很容易超过单次查询的内存额度。这时数据库不会直接失败，而是把放不下的部分写到临时文件，再成对处理。</p>
+<div class="pipe"><div class="lane tone-amber">
+        <div class="lane-meta">
+          <span class="ln">STEP 01</span>
+          <b>build 阶段把剩下的行写盘</b>
+          <small>内存满之前已经建了一部分哈希表；剩下的行按 hash(user_id) 分到 chunk 文件</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>chunk 0</b>
+        <small>hash % N = 0</small>
+        <span class="tag tone-amber">盘上</span>
+      </div><div class="pnode">
+        <b>chunk 1</b>
+        <small>hash % N = 1</small>
+        
+      </div><div class="pnode">
+        <b>……</b>
+        <small>MySQL 每个输入最多 128 个 chunk 文件</small>
+        
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">probe 阶段<span class="note">同一套 hash，把 orders 也分到对应 chunk</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-blue">
+        <div class="lane-meta">
+          
+          <b>probe 阶段也分区</b>
+          <small>一条订单只可能和同编号 chunk 里的那批 users 匹配，不用跨 chunk 找</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>orders chunk 0</b>
+        <small>对应 chunk 0</small>
+        <span class="tag tone-blue">写盘</span>
+      </div><div class="pnode">
+        <b>orders chunk 1</b>
+        <small>对应 chunk 1</small>
+        
+      </div><div class="pnode">
+        <b>……</b>
+        <small>其余订单同样按 hash 分</small>
+        
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">成对读回<span class="note">每个 chunk 单独建表、探测</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-green">
+        <div class="lane-meta">
+          
+          <b>逐对处理</b>
+          <small>读一个 build chunk 进内存建哈希表，再读对应的 probe chunk 探测；做完一对，再下一对</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>内存里的哈希表</b>
+        <small>一次只装一个 chunk</small>
+        
+      </div><div class="pnode">
+        <b>结果</b>
+        <small>与其它 chunk 的结果合并</small>
+        
+      </div><div class="pnode">
+        <b>必要时再切</b>
+        <small>单个 chunk 仍太大，就继续往下分</small>
+        
+      </div></div>
+      </div></div><p>两个细节值得知道：</p>
+<ul>
+<li><strong>MySQL 的实现里，分区和桶用了两套 hash 函数。</strong> 如果同一套，同一个 chunk 里的行会全部落到同一个桶，哈希表退化成链表。</li>
+<li><strong>chunk 数量有上限。</strong> MySQL 每个输入最多 128 个 chunk 文件；如果内存太小、文件数超过 <code>open_files_limit</code>，查询会直接失败，而不是慢慢跑完。</li>
+</ul>
+<p>落盘之后，同一批数据要多走三趟：读原表、写临时文件、从临时文件读回来。所以耗时不是线性增加，而是突然跳一个台阶 —— 这也是「昨天还好、今天突然慢十倍」的常见来路。</p>
+<div class="callout tone-amber">
+      <span class="ic">⚙️</span>
+      <div><p>两个引擎的默认额度差别很大，但都是<strong>每个操作</strong>的额度：</p>
+<ul>
+<li><strong>PostgreSQL</strong>：<code>work_mem</code> 默认 4MB，哈希表还能再乘 <code>hash_mem_multiplier</code>（默认 2.0），约 8MB 起。一条复杂查询里有多个排序/哈希节点，每个都按这个额度算；并发会话再乘一遍 —— 官方文档明确提醒总内存可能是 <code>work_mem</code> 的很多倍。</li>
+<li><strong>MySQL</strong>：<code>join_buffer_size</code> 默认 262144 字节（256KB），哈希连接不能超过这个量。哈希连接是增量分配内存的，调大它比调大块嵌套循环的缓冲更安全。</li>
+</ul>
+<p><mark class="mk-green">调大额度能避免落盘，但不会让 1.5 亿行变少。</mark></p>
+</div>
+    </div><h2 id="分布式还要过一次网络"><span class="num">06</span>分布式：还要过一次网络</h2>
+<p>单机上的账是「读得多、可能落盘」。到了 Spark、Flink、Doris、StarRocks、ClickHouse 这类系统，两侧的数据分散在多个节点上，同一条 <code>user_id</code> 的订单和用户可能根本不在同一台机器。</p>
+<div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;o&quot;,&quot;to&quot;:&quot;s&quot;,&quot;label&quot;:&quot;Shuffle：按 key 重分发&quot;,&quot;labelDx&quot;:-130},{&quot;from&quot;:&quot;u&quot;,&quot;to&quot;:&quot;s&quot;,&quot;label&quot;:&quot;Shuffle：两侧都要搬&quot;,&quot;labelDx&quot;:130},{&quot;from&quot;:&quot;s&quot;,&quot;to&quot;:&quot;n0&quot;},{&quot;from&quot;:&quot;s&quot;,&quot;to&quot;:&quot;n1&quot;},{&quot;from&quot;:&quot;s&quot;,&quot;to&quot;:&quot;n2&quot;},{&quot;from&quot;:&quot;s&quot;,&quot;to&quot;:&quot;n3&quot;},{&quot;from&quot;:&quot;n0&quot;,&quot;to&quot;:&quot;out&quot;},{&quot;from&quot;:&quot;n1&quot;,&quot;to&quot;:&quot;out&quot;},{&quot;from&quot;:&quot;n2&quot;,&quot;to&quot;:&quot;out&quot;},{&quot;from&quot;:&quot;n3&quot;,&quot;to&quot;:&quot;out&quot;}]" style="--flow-marker:url(#fa-2)">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa-2" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-violet" data-id="o">
+              
+              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="8" cy="4.2" rx="5" ry="1.9"/><path d="M3 4.2v7.6c0 1.05 2.24 1.9 5 1.9s5-.85 5-1.9V4.2"/></svg>
+              <b>orders 分片</b>
+              <small>4 台机器，共 1 亿行</small>
+            </div><div class="fnode tone-blue" data-id="u">
+              
+              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="8" cy="4.2" rx="5" ry="1.9"/><path d="M3 4.2v7.6c0 1.05 2.24 1.9 5 1.9s5-.85 5-1.9V4.2"/></svg>
+              <b>users 分片</b>
+              <small>4 台机器，共 5000 万行</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-amber" data-id="s">
+              
+              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M3 5h10M3 8h10M3 11h6"/></svg>
+              <b>按 user_id 哈希重分区</b>
+              <small>相同 key 必须进同一个分区</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="n0">
+              
+              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5L3 8l3 4.5M10 3.5L13 8l-3 4.5"/></svg>
+              <b>节点 A</b>
+              <small>约 1500 万行</small>
+            </div><div class="fnode tone-green" data-id="n1">
+              
+              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5L3 8l3 4.5M10 3.5L13 8l-3 4.5"/></svg>
+              <b>节点 B</b>
+              <small>约 1000 万行</small>
+            </div><div class="fnode tone-red" data-id="n2">
+              
+              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5L3 8l3 4.5M10 3.5L13 8l-3 4.5"/></svg>
+              <b>节点 C</b>
+              <small>约 6500 万行 · 热点</small>
+            </div><div class="fnode tone-green" data-id="n3">
+              
+              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5L3 8l3 4.5M10 3.5L13 8l-3 4.5"/></svg>
+              <b>节点 D</b>
+              <small>约 1000 万行</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="out">
+              
+              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="3" width="11" height="8.5" rx="1.5"/><path d="M2.5 6h11"/></svg>
+              <b>各节点本地 Hash Join</b>
+              <small>再汇总成分片结果</small>
+            </div></div></div>
+      
+    </div><p>这一步叫 Shuffle：按 join key 重新分区，把数据跨节点拷一遍。Spark 文档对它的描述很直白 —— 重新分配数据，通常要在执行器和机器之间拷贝，因此既复杂又昂贵；map 侧先按目标分区写文件，reduce 侧再读对应的块，内存不够还会落盘。</p>
+<p>搬多少数据，取决于表的分布和系统选的策略。Doris 官方文档把四种方式的开销列得很清楚：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>方式</th><th>要搬多少</th><th>什么时候可用</th></tr></thead><tbody><tr><th>Broadcast Join</th><td data-label="要搬多少">N × 右表大小（发给每个参与计算的节点）</td><td data-label="什么时候可用">右表小到能整份广播，通常配合过滤后的小结果集</td></tr><tr><th>Partition Shuffle Join</th><td data-label="要搬多少">左表 + 右表都要搬</td><td data-label="什么时候可用">通用等值 join，两侧都大时的默认选择</td></tr><tr><th>Bucket Shuffle Join</th><td data-label="要搬多少">只搬右表</td><td data-label="什么时候可用">左表本来就按 join 列分桶</td></tr><tr><th>Colocate Join</th><td data-label="要搬多少">0</td><td data-label="什么时候可用">两张表按同一列、同一规则预先落在同一批节点</td></tr></tbody></table></div><p><code>N</code> 是参与计算的实例数（可以理解为节点或分片数）。四种方式对数据分布的要求依次变严，命中时省下的网络也依次变多。</p>
+<h3 id="倾斜最慢的那个节点决定结束时间">倾斜：最慢的那个节点决定结束时间</h3>
+<p>上图的节点 C 分到了约 6500 万行订单（热门 <code>user_id</code> 的订单几乎都落在一个分区），其余三个加起来才 3500 万。即使 A、B、D 早就跑完了，整个任务还是要等 C —— 这就是 join 倾斜。常见来路之一是热门 <code>user_id</code>，比如平台自营账号、测试账号。</p>
+<p>Spark 的自适应执行（AQE，Adaptive Query Execution）会在运行时识别这种分区：分区大小超过 256MB，且大于中位数的 5 倍时，把它拆成更小的任务（必要时复制另一侧的数据）。这类优化默认开启，但它处理的是「已经倾斜」；真正减少数据量还是得靠过滤和预聚合。</p>
+<h2 id="先过滤省了哪几笔没省哪几笔"><span class="num">07</span>先过滤：省了哪几笔，没省哪几笔</h2>
+<p>把条件写上，是很自然的改法：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-sql">SELECT
+    o.order_id,
+    o.user_id,
+    u.user_name,
+    o.amount
+FROM orders o
+JOIN users u
+  ON o.user_id = u.user_id
+WHERE o.pay_time &gt;= CURRENT_DATE - INTERVAL '7 days'
+  AND o.status = 'PAID';
+</code></pre></div>
+<p><code>WHERE</code> 写在 <code>JOIN</code> 后面，但优化器通常会在语义允许时把条件下推到扫描节点（谓词下推）。执行计划里，它显示成扫描节点上的 <code>Filter</code>，而不是 join 之后再补一刀。</p>
+<p>关键在于：<strong>下推让扫描节点少吐出一些行，不等于少读一些页。</strong></p>
+<p>PostgreSQL 官方文档的例子说得很清楚：给 <code>Seq Scan</code> 加一个 <code>WHERE unique1 &lt; 7000</code>，输出行数从 10000 降到 7000，但扫描仍然要访问全部 10000 行，成本没降，反而因为多了一次条件判断略微升高。要真的少读页，得有索引或分区裁剪。</p>
+<p>所以两版查询的账要分开记：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>这一笔</th><th>不带过滤</th><th>只取最近 7 天已支付</th></tr></thead><tbody><tr><th>orders 参与 join 的行</th><td data-label="不带过滤">1 亿</td><td data-label="只取最近 7 天已支付">约 200 万（示意）</td></tr><tr><th>orders 被读的页</th><td data-label="不带过滤">全部</td><td data-label="只取最近 7 天已支付">有 pay_time 的索引或分区才减少；只加 WHERE 仍读全表</td></tr><tr><th>probe 次数</th><td data-label="不带过滤">1 亿</td><td data-label="只取最近 7 天已支付">约 200 万</td></tr><tr><th>输出行数</th><td data-label="不带过滤">约 1 亿</td><td data-label="只取最近 7 天已支付">约 200 万</td></tr><tr><th>users 侧</th><td data-label="不带过滤">扫描 5000 万行建哈希表</td><td data-label="只取最近 7 天已支付">可能仍然是 5000 万行</td></tr><tr><th>后续排序 / 聚合 / 网络</th><td data-label="不带过滤">按 1 亿量级</td><td data-label="只取最近 7 天已支付">按 200 万量级</td></tr></tbody></table></div><div class="callout tone-red">
+      <span class="ic">⚠</span>
+      <div><p><mark class="mk-blue">订单过滤到 200 万行，不代表 users 不会被全扫。</mark></p>
+<p>普通哈希连接仍然要先把 users 整张建成哈希表。订单变少，省下的是 probe 次数、输出行数和后续处理；users 那 5000 万行该读还得读。</p>
+</div>
+    </div><p>想让 users 侧也少读，常见三条路：</p>
+<div class="cards" data-cols="3"><div class="ccard tone-green">
+          <span class="tag tone-green">NLJ</span>
+          <h4>让内层走唯一索引</h4>
+          
+          <div class="cbody"><p>外层只剩 200 万条订单时，改成嵌套循环 + <code>users.user_id</code> 主键查找：查 200 万次，每次几次页访问，只读命中的那些页。
+代价是 200 万次随机 I/O，订单再大就不划算了。</p>
+</div>
+          
+        </div><div class="ccard tone-amber">
+          <span class="tag tone-amber">子查询去重</span>
+          <h4>先从订单提出 user_id 集合</h4>
+          
+          <div class="cbody"><p>先把 7 天订单的 <code>user_id</code> 去重，再去查 users。
+<mark class="mk-blue">是否真省，取决于执行计划</mark>：如果数据库仍选择整表建哈希表，这一步只是多写了几行 SQL。</p>
+</div>
+          
+        </div><div class="ccard tone-violet">
+          <span class="tag tone-violet">执行时才知道</span>
+          <h4>动态过滤 / Bloom Filter</h4>
+          
+          <div class="cbody"><p>先用订单侧的 <code>user_id</code> 造一个过滤器（Doris 叫 Runtime Filter），推到 users 的扫描节点：不在集合里的行直接丢掉。
+Bloom Filter 只能确定「一定不存在」，不能确定「一定存在」，最后还要精确比一次 key。</p>
+</div>
+          
+        </div></div><p>Doris 的 Runtime Filter 文档给了另一种结构：不能静态改写成 <code>IN</code> 列表时（集合是运行时才知道的），在 join 节点收集 key、生成 Bloom Filter、下推到扫描节点，分布式下还要先在 Manager 上合并成全局过滤器。文档里同一个例子：orders 1 亿行、customer 10 万行，先按国家过滤 customer，再让 orders 的扫描用上过滤器。</p>
+<h2 id="为什么有索引也可能不走"><span class="num">08</span>为什么有索引也可能不走</h2>
+<p>「有索引」只说明存在一条可走的路，不说明它便宜。</p>
+<p>PostgreSQL 的成本模型把这件事量化了：<code>seq_page_cost</code> 默认 1.0，<code>random_page_cost</code> 默认 4.0。顺序读一页算 1，随机读一页算 4。走索引取一行，通常要读索引页，再回表读数据页，这些是随机访问；如果查询要碰表里的大部分页，顺序扫一遍整张表反而更便宜。</p>
+<p>文档在同一节里写了两面：回表读行「比顺序读贵得多」，但<strong>当不需要访问整张表的所有页时</strong>，它仍然比全表扫描便宜。决定性的是「要访问的页占多大比例」，不是「有没有索引」。</p>
+<p>MySQL 从 8.0.18 起支持哈希连接。官方博客的说法是：有可用索引时倾向走嵌套循环 + 索引查找；等值连接且没有可用索引时，才用哈希连接。8.4 手册补充了一点：单表谓词上有索引时，哈希连接也照样可能被选中。</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>算法</th><th>它怎么花时间</th><th>适合什么形状</th><th>什么时候反而更贵</th></tr></thead><tbody><tr><th>Nested Loop</th><td data-label="它怎么花时间">外表每行 → 内层查一次索引</td><td data-label="适合什么形状">外表过滤后很小，内层 join 列有高效索引</td><td data-label="什么时候反而更贵">外表仍有上亿行 → 上亿次随机查找，比顺序扫一遍贵</td></tr><tr><th>Hash Join</th><td data-label="它怎么花时间">两侧各扫一遍，build 建表，probe 逐行查</td><td data-label="适合什么形状">等值连接，两侧都大，或 join 列没有合适索引</td><td data-label="什么时候反而更贵">内存装不下 → 分批落盘，成本跳一档</td></tr><tr><th>Merge Join</th><td data-label="它怎么花时间">两侧按 key 排序，再归并</td><td data-label="适合什么形状">两侧已经有序（索引顺序、已排序的中间结果）</td><td data-label="什么时候反而更贵">大表重新排序，同样可能落盘</td></tr></tbody></table></div><p>「小表驱动大表」也不是无条件成立：它的完整版本是「过滤后行数少的一侧做驱动，且被驱动侧的 join 列有可用索引」。驱动表的细节在<a href="../mysql-join-driver/">另一篇</a>里讲透了，这里只需要记住：<mark class="mk-blue">优化器比的是总成本，不是关键字，也不是有没有索引</mark>。</p>
+<h2 id="怎么确认它真的在全量扫"><span class="num">09</span>怎么确认它真的在全量扫</h2>
+<p>不能从 SQL 文本猜。看执行计划，再看实际行数。</p>
+<p>MySQL 的哈希连接，用 <code>EXPLAIN FORMAT=TREE</code> 看结构最清楚；传统 <code>EXPLAIN</code> 只在 <code>Extra</code> 里写一句 <code>Using join buffer (hash join)</code>。</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-sql">EXPLAIN FORMAT=TREE
+SELECT
+    o.order_id,
+    o.user_id,
+    u.user_name,
+    o.amount
+FROM orders o
+JOIN users u
+  ON o.user_id = u.user_id;
+</code></pre></div>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">-&gt; Inner hash join (o.user_id = u.user_id)
+    -&gt; Table scan on o          ← probe 侧：1 亿行
+    -&gt; Hash
+        -&gt; Table scan on u      ← build 侧：5000 万行
+</code></pre></div>
+<p>输出形状是示意的，但结构就是手册里的那种：<code>Hash</code> 下面那一支是 build 侧，另一个子节点是 probe 侧。</p>
+<p>计划里这几个信号分别回答一个问题：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>看到什么</th><th>它在说什么</th><th>下一步看哪里</th></tr></thead><tbody><tr><th>Table scan / Seq Scan 出现在两张表上</th><td data-label="它在说什么">两张表都没走索引，按全量读</td><td data-label="下一步看哪里">过滤条件能不能配索引或分区</td></tr><tr><th>Hash 下面那一支</th><td data-label="它在说什么">哪一侧被建成哈希表（先读的那侧）</td><td data-label="下一步看哪里">这一侧的估算行数是否和实际接近</td></tr><tr><th>rows × filtered</th><td data-label="它在说什么">优化器估算「进入 join 的行数」</td><td data-label="下一步看哪里">和 <code>EXPLAIN ANALYZE</code> 的实际行数差多少</td></tr><tr><th>Using join buffer (hash join)（MySQL）</th><td data-label="它在说什么">传统 EXPLAIN 的 Extra 列，走了哈希连接</td><td data-label="下一步看哪里"><code>join_buffer_size</code> 够不够这侧装下</td></tr><tr><th>partitions=1/14（Doris explain）</th><td data-label="它在说什么">分区裁剪生效，只扫了一部分</td><td data-label="下一步看哪里">过滤条件是否命中分区键</td></tr><tr><th>runtime filters: RF000[bloom]（Doris）</th><td data-label="它在说什么">动态过滤器已下推到扫描节点</td><td data-label="下一步看哪里">看 Profile 里 filtered / input 的比例</td></tr></tbody></table></div><p><code>rows</code> 是估算值，<code>filtered</code> 是表条件过滤后的百分比 —— 两者相乘才是优化器认为参与 join 的行数。估算依赖统计信息，批量写入之后没更新统计，估算可能差几个数量级，驱动侧和算法都跟着选错。</p>
+<div class="callout tone-violet">
+      <span class="ic">🔎</span>
+      <div><p><mark class="mk-blue">看计划要成对看：估算行数 + 实际行数。</mark></p>
+<p>只有估算时，看到的是优化器的想法；加上 <code>ANALYZE</code> 才是这次真跑了多少行。两者差得远，先更新统计信息，再谈调参数。</p>
+</div>
+    </div><h2 id="能改的六件事"><span class="num">10</span>能改的六件事</h2>
+<p>按「先改数据，再改计划，最后改参数」的顺序排：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>做法</th><th>它省掉哪一笔</th><th>什么情况下不奏效</th></tr></thead><tbody><tr><th>先过滤（日期、状态、业务范围）</th><td data-label="它省掉哪一笔">参与 join 的行、probe 次数、输出、网络</td><td data-label="什么情况下不奏效">过滤列没有索引或分区时，表照样整张读</td></tr><tr><th>只取需要的列</th><td data-label="它省掉哪一笔">每行宽度、哈希表大小、传输量</td><td data-label="什么情况下不奏效">大字段本身要参与过滤时躲不开</td></tr><tr><th>先按 join key 聚合再 join</th><td data-label="它省掉哪一笔">一对多相乘、重复求和</td><td data-label="什么情况下不奏效">聚合要先把子表扫一遍；但这一遍是固定的</td></tr><tr><th>给 join 列和过滤列建索引 / 分区</th><td data-label="它省掉哪一笔">实际读的页数</td><td data-label="什么情况下不奏效">选择性差（要读大部分页）时优化器仍选全扫</td></tr><tr><th>看清基数关系（1:1 / 1:N / N:N）</th><td data-label="它省掉哪一笔">对输出行数的预期</td><td data-label="什么情况下不奏效">统计信息过期时估不准</td></tr><tr><th>小表驱动 / 广播小表</th><td data-label="它省掉哪一笔">扫描次数、Shuffle 数据量</td><td data-label="什么情况下不奏效">两侧都大时没有小表可广播</td></tr></tbody></table></div><p>参数（<code>work_mem</code>、<code>join_buffer_size</code>）排在最后，因为它只影响「装不装得下」，不减少要处理的行。把 1 亿行塞进内存，它还是 1 亿行。</p>
+<p>这篇只回答一个问题：为什么「没筛就关联」既慢又容易算错，以及慢在机器的哪一层。相邻的三篇：</p>
+<ul>
+<li><a href="../sql-join-six-types/">JOIN 的六种语义</a>：哪些行被保留</li>
+<li><a href="../mysql-join-driver/">JOIN 的执行：驱动表与连接算法</a>：谁先读、内层怎么找</li>
+<li><a href="../wide-table-split-semantics/">宽表拆分里的 Join 与列分布</a>：分桶、colocate 与分布</li>
+<li><a href="../mysql-sql-execution-flow/">一条 SQL 的执行流程</a>：从解析、优化到执行器</li>
+</ul>
+<div class="summary">
+      <h3 id="一句话">一句话</h3>
+      <p>全量 join 的代价不是某一个算子造成的，是<strong>行数在每一层被重新走了一遍</strong>：读页、建表、探测、输出、Shuffle。
+先让参与配对的行变小，再谈算法和参数。</p>
+
+    </div><div class="pq tone-violet">
+      <button class="pq-open" type="button" data-pq-open="pq-1" aria-haspopup="dialog" aria-controls="pq-1">
+        <span class="pq-ic" aria-hidden="true">▤</span>
+        <span class="pq-txt"><b>这次的问答原文</b><span class="pq-sub">第一轮问答 · 摘录</span></span>
+        <span class="pq-hint">点开阅读 →</span>
+      </button>
+      <dialog class="pq-dialog" id="pq-1" aria-labelledby="pq-1-t">
+        <div class="pq-panel" tabindex="-1">
+          <div class="pq-head">
+            <div class="pq-ht"><b id="pq-1-t">这次的问答原文</b><span class="pq-sub">第一轮问答 · 摘录</span></div>
+            <button class="pq-close" type="button" data-pq-close aria-label="关闭">✕</button>
+          </div>
+          <p class="pq-note">原文摘录：保留结论、例子与数字，重复的展开段落做了压缩。原文里两处 [6] [7] 引用标记没有对应的可访问来源，正文只采用能核对到官方文档的部分。</p>
+          <div class="pq-body"><h4>问</h4>
+<p>什么是大表全量 join，举例子。</p>
+<h4>答</h4>
+<p><strong>大表全量 Join</strong> 通常不是指 SQL 里的 <code>FULL OUTER JOIN</code>，而是指：</p>
+<blockquote>
+<p>两张（或多张）数据量很大的表，在没有充分过滤、裁剪字段或预聚合的情况下，直接把大量甚至全部数据拿来做关联。</p>
+</blockquote>
+<p>这会造成大量扫描、网络 Shuffle、内存/磁盘消耗，查询很慢；如果关联关系是一对多或多对多，还可能造成行数急剧膨胀。</p>
+<h5>例子 1：两张大表不加条件直接关联</h5>
+<p>假设 <code>orders</code> 1 亿行、<code>users</code> 5000 万行，直接按 <code>user_id</code> 关联。如果不加时间、状态等过滤条件，数据库可能需要扫描 <code>orders</code> 的 1 亿行、扫描 <code>users</code> 的 5000 万行、根据 <code>user_id</code> 对两张大表进行匹配、排序或 Hash 分布，并生成大量关联结果。</p>
+<p>如果你其实只需要「最近 7 天已支付订单」，却没有提前过滤，就白白关联了大量历史订单和无效数据。核心思想是<strong>先过滤，再 Join</strong>。</p>
+<h5>例子 2：订单明细和支付记录直接 Join，导致数据膨胀</h5>
+<p>一个订单有多条商品明细，也可能有多条支付记录。订单 <code>1001</code> 有两条明细（100、200）和两笔支付（150、150）。直接 join 再 <code>GROUP BY</code> 聚合，2 行 × 2 行会变成 4 行：</p>
+<pre><code class="language-text">商品金额：100 + 100 + 200 + 200 = 600   -- 实际应为 300
+支付金额：150 + 150 + 150 + 150 = 600   -- 实际应为 300
+</code></pre>
+<p>正确做法是先把两张子表分别按 <code>order_id</code> 聚合，再与订单主表 join。</p>
+<h5>常见优化原则</h5>
+<ol>
+<li>先过滤，再 Join</li>
+<li>只取需要的字段，避免 <code>SELECT *</code></li>
+<li>先聚合，再 Join</li>
+<li>给关联字段建索引 / 分区</li>
+<li>注意 Join 的基数关系：一对一、一对多、多对多</li>
+<li>小表驱动大表</li>
+</ol>
+</div>
+        </div>
+      </dialog>
+    </div><div class="quiz"><details>
+        <summary>「大表全量 join」和 FULL OUTER JOIN 是一回事吗？</summary>
+        <div class="a"><p>不是。FULL OUTER JOIN 决定「配不上的行留不留」；全量 join 说的是「参与配对的行没有被先筛小」。
+一句 INNER JOIN 完全可以全量，一句 LEFT JOIN 也可能只碰几十行。</p>
+</div>
+      </details><details>
+        <summary>两张一对多的表直接 join 再 SUM，为什么会翻倍？加 DISTINCT 行不行？</summary>
+        <div class="a"><p>2 条明细 × 2 笔支付 = 4 行，每条明细和每笔支付都被复制了一遍，SUM 把同一笔金额累加了两次。
+SUM(DISTINCT) 也不行：它会把金额相同的两条明细算成一条。正确做法是每张子表先按 join key 聚合到一行，再 join 主表。</p>
+</div>
+      </details><details>
+        <summary>orders 加了「最近 7 天」的条件，users 还会被全扫吗？为什么有索引也可能不走？</summary>
+        <div class="a"><p>可能。普通哈希连接仍然要先把 users 整张建成哈希表；订单变少省的是 probe 次数、输出和后续处理。
+有索引也可能不走，是因为优化器比总成本：走索引要随机读索引页再回表，随机 I/O 单价高于顺序读
+（PostgreSQL 默认 seq_page_cost 1.0、random_page_cost 4.0）；要碰表里大部分页时，顺序扫一遍更便宜。</p>
+</div>
+      </details></div>
+
+    <footer>
+      <span>大表全量 JOIN：两个上亿的表直接配对，底下发生了什么</span>
+      <span>最后更新 2026-10-28 · 单文件可离线打开</span>
+    </footer>
+  </main>
+</div>
+
+<script src="../../assets/app.js?v=66ab62f04a"></script>
+</body>
+</html>
