@@ -1,0 +1,1194 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-has-toc="1">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>取指令和取数据，为什么是两条通道</title>
+<meta name="description" content="一条 x = x + 1 要分别在指令页取 6 个字节、在数据页读 4 个字节：两套 TLB、两个 L1、两次翻译，只有 L2 往下才共用。「翻译」这个词在编译、地址翻译、指令解码三处指三件事，混着用就会卡在「已经是汇编了还翻什么」。" />
+<link rel="stylesheet" href="../../assets/theme.css?v=19aa345f51" />
+  <link rel="stylesheet" href="../../assets/blocks.css?v=8698f15115" />
+  <link rel="stylesheet" href="../../assets/archify-embed.css?v=68fec0b81b" />
+</head>
+<body>
+<div id="progress"></div>
+<div id="tocScrim"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
+    <a class="brand" href="../../index.html"><span class="dot"></span>知识笔记</a>
+    
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="toc" id="toc">
+      <p class="toc-title">目录</p>
+      <a href="../../index.html" class="sub">← 全部笔记</a>
+      <a href="#这次的问答原文">这次的问答原文</a>
+      <a href="#三件不同的事都叫翻译">三件不同的事，都叫「翻译」</a>
+      <a href="#一条-x-x-1-的两个地址">一条 x = x + 1 的两个地址</a>
+      <a href="#整体图两条通道">整体图：两条通道</a>
+      <a href="#把两条通道走一遍">把两条通道走一遍</a>
+      <a href="#指令里到底有没有-x-的地址">指令里到底有没有 x 的地址</a>
+      <a href="#你的-gap五层按顺序补">你的 gap：五层，按顺序补</a>
+      <a href="#速查与自测">速查与自测</a>
+      <a href="#一句话" class="sub">一句话</a>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow">● 计算机基础 · 函数调用 ⑤</span>
+      <h1>取指令和取数据，为什么是两条通道</h1>
+      <p class="lede">一条 x = x + 1 要分别在指令页取 6 个字节、在数据页读 4 个字节：两套 TLB、两个 L1、两次翻译，只有 L2 往下才共用。「翻译」这个词在编译、地址翻译、指令解码三处指三件事，混着用就会卡在「已经是汇编了还翻什么」。</p>
+    </div>
+
+<aside class="needs">
+      <p class="needs-title">读这篇之前，你需要先知道</p>
+      <a class="need" href="../instruction-pointer/">← <b>4. RIP：CPU 怎么记住「下一条」</b><span>为什么 RIP 指下一条、指令长度不等所以不是等步长、谁在改它、为什么 mov rip 不存在、RIP 相对寻址怎么撑起 PIE</span></a>
+    </aside>
+    <div class="provenance"><span><b>来源</b> Intel 白皮书《TLBs, Paging-Structure Caches, and Their Invalidation》(317080-002) —— 原话：paging 适用于所有使用线性地址的访问，「includes instruction fetches and ordinary data accesses」；IA-32e 下 48 位线性地址 → 52 位物理地址，bits 47:12 是 4-KByte 页号，bits 11:0 是页内偏移 https://kib.kiev.ua/x86docs/Intel/WhitePapers/317080-002.pdf · OSTEP 第 19 章《Paging: Faster Translations (TLBs)》—— TLB 是地址翻译缓存；「Going to memory for translation information before every instruction fetch or explicit load or store is prohibitively slow」；TLB 命中/未命中与回填页表的控制流 https://pages.cs.wisc.edu/~remzi/OSTEP/vm-tlbs.pdf · Intel SDM Vol 3A（第 4 章分页、4.10 节翻译缓存）https://www.intel.com/content/www/us/en/developer/articles/technical/intel-sdm.html · Intel SDM Vol 2A §2.3.11 Instruction Length —— x86 指令长度上限 15 字节（本机实测到的 3、5、6 字节都在这个范围内） · felixcloutier 镜像的 MOV 指令页 —— `8B /r` 是 ModRM:r/m 形式的内存读到寄存器；`B8+rd id` 是立即数进寄存器 https://www.felixcloutier.com/x86/mov · Wikipedia《CPU cache》——「Most CPUs have a hierarchy of multiple cache levels (L1, L2, often L3 …), with separate instruction-specific (I-cache) and data-specific (D-cache) caches at level 1」；写回策略与 dirty 行的定义 https://en.wikipedia.org/wiki/CPU_cache · Wikipedia《Translation lookaside buffer》—— TLB 是虚拟地址到物理地址的缓存；「Some processors have different instruction and data address TLBs」；物理索引的缓存每次访问都要先查 TLB https://en.wikipedia.org/wiki/Translation_lookaside_buffer · cppreference《As-if rule》—— 编译器可以做任何不改变可观察行为的变换 https://en.cppreference.com/w/c/language/as_if.html · Arm《ADRP — Address of 4KB Page》—— AArch64 没有 RIP，用 adrp 取 4 KiB 页地址再配合偏移（本机 arm64 反汇编就是 adrp + ldr/str）https://developer.arm.com/documentation/ddi0602/2024-12/Base-Instructions/ADRP--Address-of-4KB-Page- · 本机实测（macOS 26.6.1 · Apple M4 · Apple clang 21）：clang -O0 / -O2 的 x86_64 与 arm64 反汇编与字节（8b 05 e6 1a 00 00 / 8b 45 fc / ff 05 e6 1a 00 00 / b8 0b 00 00 00）、符号地址与位移对账（0x51a + 0x1ae6 = 0x100002000）、两次运行的 ASLR 平移（&amp;x 0x100a05000 → 0x104905000）、sysctl hw.pagesize=16384 与 hw.cachelinesize=128 · 仓库内前置笔记：notes/instruction-pointer（RIP 与 RIP 相对寻址）、notes/frame-pointer（RBP 相对寻址）、notes/stack-call-return（栈上的地址）、notes/two-spaces（进程的地址空间）</span><span><b>生成</b> 2026-10-29</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">指令</span> <span class="tag tone-muted">TLB</span> <span class="tag tone-muted">Cache</span> <span class="tag tone-muted">虚拟地址</span> <span class="tag tone-muted">汇编</span></span></div>
+
+<h2 id="这次的问答原文"><span class="num">00</span>这次的问答原文</h2>
+<div class="pq tone-violet">
+      <button class="pq-open" type="button" data-pq-open="pq-1" aria-haspopup="dialog" aria-controls="pq-1">
+        <span class="pq-ic" aria-hidden="true">▤</span>
+        <span class="pq-txt"><b>这次讨论的原文</b><span class="pq-sub">一问一答 · 约 1.1 万字</span></span>
+        <span class="pq-hint">点开阅读 →</span>
+      </button>
+      <dialog class="pq-dialog" id="pq-1" aria-labelledby="pq-1-t">
+        <div class="pq-panel" tabindex="-1">
+          <div class="pq-head">
+            <div class="pq-ht"><b id="pq-1-t">这次讨论的原文</b><span class="pq-sub">一问一答 · 约 1.1 万字</span></div>
+            <button class="pq-close" type="button" data-pq-close aria-label="关闭">✕</button>
+          </div>
+          <p class="pq-note">原文照录；只把标题降了级，避免打乱本页目录。</p>
+          <div class="pq-body"><h4>问</h4>
+<blockquote>
+<ol>
+<li>PC/RIP 指出指令的虚拟地址</li>
+<li>iTLB 翻译指令地址</li>
+<li>L1 I-Cache 取得指令</li>
+<li>CPU 解码指令</li>
+<li>dTLB 翻译变量 x 的地址</li>
+<li>L1 D-Cache 查找 x</li>
+<li>如果 L1 没有，继续查 L2</li>
+<li>L2 没有，继续查 L3</li>
+<li>L3 也没有，才访问 RAM</li>
+<li>将 x 放入寄存器</li>
+<li>ALU 执行 x + 1</li>
+<li>结果先保存在寄存器和 Cache 中</li>
+<li>之后再按规则写回内存</li>
+</ol>
+<p>上面步骤中，指令是什么，拿到指令为什么还需要翻译，不是已经是汇编语言了吗，指令的地址上没有 x 变量的值吗，为什么还要去找 x。</p>
+<p>我看这个非常迷糊，我的知识 gap 是什么，帮忙指点迷津。</p>
+</blockquote>
+<h4>答</h4>
+<p>你迷糊的核心原因，是把三种不同的「翻译」以及「指令」和「数据」混在一起了：</p>
+<ol>
+<li><strong>编译/汇编</strong>：C 代码、汇编文本 → 机器码</li>
+<li><strong>地址翻译</strong>：虚拟地址 → 物理地址</li>
+<li><strong>指令解码</strong>：机器码 → CPU 内部操作</li>
+</ol>
+<p>它们是完全不同的事情。</p>
+<h5>一、这里说的「指令」到底是什么</h5>
+<p>假设源代码是：</p>
+<pre><code class="language-c">int x = 10;
+
+void f() {
+    x = x + 1;
+}
+</code></pre>
+<p>它可能被编译成类似的汇编：</p>
+<pre><code class="language-asm">mov eax, DWORD PTR [rip + x]   ; 读取 x
+add eax, 1                     ; 加 1
+mov DWORD PTR [rip + x], eax   ; 写回 x
+</code></pre>
+<p>但 CPU 实际取到的不是这些文本，而是类似这样的二进制机器码：</p>
+<pre><code class="language-text">8B 05 FA 2F 00 00
+83 C0 01
+89 05 F1 2F 00 00
+</code></pre>
+<p><code>mov eax, ...</code> 只是人类为了方便阅读，对机器码的文字表示。</p>
+<p>所以：</p>
+<ul>
+<li>汇编语言是给人看的</li>
+<li>机器码字节是 CPU 实际执行的</li>
+<li>CPU 从内存中取的是机器码，不是 <code>&quot;mov eax, ...&quot;</code> 这串文字</li>
+</ul>
+<h5>二、PC/RIP 指向的是什么</h5>
+<p>PC/RIP 是一个寄存器，里面保存着：</p>
+<blockquote>
+<p>下一条要执行的机器指令所在的虚拟地址。</p>
+</blockquote>
+<p>例如：</p>
+<pre><code class="language-text">RIP = 0x400100
+</code></pre>
+<p>意思是：</p>
+<blockquote>
+<p>去当前进程的虚拟地址 <code>0x400100</code> 取机器码。</p>
+</blockquote>
+<p>假设那里存放：</p>
+<pre><code class="language-text">8B 05 FA 2F 00 00
+</code></pre>
+<p>CPU 取到这些字节，然后解码，才知道它表示：</p>
+<pre><code class="language-asm">mov eax, DWORD PTR [rip + x]
+</code></pre>
+<p>因此，RIP 不是指令本身，它只是指令所在位置的地址。</p>
+<h5>三、「拿到指令为什么还需要翻译」</h5>
+<p>这里的「翻译」有歧义。</p>
+<p>实际顺序是：</p>
+<pre><code class="language-text">RIP 中有指令的虚拟地址
+        ↓
+iTLB 把虚拟地址翻译成物理地址
+        ↓
+根据物理地址，从 Cache/RAM 取到机器码
+        ↓
+CPU 解码机器码
+</code></pre>
+<p>也就是说，<strong>地址翻译发生在真正取到指令之前</strong>。</p>
+<h6>iTLB 翻译的不是汇编语言</h6>
+<p>iTLB 做的是：</p>
+<pre><code class="language-text">指令虚拟地址 → 指令物理地址
+</code></pre>
+<p>例如：</p>
+<pre><code class="language-text">虚拟地址 0x400100
+        ↓ iTLB
+物理地址 0x18A32100
+</code></pre>
+<p>然后 CPU 才能去 Cache 或 RAM 中找对应的机器码。</p>
+<p>iTLB 不会把：</p>
+<pre><code class="language-asm">mov eax, [x]
+</code></pre>
+<p>翻译成机器码，那是汇编器的工作。</p>
+<h5>四、为什么使用虚拟地址</h5>
+<p>现代操作系统给每个进程提供独立的虚拟地址空间。</p>
+<p>两个程序都可能认为自己在使用：</p>
+<pre><code class="language-text">0x400100
+</code></pre>
+<p>但它们映射到不同的物理内存：</p>
+<pre><code class="language-text">进程 A 的 0x400100 → 物理地址 0x10000100
+进程 B 的 0x400100 → 物理地址 0x28700100
+</code></pre>
+<p>所以 RIP 中通常保存的是虚拟地址，需要经过：</p>
+<pre><code class="language-text">虚拟地址 → 页表/TLB → 物理地址
+</code></pre>
+<p>CPU 才能访问真实的 Cache 和内存。</p>
+<h5>五、为什么指令地址上没有 x 的值</h5>
+<p>因为<strong>指令和变量是两个不同的东西，通常位于不同地址</strong>。</p>
+<p>可以把内存大致想象成：</p>
+<pre><code class="language-text">虚拟地址空间：
+
+0x400100：mov eax, [rip + x] 的机器码
+0x400106：add eax, 1 的机器码
+0x400109：mov [rip + x], eax 的机器码
+
+...
+
+0x403100：变量 x 的值，例如 10
+</code></pre>
+<p>RIP 指向 <code>0x400100</code>，那里保存的是「如何操作」的机器指令。</p>
+<p>变量 <code>x</code> 位于 <code>0x403100</code>，那里保存的才是值 <code>10</code>。</p>
+<p>可以类比成：</p>
+<ul>
+<li>指令：菜谱，「去冰箱拿鸡蛋」</li>
+<li>x：冰箱里的鸡蛋</li>
+<li>指令地址：菜谱放在哪里</li>
+<li>x 的地址：鸡蛋放在哪里</li>
+</ul>
+<p>菜谱里会告诉你怎么找到鸡蛋，但菜谱本身通常不包含那颗鸡蛋。</p>
+<h5>六、指令里到底有没有 x 的地址</h5>
+<p>有时有，但通常不一定是完整地址，而是某种「地址计算方式」。</p>
+<h6>1. RIP 相对寻址</h6>
+<p>例如：</p>
+<pre><code class="language-asm">mov eax, [rip + 0x2FFA]
+</code></pre>
+<p>意思是：</p>
+<pre><code class="language-text">x 的虚拟地址 = 下一条指令的 RIP + 0x2FFA
+</code></pre>
+<p>指令中保存的是偏移量，而不是 x 的值。</p>
+<h6>2. 栈变量</h6>
+<p>例如：</p>
+<pre><code class="language-c">void f() {
+    int x = 10;
+    x++;
+}
+</code></pre>
+<p>可能变成：</p>
+<pre><code class="language-asm">mov eax, [rbp - 4]
+add eax, 1
+mov [rbp - 4], eax
+</code></pre>
+<p>这里 x 的地址是：</p>
+<pre><code class="language-text">RBP - 4
+</code></pre>
+<p>指令中只有 <code>-4</code> 这个偏移量，基础地址在 RBP 寄存器里。</p>
+<h6>3. 堆上的变量</h6>
+<p>例如：</p>
+<pre><code class="language-c">int *p = malloc(sizeof(int));
+*p = *p + 1;
+</code></pre>
+<p>可能是：</p>
+<pre><code class="language-asm">mov eax, [rdi]
+add eax, 1
+mov [rdi], eax
+</code></pre>
+<p>x 的地址已经保存在 <code>rdi</code> 这样的寄存器中。</p>
+<h6>4. 立即数</h6>
+<p>有些数值可以直接放在指令里：</p>
+<pre><code class="language-asm">mov eax, 10
+add eax, 1
+</code></pre>
+<p>这里的 <code>10</code> 和 <code>1</code> 是立即数，确实编码在指令内部，不需要去内存寻找。</p>
+<p>但普通变量的值可能随时变化，所以一般不能直接永久写在指令里。</p>
+<h5>七、为什么取到指令后还要去找 x</h5>
+<p>因为指令只描述「要做什么」，变量保存「要处理的数据」。</p>
+<p>例如 CPU 解码出：</p>
+<pre><code class="language-asm">mov eax, [rip + x]
+</code></pre>
+<p>它只知道：</p>
+<blockquote>
+<p>计算 x 的虚拟地址，然后从那里读取 4 个字节放入 EAX。</p>
+</blockquote>
+<p>接下来 CPU 才会：</p>
+<pre><code class="language-text">1. 地址生成单元计算 x 的虚拟地址
+2. dTLB 将 x 的虚拟地址翻译为物理地址
+3. 查询 L1 D-Cache
+4. 未命中则查询 L2、L3、RAM
+5. 得到 x 的值
+6. 把值放入寄存器
+</code></pre>
+<p>注意两种访问是分开的：</p>
+<table>
+<thead>
+<tr>
+<th>访问类型</th>
+<th>内容</th>
+<th>使用的 TLB/Cache</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>取指令</td>
+<td>获取机器码</td>
+<td>iTLB、L1 I-Cache</td>
+</tr>
+<tr>
+<td>读取 x</td>
+<td>获取变量值</td>
+<td>dTLB、L1 D-Cache</td>
+</tr>
+</tbody>
+</table>
+<p>这也是为什么很多 CPU 把一级缓存分成：</p>
+<ul>
+<li>L1 I-Cache：Instruction Cache，指令缓存</li>
+<li>L1 D-Cache：Data Cache，数据缓存</li>
+</ul>
+<h5>八、把整个过程重新串起来</h5>
+<p>假设 CPU 执行：</p>
+<pre><code class="language-asm">mov eax, [rip + x]
+add eax, 1
+mov [rip + x], eax
+</code></pre>
+<h6>第一阶段：取指令</h6>
+<pre><code class="language-text">RIP 保存指令虚拟地址
+        ↓
+iTLB：指令虚拟地址 → 物理地址
+        ↓
+L1 I-Cache 查找机器码
+        ↓
+未命中则去 L2/L3/RAM
+        ↓
+取回机器码
+</code></pre>
+<h6>第二阶段：解码</h6>
+<p>CPU 将机器码解码为内部操作，例如：</p>
+<pre><code class="language-text">计算 x 的地址
+读取 x
+加 1
+写回 x
+</code></pre>
+<p>现代 CPU 还可能把一条复杂机器指令拆成多个微操作（µops）。</p>
+<h6>第三阶段：读取 x</h6>
+<pre><code class="language-text">根据 RIP 和指令中的偏移量计算 x 的虚拟地址
+        ↓
+dTLB：x 的虚拟地址 → 物理地址
+        ↓
+查询 L1 D-Cache
+        ↓
+没有则查询 L2、L3、RAM
+        ↓
+得到 x 的值
+</code></pre>
+<h6>第四阶段：计算</h6>
+<pre><code class="language-text">x 的值进入寄存器
+        ↓
+ALU 执行 x + 1
+        ↓
+结果进入寄存器
+</code></pre>
+<h6>第五阶段：写回 x</h6>
+<p>必须有一条 store 操作，例如：</p>
+<pre><code class="language-asm">mov [rip + x], eax
+</code></pre>
+<p>结果通常先进入：</p>
+<pre><code class="language-text">Store Buffer → L1 D-Cache
+</code></pre>
+<p>采用写回缓存时，对应 Cache Line 会被标记为 dirty，之后可能在缓存行被替换时写回更低层缓存或 RAM。</p>
+<h5>九、你原来的步骤有哪些需要修正</h5>
+<p>你的整体理解方向是对的，但有几个重要细节。</p>
+<h6>1. 指令取值也可能发生 Cache Miss</h6>
+<p>不只是变量 x 会查 L1/L2/L3/RAM，指令也一样：</p>
+<pre><code class="language-text">L1 I-Cache → L2 → L3 → RAM
+</code></pre>
+<h6>2. iTLB 不翻译指令内容</h6>
+<p>它只翻译：</p>
+<pre><code class="language-text">指令虚拟地址 → 物理地址
+</code></pre>
+<h6>3. dTLB 也不查找 x 的值</h6>
+<p>它只翻译：</p>
+<pre><code class="language-text">x 的虚拟地址 → 物理地址
+</code></pre>
+<p>真正的值由 Cache/RAM 提供。</p>
+<h6>4. 结果不会自动从寄存器写到 Cache</h6>
+<p>必须执行 store 指令，例如：</p>
+<pre><code class="language-asm">mov [x], eax
+</code></pre>
+<p>如果编译器认为 x 只需要保存在寄存器中，甚至可能根本不写内存。</p>
+<h6>5. 这些步骤不一定严格串行</h6>
+<p>现代 CPU 会：</p>
+<ul>
+<li>流水线执行</li>
+<li>乱序执行</li>
+<li>同时处理多条指令</li>
+<li>提前取指</li>
+<li>分支预测</li>
+<li>推测执行</li>
+<li>并行查询 TLB 和 Cache</li>
+</ul>
+<p>你列出的步骤适合作为逻辑模型，但不是精确的时序图。</p>
+<h5>十、编译器可能让整个过程完全不同</h5>
+<p>例如：</p>
+<pre><code class="language-c">int f() {
+    int x = 10;
+    return x + 1;
+}
+</code></pre>
+<p>优化后可能直接变成：</p>
+<pre><code class="language-asm">mov eax, 11
+ret
+</code></pre>
+<p>此时：</p>
+<ul>
+<li>没有从内存读取 x</li>
+<li>没有 dTLB 查询</li>
+<li>没有 D-Cache 查询</li>
+<li>甚至没有真正执行加法</li>
+</ul>
+<p>因为编译器已经知道结果是 11。</p>
+<p>再比如循环变量可能始终保存在寄存器中：</p>
+<pre><code class="language-asm">add eax, 1
+</code></pre>
+<p>这也不需要访问内存。</p>
+<p>所以你列出的步骤只适用于：</p>
+<blockquote>
+<p>x 确实位于内存中，并且编译后的指令确实需要读取和写回它。</p>
+</blockquote>
+<h5>十一、你的知识 gap 主要在哪里</h5>
+<p>建议重点补齐下面几块。</p>
+<h6>1. 编译过程</h6>
+<p>理解：</p>
+<pre><code class="language-text">C/C++ 源代码
+    ↓ 编译器
+汇编代码
+    ↓ 汇编器
+目标文件/机器码
+    ↓ 链接器
+可执行文件
+</code></pre>
+<p>关键点：CPU 执行机器码，不执行 C 代码或汇编文本。</p>
+<h6>2. ISA 与机器指令</h6>
+<p>需要了解：</p>
+<ul>
+<li>操作码 opcode</li>
+<li>寄存器</li>
+<li>立即数</li>
+<li>内存操作数</li>
+<li>寻址方式</li>
+<li>load/store</li>
+<li>指令编码</li>
+</ul>
+<h6>3. 进程的虚拟地址空间</h6>
+<p>理解典型布局：</p>
+<pre><code class="language-text">.text   ：机器指令
+.rodata ：只读数据
+.data   ：已初始化全局变量
+.bss    ：未初始化/零初始化全局变量
+heap    ：动态分配
+stack   ：局部变量、调用帧
+</code></pre>
+<h6>4. 虚拟内存与 TLB</h6>
+<p>理解：</p>
+<pre><code class="language-text">虚拟地址
+  ↓
+页号 + 页内偏移
+  ↓
+TLB / 页表
+  ↓
+物理地址
+</code></pre>
+<h6>5. Cache 层次结构</h6>
+<p>理解：</p>
+<pre><code class="language-text">寄存器
+L1 Cache
+L2 Cache
+L3 Cache
+RAM
+磁盘（缺页时）
+</code></pre>
+<p>以及 Cache Line、命中、未命中、写回等概念。</p>
+<h6>6. 编译器优化与 CPU 微架构</h6>
+<p>最后再学习：</p>
+<ul>
+<li>流水线</li>
+<li>乱序执行</li>
+<li>分支预测</li>
+<li>Store Buffer</li>
+<li>预取</li>
+<li>微操作</li>
+<li>Cache 一致性</li>
+</ul>
+<h5>十二、推荐的学习顺序</h5>
+<p>不要一开始就把 TLB、Cache、流水线全部揉在一起。按下面顺序会清晰很多：</p>
+<ol>
+<li><strong>变量、指针、内存地址</strong></li>
+<li><strong>寄存器和基础汇编</strong></li>
+<li><strong>C 代码如何编译成汇编</strong></li>
+<li><strong>机器指令的编码与解码</strong></li>
+<li><strong>进程虚拟地址空间</strong></li>
+<li><strong>页表和 TLB</strong></li>
+<li><strong>Cache 层次结构</strong></li>
+<li><strong>流水线和乱序执行</strong></li>
+</ol>
+<p>最关键的一句话是：</p>
+<blockquote>
+<p>RIP 指向的是「指令在哪里」；指令描述「如何找到并处理 x」；x 的地址指向「数据在哪里」。指令和数据是两个独立的内存对象，访问它们通常需要两次独立的地址翻译和缓存查询。</p>
+</blockquote>
+</div>
+        </div>
+      </dialog>
+    </div><p>那张 13 步的表，方向是对的。它读起来别扭，是因为表里同时有两件事在发生：<strong>取指令</strong>和<strong>取数据</strong>。这两件事各做一次地址翻译、各查一次 L1，只是共用更下层的缓存和内存。拆开以后，你问的四个问题都能落到具体位置。</p>
+<h2 id="三件不同的事都叫翻译"><span class="num">01</span>三件不同的事，都叫「翻译」</h2>
+<table>
+<thead>
+<tr>
+<th>谁在做</th>
+<th>输入</th>
+<th>输出</th>
+<th>什么时候发生</th>
+<th>对应你表里的第几步</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>编译器 + 汇编器 + 链接器</td>
+<td>C 源码文本</td>
+<td>汇编文本，然后变成机器码字节</td>
+<td>编译那一次</td>
+<td>表里没有这一步</td>
+</tr>
+<tr>
+<td>MMU（里面的 iTLB / dTLB）</td>
+<td>一个虚拟地址</td>
+<td>一个物理地址</td>
+<td>每一次访问内存，运行时</td>
+<td>第 2 步、第 5 步</td>
+</tr>
+<tr>
+<td>解码器</td>
+<td>机器码字节</td>
+<td>CPU 内部的操作（µops）</td>
+<td>每一条指令执行时</td>
+<td>第 4 步，但它不算「翻译」</td>
+</tr>
+</tbody>
+</table>
+<p>三种都发生在不同的时间点：编译期一次、每次访问内存一次、每条指令一次。混在一起看，就会出现「已经是汇编了，为什么还要翻译」这种卡住的地方。</p>
+<p><mark class="mk-blue">CPU 从来没有见过汇编文本。</mark> 汇编是写给人看的，汇编器把它变成字节；内存里躺着的是字节，<code>RIP</code> 指的也是字节数组里的某个位置。</p>
+<div class="callout tone-amber">
+      <span class="ic">🔤</span>
+      <div><p><code>movl 0x1ae6(%rip),%eax</code> 这一行是反汇编器<strong>从字节反推出来</strong>的显示结果。</p>
+<p>同一条指令，机器码只有 6 个字节：<code>8b 05 e6 1a 00 00</code>。
+<mark class="mk-green">CPU 读到的是这 6 个字节 —— 它没有「汇编语言」这个概念。</mark></p>
+</div>
+    </div><h2 id="一条-x-x-1-的两个地址"><span class="num">02</span>一条 x = x + 1 的两个地址</h2>
+<p>先看这台机器上真编出来的东西。源码是一行 <code>x = x + 1</code>，<code>x</code> 是全局变量：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-c">int x = 10;
+void f(void) { x = x + 1; }
+</code></pre></div>
+<p><code>clang -O0 --target=x86_64-apple-darwin</code> 编出来，再用 <code>llvm-objdump</code> 反汇编，地址和字节是这样：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">0000000100000510 &lt;_f&gt;:
+100000510: 55                     pushq  %rbp
+100000511: 48 89 e5               movq   %rsp, %rbp
+100000514: 8b 05 e6 1a 00 00      movl   0x1ae6(%rip), %eax    ## 0x100002000 &lt;_x&gt;
+10000051a: 83 c0 01               addl   $0x1, %eax
+10000051d: 89 05 dd 1a 00 00      movl   %eax, 0x1add(%rip)    ## 0x100002000 &lt;_x&gt;
+100000523: 5d                     popq   %rbp
+100000524: c3                     retq
+</code></pre></div>
+<p>符号表里 <code>_x</code> 在 <code>0x100002000</code>。两个地址对一下：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">读取：下一条指令 0x10000051a + 位移 0x1ae6 = 0x100002000  ✓
+写回：下一条指令 0x100000523 + 位移 0x1add = 0x100002000  ✓
+</code></pre></div>
+<p><mark class="mk-blue">同一个 x，两条指令里的位移不一样</mark>（<code>0x1ae6</code> 和 <code>0x1add</code>），因为位移的基准是「各自的下一条指令」。位移不是地址，它只是一段要加到基准上的距离。</p>
+<figure class="memmap" data-memmap>
+      <figcaption class="mm-title">这两个东西，住在虚拟地址空间的两个不同页里<span class="mm-cap-sub">本机 clang -O0 编出的 x86_64 二进制（地址取自同一个静态布局）</span></figcaption>
+      <div class="mm-stack"><div class="mm-seg tone-muted" style="--mm-size:0.9">
+        <div class="mm-body">
+          <div class="mm-head"><b>内核空间</b></div>
+          <p class="mm-sub">用户程序碰不到</p>
+        </div>
+        
+      </div><div class="mm-seg tone-blue" style="--mm-size:1.8">
+        <div class="mm-body">
+          <div class="mm-head"><b>栈</b><span class="mm-dir mm-down" title="向下增长">↓ 向下长</span></div>
+          <p class="mm-sub">局部变量、返回地址，向低地址长</p>
+        </div>
+        <div class="mm-side">
+              
+              <span class="mm-mark">通道 B 有时用这里</span>
+            </div>
+      </div><div class="mm-seg tone-muted" style="--mm-size:1.2">
+        <div class="mm-body">
+          <div class="mm-head"><b>映射区 / 堆</b></div>
+          <p class="mm-sub">mmap、malloc 来的内存</p>
+        </div>
+        
+      </div><div class="mm-seg tone-amber" style="--mm-size:1.2">
+        <div class="mm-body">
+          <div class="mm-head"><b>数据段 · x = 10</b></div>
+          <p class="mm-sub">4 个字节，在 0x100002000</p>
+        </div>
+        <div class="mm-side">
+              <span class="mm-addr">0x100002000</span>
+              <span class="mm-mark">通道 B 要翻译的就是这一页</span>
+            </div>
+      </div><div class="mm-seg tone-green" style="--mm-size:1.2">
+        <div class="mm-body">
+          <div class="mm-head"><b>代码段 · f 的 6 个字节</b></div>
+          <p class="mm-sub">movl 0x1ae6(%rip),%eax 就在 0x100000514</p>
+        </div>
+        <div class="mm-side">
+              <span class="mm-addr">0x100000514</span>
+              <span class="mm-mark">通道 A 要翻译的就是这一页</span>
+            </div>
+      </div></div>
+      <div class="mm-ends">
+            <span class="mm-end">高地址 高地址</span>
+            <span class="mm-end">低地址 低地址</span>
+          </div>
+      <p class="mm-note">两者不在同一页。<strong>页号不同 → 页表项不同 → TLB 里是两条不同的条目。</strong></p>
+    </figure><p>再补一个实测：同一份二进制跑两次，两个地址整体平移了同一个随机量 —— 操作系统把地址空间随机化（ASLR）了：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">第一次：&amp;f = 0x100a03510   &amp;x = 0x100a05000
+第二次：&amp;f = 0x104903510   &amp;x = 0x104905000
+平移量都是 0x3F00000，两者的差始终是 0x1AF0
+</code></pre></div>
+<p>程序拿到的地址每次都不一样，说明它不可能是物理地址 —— 物理内存只有一份，不可能每个进程都从 <code>0x100a05000</code> 开始。<mark class="mk-blue"><code>RIP</code> 和指令里的位移都属于这套「每个进程自己一份」的虚拟地址，所以用之前必须先翻译。</mark></p>
+<h2 id="整体图两条通道"><span class="num">03</span>整体图：两条通道</h2>
+<figure class="archfig" data-arch style="--arch-max-width:1560px" data-boundaries="nested" data-pano data-parts='{"rip":{"label":"RIP","detail":"它只回答「下一条在哪」。指令长什么样、x 在哪，它都不知道。"},"itlb":{"label":"iTLB","detail":"指令地址的翻译缓存。条目里除了页框号，还带权限位 —— 取指也会做权限检查。"},"l1i":{"label":"L1 I-Cache","detail":"只装指令。和 D-Cache 分开，是为了取指和取数能同时进行、互不阻塞。"},"dec":{"label":"解码器","detail":"把字节拆成操作数和操作。到这一步，指令里那个位移才被加上 RIP，变成 x 的地址。"},"dtlb":{"label":"dTLB","detail":"数据地址的翻译缓存。==它只翻译地址，不碰值。=="},"l1d":{"label":"L1 D-Cache","detail":"数据的副本。写回策略下，store 只改本地这一行，不立刻写内存。"},"reg":{"label":"寄存器","detail":"值和运算结果真正待的地方。x 有没有被放进寄存器，决定了后面还写不写内存。"},"alu":{"label":"ALU","detail":"只做加减位移这类运算。它拿到的都是寄存器里的值。"},"l2":{"label":"L2","detail":"指令和数据共用。两条通道的未命中都会到这里问一次。"},"l3":{"label":"L3","detail":"再往下一层的大共享缓存，通常跨多个核。"},"ram":{"label":"RAM","detail":"页表本身也在这里。取一条新的页表项，就是一次内存访问。"}}' data-tours='[{"id":"fetch","label":"取一条指令要几步","steps":[{"at":["rip"],"text":"手里只有一个虚拟地址。==这一步什么都没有取到。=="},{"at":["itlb"],"text":"先换成物理页框号。页内偏移不参与翻译，所以页内位置不变。"},{"at":["l1i"],"text":"按物理地址查 L1I，取回 6 个字节。"},{"at":["dec"],"text":"字节拆开，才知道这条指令要干什么 —— 包括它还要读一次内存。"}]},{"id":"load","label":"取 x 要几步","steps":[{"at":["dec"],"text":"解码给出 x 的地址：下一条 RIP + 0x1ae6 = 0x…2000。==通道 B 从这里开始。=="},{"at":["dtlb"],"text":"换成 x 那一页的物理页框号。这是另一条 TLB 条目。"},{"at":["l1d"],"text":"查 L1D，取回 4 个字节：10。"},{"at":["reg","alu"],"text":"进寄存器，加 1，结果 11 回寄存器。"}]},{"id":"miss","label":"没命中会怎样","steps":[{"at":["l1i","l1d"],"text":"两条通道都可能在自己的 L1 上没命中。指令和数据在这里是平等的。"},{"at":["l2"],"text":"先去 L2 问一次。命中就把整行搬回 L1，顺便放好。"},{"at":["l3"],"text":"L2 也没有，再往下问 L3。"},{"at":["ram"],"text":"只好去内存取。==取回来的仍然是一整行，不是一个变量。=="}]},{"id":"separate","label":"为什么要分成两条","steps":[{"at":["itlb","dtlb"],"text":"两个地址落在不同的页里，翻译结果就是两条不同的条目。"},{"at":["l1i","l1d"],"text":"分开的 L1 让取指和取数可以同时进行 —— 合在一起就会互相挤掉对方的行。"}]}]' data-frames='[{"id":"core","boundary":0,"kind":"contains","label":"CPU 核 · 两条通道各有一套 TLB 和 L1","detail":"取指和取数在这里是两套独立的硬件表项：iTLB 只装指令页的翻译，dTLB 只装数据页的翻译；L1 也分成 I-Cache 和 D-Cache 两份。","members":["rip","itlb","l1i","dec","dtlb","l1d","reg","alu"],"depth":1},{"id":"lower","boundary":1,"kind":"contains","label":"核外 · L2 / L3 / RAM","detail":"从 L2 往下，指令和数据共用同一套缓存和同一块内存。两条通道的未命中请求在这里排队。","members":["l2","l3","ram"],"depth":1}]'>
+      <div class="arch-boundary-ui">
+          <div class="arch-boundary-toolbar"><span class="arch-boundary-label">边界</span>
+            <button type="button" data-boundary-mode="nested" aria-pressed="true">多层归属框</button>
+            <button type="button" data-boundary-mode="flat" aria-pressed="false">只留一层分区</button>
+            <button type="button" data-arch-reset>恢复全图</button>
+          </div>
+          <div class="arch-address-box" aria-live="polite"><div data-arch-address>点一个零件，看完整归属路径；点一个区域标题，看这一层的含义。</div>
+            <div data-arch-frame-detail>最外框表示逻辑资源域，不表示所有对象在一块内存里。每层边界的标题说明分组依据。</div></div>
+        </div>
+      <div class="arch-canvas"><svg viewBox="0 0 1560 1620" role="img" aria-labelledby="two-paths-archify-diagram-title two-paths-archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
+        <title id="two-paths-archify-diagram-title">一条 x = x + 1，走两条各自完整的内存访问</title>
+        <desc id="two-paths-archify-diagram-description">取指令和取数据各有自己的 TLB 和 L1；只有 L2 往下是共用的</desc>
+        <!-- Definitions -->
+        <defs>
+          <marker id="two-paths-arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-default" />
+          </marker>
+          <marker id="two-paths-arrowhead-emphasis" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-emphasis" />
+          </marker>
+          <marker id="two-paths-arrowhead-security" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-security" />
+          </marker>
+          <marker id="two-paths-arrowhead-dashed" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-dashed" />
+          </marker>
+          <pattern id="two-paths-grid" width="40" height="40" patternUnits="userSpaceOnUse">
+            <path d="M 40 0 L 0 0 0 40" class="c-grid" stroke-width="0.5"/>
+          </pattern>
+        </defs>
+
+        <!-- Background Grid -->
+        <rect width="100%" height="100%" fill="url(#two-paths-grid)" />
+
+        <!-- Boundaries (behind everything) -->
+        <g class="arch-frame" data-frame="core" data-depth="1" data-frame-flat="false" data-frame-kind="contains" role="button" tabindex="0" aria-pressed="false" aria-label="CPU 核 · 两条通道各有一套 TLB 和 L1"><title>取指和取数在这里是两套独立的硬件表项：iTLB 只装指令页的翻译，dTLB 只装数据页的翻译；L1 也分成 I-Cache 和 D-Cache 两份。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="0" data-frame-members="rip itlb l1i dec dtlb l1d reg alu" x="140" y="70" width="1280" height="921" rx="12" class="c-region" stroke-width="1"/>
+        <text x="148" y="88" class="t-cloud" font-size="9" font-weight="600">CPU 核 · 两条通道各有一套 TLB 和 L1</text></g>
+
+        <g class="arch-frame" data-frame="lower" data-depth="1" data-frame-flat="false" data-frame-kind="contains" role="button" tabindex="0" aria-pressed="false" aria-label="核外 · L2 / L3 / RAM"><title>从 L2 往下，指令和数据共用同一套缓存和同一块内存。两条通道的未命中请求在这里排队。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="1" data-frame-members="l2 l3 ram" x="580" y="1020" width="360" height="480" rx="12" class="c-region" stroke-width="1"/>
+        <text x="588" y="1038" class="t-cloud" font-size="9" font-weight="600">核外 · L2 / L3 / RAM</text></g>
+
+        <!-- Connection paths (before components for correct z-order) -->
+        <path data-edge-from="rip" data-edge-to="itlb" data-edge-label="指令的虚拟地址" data-edge-key="0" data-composition-points="350,225;350,305" d="M 350 225 L 350 305" class="a-default" stroke-width="1.5" marker-end="url(#two-paths-arrowhead)"/>
+        <path data-edge-from="itlb" data-edge-to="l1i" data-edge-label="物理地址" data-edge-key="1" data-composition-points="350,405;350,485" d="M 350 405 L 350 485" class="a-default" stroke-width="1.5" marker-end="url(#two-paths-arrowhead)"/>
+        <path data-edge-from="l1i" data-edge-to="dec" data-edge-label="6 字节机器码" data-edge-key="2" data-composition-points="350,605;350,685" d="M 350 605 L 350 685" class="a-default" stroke-width="1.5" marker-end="url(#two-paths-arrowhead)"/>
+        <path data-edge-from="dec" data-edge-to="dtlb" data-edge-label="解码后才知道：还要读 0x…2000" data-edge-key="3" data-composition-points="520,735;800,735;800,355;1040,355" d="M 520 735 L 792 735 Q 800 735 800 727 L 800 363 Q 800 355 808 355 L 1040 355" class="a-emphasis" stroke-width="1.8" marker-end="url(#two-paths-arrowhead-emphasis)"/>
+        <path data-edge-from="dtlb" data-edge-to="l1d" data-edge-label="物理地址" data-edge-key="4" data-composition-points="1210,405;1210,485" d="M 1210 405 L 1210 485" class="a-default" stroke-width="1.5" marker-end="url(#two-paths-arrowhead)"/>
+        <path data-edge-from="l1d" data-edge-to="reg" data-edge-label="4 字节：10" data-edge-key="5" data-composition-points="1210,595;1210,675" d="M 1210 595 L 1210 675" class="a-default" stroke-width="1.5" marker-end="url(#two-paths-arrowhead)"/>
+        <path data-edge-from="reg" data-edge-to="alu" data-edge-label="10 + 1" data-edge-key="6" data-composition-points="1210,771;1210,851" d="M 1210 771 L 1210 851" class="a-default" stroke-width="1.5" marker-end="url(#two-paths-arrowhead)"/>
+        <path data-edge-from="l1i" data-edge-to="l2" data-edge-label="没命中：往下问一层" data-edge-key="7" data-composition-points="180,545;100,545;100,1110;620,1110" d="M 180 545 L 108 545 Q 100 545 100 553 L 100 1102 Q 100 1110 108 1110 L 620 1110" class="a-dashed" stroke-width="1.5" marker-end="url(#two-paths-arrowhead-dashed)"/>
+        <path data-edge-from="l1d" data-edge-to="l2" data-edge-label="没命中：往下问一层" data-edge-key="8" data-composition-points="1380,540;1460,540;1460,1110;900,1110" d="M 1380 540 L 1452 540 Q 1460 540 1460 548 L 1460 1102 Q 1460 1110 1452 1110 L 900 1110" class="a-dashed" stroke-width="1.5" marker-end="url(#two-paths-arrowhead-dashed)"/>
+        <path data-edge-from="l2" data-edge-to="l3" data-edge-label="也没有" data-edge-key="9" data-composition-points="760,1160;760,1210" d="M 760 1160 L 760 1210" class="a-dashed" stroke-width="1.5" marker-end="url(#two-paths-arrowhead-dashed)"/>
+        <path data-edge-from="l3" data-edge-to="ram" data-edge-label="只能到内存" data-edge-key="10" data-composition-points="760,1310;760,1360" d="M 760 1310 L 760 1360" class="a-dashed" stroke-width="1.5" marker-end="url(#two-paths-arrowhead-dashed)"/>
+
+        <!-- Components -->
+        <g id="two-paths-node-rip" data-nb="1" data-node-id="rip" data-node-label="RIP · 下一条指令的地址" tabindex="0" role="button" aria-label="Focus RIP · 下一条指令的地址, 0x…0514（虚拟地址）, CPU 核 · 两条通道各有一套 TLB 和 L1" aria-pressed="false" data-node-kind="backend" data-node-sublabel="0x…0514（虚拟地址）" data-node-context="CPU 核 · 两条通道各有一套 TLB 和 L1">
+          <title>RIP · 下一条指令的地址 · 0x…0514（虚拟地址） · CPU 核 · 两条通道各有一套 TLB 和 L1</title>
+          <rect x="180" y="110" width="340" height="115" rx="6" class="c-mask"/>
+          <rect x="180" y="110" width="340" height="115" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(186 116) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <rect class="nb-badge" x="448.0" y="118" width="60.0" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="478.0" y="129" font-size="8" text-anchor="middle">一个寄存器</text>
+          <text class="nb-title" x="214" y="131" font-size="10.5" font-weight="600">RIP · 下一条指令的地址</text>
+          <line class="nb-hr" x1="188" y1="138" x2="512" y2="138"/>
+          <text class="nb-k" x="192" y="163.5" font-size="9">装的什么</text><text class="nb-v" x="244.2" y="163.5" font-size="9">一个虚拟地址，不是指令、也不是物理地址</text>
+          <text class="nb-k" x="192" y="177.5" font-size="9">指向哪</text><text class="nb-v" x="244.2" y="177.5" font-size="9">下一条要执行的指令</text>
+          <text class="nb-k" x="192" y="191.5" font-size="9">谁改它</text><text class="nb-v" x="244.2" y="191.5" font-size="9">顺序执行时加上这条指令的长度，跳转时直接写新值</text>
+          <text class="nb-note" x="192" y="217" font-size="8">本机这条指令长 6 字节，所以下一条是 +6</text>
+        </g>
+
+        <g id="two-paths-node-itlb" data-nb="1" data-node-id="itlb" data-node-label="iTLB · 翻译指令地址" tabindex="0" role="button" aria-label="Focus iTLB · 翻译指令地址, 虚拟页号 → 物理页框号, CPU 核 · 两条通道各有一套 TLB 和 L1" aria-pressed="false" data-node-kind="security" data-node-sublabel="虚拟页号 → 物理页框号" data-node-context="CPU 核 · 两条通道各有一套 TLB 和 L1">
+          <title>iTLB · 翻译指令地址 · 虚拟页号 → 物理页框号 · CPU 核 · 两条通道各有一套 TLB 和 L1</title>
+          <rect x="180" y="305" width="340" height="100" rx="6" class="c-mask"/>
+          <rect x="180" y="305" width="340" height="100" rx="6" class="c-security" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="security" class="semantic-sigil s-security" transform="translate(186 311) scale(0.6875)">
+            <path d="M8 2.2 13 4v3.5c0 3.1-1.8 5.4-5 6.5-3.2-1.1-5-3.4-5-6.5V4Z"/>
+            <path d="m5.8 8 1.5 1.5 3-3"/>
+          </g>
+          <rect class="nb-badge" x="428.8" y="313" width="79.2" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="468.4" y="324" font-size="8" text-anchor="middle">每条指令页一次</text>
+          <text class="nb-title" x="214" y="326" font-size="10.5" font-weight="600">iTLB · 翻译指令地址</text>
+          <line class="nb-hr" x1="188" y1="333" x2="512" y2="333"/>
+          <text class="nb-k" x="192" y="358" font-size="9">查什么</text><text class="nb-v" x="233.4" y="358" font-size="9">虚拟页号 → 物理页框号</text>
+          <text class="nb-k" x="192" y="372" font-size="9">没命中</text><text class="nb-v" x="233.4" y="372" font-size="9">MMU 去走页表，把结果填回来</text>
+          <text class="nb-note" x="192" y="397" font-size="8">页内偏移不参与翻译，原样带过去</text>
+        </g>
+
+        <g id="two-paths-node-l1i" data-nb="1" data-node-id="l1i" data-node-label="L1 I-Cache" tabindex="0" role="button" aria-label="Focus L1 I-Cache, 取回 6 个字节：8b 05 e6 1a 00 00, CPU 核 · 两条通道各有一套 TLB 和 L1" aria-pressed="false" data-node-kind="backend" data-node-sublabel="取回 6 个字节：8b 05 e6 1a 00 00" data-node-context="CPU 核 · 两条通道各有一套 TLB 和 L1">
+          <title>L1 I-Cache · 取回 6 个字节：8b 05 e6 1a 00 00 · CPU 核 · 两条通道各有一套 TLB 和 L1</title>
+          <rect x="180" y="485" width="340" height="120" rx="6" class="c-mask"/>
+          <rect x="180" y="485" width="340" height="120" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(186 491) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <rect class="nb-badge" x="395.2" y="493" width="112.8" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="451.6" y="504" font-size="8" text-anchor="middle">行 = 128 字节（本机）</text>
+          <text class="nb-title" x="214" y="506" font-size="10.5" font-weight="600">L1 I-Cache</text>
+          <line class="nb-hr" x1="188" y1="513" x2="512" y2="513"/>
+          <text class="nb-k" x="192" y="541" font-size="9">装什么</text><text class="nb-v" x="244.2" y="541" font-size="9">机器码的副本</text>
+          <text class="nb-k" x="192" y="555" font-size="9">这次取回</text><text class="nb-v" x="244.2" y="555" font-size="9">`8b 05 e6 1a 00 00`</text>
+          <text class="nb-k" x="192" y="569" font-size="9">谁放进来</text><text class="nb-v" x="244.2" y="569" font-size="9">上一次没命中时，从 L2 或内存搬上来的整行</text>
+          <text class="nb-note" x="192" y="597" font-size="8">取指也会未命中，一样要往 L2、L3、内存问</text>
+        </g>
+
+        <g id="two-paths-node-dec" data-nb="1" data-node-id="dec" data-node-label="解码器" tabindex="0" role="button" aria-label="Focus 解码器, 认出这 6 字节 = 「读 [下一条 RIP + 0x1ae6]」, CPU 核 · 两条通道各有一套 TLB 和 L1" aria-pressed="false" data-node-kind="backend" data-node-sublabel="认出这 6 字节 = 「读 [下一条 RIP + 0x1ae6]」" data-node-context="CPU 核 · 两条通道各有一套 TLB 和 L1">
+          <title>解码器 · 认出这 6 字节 = 「读 [下一条 RIP + 0x1ae6]」 · CPU 核 · 两条通道各有一套 TLB 和 L1</title>
+          <rect x="180" y="685" width="340" height="100" rx="6" class="c-mask"/>
+          <rect x="180" y="685" width="340" height="100" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(186 691) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <rect class="nb-badge" x="457.6" y="693" width="50.4" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="482.8" y="704" font-size="8" text-anchor="middle">每条指令</text>
+          <text class="nb-title" x="214" y="706" font-size="10.5" font-weight="600">解码器</text>
+          <line class="nb-hr" x1="188" y1="713" x2="512" y2="713"/>
+          <text class="nb-k" x="192" y="738" font-size="9">输入</text><text class="nb-v" x="222.6" y="738" font-size="9">几个字节，不是文本</text>
+          <text class="nb-k" x="192" y="752" font-size="9">输出</text><text class="nb-v" x="222.6" y="752" font-size="9">「读 [下一条 RIP + 0x1ae6] 的 4 字节到 EAX」这样的操作</text>
+          <text class="nb-k" x="192" y="766" font-size="9">关键</text><text class="nb-v" x="222.6" y="766" font-size="9">到这一步才算出 x 的地址，通道 B 也到这一步才启动</text>
+        </g>
+
+        <g id="two-paths-node-dtlb" data-nb="1" data-node-id="dtlb" data-node-label="dTLB · 翻译 x 的地址" tabindex="0" role="button" aria-label="Focus dTLB · 翻译 x 的地址, 虚拟页号 → 物理页框号, CPU 核 · 两条通道各有一套 TLB 和 L1" aria-pressed="false" data-node-kind="security" data-node-sublabel="虚拟页号 → 物理页框号" data-node-context="CPU 核 · 两条通道各有一套 TLB 和 L1">
+          <title>dTLB · 翻译 x 的地址 · 虚拟页号 → 物理页框号 · CPU 核 · 两条通道各有一套 TLB 和 L1</title>
+          <rect x="1040" y="305" width="340" height="100" rx="6" class="c-mask"/>
+          <rect x="1040" y="305" width="340" height="100" rx="6" class="c-security" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="security" class="semantic-sigil s-security" transform="translate(1046 311) scale(0.6875)">
+            <path d="M8 2.2 13 4v3.5c0 3.1-1.8 5.4-5 6.5-3.2-1.1-5-3.4-5-6.5V4Z"/>
+            <path d="m5.8 8 1.5 1.5 3-3"/>
+          </g>
+          <rect class="nb-badge" x="1308.0" y="313" width="60.0" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="1338.0" y="324" font-size="8" text-anchor="middle">另一套表项</text>
+          <text class="nb-title" x="1074" y="326" font-size="10.5" font-weight="600">dTLB · 翻译 x 的地址</text>
+          <line class="nb-hr" x1="1048" y1="333" x2="1372" y2="333"/>
+          <text class="nb-k" x="1052" y="365" font-size="9">查什么</text><text class="nb-v" x="1136.6" y="365" font-size="9">x 的虚拟页号 → 物理页框号</text>
+          <text class="nb-k" x="1052" y="379" font-size="9">和 iTLB 的关系</text><text class="nb-v" x="1136.6" y="379" font-size="9">两条独立条目，各查各的</text>
+        </g>
+
+        <g id="two-paths-node-l1d" data-nb="1" data-node-id="l1d" data-node-label="L1 D-Cache" tabindex="0" role="button" aria-label="Focus L1 D-Cache, 取回 4 个字节：x = 10, CPU 核 · 两条通道各有一套 TLB 和 L1" aria-pressed="false" data-node-kind="backend" data-node-sublabel="取回 4 个字节：x = 10" data-node-context="CPU 核 · 两条通道各有一套 TLB 和 L1">
+          <title>L1 D-Cache · 取回 4 个字节：x = 10 · CPU 核 · 两条通道各有一套 TLB 和 L1</title>
+          <rect x="1040" y="485" width="340" height="110" rx="6" class="c-mask"/>
+          <rect x="1040" y="485" width="340" height="110" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(1046 491) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <rect class="nb-badge" x="1255.2" y="493" width="112.8" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="1311.6" y="504" font-size="8" text-anchor="middle">行 = 128 字节（本机）</text>
+          <text class="nb-title" x="1074" y="506" font-size="10.5" font-weight="600">L1 D-Cache</text>
+          <line class="nb-hr" x1="1048" y1="513" x2="1372" y2="513"/>
+          <text class="nb-k" x="1052" y="543" font-size="9">装什么</text><text class="nb-v" x="1104.2" y="543" font-size="9">数据的副本</text>
+          <text class="nb-k" x="1052" y="557" font-size="9">这次取回</text><text class="nb-v" x="1104.2" y="557" font-size="9">4 个字节，值是 10</text>
+          <text class="nb-k" x="1052" y="571" font-size="9">写回</text><text class="nb-v" x="1104.2" y="571" font-size="9">store 先进 store buffer，再落进这一行；行标 dirty，等被逐出时才往下写</text>
+        </g>
+
+        <g id="two-paths-node-reg" data-nb="1" data-node-id="reg" data-node-label="寄存器" tabindex="0" role="button" aria-label="Focus 寄存器, x = 10，算完是 11, CPU 核 · 两条通道各有一套 TLB 和 L1" aria-pressed="false" data-node-kind="backend" data-node-sublabel="x = 10，算完是 11" data-node-context="CPU 核 · 两条通道各有一套 TLB 和 L1">
+          <title>寄存器 · x = 10，算完是 11 · CPU 核 · 两条通道各有一套 TLB 和 L1</title>
+          <rect x="1040" y="675" width="340" height="96" rx="6" class="c-mask"/>
+          <rect x="1040" y="675" width="340" height="96" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(1046 681) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <rect class="nb-badge" x="1298.4" y="683" width="69.6" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="1333.2" y="694" font-size="8" text-anchor="middle">数据待的地方</text>
+          <text class="nb-title" x="1074" y="696" font-size="10.5" font-weight="600">寄存器</text>
+          <line class="nb-hr" x1="1048" y1="703" x2="1372" y2="703"/>
+          <text class="nb-k" x="1052" y="733" font-size="9">现在装</text><text class="nb-v" x="1093.4" y="733" font-size="9">x = 10</text>
+          <text class="nb-k" x="1052" y="747" font-size="9">算完装</text><text class="nb-v" x="1093.4" y="747" font-size="9">11</text>
+        </g>
+
+        <g id="two-paths-node-alu" data-nb="1" data-node-id="alu" data-node-label="ALU" tabindex="0" role="button" aria-label="Focus ALU, 11 = 10 + 1, CPU 核 · 两条通道各有一套 TLB 和 L1" aria-pressed="false" data-node-kind="backend" data-node-sublabel="11 = 10 + 1" data-node-context="CPU 核 · 两条通道各有一套 TLB 和 L1">
+          <title>ALU · 11 = 10 + 1 · CPU 核 · 两条通道各有一套 TLB 和 L1</title>
+          <rect x="1040" y="851" width="340" height="100" rx="6" class="c-mask"/>
+          <rect x="1040" y="851" width="340" height="100" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(1046 857) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <rect class="nb-badge" x="1317.6" y="859" width="50.4" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="1342.8" y="870" font-size="8" text-anchor="middle">只做运算</text>
+          <text class="nb-title" x="1074" y="872" font-size="10.5" font-weight="600">ALU</text>
+          <line class="nb-hr" x1="1048" y1="879" x2="1372" y2="879"/>
+          <text class="nb-k" x="1052" y="904" font-size="9">输入</text><text class="nb-v" x="1082.6" y="904" font-size="9">两个值（来自寄存器）</text>
+          <text class="nb-k" x="1052" y="918" font-size="9">输出</text><text class="nb-v" x="1082.6" y="918" font-size="9">11</text>
+          <text class="nb-note" x="1052" y="943" font-size="8">它不访问内存，取数是前面已经做完的事</text>
+        </g>
+
+        <g id="two-paths-node-l2" data-node-id="l2" data-node-label="L2" tabindex="0" role="button" aria-label="Focus L2, 两条通道共用，指令和数据都在里面, 核外 · L2 / L3 / RAM：两条通道共用，越往下越慢" aria-pressed="false" data-node-kind="database" data-node-sublabel="两条通道共用，指令和数据都在里面" data-node-context="核外 · L2 / L3 / RAM：两条通道共用，越往下越慢">
+          <title>L2 · 两条通道共用，指令和数据都在里面 · 核外 · L2 / L3 / RAM：两条通道共用，越往下越慢</title>
+          <rect x="620" y="1060" width="280" height="100" rx="6" class="c-mask"/>
+          <rect x="620" y="1060" width="280" height="100" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(626 1066) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <text data-detail-anchor x="760" y="1108" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">L2</text>
+        <text data-detail="context" x="760" y="1124" class="t-muted" font-size="9" text-anchor="middle">两条通道共用，指令和数据都在里面</text>
+        </g>
+
+        <g id="two-paths-node-l3" data-node-id="l3" data-node-label="L3" tabindex="0" role="button" aria-label="Focus L3, 再往下更大的共享缓存, 核外 · L2 / L3 / RAM：两条通道共用，越往下越慢" aria-pressed="false" data-node-kind="database" data-node-sublabel="再往下更大的共享缓存" data-node-context="核外 · L2 / L3 / RAM：两条通道共用，越往下越慢">
+          <title>L3 · 再往下更大的共享缓存 · 核外 · L2 / L3 / RAM：两条通道共用，越往下越慢</title>
+          <rect x="620" y="1210" width="280" height="100" rx="6" class="c-mask"/>
+          <rect x="620" y="1210" width="280" height="100" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(626 1216) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <text data-detail-anchor x="760" y="1258" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">L3</text>
+        <text data-detail="context" x="760" y="1274" class="t-muted" font-size="9" text-anchor="middle">再往下更大的共享缓存</text>
+        </g>
+
+        <g id="two-paths-node-ram" data-node-id="ram" data-node-label="RAM" tabindex="0" role="button" aria-label="Focus RAM, 页表也在这里；缺页才轮到磁盘, 核外 · L2 / L3 / RAM：两条通道共用，越往下越慢" aria-pressed="false" data-node-kind="external" data-node-sublabel="页表也在这里；缺页才轮到磁盘" data-node-context="核外 · L2 / L3 / RAM：两条通道共用，越往下越慢">
+          <title>RAM · 页表也在这里；缺页才轮到磁盘 · 核外 · L2 / L3 / RAM：两条通道共用，越往下越慢</title>
+          <rect x="620" y="1360" width="280" height="100" rx="6" class="c-mask"/>
+          <rect x="620" y="1360" width="280" height="100" rx="6" class="c-external" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="external" class="semantic-sigil s-external" transform="translate(626 1366) scale(0.6875)">
+            <rect x="2.5" y="5" width="8.5" height="8" rx="1.5"/>
+            <path d="M8 2.5h5.5V8M13.5 2.5 7.5 8.5"/>
+          </g>
+          <text data-detail-anchor x="760" y="1408" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">RAM</text>
+        <text data-detail="context" x="760" y="1424" class="t-muted" font-size="9" text-anchor="middle">页表也在这里；缺页才轮到磁盘</text>
+        </g>
+
+        <!-- Connection labels -->
+        <g data-detail="context" data-edge-from="rip" data-edge-to="itlb" data-edge-label="指令的虚拟地址" data-edge-key="0">
+          <rect x="311.4" y="255" width="77.2" height="14" rx="3" class="c-mask"/>
+          <text x="350" y="265" class="t-muted" font-size="8" text-anchor="middle">指令的虚拟地址</text>
+        </g>
+        <g data-detail="context" data-edge-from="itlb" data-edge-to="l1i" data-edge-label="物理地址" data-edge-key="1">
+          <rect x="325.8" y="435" width="48.4" height="14" rx="3" class="c-mask"/>
+          <text x="350" y="445" class="t-muted" font-size="8" text-anchor="middle">物理地址</text>
+        </g>
+        <g data-detail="context" data-edge-from="l1i" data-edge-to="dec" data-edge-label="6 字节机器码" data-edge-key="2">
+          <rect x="316.2" y="635" width="67.6" height="14" rx="3" class="c-mask"/>
+          <text x="350" y="645" class="t-muted" font-size="8" text-anchor="middle">6 字节机器码</text>
+        </g>
+        <g data-detail="context" data-edge-from="dec" data-edge-to="dtlb" data-edge-label="解码后才知道：还要读 0x…2000" data-edge-key="3">
+          <rect x="847.8" y="315" width="144.4" height="14" rx="3" class="c-mask"/>
+          <text x="920" y="325" class="t-backend" font-size="8" text-anchor="middle">解码后才知道：还要读 0x…2000</text>
+        </g>
+        <g data-detail="context" data-edge-from="dtlb" data-edge-to="l1d" data-edge-label="物理地址" data-edge-key="4">
+          <rect x="1185.8" y="435" width="48.4" height="14" rx="3" class="c-mask"/>
+          <text x="1210" y="445" class="t-muted" font-size="8" text-anchor="middle">物理地址</text>
+        </g>
+        <g data-detail="context" data-edge-from="l1d" data-edge-to="reg" data-edge-label="4 字节：10" data-edge-key="5">
+          <rect x="1181" y="625" width="58" height="14" rx="3" class="c-mask"/>
+          <text x="1210" y="635" class="t-muted" font-size="8" text-anchor="middle">4 字节：10</text>
+        </g>
+        <g data-detail="context" data-edge-from="reg" data-edge-to="alu" data-edge-label="10 + 1" data-edge-key="6">
+          <rect x="1190.6" y="801" width="38.8" height="14" rx="3" class="c-mask"/>
+          <text x="1210" y="811" class="t-muted" font-size="8" text-anchor="middle">10 + 1</text>
+        </g>
+        <g data-detail="context" data-edge-from="l1i" data-edge-to="l2" data-edge-label="没命中：往下问一层" data-edge-key="7">
+          <rect x="351.8" y="1065" width="96.39999999999999" height="14" rx="3" class="c-mask"/>
+          <text x="400" y="1075" class="t-messagebus" font-size="8" text-anchor="middle">没命中：往下问一层</text>
+        </g>
+        <g data-detail="context" data-edge-from="l1d" data-edge-to="l2" data-edge-label="没命中：往下问一层" data-edge-key="8">
+          <rect x="1111.8" y="1065" width="96.39999999999999" height="14" rx="3" class="c-mask"/>
+          <text x="1160" y="1075" class="t-messagebus" font-size="8" text-anchor="middle">没命中：往下问一层</text>
+        </g>
+        <g data-detail="context" data-edge-from="l2" data-edge-to="l3" data-edge-label="也没有" data-edge-key="9">
+          <rect x="740.6" y="1175" width="38.8" height="14" rx="3" class="c-mask"/>
+          <text x="760" y="1185" class="t-messagebus" font-size="8" text-anchor="middle">也没有</text>
+        </g>
+        <g data-detail="context" data-edge-from="l3" data-edge-to="ram" data-edge-label="只能到内存" data-edge-key="10">
+          <rect x="731" y="1325" width="58" height="14" rx="3" class="c-mask"/>
+          <text x="760" y="1335" class="t-messagebus" font-size="8" text-anchor="middle">只能到内存</text>
+        </g>
+
+        <!-- Legend -->
+        <g data-legend data-legend-bridge>
+          <text x="40" y="1584" class="t-primary" font-size="12" font-weight="650">Legend</text>
+          <g data-legend-semantic-kind="backend" data-legend-kind="backend" data-legend-label="核内功能单元" data-legend-x="40" data-legend-baseline="1604" data-legend-width="103">
+            <rect x="40" y="1595" width="16" height="10" rx="2.5" class="c-backend" stroke-width="1"/>
+            <text x="62" y="1604" class="t-muted" font-size="10" font-weight="500">核内功能单元</text>
+          </g>
+          <g data-legend-semantic-kind="database" data-legend-kind="database" data-legend-label="缓存" data-legend-x="165" data-legend-baseline="1604" data-legend-width="63">
+            <rect x="165" y="1595" width="16" height="10" rx="2.5" class="c-database" stroke-width="1"/>
+            <text x="187" y="1604" class="t-muted" font-size="10" font-weight="500">缓存</text>
+          </g>
+          <g data-legend-semantic-kind="security" data-legend-kind="security" data-legend-label="地址翻译（TLB）" data-legend-x="250" data-legend-baseline="1604" data-legend-width="118">
+            <rect x="250" y="1595" width="16" height="10" rx="2.5" class="c-security" stroke-width="1"/>
+            <text x="272" y="1604" class="t-muted" font-size="10" font-weight="500">地址翻译（TLB）</text>
+          </g>
+          <g data-legend-semantic-kind="external" data-legend-kind="external" data-legend-label="核外内存" data-legend-x="390" data-legend-baseline="1604" data-legend-width="83">
+            <rect x="390" y="1595" width="16" height="10" rx="2.5" class="c-external" stroke-width="1"/>
+            <text x="412" y="1604" class="t-muted" font-size="10" font-weight="500">核外内存</text>
+          </g>
+        </g>
+      </svg></div>
+      <figcaption>左列是取指令，右列是取数据；中间那条绿线是「解码之后才知道还要读 x」。从 RIP 进去，沿箭头走一遍。点任意一个框只看它和它的邻居，或用「导览」按问题走。</figcaption>
+      <div class="pano-ui"></div>
+      <p class="arch-hint"><span class="idle">点头上的任意一个框看它的关系，点区域标题看分组含义，点零件看完整归属路径</span><span class="focused">再点一次空白处取消</span></p>
+    </figure><p>把两条通道各自的账列出来，对比更清楚：</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>通道 A · 取指令</th>
+<th>通道 B · 取数据</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>谁发起这次访问</td>
+<td><code>RIP</code> 里的值</td>
+<td>解码后算出的地址</td>
+</tr>
+<tr>
+<td>翻译的是什么</td>
+<td>指令所在页</td>
+<td>x 所在页</td>
+</tr>
+<tr>
+<td>用哪个 TLB</td>
+<td>iTLB</td>
+<td>dTLB</td>
+</tr>
+<tr>
+<td>用哪个一级缓存</td>
+<td>L1 I-Cache</td>
+<td>L1 D-Cache</td>
+</tr>
+<tr>
+<td>什么时候开始</td>
+<td>每条指令的起点</td>
+<td>解码之后</td>
+</tr>
+<tr>
+<td>未命中时往哪走</td>
+<td>L2 → L3 → RAM</td>
+<td>L2 → L3 → RAM（同一套）</td>
+</tr>
+</tbody>
+</table>
+<h2 id="把两条通道走一遍"><span class="num">04</span>把两条通道走一遍</h2>
+<p>点「下一步」，两条通道会先后动起来。第三档（已被优化掉）用来对照：那条 <code>mov</code> 里没有内存操作数，整条通道 B 都不会启动。</p>
+<div class="demo" data-widget="two-path-lab">
+      <div class="demo-head">
+        <span class="title">同一条 x + 1，两条通道各走一遍</span>
+        <span class="status" data-status></span>
+        <span class="spacer"></span>
+        
+      </div>
+      <div class="demo-body custom" data-mount></div>
+    </div><p>你的第 12、13 步要换成两句更准确的话：</p>
+<div class="callout tone-amber">
+      <span class="ic">✍️</span>
+      <div><p><strong>第 12 步</strong>：结果先在<strong>寄存器</strong>里，不是「寄存在寄存器和 Cache 中」。</p>
+<p><strong>第 13 步</strong>：只有紧接着的 store 指令（写内存的那条），才把这个值写进 L1D 里那一行。<mark class="mk-blue">写进 Cache 不等于写进内存</mark> —— 那一行被标成 dirty，等它被逐出这一级缓存时，才往下写到 L2，再往后才轮到 RAM。</p>
+</div>
+    </div><h2 id="指令里到底有没有-x-的地址"><span class="num">05</span>指令里到底有没有 x 的地址</h2>
+<p>有，但形式不一样：<strong>指令里存的是「怎么算出地址」，不是地址本身，更不是值。</strong></p>
+<table>
+<thead>
+<tr>
+<th>写法</th>
+<th>机器码里存了什么</th>
+<th>地址从哪来</th>
+<th>本机实测</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>全局变量 <code>x</code></td>
+<td>一个 32 位位移（<code>e6 1a 00 00</code>）</td>
+<td>下一条指令的 <code>RIP</code> + 位移</td>
+<td><code>8b 05 e6 1a 00 00</code></td>
+</tr>
+<tr>
+<td>栈变量 <code>x</code></td>
+<td>一个 8 位位移（<code>fc</code>，即 −4）</td>
+<td><code>RBP</code> 的值 − 4</td>
+<td><code>8b 45 fc</code></td>
+</tr>
+<tr>
+<td>指针 <code>*p</code></td>
+<td>只有寄存器号</td>
+<td>寄存器 <code>rdi</code> 里的值</td>
+<td><code>8b 07</code>（-O2，p 留在 <code>rdi</code>）</td>
+</tr>
+<tr>
+<td>立即数 <code>x + 1</code> 里的 <code>1</code></td>
+<td>值本身（<code>01</code>）</td>
+<td>不需要地址，不用去内存</td>
+<td><code>83 c0 01</code></td>
+</tr>
+</tbody>
+</table>
+<p>前三种都还要再走一次「翻译 → 查缓存」，第四种不用 —— 因为 <code>1</code> 就在指令里。这也解释了为什么<mark class="mk-blue">普通变量不能直接写进指令</mark>：它的值会变，而指令一旦编好就固定了。</p>
+<p>再回到那个位移。同一个 x，读和写的两条指令里位移不同：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">读：0x1ae6  ← 基准是 0x10000051a
+写：0x1add  ← 基准是 0x100000523
+</code></pre></div>
+<p>两条指令相差 9 个字节（<code>addl</code> 3 字节 + 前面 <code>movl</code> 的 6 字节），位移就跟着差了 9。如果位移是 x 的地址，它不该变。</p>
+<h2 id="你的-gap五层按顺序补"><span class="num">06</span>你的 gap：五层，按顺序补</h2>
+<p>四个问题里，有三个落在下面第 1、2 层：</p>
+<ul>
+<li>「指令是什么」→ 第 1、2 层</li>
+<li>「为什么还要翻译」→ 第 2、3 层</li>
+<li>「为什么还要去找 x」→ 第 2、3 层</li>
+</ul>
+<p>TLB 和缓存的细节（第 3、4 层）属于第二步要补的，不是你迷糊的直接原因。第 5 层可以先放着，它是性能问题，不是理解问题。</p>
+<div class="pipe"><div class="lane tone-muted">
+        <div class="lane-meta">
+          <span class="ln">LAYER 01</span>
+          <b>源码到机器码</b>
+          <small>谁把 C 变成字节</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>编译器</b>
+        <small>C 源码 → 汇编文本</small>
+        <span class="tag tone-muted">编译期</span>
+      </div><div class="pnode">
+        <b>汇编器</b>
+        <small>汇编文本 → 目标文件里的字节</small>
+        <span class="tag tone-muted">编译期</span>
+      </div><div class="pnode">
+        <b>链接器</b>
+        <small>把各段拼起来，定下地址和符号</small>
+        <span class="tag tone-muted">链接期</span>
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">输出的是字节，不是文本</span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-blue">
+        <div class="lane-meta">
+          <span class="ln">LAYER 02</span>
+          <b>CPU 拿到的到底是什么</b>
+          <small>这一层补上，四个问题有一半就散了</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>取指单元</b>
+        <small>按 RIP 取几个字节，长度 1–15 不等</small>
+        <span class="tag tone-blue">字节</span>
+      </div><div class="pnode">
+        <b>解码器</b>
+        <small>字节 → 操作码 + 操作数 + 寻址方式</small>
+        <span class="tag tone-blue">µops</span>
+      </div><div class="pnode">
+        <b>寄存器</b>
+        <small>值和运算结果真正待的地方</small>
+        <span class="tag tone-blue">数据</span>
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">要取字节、要取数据，都得先把地址翻成物理的</span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-violet">
+        <div class="lane-meta">
+          <span class="ln">LAYER 03</span>
+          <b>地址与翻译</b>
+          <small>虚拟地址为什么要过一道</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>虚拟地址</b>
+        <small>每个进程一份，运行时整体平移（ASLR）</small>
+        <span class="tag tone-violet">软件</span>
+      </div><div class="pnode">
+        <b>页表</b>
+        <small>页号 → 物理页框号；本身放在内存里</small>
+        <span class="tag tone-violet">内核</span>
+      </div><div class="pnode">
+        <b>iTLB / dTLB</b>
+        <small>两套翻译缓存，各存各的条目</small>
+        <span class="tag tone-violet">硬件</span>
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">翻好之后，才轮得到缓存</span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-green">
+        <div class="lane-meta">
+          <span class="ln">LAYER 04</span>
+          <b>缓存层次与写回</b>
+          <small>为什么值可能一直没回到内存</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>L1I / L1D</b>
+        <small>分开两份，取指和取数互不挤占</small>
+        <span class="tag tone-green">每核</span>
+      </div><div class="pnode">
+        <b>L2 / L3</b>
+        <small>指令和数据共用，越往下越大越慢</small>
+        <span class="tag tone-green">共享</span>
+      </div><div class="pnode">
+        <b>RAM</b>
+        <small>页表也在这里</small>
+        <span class="tag tone-green">核外</span>
+      </div><div class="pnode">
+        <b>行与 dirty</b>
+        <small>按整行搬；写进缓存不等于写进内存</small>
+        <span class="tag tone-green">写回</span>
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">到这里，逻辑模型就完整了</span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-amber">
+        <div class="lane-meta">
+          <span class="ln">LAYER 05</span>
+          <b>现代 CPU 的真实执行</b>
+          <small>理解问题解决之后再碰</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>流水线</b>
+        <small>多条指令的不同阶段同时在进行</small>
+        <span class="tag tone-amber">并行</span>
+      </div><div class="pnode">
+        <b>乱序执行</b>
+        <small>只要结果对，顺序可以换</small>
+        <span class="tag tone-amber">重排</span>
+      </div><div class="pnode">
+        <b>store buffer</b>
+        <small>写先排队，不等内存</small>
+        <span class="tag tone-amber">异步</span>
+      </div><div class="pnode">
+        <b>分支预测与推测</b>
+        <small>猜错就丢掉重来</small>
+        <span class="tag tone-amber">猜测</span>
+      </div></div>
+      </div></div><p>每一层对应你当时的哪句话、补完能回答什么：</p>
+<table>
+<thead>
+<tr>
+<th>你当时的疑问</th>
+<th>缺的是哪一层</th>
+<th>补完之后能说什么</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>「指令是什么」</td>
+<td>02：机器码与解码</td>
+<td>CPU 读的是字节，<code>mov</code> 那行是反汇编给人看的</td>
+</tr>
+<tr>
+<td>「不是已经是汇编语言了吗，为什么还要翻译」</td>
+<td>02 + 03</td>
+<td>汇编是编译期的文本；运行时那次翻译换的是地址，不是语言</td>
+</tr>
+<tr>
+<td>「指令的地址上没有 x 的值吗」</td>
+<td>02：指令和数据是两个对象</td>
+<td>指令在代码段、x 在数据段，各自一个地址</td>
+</tr>
+<tr>
+<td>「为什么还要去找 x」</td>
+<td>02 + 03</td>
+<td>指令只给「怎么算地址」，值要另外取一次，取的时候还要再过一遍 TLB 和 Cache</td>
+</tr>
+<tr>
+<td>「结果不是写回内存了吗」</td>
+<td>04：写回</td>
+<td>先进寄存器；store 才写进缓存行；真正回内存要等逐出</td>
+</tr>
+</tbody>
+</table>
+<h2 id="速查与自测"><span class="num">07</span>速查与自测</h2>
+<p>想往前读，前置的几篇在这几处：<a href="../instruction-pointer/">《RIP：CPU 怎么记住「下一条」》</a>讲 <code>RIP</code> 指哪、为什么指令长度不固定；<a href="../two-spaces/">《进程和线程在两套空间里各有什么》</a>讲一个进程的地址空间长什么样；<a href="../frame-pointer/">《栈帧基址》</a>和<a href="../stack-call-return/">《函数调用时栈上放了什么》</a>讲栈上的地址怎么算出来。</p>
+<div class="summary">
+      <h3 id="一句话">一句话</h3>
+      <p><code>RIP</code> 给的是<strong>指令的地址</strong>，指令给的是<strong>怎么算出 x 的地址</strong>，x 的值住在<strong>另一个页</strong>里。
+三样东西、两个页、两次翻译、两个 L1 —— 这就是一条 <code>x = x + 1</code> 要看起来像「走了两遍内存」的原因。</p>
+
+    </div><div class="quiz"><details>
+        <summary>汇编代码里写着 <code>mov eax, [x]</code>，CPU 取到的是这行字吗？</summary>
+        <div class="a"><p>不是。汇编器已经把它变成字节，比如 <code>8b 05 e6 1a 00 00</code>。CPU 取到的是这 6 个字节，
+解码之后才知道它是「从 [下一条 RIP + 0x1ae6] 读 4 字节到 EAX」。</p>
+<p><code>mov eax, [x]</code> 是反汇编器把字节翻译回文本给人看的。</p>
+</div>
+      </details><details>
+        <summary>为什么取指令和取数据要各有一个 TLB、各有一个 L1？</summary>
+        <div class="a"><p>因为它们访问的是两个不同页里的两个不同地址。翻译结果按页缓存，两条地址的页号不同，
+就只能各存一份；L1 分开则是为了让取指和取数能同时进行，不互相挤掉对方的行。</p>
+</div>
+      </details><details>
+        <summary>一条 store 执行完，值一定已经在内存里了吗？</summary>
+        <div class="a"><p>不一定。它通常先进 store buffer，再落进 L1D 的那一行，那一行被标成 dirty。
+真正写回 L2、再写回 RAM，要等这一行被逐出。写进缓存和写进内存是两件事。</p>
+</div>
+      </details></div>
+
+    <footer>
+      <span>取指令和取数据，为什么是两条通道</span>
+      <span>最后更新 2026-10-29 · 单文件可离线打开</span>
+    </footer>
+  </main>
+</div>
+
+<script src="../../assets/app.js?v=1b38dfd95d"></script>
+</body>
+</html>
