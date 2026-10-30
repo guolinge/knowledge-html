@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-has-toc="1">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>UI 探针：怎么量到真实像素</title>
+<meta name="description" content="单测跑在假 DOM 上，量不出宽度、颜色、换行和浮层。docs/ui-probe.mjs 用「临时搭一个只挂真组件的页面 + 真 Chromium 读计算样式」把这类问题变成可复现、可量化的数据。这篇讲它到底做了什么、为什么量出来的值可信、以及它在哪一步帮不上忙。" />
+<link rel="stylesheet" href="../../assets/theme.css?v=19aa345f51" />
+  <link rel="stylesheet" href="../../assets/blocks.css?v=8698f15115" />
+  <link rel="stylesheet" href="../../assets/archify-embed.css?v=68fec0b81b" />
+</head>
+<body>
+<div id="progress"></div>
+<div id="tocScrim"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
+    <a class="brand" href="../../index.html"><span class="dot"></span>知识笔记</a>
+    
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="toc" id="toc">
+      <p class="toc-title">目录</p>
+      <a href="../../index.html" class="sub">← 全部笔记</a>
+      <a href="#单测为什么摸不到像素">单测为什么摸不到像素</a>
+      <a href="#三步">三步</a>
+      <a href="#那三个文件里真正起作用的是-maints">那三个文件里，真正起作用的是 main.ts</a>
+      <a href="#为什么这样量出来的值可信">为什么这样量出来的值可信</a>
+      <a href="#一次真实排障826px-宿主里的浅蓝底">一次真实排障：826px 宿主里的浅蓝底</a>
+      <a href="#它不做的事">它不做的事</a>
+      <a href="#场景表每个场景就是一段复现条件">场景表：每个场景就是一段复现条件</a>
+      <a href="#三个必须知道的局限">三个必须知道的局限</a>
+      <a href="#怎么用">怎么用</a>
+      <a href="#自测">自测</a>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow">● 开发工具 · UI 排障</span>
+      <h1>UI 探针：怎么量到真实像素</h1>
+      <p class="lede">单测跑在假 DOM 上，量不出宽度、颜色、换行和浮层。docs/ui-probe.mjs 用「临时搭一个只挂真组件的页面 + 真 Chromium 读计算样式」把这类问题变成可复现、可量化的数据。这篇讲它到底做了什么、为什么量出来的值可信、以及它在哪一步帮不上忙。</p>
+    </div>
+
+
+    <div class="provenance"><span><b>来源</b> 本仓 audience_web/docs/ui-probe.mjs（397 行，场景表在 :176-300 附近） · 本仓 audience_web/packages/combination/test/condition-ui.spec.ts（happy-dom 只能断言类名接线） · 本仓 audience_web/packages/combination/src/components/RelationRow.vue（.relation-row 宽度与 desc 换行规则） · opencli 1.8.8 本机实测：browser &lt;session&gt; open/hover/eval/screenshot 驱动本机 Chrome · vite 5.4.21 本机实测：--config .play/vite.config.mts --port 5199 --strictPort</span><span><b>生成</b> 2026-10-30</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">ui-probe</span> <span class="tag tone-muted">vite</span> <span class="tag tone-muted">opencli</span> <span class="tag tone-muted">CSS 布局</span> <span class="tag tone-muted">happy-dom</span> <span class="tag tone-muted">组件库</span></span></div>
+
+<p><code>docs/ui-probe.mjs</code> 不是测试框架。它<strong>临时搭一个小页面挂上真组件</strong>，再由<strong>你自己的 Chrome</strong> 去读计算后的宽度、颜色和浮层位置。</p>
+<p>仓库里的自动化测试跑在 happy-dom 上——它能告诉你「DOM 里有没有这个类名」，但量不出「这个框多宽、有没有换行、提示条弹在哪」。这类问题只能交给真浏览器。</p>
+<h2 id="单测为什么摸不到像素"><span class="num">01</span>单测为什么摸不到像素</h2>
+<p>同一个组件，两种运行环境差在这些地方：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>要验的东西</th><th>happy-dom（单测）</th><th>真 Chromium（探针）</th></tr></thead><tbody><tr><th>类名接线、DOM 结构</th><td data-label="happy-dom（单测）"><span class="tag tone-green">能验，而且是强项</span></td><td data-label="真 Chromium（探针）"><span class="tag tone-muted">也能，但没必要</span></td></tr><tr><th>布局计算（flex 收缩、<code>min-content</code>、<code>max-content</code>）</th><td data-label="happy-dom（单测）"><span class="tag tone-red">完全不实现</span></td><td data-label="真 Chromium（探针）"><span class="tag tone-green">按浏览器规则算</span></td></tr><tr><th>伪元素（<code>::before</code> / <code>::after</code>）</th><td data-label="happy-dom（单测）"><span class="tag tone-red">不算样式</span></td><td data-label="真 Chromium（探针）"><span class="tag tone-green">真实绘制，可读计算值</span></td></tr><tr><th>被 teleport 到 <code>body</code> 的浮层（下拉、提示条）</th><td data-label="happy-dom（单测）"><span class="tag tone-red">拿不到位置</span></td><td data-label="真 Chromium（探针）"><span class="tag tone-green">能查可见性与坐标</span></td></tr><tr><th><code>:hover</code> / <code>:focus-within</code> 这类状态</th><td data-label="happy-dom（单测）"><span class="tag tone-red">没有鼠标</span></td><td data-label="真 Chromium（探针）"><span class="tag tone-green">可以真的移上去</span></td></tr><tr><th>字体度量（同一条时间串在不同字体下宽度不同）</th><td data-label="happy-dom（单测）"><span class="tag tone-red">无字体引擎</span></td><td data-label="真 Chromium（探针）"><span class="tag tone-green">可实测文字宽度</span></td></tr></tbody></table></div><p>一个具体例子：<code>condition-ui.spec.ts</code> 能断言「关系行有删除按钮」，但它量不出这个按钮离客体框 <strong>368px</strong>。而这个数字正是产品截图里那条空白的来源。</p>
+<h2 id="三步"><span class="num">02</span>三步</h2>
+<div class="pipe"><div class="lane tone-blue">
+        <div class="lane-meta">
+          <span class="ln">STEP 01</span>
+          <b>写三个文件</b>
+          <small>在 packages/combination/.play/ 下生成临时项目</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>index.html</b>
+        <small>&lt;div id=&quot;app&quot;&gt; + 引 main.ts</small>
+        <span class="tag tone-blue">12 行</span>
+      </div><div class="pnode">
+        <b>main.ts</b>
+        <small>写死 metadata 与 draft，再挂组件</small>
+        <span class="tag tone-blue">场景内容</span>
+      </div><div class="pnode">
+        <b>vite.config.mts</b>
+        <small>root 指到 .play，端口 5199</small>
+        <span class="tag tone-blue">strictPort</span>
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">启动 <span class="en">spawn</span><span class="note">用仓库里已装的 vite，不额外装依赖</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-violet">
+        <div class="lane-meta">
+          <span class="ln">STEP 02</span>
+          <b>起一个开发服务器</b>
+          <small>vite 把 .vue / .ts 编译成浏览器能跑的模块</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>npx vite --config .play/vite.config.mts</b>
+        <small>--port 5199 --strictPort</small>
+        
+      </div><div class="pnode">
+        <b>得到 <a href="http://localhost:5199/">http://localhost:5199/</a></b>
+        
+        <span class="tag tone-violet">真 URL</span>
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">量 <span class="en">measure</span><span class="note">数据全部来自浏览器自己算的结果</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-green">
+        <div class="lane-meta">
+          <span class="ln">STEP 03</span>
+          <b>用你的 Chrome 读值</b>
+          <small>opencli 通过浏览器扩展驱动本机已登录的 Chrome</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>hover / click</b>
+        <small>真的把鼠标移上去</small>
+        <span class="tag tone-green">交互态</span>
+      </div><div class="pnode">
+        <b>eval</b>
+        <small>getComputedStyle / getBoundingClientRect</small>
+        <span class="tag tone-green">数字</span>
+      </div><div class="pnode">
+        <b>screenshot</b>
+        <small>人眼复核</small>
+        <span class="tag tone-green">截图</span>
+      </div></div>
+      </div></div><p>按 <code>Ctrl+C</code> 结束：脚本杀掉 vite，并删掉 <code>.play/</code>。加 <code>--keep</code> 就保留，方便手改 <code>main.ts</code> 看热更新。</p>
+<h2 id="那三个文件里真正起作用的是-maints"><span class="num">03</span>那三个文件里，真正起作用的是 main.ts</h2>
+<div class="tree" data-tree><ul class="tlist"><li class="has-kids">
+            <div class="tnode tone-violet" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>packages/combination/.play/</b>
+              
+              <span class="tnote">临时目录，已在 .gitignore 里</span>
+            </div>
+            <ul class="tlist"><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>index.html</b>
+              
+              <span class="tnote">只有挂载点和一个 script 标签</span>
+            </div>
+            
+          </li><li class="has-kids">
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>main.ts</b>
+              <code>由脚本的 PRELUDE + 场景片段拼成</code>
+              <span class="tnote">全部内容就是「有哪些字段」+「要显示哪些条件」</span>
+            </div>
+            <ul class="tlist"><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>META</b>
+              
+              <span class="tnote">假 metadata：特征 / 关系 / 属性 / 客体</span>
+            </div>
+            
+          </li><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>mount(draft</b>
+              
+              <span class="tnote">createApp + h(InsightCombiner) + .mount('#app')</span>
+            </div>
+            
+          </li></ul>
+          </li><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>vite.config.mts</b>
+              
+              <span class="tnote">root 指到本目录，端口写死</span>
+            </div>
+            
+          </li></ul>
+          </li></ul></div><p><code>main.ts</code> 的核心只有一句：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-ts">import { InsightCombiner } from '../src/index.ts';   // ← 源码，不是 dist
+
+createApp({
+  render: () =&gt; h(InsightCombiner, { modelValue: draft, metadata: META }),
+}).use(i18n).mount('#app');
+</code></pre></div>
+<p>两个细节决定了它的实用性：</p>
+<ul>
+<li><mark class="mk-blue">导入的是 <code>../src/index.ts</code>，也就是你正在改的那份源码</mark> —— 改了组件，Vite 热更新，探针页面立刻变，不用重新构建、不用重新安装。</li>
+<li>样式层同时引了 <code>element-plus/dist/index.css</code> 和 <code>@futuweb/crm-ui-theme/styles</code>。<strong>不引主题，量到的圆角、颜色、控件高度全都不是线上值。</strong></li>
+</ul>
+<h2 id="为什么这样量出来的值可信"><span class="num">04</span>为什么这样量出来的值可信</h2>
+<div class="cards" data-cols="2"><div class="ccard tone-violet">
+          <span class="tag tone-violet">真</span>
+          <h4>同一个组件</h4>
+          <p>真实 SFC 的 template / script / scoped CSS，没有替身、没有 stub</p>
+          
+          
+        </div><div class="ccard tone-blue">
+          <span class="tag tone-blue">真</span>
+          <h4>同一套样式栈</h4>
+          <p>Element Plus + CRM 主题，和宿主加载的顺序一致</p>
+          
+          
+        </div><div class="ccard tone-green">
+          <span class="tag tone-green">真</span>
+          <h4>同一个布局引擎</h4>
+          <p>Chromium 算 flex 收缩、min-content、伪元素，全按真实规则</p>
+          
+          
+        </div><div class="ccard tone-amber">
+          <span class="tag tone-amber">真</span>
+          <h4>真实的浮层与状态</h4>
+          <p>popper teleport 到 body、hover、focus-within 都是真的</p>
+          
+          
+        </div></div><p>换句话说：<mark class="mk-blue">它量的是「线上会是什么样」；DOM 结构对不对，交给单测。</mark></p>
+<h2 id="一次真实排障826px-宿主里的浅蓝底"><span class="num">05</span>一次真实排障：826px 宿主里的浅蓝底</h2>
+<p>产品截图里，只读宿主（对方页面）的条件行明显超出浅蓝底面板。探针把这条链路拆成了可量的数字：</p>
+<div class="timeline"><div class="titem tone-blue">
+          <span class="when">第 1 步</span>
+          <h4>拉起探针的只读场景</h4>
+          <p>826px 的宿主画框 + 时间类特征行 + 带日期区间的关系属性</p>
+        </div><div class="titem tone-amber">
+          <span class="when">第 2 步</span>
+          <h4>量到「行比面板宽」</h4>
+          <p>行 1138px、面板 984px —— 差 154px，正好是截图里溢出的那一块</p>
+        </div><div class="titem tone-green">
+          <span class="when">第 3 步</span>
+          <h4>第一次修：面板改 min-content</h4>
+          <p>826 宿主里面板变成 1234px，行全部落进蓝底（本地通过）</p>
+        </div><div class="titem tone-red">
+          <span class="when">第 4 步</span>
+          <h4>线上仍然溢出</h4>
+          <p>宿主给我们的内部类写了 min-width: 0，特异性更高，把 min-content 顶掉了</p>
+        </div><div class="titem tone-green">
+          <span class="when">第 5 步</span>
+          <h4>第二次修：改用 width: max-content</h4>
+          <p>外部没碰 width，所以压不掉；探针里注入同样的覆盖再量，面板 1044px 仍然包住行</p>
+        </div></div><p>第 4 步是最值钱的一步：<mark class="mk-blue">探针绿了不等于线上对</mark>。它跑的是「组件自己的 CSS」，而线上还叠着宿主的 CSS。这条只能在探针里<strong>手动注入那条覆盖</strong>才能复现。</p>
+<h2 id="它不做的事"><span class="num">06</span>它不做的事</h2>
+<ul class="check cross"><li>不发网络请求 —— 组件本来就不发，值集和名称都靠 props 传假数据</li><li>不做断言、不进 CI —— 它只提供现场；判定靠临时写的 eval 或看截图</li><li>不是真宿主 —— 没有 micro-app 的选择器改写，也没有宿主的 scoped 覆盖</li><li>不替你判断设计好坏 —— 它只回答「多宽、有没有换行、颜色是什么」</li></ul><h2 id="场景表每个场景就是一段复现条件"><span class="num">07</span>场景表：每个场景就是一段复现条件</h2>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>场景（第一参数）</th><th>复现什么</th><th>典型用途</th></tr></thead><tbody><tr><th><code>default</code></th><td data-label="复现什么">编辑态：特征 / 关系 / 属性过滤，含配了 placeholder 的格子</td><td data-label="典型用途">日常改样式</td></tr><tr><th><code>readonly</code></th><td data-label="复现什么">只读态：客户范围三个灰格 + 条件树</td><td data-label="典型用途">对外展示的观感</td></tr><tr><th><code>readonly-narrow</code></th><td data-label="复现什么">只读态塞进 826px 宿主画框</td><td data-label="典型用途">复现宿主里的溢出</td></tr><tr><th><code>temporal-range</code></th><td data-label="复现什么">时间类字段的日期控件在窄容器里的显示</td><td data-label="典型用途">日期被截断</td></tr><tr><th><code>money</code></th><td data-label="复现什么">金额取整：ct3 + long 取整，ct0 / double 不取整</td><td data-label="典型用途">数值格式化</td></tr><tr><th><code>hint</code></th><td data-label="复现什么">条件名旁的「?」详情</td><td data-label="典型用途">文案与浮层</td></tr><tr><th><code>long-desc</code></th><td data-label="复现什么">6 个超长标的名称</td><td data-label="典型用途">橙色摘要换行与删除 × 位置</td></tr></tbody></table></div><p>加场景的方式就是往脚本的 <code>SCENARIOS</code> 表里加一段 <code>main.ts</code> 文本 —— 写法就是「写死 metadata + 写死 draft」。<mark class="mk-blue">线上出现什么问题，就把那天的条件抄进来当一个场景。</mark></p>
+<h2 id="三个必须知道的局限"><span class="num">08</span>三个必须知道的局限</h2>
+<div class="callout tone-amber">
+      <span class="ic">⚠</span>
+      <div><p><strong>一、字体是本机的，不是线上的。</strong></p>
+<p>同一条 <code>2026-10-24 00:00:00</code>，Arial 量出 130px，PingFang SC / 微软雅黑 是 147px。
+日期区间框曾因此差 8px：本地够宽、线上被 <code>-</code> 挤住。
+<mark class="mk-green">要验这种，得在探针里换上目标字体再量文字宽度。</mark></p>
+<p><strong>二、宿主样式叠不进来。</strong></p>
+<p>线上是 <code>micro-app</code> 注入宿主文档，宿主的 scoped CSS 会以更高特异性覆盖组件内部类。
+探针里没有这一层，必须<strong>手动注入那条覆盖</strong>才复现。</p>
+<p><strong>三、它不证明业务正确。</strong></p>
+<p>它量的是几何与颜色。人数对不对、SQL 语义对不对，那是编译器与对拍的事。</p>
+</div>
+    </div><h2 id="怎么用"><span class="num">09</span>怎么用</h2>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-bash"># 起探针（默认 5199）
+node docs/ui-probe.mjs
+
+# 换场景 / 保留临时目录 / 换端口
+node docs/ui-probe.mjs readonly-narrow
+node docs/ui-probe.mjs --keep --port 5300
+</code></pre></div>
+<p>起来后屏幕上有现成命令，通常是这四行：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-bash">opencli browser probe open http://localhost:5199/
+opencli browser probe hover '.portrait-field--value'
+opencli browser probe eval &quot;…读 getBoundingClientRect / getComputedStyle…&quot;
+opencli browser probe screenshot /tmp/x.png
+</code></pre></div>
+<p><code>eval</code> 里就是普通浏览器 JS，读什么由问题决定：宽度看 <code>getBoundingClientRect().width</code>，换行看 <code>scrollWidth</code> 或元素高度，悬停底色看 <code>getComputedStyle(el).backgroundColor</code>，浮层是否弹出看 <code>.el-popper</code> 的 <code>offsetParent</code>。</p>
+<h2 id="自测"><span class="num">10</span>自测</h2>
+<div class="quiz"><details>
+        <summary>为什么不让组件测试直接覆盖这类问题，非要起一个真浏览器？</summary>
+        <div class="a"><p>happy-dom 不实现布局：flex 收缩、min-content、伪元素、teleport 的浮层位置、
+hover 状态、字体度量全都没有。它能断言「类名接上了」，但量不出「多宽、换不换行」。
+而线上反馈的问题恰恰都是后面这一类。</p>
+</div>
+      </details><details>
+        <summary>探针里量到「行 1138、面板 984」，为什么改完 CSS 本地通过、线上还溢出？</summary>
+        <div class="a"><p>探针只跑组件自己的样式。线上还叠着宿主的 scoped CSS，它能以更高特异性覆盖组件内部类
+（那次就是给 <code>.condition-section__body</code> 设了 <code>min-width: 0</code>）。
+复现办法是在探针里手动注入同一条覆盖，再量一次。</p>
+</div>
+      </details><details>
+        <summary>它和单测的分工是什么？</summary>
+        <div class="a"><p>单测管结构与接线（有没有这个按钮、点击后 emit 什么），进 CI、跑得快、不会漂。
+探针管几何与观感（多宽、换不换行、什么颜色、浮层在哪），人工触发、不进 CI。
+两边都要，互相不能替代。</p>
+</div>
+      </details></div>
+
+    <footer>
+      <span>UI 探针：怎么量到真实像素</span>
+      <span>最后更新 2026-10-30 · 单文件可离线打开</span>
+    </footer>
+  </main>
+</div>
+
+<script src="../../assets/app.js?v=1b38dfd95d"></script>
+</body>
+</html>
