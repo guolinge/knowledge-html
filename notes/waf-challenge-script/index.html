@@ -1,0 +1,470 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-has-toc="1">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>挑战脚本：WAF 出了一道题，为什么程序答不出来</title>
+<meta name="description" content="同一个 URL，浏览器拿 200 和 JSON，curl 拿 403。中间隔着的不是 HTTP 细节，而是一段必须在浏览器里执行、执行完才能换到通行证的 JS。这篇把一次挑战的回路铺开：谁下发、谁执行、谁校验，以及为什么「把脚本抄下来跑一遍」永远算不对。" />
+<link rel="stylesheet" href="../../assets/theme.css?v=b918ec5c83" />
+  <link rel="stylesheet" href="../../assets/blocks.css?v=1af3923321" />
+  <link rel="stylesheet" href="../../assets/archify-embed.css?v=68fec0b81b" />
+</head>
+<body>
+<div id="progress"></div>
+<div id="tocScrim"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
+    <a class="brand" href="../../index.html"><span class="dot"></span>知识笔记</a>
+    
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="toc" id="toc">
+      <p class="toc-title">目录</p>
+      <a href="../../index.html" class="sub">← 全部笔记</a>
+      <a href="#同一个地址两种客户端">同一个地址，两种客户端</a>
+      <a href="#挑战不拒绝出一道题">挑战：不拒绝，出一道题</a>
+      <a href="#四样东西">四样东西</a>
+      <a href="#时间线一条线在第二步就断了">时间线：一条线在第二步就断了</a>
+      <a href="#四种挑战三种交卷节奏">四种挑战，三种交卷节奏</a>
+      <a href="#为什么抄不出答案">为什么抄不出答案</a>
+      <a href="#那就在真浏览器里交一次">那就在真浏览器里交一次</a>
+      <a href="#一句话" class="sub">一句话</a>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow">● 抓取与反爬 · 挑战脚本</span>
+      <h1>挑战脚本：WAF 出了一道题，为什么程序答不出来</h1>
+      <p class="lede">同一个 URL，浏览器拿 200 和 JSON，curl 拿 403。中间隔着的不是 HTTP 细节，而是一段必须在浏览器里执行、执行完才能换到通行证的 JS。这篇把一次挑战的回路铺开：谁下发、谁执行、谁校验，以及为什么「把脚本抄下来跑一遍」永远算不对。</p>
+    </div>
+
+
+    <div class="provenance"><span><b>来源</b> 阿里云 WAF 帮助中心 · Bot management（JS 校验四步；没有 cookie 或值无效就「当请求来自脚本」）https://help.aliyun.com/en/waf/web-application-firewall-3-0/enable-and-configure-the-bot-management-module · Microsoft Learn · WAF JavaScript Challenge（不可见挑战；IP 变更重新挑战；cookie 有效期 5–1440 分钟、默认 30）https://learn.microsoft.com/en-us/azure/web-application-firewall/waf-javascript-challenge · Cloudflare Docs · JavaScript Detections（每个 HTML 请求；寿命 15 分钟；cf_clearance 记录 js_detection.passed）https://developers.cloudflare.com/cloudflare-challenges/challenge-types/javascript-detections · Cloudflare Docs · Clearance（cf_clearance 记录挑战结果）https://developers.cloudflare.com/cloudflare-challenges/concepts/clearance · Scrapfly · Akamai Bot Manager 的 _abck 与 sensor data（服务端校验的浏览器遥测；canvas / WebGL / 字体 / 音频交叉验证）https://scrapfly.io/blog/posts/akamai-bot-manager-understanding-abck-cookies-and-sensor-data · 极验博客 · 行为验证（操作路径、点击节奏、滑动轨迹，机器极难伪造）https://blog.geetest.com/article/99cfdf3ad5812b20f9b59b13cea50e04 · WangYihang/acw-sc-v2-go（acw_sc__v2 的公开实现，佐证它是 JS cookie challenge）https://github.com/WangYihang/acw-sc-v2-go · opencli v1.8.8 · dist/src/browser/analyze.js（反爬指纹表、响应真伪打分、Pattern A–D 判定） · opencli v1.8.8 · dist/src/cli.js（analyze 采集流程：wait 2s + 1s、body 前 2000 字符、document.cookie + CDP getCookies） · opencli-adapter-author · references/site-recon.md（Pattern A–E 分类与下一步） · 本机实测（2026-10-30）：curl 请求雪球行情接口得到 403「Seek IP Blacklisted」；同一 URL 经 browser analyze 采集到 200 JSON，real_data_score 0.87 · 本机实测（2026-10-30）：nowsecure.nl 页面里抓到 __CF$cv$params 与 /cdn-cgi/challenge-platform/scripts/jsd/main.js；同一页面 analyze 的 anti_bot.detected=false</span><span><b>生成</b> 2026-10-30</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">WAF</span> <span class="tag tone-muted">反爬</span> <span class="tag tone-muted">挑战脚本</span> <span class="tag tone-muted">cookie</span> <span class="tag tone-muted">opencli</span></span></div>
+
+<blockquote>
+<p>同一个接口，浏览器打开是 200 和 JSON，curl 打过去是一行 403。</p>
+<p>中间隔着的不是 header 没写全，而是一段必须在浏览器里执行、执行完才能换到通行证的 JS。
+这篇把它拆成四样东西、一条时间线，再说清为什么「把脚本抄下来跑一遍」这条路走不通。</p>
+</blockquote>
+<h2 id="同一个地址两种客户端"><span class="num">01</span>同一个地址，两种客户端</h2>
+<p>先看一组实测。同一个 JSON 接口，在同一台机器上先后各打一次：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>谁发的</th><th>收到什么</th><th>说明什么</th></tr></thead><tbody><tr><th>浏览器</th><td data-label="收到什么">200，application/json，字段齐全</td><td data-label="说明什么">被当成正常访客</td></tr><tr><th>curl（同一个 URL）</th><td data-label="收到什么"><span class="tag tone-red">403，只有一行字：Seek IP Blacklisted</span></td><td data-label="说明什么">在到达业务逻辑之前就被拦下了</td></tr></tbody></table></div><p>用 <code>opencli browser &lt;会话名&gt; analyze &lt;url&gt;</code> 抓同一个地址，判给它的评语是「像真数据」（<code>real_data_score</code> 0.87）：字段齐全、状态 200、body 是 JSON 对象。curl 那边只有 35 字节的一行字。</p>
+<p>这说明拦截点在<strong>边缘</strong>：请求还没进到源站，就已经被决定了命运。它判定时看的不是你 URL 拼得对不对，而是<strong>发请求的这个东西像不像浏览器</strong>。</p>
+<p>WAF（Web 应用防火墙）就是站在源站前面做这个判断的一层。它不处理业务，只决定一个请求能不能被转进去。</p>
+<p>抓取时说的「撞 WAF」，指的就是这一步：请求在边缘被挡下来，拿回来的不是数据。</p>
+<div class="callout tone-amber">
+      <span class="ic">⚠</span>
+      <div><p>上面那个 403 是<strong>硬拦</strong>，不是挑战。两者的区别在后面：硬拦直接结束，挑战会给你一次机会。</p>
+<p>但它们的判断依据是同一个：<mark class="mk-blue">你拿不出它要的证据</mark>。</p>
+</div>
+    </div><h2 id="挑战不拒绝出一道题"><span class="num">02</span>挑战：不拒绝，出一道题</h2>
+<p>挑战（challenge）的做法反过来：<strong>不返回数据，返回一段 JS</strong>。这段 JS 必须在浏览器里执行，执行完算出一个值，写进 cookie，然后带着这个 cookie 重新请求一次。第二次请求才是要数据的那一次。</p>
+<p>这种「先做题，再放行」的机制在业界叫挑战脚本（challenge script），厂商文档里常写成 JavaScript challenge 或 JS 校验。</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>边缘的三种做法</th><th>你看到什么</th><th>接下来会发生什么</th></tr></thead><tbody><tr><th>硬拦</th><td data-label="你看到什么">403 / 412，一行文本</td><td data-label="接下来会发生什么">结束，没有第二次机会</td></tr><tr><th>挑战</th><td data-label="你看到什么"><span class="tag tone-amber">200，但 body 是一段 JS</span></td><td data-label="接下来会发生什么">浏览器执行它，算出值写进 cookie，再请求一次</td></tr><tr><th>验证码</th><td data-label="你看到什么">200，一个滑块或点选</td><td data-label="接下来会发生什么">程序无从下手，只能人来做</td></tr></tbody></table></div><p>阿里云 WAF 的文档把 JS 校验写成四步，每一步都说清了谁在做：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">① 请求命中规则
+② WAF 返回一个 HTML 页面，里面装着生成挑战参数的算法
+③ 浏览器加载这个页面，算出加密参数，写进 cookie，然后重新发起请求
+④ WAF 收到请求后校验参数：通过了就转给源站；没有 cookie 或值不对，就再返回一次挑战页
+</code></pre></div>
+<p>第 ④ 步是整件事的关键。文档的原话是：</p>
+<blockquote>
+<p>If the client does not include the cookie inserted by the JavaScript challenge or the cookie value is invalid, WAF considers the request to be from a script and returns the JavaScript challenge page again.</p>
+</blockquote>
+<p>翻译过来只有一句：<strong>拿不出 cookie，就当作你是脚本</strong>。它不需要证明你是机器人，只需要你没通过。</p>
+<div class="callout tone-violet quote">
+      <span class="ic">💡</span>
+      <div><p><mark class="mk-blue">挑战的门槛不在「难」，在「没有就当你不是浏览器」。</mark></p>
+<p>所以 curl 拿到的不是「答错了」，是<strong>连被评判的资格都没有</strong>：它的请求里根本不存在那个值。</p>
+</div>
+    </div><h2 id="四样东西"><span class="num">03</span>四样东西</h2>
+<p>先不看请求怎么走。这件事只有四样东西：一个环境、一段脚本、一个 cookie、一个判定者。</p>
+<figure class="archfig" data-arch style="--arch-max-width:1587.2px" data-boundaries="nested" data-pano data-parts='{"browser":{"label":"浏览器环境","sub":"答案的来源","detail":"==脚本要的每一样东西都在这里。== 换一台机器、换一块显卡，算出来的值就不同。"},"challenge":{"label":"挑战脚本","sub":"服务器下发","detail":"它不携带数据，只携带三个动作：取指纹、算值、写 cookie。"},"jar":{"label":"cookie","sub":"通行证","detail":"这是脚本唯一留在你机器上的东西，也是 WAF 唯一认的东西。"},"waf":{"label":"WAF 边缘","sub":"判定者","detail":"它只管两件事：有没有通行证，值对不对。没有就再发一次题。"},"api":{"label":"源站 API","sub":"终点","detail":"它不会收到「没答过题」的请求，所以它不需要关心挑战这回事。"}}' data-tours='[{"id":"flow","label":"一次挑战里，东西怎么走","steps":[{"at":["waf","challenge"],"text":"命中的请求拿到一段 JS。"},{"at":["challenge","browser"],"text":"==脚本读的是这台机器的样子==，不是代码里的常量。"},{"at":["challenge","jar"],"text":"算完写进 cookie。"},{"at":["jar","waf","api"],"text":"带着它重发，WAF 才放行。"}]},{"id":"why-bot","label":"为什么程序卡在这里","steps":[{"at":["browser"],"text":"程序可以伪造 UA、IP、header，但==它没有显卡、没有字体、没有鼠标==。"},{"at":["challenge"],"text":"脚本要的正是这些，于是算出的值对不上。"},{"at":["jar"],"text":"没有合法的 cookie。"},{"at":["waf"],"text":"于是再发一次题，循环不会结束。"}]}]' data-frames='[{"id":"bproc","boundary":0,"kind":"contains","label":"浏览器进程","detail":"脚本和 cookie 都在这个进程里；脚本能读到的环境也在这里，出不去。","members":["browser","challenge","jar"],"depth":1},{"id":"edge","boundary":1,"kind":"contains","label":"站点边缘","detail":"请求先到 WAF。命中规则就下发挑战页，只有校验通过，请求才被转给源站。","members":["waf"],"depth":1},{"id":"origin","boundary":2,"kind":"contains","label":"源站","detail":"它只看见「带合法 cookie 的请求」，看不见挑战这一层。","members":["api"],"depth":1}]'>
+      <div class="arch-boundary-ui">
+          <div class="arch-boundary-toolbar"><span class="arch-boundary-label">边界</span>
+            <button type="button" data-boundary-mode="nested" aria-pressed="true">多层归属框</button>
+            <button type="button" data-boundary-mode="flat" aria-pressed="false">只留一层分区</button>
+            <button type="button" data-arch-reset>恢复全图</button>
+          </div>
+          <div class="arch-address-box" aria-live="polite"><div data-arch-address>点一个零件，看完整归属路径；点一个区域标题，看这一层的含义。</div>
+            <div data-arch-frame-detail>最外框表示逻辑资源域，不表示所有对象在一块内存里。每层边界的标题说明分组依据。</div></div>
+        </div>
+      <div class="arch-canvas"><svg viewBox="0 0 1280 700" role="img" aria-labelledby="waf-parts-archify-diagram-title waf-parts-archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
+        <title id="waf-parts-archify-diagram-title">四样东西：环境、脚本、cookie、判定</title>
+        <desc id="waf-parts-archify-diagram-description">挑战脚本没有自己的答案，它算的就是左边这个环境</desc>
+        <!-- Definitions -->
+        <defs>
+          <marker id="waf-parts-arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-default" />
+          </marker>
+          <marker id="waf-parts-arrowhead-emphasis" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-emphasis" />
+          </marker>
+          <marker id="waf-parts-arrowhead-security" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-security" />
+          </marker>
+          <marker id="waf-parts-arrowhead-dashed" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-dashed" />
+          </marker>
+          <pattern id="waf-parts-grid" width="40" height="40" patternUnits="userSpaceOnUse">
+            <path d="M 40 0 L 0 0 0 40" class="c-grid" stroke-width="0.5"/>
+          </pattern>
+        </defs>
+
+        <!-- Background Grid -->
+        <rect width="100%" height="100%" fill="url(#waf-parts-grid)" />
+
+        <!-- Boundaries (behind everything) -->
+        <g class="arch-frame" data-frame="bproc" data-depth="1" data-frame-flat="false" data-frame-kind="contains" role="button" tabindex="0" aria-pressed="false" aria-label="浏览器进程"><title>脚本和 cookie 都在这个进程里；脚本能读到的环境也在这里，出不去。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="0" data-frame-members="browser challenge jar" x="10" y="120" width="630" height="510" rx="12" class="c-region" stroke-width="1"/>
+        <text x="18" y="138" class="t-cloud" font-size="9" font-weight="600">浏览器进程</text></g>
+
+        <g class="arch-frame" data-frame="edge" data-depth="1" data-frame-flat="false" data-frame-kind="contains" role="button" tabindex="0" aria-pressed="false" aria-label="站点边缘"><title>请求先到 WAF。命中规则就下发挑战页，只有校验通过，请求才被转给源站。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="1" data-frame-members="waf" x="690" y="120" width="300" height="290" rx="12" class="c-region" stroke-width="1"/>
+        <text x="698" y="138" class="t-cloud" font-size="9" font-weight="600">站点边缘</text></g>
+
+        <g class="arch-frame" data-frame="origin" data-depth="1" data-frame-flat="false" data-frame-kind="contains" role="button" tabindex="0" aria-pressed="false" aria-label="源站"><title>它只看见「带合法 cookie 的请求」，看不见挑战这一层。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="2" data-frame-members="api" x="1010" y="140" width="250" height="250" rx="12" class="c-region" stroke-width="1"/>
+        <text x="1018" y="158" class="t-cloud" font-size="9" font-weight="600">源站</text></g>
+
+        <!-- Connection paths (before components for correct z-order) -->
+        <path data-edge-from="waf" data-edge-to="challenge" data-edge-label="② 下发这段 JS" data-edge-key="0" data-edge-id="e1" data-composition-points="720,265;610,265" d="M 720 265 L 610 265" class="a-default" stroke-width="1.5" marker-end="url(#waf-parts-arrowhead)"/>
+        <path data-edge-from="challenge" data-edge-to="browser" data-edge-label="③ 读环境指纹" data-edge-key="1" data-edge-id="e2" data-composition-points="370,265;280,265" d="M 370 265 L 280 265" class="a-default" stroke-width="1.5" marker-end="url(#waf-parts-arrowhead)"/>
+        <path data-edge-from="challenge" data-edge-to="jar" data-edge-label="④ 算出的值写进 cookie" data-edge-key="2" data-edge-id="e3" data-composition-points="490,380;490,450" d="M 490 380 L 490 450" class="a-default" stroke-width="1.5" marker-end="url(#waf-parts-arrowhead)"/>
+        <path data-edge-from="jar" data-edge-to="waf" data-edge-label="⑤ 只带这个去重发" data-edge-key="3" data-edge-id="e4" data-composition-points="610,525;840,525;840,380" d="M 610 525 L 832 525 Q 840 525 840 517 L 840 380" class="a-default" stroke-width="1.5" marker-end="url(#waf-parts-arrowhead)"/>
+        <path data-edge-from="waf" data-edge-to="api" data-edge-label="⑥ 校验通过" data-edge-key="4" data-edge-id="e5" data-composition-points="960,265;1040,265" d="M 960 265 L 1040 265" class="a-default" stroke-width="1.5" marker-end="url(#waf-parts-arrowhead)"/>
+
+        <!-- Components -->
+        <g id="waf-parts-node-browser" data-nb="1" data-node-id="browser" data-node-label="浏览器环境" tabindex="0" role="button" aria-label="Focus 浏览器环境, 答案的来源, 浏览器进程" aria-pressed="false" data-node-kind="frontend" data-node-sublabel="答案的来源" data-node-context="浏览器进程">
+          <title>浏览器环境 · 答案的来源 · 浏览器进程</title>
+          <rect x="40" y="150" width="240" height="230" rx="6" class="c-mask"/>
+          <rect x="40" y="150" width="240" height="230" rx="6" class="c-frontend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="frontend" class="semantic-sigil s-frontend" transform="translate(46 156) scale(0.6875)">
+            <rect x="2" y="3" width="12" height="10" rx="2"/>
+            <path d="M2 6.5h12"/>
+            <circle cx="4.1" cy="4.8" r=".7" class="sigil-fill"/>
+            <circle cx="6.3" cy="4.8" r=".7" class="sigil-fill"/>
+          </g>
+          <rect class="nb-badge" x="208.0" y="158" width="60.0" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="238.0" y="169" font-size="8" text-anchor="middle">答案的来源</text>
+          <text class="nb-title" x="74" y="171" font-size="10.5" font-weight="600">浏览器环境</text>
+          <line class="nb-hr" x1="48" y1="178" x2="272" y2="178"/>
+          <text class="nb-k" x="52" y="254" font-size="9">JS 引擎</text><text class="nb-v" x="136.6" y="254" font-size="9">能跑这段代码</text>
+          <text class="nb-k" x="52" y="268" font-size="9">canvas · WebGL</text><text class="nb-v" x="136.6" y="268" font-size="9">显卡画的像素</text>
+          <text class="nb-k" x="52" y="282" font-size="9">字体 · 时区</text><text class="nb-v" x="136.6" y="282" font-size="9">这台机器的样子</text>
+          <text class="nb-k" x="52" y="296" font-size="9">鼠标键盘</text><text class="nb-v" x="136.6" y="296" font-size="9">真的动过没有</text>
+          <text class="nb-note" x="52" y="372" font-size="8">这些能力本身不值钱，值钱的是**别人抄不走**</text>
+        </g>
+
+        <g id="waf-parts-node-challenge" data-nb="1" data-node-id="challenge" data-node-label="挑战脚本" tabindex="0" role="button" aria-label="Focus 挑战脚本, 服务器下发，浏览器执行, 浏览器进程" aria-pressed="false" data-node-kind="security" data-node-sublabel="服务器下发，浏览器执行" data-node-context="浏览器进程">
+          <title>挑战脚本 · 服务器下发，浏览器执行 · 浏览器进程</title>
+          <rect x="370" y="150" width="240" height="230" rx="6" class="c-mask"/>
+          <rect x="370" y="150" width="240" height="230" rx="6" class="c-security" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="security" class="semantic-sigil s-security" transform="translate(376 156) scale(0.6875)">
+            <path d="M8 2.2 13 4v3.5c0 3.1-1.8 5.4-5 6.5-3.2-1.1-5-3.4-5-6.5V4Z"/>
+            <path d="m5.8 8 1.5 1.5 3-3"/>
+          </g>
+          <rect class="nb-badge" x="509.2" y="158" width="88.8" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="553.6" y="169" font-size="8" text-anchor="middle">三步都由它自己跑</text>
+          <text class="nb-title" x="404" y="171" font-size="10.5" font-weight="600">挑战脚本</text>
+          <line class="nb-hr" x1="378" y1="178" x2="602" y2="178"/>
+          <text class="nb-k" x="382" y="261" font-size="9">① 取证</text><text class="nb-v" x="423.4" y="261" font-size="9">读 canvas / 字体 / 事件</text>
+          <text class="nb-k" x="382" y="275" font-size="9">② 计算</text><text class="nb-v" x="423.4" y="275" font-size="9">种子 + 指纹 + 时间</text>
+          <text class="nb-k" x="382" y="289" font-size="9">③ 回填</text><text class="nb-v" x="423.4" y="289" font-size="9">写 cookie，然后重发</text>
+          <text class="nb-note" x="382" y="372" font-size="8">浏览器只是照着执行，不审查它从哪来</text>
+        </g>
+
+        <g id="waf-parts-node-jar" data-nb="1" data-node-id="jar" data-node-label="cookie" tabindex="0" role="button" aria-label="Focus cookie, 交完卷才有的通行证, 浏览器进程" aria-pressed="false" data-node-kind="database" data-node-sublabel="交完卷才有的通行证" data-node-context="浏览器进程">
+          <title>cookie · 交完卷才有的通行证 · 浏览器进程</title>
+          <rect x="370" y="450" width="240" height="150" rx="6" class="c-mask"/>
+          <rect x="370" y="450" width="240" height="150" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(376 456) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <rect class="nb-badge" x="557.2" y="458" width="40.8" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="577.6" y="469" font-size="8" text-anchor="middle">通行证</text>
+          <text class="nb-title" x="404" y="471" font-size="10.5" font-weight="600">cookie</text>
+          <line class="nb-hr" x1="378" y1="478" x2="602" y2="478"/>
+          <rect class="nb-cell" x="382.0" y="519.5" width="68.0" height="23" rx="4"/><text class="nb-cell-t" x="416.0" y="534.5" font-size="9" text-anchor="middle">cf_clearance</text>
+          <rect class="nb-cell" x="456.0" y="519.5" width="68.0" height="23" rx="4"/><text class="nb-cell-t" x="490.0" y="534.5" font-size="9" text-anchor="middle">acw_sc__v2</text>
+          <rect class="nb-cell" x="530.0" y="519.5" width="68.0" height="23" rx="4"/><text class="nb-cell-t" x="564.0" y="534.5" font-size="9" text-anchor="middle">_abck</text>
+          <text class="nb-note" x="382" y="592" font-size="8">名字不同，作用一样：证明「这道题我答过」</text>
+        </g>
+
+        <g id="waf-parts-node-waf" data-nb="1" data-node-id="waf" data-node-label="WAF 边缘" tabindex="0" role="button" aria-label="Focus WAF 边缘, 只问一句：有没有合法 cookie, 站点边缘" aria-pressed="false" data-node-kind="security" data-node-sublabel="只问一句：有没有合法 cookie" data-node-context="站点边缘">
+          <title>WAF 边缘 · 只问一句：有没有合法 cookie · 站点边缘</title>
+          <rect x="720" y="150" width="240" height="230" rx="6" class="c-mask"/>
+          <rect x="720" y="150" width="240" height="230" rx="6" class="c-security" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="security" class="semantic-sigil s-security" transform="translate(726 156) scale(0.6875)">
+            <path d="M8 2.2 13 4v3.5c0 3.1-1.8 5.4-5 6.5-3.2-1.1-5-3.4-5-6.5V4Z"/>
+            <path d="m5.8 8 1.5 1.5 3-3"/>
+          </g>
+          <rect class="nb-badge" x="897.6" y="158" width="50.4" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="922.8" y="169" font-size="8" text-anchor="middle">三种结局</text>
+          <text class="nb-title" x="754" y="171" font-size="10.5" font-weight="600">WAF 边缘</text>
+          <line class="nb-hr" x1="728" y1="178" x2="952" y2="178"/>
+          <text class="nb-k" x="732" y="261" font-size="9">没有 cookie</text><text class="nb-v" x="800.4" y="261" font-size="9">再发一次题</text>
+          <text class="nb-k" x="732" y="275" font-size="9">值对不上</text><text class="nb-v" x="800.4" y="275" font-size="9">当作脚本</text>
+          <text class="nb-k" x="732" y="289" font-size="9">都对</text><text class="nb-v" x="800.4" y="289" font-size="9">放行到源站</text>
+          <text class="nb-note" x="732" y="372" font-size="8">它不判断你是谁，只判断这道题你答过没有</text>
+        </g>
+
+        <g id="waf-parts-node-api" data-nb="1" data-node-id="api" data-node-label="源站 API" tabindex="0" role="button" aria-label="Focus 源站 API, 真正有数据的地方, 源站" aria-pressed="false" data-node-kind="backend" data-node-sublabel="真正有数据的地方" data-node-context="源站">
+          <title>源站 API · 真正有数据的地方 · 源站</title>
+          <rect x="1040" y="170" width="190" height="190" rx="6" class="c-mask"/>
+          <rect x="1040" y="170" width="190" height="190" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(1046 176) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text class="nb-title" x="1074" y="191" font-size="10.5" font-weight="600">源站 API</text>
+          <line class="nb-hr" x1="1048" y1="198" x2="1222" y2="198"/>
+          <text class="nb-k" x="1052" y="275" font-size="9">收到的</text><text class="nb-v" x="1093.4" y="275" font-size="9">带合法 cookie 的请求</text>
+          <text class="nb-note" x="1052" y="352" font-size="8">它在整件事里没有选择权</text>
+        </g>
+
+        <!-- Connection labels -->
+        <g data-detail="context" data-edge-from="waf" data-edge-to="challenge" data-edge-label="② 下发这段 JS" data-edge-key="0" data-edge-id="e1">
+          <rect x="628.8" y="245" width="72.4" height="14" rx="3" class="c-mask"/>
+          <text x="665" y="255" class="t-muted" font-size="8" text-anchor="middle">② 下发这段 JS</text>
+        </g>
+        <g data-detail="context" data-edge-from="challenge" data-edge-to="browser" data-edge-label="③ 读环境指纹" data-edge-key="1" data-edge-id="e2">
+          <rect x="291.2" y="223" width="67.6" height="14" rx="3" class="c-mask"/>
+          <text x="325" y="233" class="t-muted" font-size="8" text-anchor="middle">③ 读环境指纹</text>
+        </g>
+        <g data-detail="context" data-edge-from="challenge" data-edge-to="jar" data-edge-label="④ 算出的值写进 cookie" data-edge-key="2" data-edge-id="e3">
+          <rect x="434.6" y="405" width="110.8" height="14" rx="3" class="c-mask"/>
+          <text x="490" y="415" class="t-muted" font-size="8" text-anchor="middle">④ 算出的值写进 cookie</text>
+        </g>
+        <g data-detail="context" data-edge-from="jar" data-edge-to="waf" data-edge-label="⑤ 只带这个去重发" data-edge-key="3" data-edge-id="e4">
+          <rect x="671.6" y="490" width="86.8" height="14" rx="3" class="c-mask"/>
+          <text x="715" y="500" class="t-muted" font-size="8" text-anchor="middle">⑤ 只带这个去重发</text>
+        </g>
+        <g data-detail="context" data-edge-from="waf" data-edge-to="api" data-edge-label="⑥ 校验通过" data-edge-key="4" data-edge-id="e5">
+          <rect x="971" y="245" width="58" height="14" rx="3" class="c-mask"/>
+          <text x="1000" y="255" class="t-muted" font-size="8" text-anchor="middle">⑥ 校验通过</text>
+        </g>
+
+        <!-- Legend -->
+        <g data-legend data-legend-bridge>
+          <text x="40" y="664" class="t-primary" font-size="12" font-weight="650">Legend</text>
+          <g data-legend-semantic-kind="frontend" data-legend-kind="frontend" data-legend-label="Frontend" data-legend-x="40" data-legend-baseline="684" data-legend-width="83">
+            <rect x="40" y="675" width="16" height="10" rx="2.5" class="c-frontend" stroke-width="1"/>
+            <text x="62" y="684" class="t-muted" font-size="10" font-weight="500">Frontend</text>
+          </g>
+          <g data-legend-semantic-kind="backend" data-legend-kind="backend" data-legend-label="Backend" data-legend-x="145" data-legend-baseline="684" data-legend-width="78">
+            <rect x="145" y="675" width="16" height="10" rx="2.5" class="c-backend" stroke-width="1"/>
+            <text x="167" y="684" class="t-muted" font-size="10" font-weight="500">Backend</text>
+          </g>
+          <g data-legend-semantic-kind="database" data-legend-kind="database" data-legend-label="Database" data-legend-x="245" data-legend-baseline="684" data-legend-width="83">
+            <rect x="245" y="675" width="16" height="10" rx="2.5" class="c-database" stroke-width="1"/>
+            <text x="267" y="684" class="t-muted" font-size="10" font-weight="500">Database</text>
+          </g>
+          <g data-legend-semantic-kind="security" data-legend-kind="security" data-legend-label="Security" data-legend-x="350" data-legend-baseline="684" data-legend-width="83">
+            <rect x="350" y="675" width="16" height="10" rx="2.5" class="c-security" stroke-width="1"/>
+            <text x="372" y="684" class="t-muted" font-size="10" font-weight="500">Security</text>
+          </g>
+        </g>
+      </svg></div>
+      <figcaption>从右边往里看：源站收到的请求，都是 WAF 判过「答过题」的那些；从左边往外看：脚本要的答案长在浏览器里。</figcaption>
+      <div class="pano-ui"></div>
+      <p class="arch-hint"><span class="idle">点头上的任意一个框看它的关系，点区域标题看分组含义，点零件看完整归属路径</span><span class="focused">再点一次空白处取消</span></p>
+    </figure><p>图里最容易看错的一点：<strong>脚本不是数据的中转站</strong>。它从头到尾没碰过数据，它只做一件事：把「这台机器的样子」变成一个值。所以它必须跑在浏览器里，而且必须是<strong>有显卡、有字体、有人在用的</strong>那个浏览器。</p>
+<p>还有一点值得单独说。这三步没有一步是浏览器主动做的，浏览器只是把服务器给的代码当普通脚本执行掉，既不判断来源，也不判断意图。它不知道这是挑战，也不知道执行完会发生什么。<mark class="mk-blue">这正是挑战能成立的前提</mark>：站点可以往任何访客的浏览器里塞一段代码，而浏览器会老实跑完。</p>
+<h2 id="时间线一条线在第二步就断了"><span class="num">04</span>时间线：一条线在第二步就断了</h2>
+<p>把两边的请求按时间铺开，差异只有一处：</p>
+<div class="seqd has-grid" data-seq data-n="4"
+      style="--seq-fill:url(#s-fill-1);--seq-open:url(#s-fill-1-open)">
+      <svg class="seqd-svg" aria-hidden="true">
+        <defs>
+          <marker id="s-fill-1" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+          <marker id="s-fill-1-open" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10" fill="none" stroke="currentColor" stroke-width="1.4"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="seqd-head"><div class="scell"><div class="spart tone-muted has-icon" data-id="c">
+          <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="2.5" width="7.5" height="7.5" rx="1"/><path d="M8.5 9.5l4.5 4.5M13 9.8V13H9.8"/></svg><b>curl</b><small>不执行 JS</small>
+        </div></div><div class="scell"><div class="spart tone-muted has-icon" data-id="b">
+          <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="3" width="11" height="8.5" rx="1.5"/><path d="M2.5 6h11"/></svg><b>浏览器</b><small>会执行 JS</small>
+        </div></div><div class="scell"><div class="spart tone-red has-icon" data-id="w">
+          <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2.2l4.8 1.9v4c0 2.9-2.1 4.8-4.8 5.7-2.7-.9-4.8-2.8-4.8-5.7v-4z"/></svg><b>WAF</b><small>边缘</small>
+        </div></div><div class="scell"><div class="spart tone-green has-icon" data-id="a">
+          <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5L3 8l3 4.5M10 3.5L13 8l-3 4.5"/></svg><b>源站 API</b><small>有数据</small>
+        </div></div></div>
+      <div class="seqd-body"><div class="smsg" data-from="c" data-to="w" data-kind="sync" data-i="1" data-note="1"><span class="snote">1</span><span class="slabel">GET /api/quotec</span></div><div class="smsg" data-from="b" data-to="w" data-kind="sync" data-i="2" data-note="1"><span class="snote">1</span><span class="slabel">GET /api/quotec</span></div><div class="smsg" data-from="w" data-to="c" data-kind="reply" data-i="3" data-note="2"><span class="snote">2</span><span class="slabel">200 + 挑战脚本</span></div><div class="smsg" data-from="w" data-to="b" data-kind="reply" data-i="4" data-note="2"><span class="snote">2</span><span class="slabel">200 + 挑战脚本</span></div><div class="smsg is-self" data-from="b" data-to="b" data-kind="self" data-i="5" data-note="3"><span class="snote">3</span><span class="slabel">取证 → 计算 → 回填</span></div><div class="smsg" data-from="b" data-to="w" data-kind="sync" data-i="6" data-note="4"><span class="snote">4</span><span class="slabel">同一个请求 + cookie</span></div><div class="smsg" data-from="w" data-to="a" data-kind="sync" data-i="7" data-note="5"><span class="snote">5</span><span class="slabel">校验通过，转发</span></div><div class="smsg" data-from="a" data-to="b" data-kind="reply" data-i="8" data-note="6"><span class="snote">6</span><span class="slabel">JSON 数据</span></div></div>
+    </div><p>两条线在第 ② 步拿到的东西<strong>一模一样</strong>：都是那份 HTML。区别在后面：浏览器的第 ③ 步是「跑」，curl 的那一栏什么都没有，它只是把这段 HTML 存进了内存，然后就没有下一步了。</p>
+<p>所以「curl 被拦了」这个说法不准确。它没有被拦，它是<strong>走到一半停住了</strong>，因为它的世界里没有能执行那段代码的东西。</p>
+<h2 id="四种挑战三种交卷节奏"><span class="num">05</span>四种挑战，三种交卷节奏</h2>
+<p>「挑战」是一个统称，各家实现差别很大。下面四种是抓取时最常撞到的：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>谁家的</th><th>你看到的线索</th><th>交卷方式</th><th>通行证</th></tr></thead><tbody><tr><th>阿里云 WAF</th><td data-label="你看到的线索">HTML 里出现 <code>arg1='…'</code> 和一大段混淆函数</td><td data-label="交卷方式">算完写 cookie，整页重发</td><td data-label="通行证"><code>acw_sc__v2</code> / <code>acw_sc__v3</code></td></tr><tr><th>Cloudflare</th><td data-label="你看到的线索">隐藏 iframe 加载 <code>/cdn-cgi/challenge-platform/…</code></td><td data-label="交卷方式"><span class="tag tone-amber">静默，页面不刷新，每个 HTML 请求都跑一次</span></td><td data-label="通行证"><code>cf_clearance</code></td></tr><tr><th>Akamai</th><td data-label="你看到的线索">页面加载后持续上报 sensor data</td><td data-label="交卷方式"><span class="tag tone-amber">持续上报，若干次请求之后才翻转</span></td><td data-label="通行证"><code>_abck</code>（不透明，绑定会话）</td></tr><tr><th>极验</th><td data-label="你看到的线索">一个滑块或点选图</td><td data-label="交卷方式"><span class="tag tone-red">让人来拖，服务端判轨迹</span></td><td data-label="通行证">验证票据</td></tr></tbody></table></div><p>交卷的节奏不一样，取数据的时机也不一样：</p>
+<div class="cards" data-cols="3"><div class="ccard tone-blue">
+          <span class="tag tone-blue">一次性</span>
+          <h4>整页重载</h4>
+          <p>要等它刷新完。在这之前读页面，读到的是挑战页本身</p>
+          
+          
+        </div><div class="ccard tone-violet">
+          <span class="tag tone-violet">每次请求</span>
+          <h4>静默</h4>
+          <p>要等脚本跑完，而页面不会有任何变化提示</p>
+          
+          
+        </div><div class="ccard tone-amber">
+          <span class="tag tone-amber">有时序</span>
+          <h4>持续上报</h4>
+          <p>要等几次请求之后。打开就取，拿到的还是挑战页</p>
+          
+          
+        </div></div><p>Cloudflare 那种静默模式，真实抓到的注入是这样的：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-js">window.__CF$cv$params={r:'a52877852aaa7a89',t:'MTc5MzM0MjgyOA=='};
+var u='/cdn-cgi/challenge-platform/scripts/jsd/main.js?ray=a52877852aaa7a89';
+</code></pre></div>
+<p><code>r</code> 是这次请求的编号，<code>t</code> 是 base64 之后的时间戳。官方文档说这段东西是「轻量、不可见的片段，在每个 HTML 请求上运行」，寿命 15 分钟，过期前会再注入一次；结果写进 <code>cf_clearance</code>，字段叫 <code>js_detection.passed</code>。</p>
+<div class="callout tone-amber">
+      <span class="ic">⚠</span>
+      <div><p><mark class="mk-blue">「页面看起来正常」不能说明挑战没发生。</mark></p>
+<p>Cloudflare 的脚本在隐藏 iframe 里跑，页面该显示什么还显示什么。
+真正能说明问题的只有一件事：<strong>你的请求里有没有那个 cookie</strong>。</p>
+</div>
+    </div><h2 id="为什么抄不出答案"><span class="num">06</span>为什么抄不出答案</h2>
+<p>最容易想到的办法是：把那段 JS 抄下来，在自己的环境里跑一遍，拿到值，再塞进请求。这条路走不通，原因在脚本的输入上。</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>它验什么</th><th>怎么验</th><th>为什么伪造不了</th></tr></thead><tbody><tr><th>渲染</th><td data-label="怎么验">canvas 上画一段字，把像素读回来</td><td data-label="为什么伪造不了">每块 GPU / 每版驱动 / 每套字体的抗锯齿都不一样</td></tr><tr><th>硬件</th><td data-label="怎么验">WebGL 报出 renderer 字符串</td><td data-label="为什么伪造不了">显卡型号要和 UA 声明的系统对得上</td></tr><tr><th>行为</th><td data-label="怎么验">鼠标轨迹、点击节奏、停顿</td><td data-label="为什么伪造不了">人是抖的，脚本是均匀的</td></tr><tr><th>上下文</th><td data-label="怎么验">TLS 指纹、HTTP/2 头顺序、cookie 连续性</td><td data-label="为什么伪造不了">换一层就全对不上</td></tr></tbody></table></div><p>四条里前两条最要紧，因为它们说明<strong>值不是常量</strong>：</p>
+<ul>
+<li>同一段脚本，在你的 Mac 上和在 Linux 容器里，算出来的值不同。</li>
+<li>你在 Node 里跑同一个函数，它拿到的 canvas 是假的、字体是空的、时区是 UTC，算出来的值是<strong>第三种</strong>。</li>
+<li>结果对不上，WAF 不会告诉你差在哪，只会再发一次题。</li>
+</ul>
+<p>Akamai 的做法更彻底：它不是一次性计算，而是让页面里的脚本持续采集环境信号和行为时序，交给服务端打分，再拿分数和 UA、系统、cookie 历史做交叉验证。文档里把这叫 sensor data。所以「跑一遍脚本」连理论上都不成立：它要的是一段<strong>时间</strong>。</p>
+<p>极验那类滑块更直白。它的官方说明是：判断依据是操作路径、点击节奏、滑动轨迹，这些特征「机器极难伪造」。</p>
+<div class="callout tone-red">
+      <span class="ic">⚠</span>
+      <div><p><mark class="mk-blue">这段脚本没有自己的答案。它算的就是你。</mark></p>
+<p>所以「破解脚本」这个方向一开始就错了：脚本是公开的，难的是它读的那些东西。
+一个没有显卡、没有字体、没有鼠标进程的客户端，跑出来的值天生就是错的。</p>
+</div>
+    </div><h2 id="那就在真浏览器里交一次"><span class="num">07</span>那就在真浏览器里交一次</h2>
+<p>方向转过来：不去伪造答案，而是让一个真的浏览器把答案算出来，然后把结果带走。做法只有两条。</p>
+<div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;need&quot;,&quot;to&quot;:&quot;pass&quot;},{&quot;from&quot;:&quot;pass&quot;,&quot;to&quot;:&quot;page&quot;,&quot;label&quot;:&quot;留在页面里&quot;,&quot;labelDy&quot;:-16},{&quot;from&quot;:&quot;pass&quot;,&quot;to&quot;:&quot;node&quot;,&quot;label&quot;:&quot;取 cookie 离场&quot;,&quot;labelDy&quot;:16},{&quot;from&quot;:&quot;page&quot;,&quot;to&quot;:&quot;out&quot;},{&quot;from&quot;:&quot;node&quot;,&quot;to&quot;:&quot;out&quot;}]" style="--flow-marker:url(#fa-1)">
+      <svg class="flowd-svg" aria-hidden="true">
+        <defs>
+          <marker id="fa-1" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="flowd-groups"></div>
+      <div class="flowd-grid"><div class="flowd-row"><div class="fnode tone-muted" data-id="need">
+              
+              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="3" width="11" height="8.5" rx="1.5"/><path d="M2.5 6h11"/></svg>
+              <b>需要一个真浏览器会话</b>
+              <small>登录态 + 指纹都在里面</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-muted" data-id="pass">
+              
+              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="3" width="11" height="8.5" rx="1.5"/><path d="M2.5 6h11"/></svg>
+              <b>页面打开，挑战跑完</b>
+              <small>静默或整页刷新都算</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-green" data-id="page">
+              
+              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5L3 8l3 4.5M10 3.5L13 8l-3 4.5"/></svg>
+              <b>在页面里发请求</b>
+              <small>fetch + credentials: include</small>
+            </div><div class="fnode tone-green" data-id="node">
+              
+              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5L3 8l3 4.5M10 3.5L13 8l-3 4.5"/></svg>
+              <b>在 Node 里发请求</b>
+              <small>带上取出来的 cookie</small>
+            </div></div><div class="flowd-row"><div class="fnode tone-violet" data-id="out">
+              
+              <svg class="ficon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="8" cy="4.2" rx="5" ry="1.9"/><path d="M3 4.2v7.6c0 1.05 2.24 1.9 5 1.9s5-.85 5-1.9V4.2"/></svg>
+              <b>数据</b>
+              
+            </div></div></div>
+      
+    </div><p>两条路的区别只在「谁发后续请求」，收益是同一个：<strong>通行证是在浏览器里产生的</strong>。</p>
+<ul>
+<li>留在现场：请求由页面发出，同源、带 cookie、带指纹，最不容易出问题。代价是每次都要驱动浏览器。</li>
+<li>取 cookie 离场：把浏览器当一次性的「交卷机」，之后用 Node 批量请求。代价是 cookie 会过期。</li>
+</ul>
+<p>过期这件事不能靠感觉。两个具体数字：</p>
+<table>
+<thead>
+<tr>
+<th>来源</th>
+<th>有效期</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Azure WAF 的 JS 挑战</td>
+<td>5–1440 分钟，默认 30</td>
+<td>策略里配的，过期要重新挑战</td>
+</tr>
+<tr>
+<td>Cloudflare 的 JavaScript Detections</td>
+<td>15 分钟</td>
+<td>过期前会重新注入，不是等你过期才补</td>
+</tr>
+</tbody>
+</table>
+<p>还有一条容易被忽略的：<strong>换 IP 会重新挑战</strong>。微软的文档写得很直接：客户端答完题之后如果 IP 变了，挑战会重新下发。所以「在一台机器上取 cookie，拿去另一台机器用」这条路，在不少站上是走不通的。</p>
+<p>这也是 <code>analyze</code> 输出的 <code>anti_bot</code> 字段存在的意义：它在你动手之前就告诉你挂的是哪家、下一步该走哪条路。</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>analyze 的输出</th><th>它在说什么</th><th>你接下来做什么</th></tr></thead><tbody><tr><th><code>anti_bot.detected = true</code></th><td data-label="它在说什么">挂的是哪家 WAF，以及它给的一句处理建议</td><td data-label="你接下来做什么">按这句走：先在浏览器上下文里探，再决定 cookie 策略</td></tr><tr><th><code>pattern</code></th><td data-label="它在说什么">数据从哪来：A 走 API、B 读首屏内嵌数据、C 抓 HTML、D 要鉴权</td><td data-label="你接下来做什么">决定读哪里，不决定要不要过挑战</td></tr><tr><th><code>api_candidates[].verdict</code></th><td data-label="它在说什么">这条响应像不像真数据</td><td data-label="你接下来做什么"><code>likely_data</code> 才值得拿去 replay</td></tr></tbody></table></div><p>有个反直觉的实测结果：对一个确实挂着 Cloudflare 的站跑 <code>analyze</code>，<code>anti_bot.detected</code> 是 <code>false</code>。</p>
+<div class="callout tone-violet">
+      <span class="ic">🧭</span>
+      <div><p><mark class="mk-blue">挑战成功是无声的。</mark></p>
+<p>浏览器已经把那段脚本跑完、cookie 也种上了，页面干净得像什么都没发生。
+只有失败的时候才会留下痕迹：403、滑块页、或者一个空壳 HTML。</p>
+<p><mark class="mk-green">所以判断「这个站有没有反爬」，不能只看页面长得正不正常。</mark></p>
+</div>
+    </div><div class="summary">
+      <h3 id="一句话">一句话</h3>
+      <p>WAF 不判断你是谁，只判断这道题你答过没有。题是公开的，答案长在机器上。
+所以别去解题，<mark class="mk-blue">让真浏览器答一次，把通行证带走</mark>。</p>
+
+    </div><p>逛完这篇可以接着看 <a href="../opencli-adapter-anatomy/">opencli 做了什么</a>：<code>analyze</code> 那条命令具体采了哪些信号、怎么打分。</p>
+<div class="quiz"><details>
+        <summary>curl 拿到的是「挑战页」，为什么它永远过不了这一关？</summary>
+        <div class="a"><p>因为它拿到的是文本，不是可执行的程序。挑战的第二步要求「算出一个值写进 cookie」，
+而 curl 没有 JS 引擎、没有 canvas、没有字体、没有鼠标事件，它连输入都凑不齐。
+下一次请求仍然没有 cookie，WAF 就再发一次题，循环不会结束。</p>
+</div>
+      </details><details>
+        <summary>把挑战脚本抄下来，在 Node 里跑一遍，为什么算出来的值也不对？</summary>
+        <div class="a"><p>因为脚本算的不是自己，是运行它的环境：canvas 渲染出的像素、WebGL 报出的显卡、
+安装的字体、当前时区、鼠标轨迹。Node 里这些东西是缺失或伪造的，
+算出的值是第三种，和真机不一致，WAF 照样拒绝。</p>
+</div>
+      </details><details>
+        <summary>为什么「在一台机器上取到 cookie，复制到另一台机器用」经常失效？</summary>
+        <div class="a"><p>这类 cookie 通常绑定了 IP、浏览器指纹和会话。官方文档明确写了 IP 变化会重新挑战；
+Akamai 那类还会校验 cookie 与当前会话的连续性。所以跨机器、跨出口复用基本不成立，
+只能在同一会话里尽快用掉。</p>
+</div>
+      </details><details>
+        <summary>页面显示完全正常，能说明这个站没有反爬吗？</summary>
+        <div class="a"><p>不能。Cloudflare 的 JavaScript Detections 就是静默的：脚本在隐藏 iframe 里跑，
+页面照常渲染，结果写进 cf_clearance。判断依据只能是请求里有没有那个 cookie，
+以及接口响应是否真的带数据。</p>
+</div>
+      </details></div>
+
+    <footer>
+      <span>挑战脚本：WAF 出了一道题，为什么程序答不出来</span>
+      <span>最后更新 2026-10-30 · 单文件可离线打开</span>
+    </footer>
+  </main>
+</div>
+
+<script src="../../assets/app.js?v=757eed9a2d"></script>
+</body>
+</html>
