@@ -12545,7 +12545,6 @@ WIDGETS['mysql-2pc-crash'] = (root) => {
     function render() {
       const m = MODES[mi];
       const step = m.steps[Math.min(k, m.steps.length) - 1] || null;
-      const prevStep = k > 1 ? m.steps[k - 2] : null;
 
       tabEls.forEach((b, i) => b.classList.toggle('is-on', i === mi));
 
@@ -12752,6 +12751,238 @@ WIDGETS['mysql-2pc-crash'] = (root) => {
     prevBtn.addEventListener('click', () => { si -= 1; draw(); });
     nextBtn.addEventListener('click', () => { si += 1; draw(); });
     draw();
+  };
+
+  /* ============================================================
+     控件：chan-lab —— 有缓冲 / 无缓冲，一次发送走哪条路
+     ------------------------------------------------------------
+     三条路径的判定顺序照搬 runtime/chan.go 的 chansend：
+       ① recvq 里有人等 → 直接越过缓冲区交接
+       ② buf 还有空位   → 写环形缓冲区
+       ③ 都不行        → sudog 挂 sendq，park
+     recv 同理（① 从 sendq 拿，② 从缓冲区读，③ 挂 recvq）。
+     cap 写 0 就是无缓冲：那时 buf 不存在，send 只能走 ① 或 ③。
+
+     config:
+       cap: 3       0 = 无缓冲
+  ============================================================ */
+  WIDGETS['chan-lab'] = (root) => {
+    const cfg = cfgOf(root);
+    const CAP = Math.max(0, Number(cfg.cap) || 0);
+    const statusEl = root.querySelector('[data-status]');
+    const box = mountOf(root);
+    /* 内层再套一层：挂载点的 display 会被 .demo-body.custom 盖掉 */
+    const wrap = el('div', 'cl');
+    box.append(wrap);
+
+    let st;
+    function reset() {
+      st = {
+        buf: new Array(CAP).fill(null),
+        qcount: 0,
+        sendx: 0,
+        recvx: 0,
+        closed: false,
+        recvq: 0,
+        sendq: [],
+        nextVal: 10,
+        log: [],
+      };
+      draw();
+    }
+
+    function say(kind, html) {
+      st.log.unshift({ kind, html });
+      if (st.log.length > 6) st.log.pop();
+    }
+
+    /* ---------- 界面骨架 ---------- */
+    const top = el('div', 'cl-top');
+    const stage = el('div', 'cl-stage');
+    const leftPanel = el('div', 'cl-panel');
+    const rightPanel = el('div', 'cl-panel');
+    leftPanel.append(el('div', 'cl-ph', CAP === 0 ? 'hchan（无缓冲：buf 不存在）' : 'hchan（含环形缓冲区）'));
+    const ring = el('div', 'cl-ring');
+    leftPanel.append(ring);
+
+    rightPanel.append(el('div', 'cl-ph', '两条等待队列'));
+    const qbox = el('div', 'cl-q');
+    rightPanel.append(qbox);
+
+    stage.append(leftPanel, rightPanel);
+
+    const btns = el('div', 'cl-btns');
+    const bSend = el('button', 'cl-btn tone-violet', '发送一个值');
+    const bRecv = el('button', 'cl-btn tone-blue', '接收一个值');
+    const bClose = el('button', 'cl-btn tone-red', 'close(ch)');
+    const bReset = el('button', 'cl-btn ghost', '重置');
+    btns.append(bSend, bRecv, bClose, bReset);
+
+    const logBox = el('div', 'cl-log');
+
+    wrap.append(top, stage, btns, logBox);
+
+    /* ---------- 一次发送 ---------- */
+    function doSend() {
+      const v = st.nextVal;
+      st.nextVal += 10;
+
+      if (st.closed) {
+        say('p3', '**panic: send on closed channel** —— 先查 `closed`，再决定走哪条。');
+        draw(); return;
+      }
+      if (st.recvq > 0) {
+        st.recvq -= 1;
+        say('p1', '路径 ① **直接交接**：recvq 里有人在等，`' + v + '` 被直接拷进它的目标地址，' +
+          (CAP === 0 ? '这里本来就没有缓冲区。' : '缓冲区一步没动。'));
+        draw(); return;
+      }
+      if (st.qcount < CAP) {
+        const slot = st.sendx;
+        st.buf[slot] = v;
+        st.sendx = (st.sendx + 1) % CAP;
+        st.qcount += 1;
+        say('p2', '路径 ② **写缓冲区**：`buf[' + slot + '] = ' + v + '`，sendx 前进到 ' +
+          st.sendx + '，qcount = ' + st.qcount + '。');
+        draw(); return;
+      }
+      st.sendq.push(v);
+      say('p3', '路径 ③ **卡住**：' +
+        (CAP === 0 ? '无缓冲，没人接的时候没地方放。' : '缓冲区满了，qcount = dataqsiz。') +
+        '这个 goroutine 被包成 sudog 挂在 sendq 上，park。');
+      draw();
+    }
+
+    /* ---------- 一次接收 ---------- */
+    function doRecv() {
+      if (st.closed && st.qcount === 0 && st.sendq.length === 0) {
+        say('ok', '已关闭且空：**立刻返回零值和 ok=false**，不阻塞。');
+        draw(); return;
+      }
+      if (st.sendq.length > 0) {
+        const v = st.sendq.shift();
+        if (CAP === 0) {
+          say('p1', '路径 ① **直接接收**：无缓冲，`' + v + '` 从发送方的栈直接拷过来，并唤醒那个 G。');
+        } else {
+          const slot = st.recvx;
+          const got = st.buf[slot];
+          st.buf[slot] = v;
+          st.recvx = (st.recvx + 1) % CAP;
+          say('p1', '路径 ① **从 sendq 取**：先拿走队头 `' + got + '`，再把发送方的 `' + v +
+            '` 填进同一个槽位 —— 队列是满的，一头出一头进。');
+        }
+        draw(); return;
+      }
+      if (st.qcount > 0) {
+        const slot = st.recvx;
+        const got = st.buf[slot];
+        st.buf[slot] = null;
+        st.recvx = (st.recvx + 1) % CAP;
+        st.qcount -= 1;
+        say('p2', '路径 ② **从缓冲区取**：`' + got + '` 从 `buf[' + slot + ']` 出来，recvx 前进到 ' +
+          st.recvx + '，qcount = ' + st.qcount + '。');
+        draw(); return;
+      }
+      st.recvq += 1;
+      say('p3', '路径 ③ **卡住**：缓冲区空的，当前 goroutine 挂在 recvq 上，park。');
+      draw();
+    }
+
+    function doClose() {
+      if (st.closed) {
+        say('p3', '**panic: close of closed channel** —— 重复关闭直接炸。');
+        draw(); return;
+      }
+      st.closed = true;
+      const nSend = st.sendq.length;
+      const nRecv = st.recvq;
+      st.sendq = [];
+      st.recvq = 0;
+      say('ok', '**close(ch)**：`closed = 1`；唤醒 recvq 上 ' + nRecv +
+        ' 个接收者（拿零值 + ok=false）；sendq 上 ' + nSend + ' 个发送者被唤醒后 panic。');
+      draw();
+    }
+
+    /* ---------- 画 ---------- */
+    function draw() {
+      /* 顶部数字 */
+      top.textContent = '';
+      const chip = (k, v, cls) => {
+        const c = el('span', 'cl-chip' + (cls ? ' ' + cls : ''));
+        c.append(document.createTextNode(k));
+        c.append(el('b', '', v));
+        return c;
+      };
+      top.append(
+        chip('qcount', String(st.qcount)),
+        chip('dataqsiz', String(CAP)),
+        chip('sendx', CAP === 0 ? '—' : String(st.sendx)),
+        chip('recvx', CAP === 0 ? '—' : String(st.recvx)),
+        chip('closed', st.closed ? '1' : '0', st.closed ? 'bad' : ''),
+      );
+
+      /* 环形缓冲区 */
+      ring.textContent = '';
+      if (CAP === 0) {
+        const p = el('div', 'cl-empty');
+        richText(p, '没有这块。无缓冲时 `buf` 指向 hchan 自己，一个字节的元素也存不了。');
+        ring.append(p);
+      } else {
+        for (let i = 0; i < CAP; i += 1) {
+          const filled = st.buf[i] !== null;
+          const slot = el('div', 'cl-slot' + (filled ? ' on' : ''));
+          const mks = el('div', 'cl-mks');
+          if (i === st.sendx) mks.append(el('span', 'cl-mk w', '写'));
+          if (i === st.recvx) mks.append(el('span', 'cl-mk r', '读'));
+          slot.append(mks);
+          slot.append(el('div', 'cl-v' + (filled ? '' : ' nil'), filled ? String(st.buf[i]) : '空'));
+          slot.append(el('div', 'cl-i', 'buf[' + i + ']'));
+          ring.append(slot);
+        }
+      }
+
+      /* 两条队列 */
+      qbox.textContent = '';
+      const row = (label, n, list) => {
+        const r = el('div', 'cl-qrow');
+        r.append(document.createTextNode(label));
+        r.append(el('b', '', String(n) + ' 个 G'));
+        if (list && list.length) {
+          list.forEach((v) => r.append(el('span', 'cl-vals', String(v))));
+        } else {
+          r.append(el('span', 'cl-none', '空'));
+        }
+        return r;
+      };
+      qbox.append(row('recvq · 等着的接收方', st.recvq), row('sendq · 等着的发送方', st.sendq.length, st.sendq));
+      qbox.append(el('div', 'cl-none', CAP === 0
+        ? '无缓冲时，这两条队列是唯一的交接地点。'
+        : '队列里的值只说明「有人在等」，元素本身还在对方栈上。'));
+
+      /* 日志 */
+      logBox.textContent = '';
+      if (!st.log.length) {
+        logBox.append(el('div', 'cl-line', '点下面的按钮试一次。先连点两次「发送」把缓冲区装满，再点「接收」。'));
+      }
+      st.log.forEach((l) => {
+        const d = el('div', 'cl-line ' + l.kind);
+        richText(d, l.html);
+        logBox.append(d);
+      });
+
+      /* 状态行 */
+      if (statusEl) {
+        statusEl.textContent = 'qcount ' + st.qcount + ' / ' + CAP +
+          (st.closed ? ' · 已关闭' : '') +
+          (st.recvq || st.sendq.length ? ' · 有 G 在等' : '');
+      }
+    }
+
+    bSend.addEventListener('click', doSend);
+    bRecv.addEventListener('click', doRecv);
+    bClose.addEventListener('click', doClose);
+    bReset.addEventListener('click', reset);
+    reset();
   };
 
   /* ---------- 挂载 ---------- */

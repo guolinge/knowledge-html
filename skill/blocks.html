@@ -1867,6 +1867,45 @@ finally { pool.release(conn); }
 <li>它只读字节，不认识任何协议。别的线格式（TCP 头、TLS 记录、protobuf、Redis 协议）
 都能用，只要你能拿出那一段字节并把「每一步切哪几个字节」写出来。</li>
 </ul>
+<h4><code>chan-lab</code> —— 有缓冲 / 无缓冲，一次发送走哪条路</h4>
+<p><strong>讲「同一组按钮，容量不同就走完全不同的路」</strong>：上面是 hchan 的四个数字，
+中间是环形缓冲区，右边是两条等待队列。点发送 / 接收，看 qcount、两个游标
+和队列怎么变，日志会说这一步走的是路径 ① ② 还是 ③。</p>
+<div class="demo" data-widget="chan-lab" data-config="{&quot;cap&quot;:3}">
+      <div class="demo-head">
+        <span class="title">有缓冲 · 亲手走一遍三条路</span>
+        <span class="status" data-status></span>
+        <span class="spacer"></span>
+        
+      </div>
+      <div class="demo-body custom" data-mount></div>
+    </div><table>
+<thead>
+<tr>
+<th>键</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>cap</code></td>
+<td>容量。<strong>写 0 就是无缓冲</strong> —— 那时缓冲区那块显示「没有这块」，<code>buf</code> 指向 hchan 自己</td>
+</tr>
+</tbody>
+</table>
+<p>三条路径的判定顺序照抄 <code>runtime/chan.go</code> 的 <code>chansend</code>，不是自己编的：</p>
+<ol>
+<li><code>recvq</code> 里有人等 → <strong>直接交接</strong>，缓冲区一步没动</li>
+<li><code>qcount &lt; dataqsiz</code> → 写进 <code>buf[sendx]</code>，游标前进</li>
+<li>都不行 → 造 sudog 挂到 <code>sendq</code>，park</li>
+</ol>
+<p><code>recv</code> 反过来：<code>sendq</code> 有人就把发送方的值填进刚腾出的槽位（队列是满的，
+一头出一头进）；缓冲区有数据就从 <code>buf[recvx]</code> 取；都空就挂 <code>recvq</code>。</p>
+<blockquote>
+<p>这个控件只在 Go channel 这一篇用得上，但它示范的形状是通用的：
+<strong>一组状态数字 + 一块环形存储 + 两条队列，操作按固定优先级试三条路</strong>。
+换成一个连接池、一个定长任务队列、一个生产者消费者缓冲区，改判定条件就能用。</p>
+</blockquote>
 <h4><code>two-path-lab</code> —— 一条指令为什么要走两遍内存</h4>
 <p><strong>讲「取指令和取数据是两条独立通道」</strong>：两条泳道并排（通道 A 取指令、通道 B 取数据），
 点一步两边同时前进。通道 B 只在「解码」那一步才启动 —— 这是最常见的那处卡点。</p>

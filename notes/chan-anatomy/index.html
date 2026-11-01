@@ -1,0 +1,1186 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-has-toc="1">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>chan 是一块堆内存吗：四块东西，三条路</title>
+<meta name="description" content="把「一块内存」拆成四块：8 字节的变量、112 字节的 hchan、可能不存在的环形缓冲区、以及有人被挂住时才出现的 sudog 链。然后跟着一次 ch &lt;- v 走三条路 —— 路径 ① 直接越过缓冲区交接，路径 ③ 连数据都不复制，只有路径 ② 才真的写进那块内存。" />
+<link rel="stylesheet" href="../../assets/theme.css?v=19aa345f51" />
+  <link rel="stylesheet" href="../../assets/blocks.css?v=bb15413b7c" />
+  <link rel="stylesheet" href="../../assets/archify-embed.css?v=68fec0b81b" />
+</head>
+<body>
+<div id="progress"></div>
+<div id="tocScrim"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
+    <a class="brand" href="../../index.html"><span class="dot"></span>知识笔记</a>
+    
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="toc" id="toc">
+      <p class="toc-title">目录</p>
+      <a href="../../index.html" class="sub">← 全部笔记</a>
+      <a href="#四块东西各在哪">四块东西，各在哪</a>
+      <a href="#变量不等于对象">变量不等于对象</a>
+      <a href="#一次-ch-v-走哪条路">一次 ch &lt;- v 走哪条路</a>
+      <a href="#makechan堆上到底几块">makechan：堆上到底几块</a>
+      <a href="#缓冲区里放的是什么">缓冲区里放的是什么</a>
+      <a href="#三条跟着来的语义">三条跟着来的语义</a>
+      <a href="#happens-before-是第四样东西" class="sub">happens-before 是第四样东西</a>
+      <a href="#什么时候别用-channel">什么时候别用 channel</a>
+      <a href="#回到那个问题" class="sub">回到那个问题</a>
+      <a href="#速查">速查</a>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow">● Go · 并发</span>
+      <h1>chan 是一块堆内存吗：四块东西，三条路</h1>
+      <p class="lede">把「一块内存」拆成四块：8 字节的变量、112 字节的 hchan、可能不存在的环形缓冲区、以及有人被挂住时才出现的 sudog 链。然后跟着一次 ch &lt;- v 走三条路 —— 路径 ① 直接越过缓冲区交接，路径 ③ 连数据都不复制，只有路径 ② 才真的写进那块内存。</p>
+    </div>
+
+<aside class="needs">
+      <p class="needs-title">读这篇之前，你需要先知道</p>
+      <a class="need" href="../goroutine-gmp/">← <b>6. GMP · G 怎么挂回线程</b><span>G 是数据、M 是线程、P 是许可；本地队列与 mcache 各省一把锁</span></a>
+    </aside>
+    <div class="provenance"><span><b>来源</b> Go 1.26.2 源码 /usr/local/go/src/runtime/chan.go：hchan 定义、makechan 三个分支、chansend 三条路径（含注释 bypassing the channel buffer (if any)）、chanrecv 的 sendq 分支、closechan 先清 recvq/sendq 再唤醒 · Go 1.26.2 源码 /usr/local/go/src/runtime/runtime2.go：mutex 定义（key uintptr，arm64 上 8 字节） · Go 内存模型 /usr/local/go/doc/go_mem.html：send synchronized before receive；close synchronized before 返回零值的 receive；无缓冲 receive synchronized before send 完成；第 k 次 receive synchronized before 第 k+C 次 send · 本机实测（Go 1.26.2 darwin/arm64，testing.Benchmark）：make(chan int)=112 B/1 alloc；make(chan int,3)=144 B/1；make(chan int,100)=1024 B/1；make(chan []int)=112 B/1；make(chan []int,3)=192 B/2；make(chan struct{})=112 B/1；make(chan struct{},100)=112 B/1 · 用户提供的两轮问答原文（已收进页首 popquote，照录） · Go 规范 /usr/local/go/doc/go_spec.html：channel 类型、make 的内建语义、close 与 receive 的零值行为 · Effective Go（Channels 一节：channels 与 goroutine 的配合，共享内存 vs 通过通信共享）— https://go.dev/doc/effective_go#channels · Go by Example: Channels / Channel Buffering / Worker Pools（原文里那几个例子的常见出处）— https://gobyexample.com/channels</span><span><b>生成</b> 2026-11-01</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">Go</span> <span class="tag tone-muted">channel</span> <span class="tag tone-muted">goroutine</span> <span class="tag tone-muted">runtime</span> <span class="tag tone-muted">并发</span></span></div>
+
+<div class="pq tone-violet">
+      <button class="pq-open" type="button" data-pq-open="pq-1" aria-haspopup="dialog" aria-controls="pq-1">
+        <span class="pq-ic" aria-hidden="true">▤</span>
+        <span class="pq-txt"><b>这两轮的问答原文</b><span class="pq-sub">2 轮问答 · 约 1 万字</span></span>
+        <span class="pq-hint">点开阅读 →</span>
+      </button>
+      <dialog class="pq-dialog" id="pq-1" aria-labelledby="pq-1-t">
+        <div class="pq-panel" tabindex="-1">
+          <div class="pq-head">
+            <div class="pq-ht"><b id="pq-1-t">这两轮的问答原文</b><span class="pq-sub">2 轮问答 · 约 1 万字</span></div>
+            <button class="pq-close" type="button" data-pq-close aria-label="关闭">✕</button>
+          </div>
+          <p class="pq-note">原文照录，只把标题降了一级（否则它们会进本页目录）。代码块和表格保持原样，错别字没改。</p>
+          <div class="pq-body"><h4>问</h4>
+<p>如何理解 go 里的 chan，它是一块堆上面的内存吗？</p>
+<h4>答</h4>
+<p>可以把 Go 的 <code>chan</code> 理解为：<strong>一个由 runtime 管理的、用于 goroutine 通信与同步的“并发队列对象”</strong>。它通常会分配在堆上，但不能简单等同于“一块堆内存”。</p>
+<h4>1. <code>chan</code> 变量本身像一个引用</h4>
+<p>例如：</p>
+<pre><code class="language-go">ch := make(chan int, 10)
+</code></pre>
+<p>这里的 <code>ch</code> 是一个 channel 类型的值。底层它可以近似理解为指向 runtime 内部 channel 对象的引用：</p>
+<pre><code class="language-go">type hchan struct {
+    qcount   uint           // 当前缓冲区中的元素数量
+    dataqsiz uint           // 缓冲区容量
+    buf      unsafe.Pointer // 环形缓冲区
+    elemsize uint16
+    closed   uint32
+
+    sendq    waitq          // 等待发送的 goroutine
+    recvq    waitq          // 等待接收的 goroutine
+    // 还有锁、元素类型信息等
+}
+</code></pre>
+<p>真实定义会随 Go 版本变化，但核心概念差不多。</p>
+<p>因此：</p>
+<pre><code class="language-go">var ch chan int
+</code></pre>
+<p>这个 <code>ch</code> 变量本身只是一个很小的值（可理解为引用/指针语义）；而 <code>make(chan int)</code> 创建的底层 channel 运行时对象，通常位于堆上。</p>
+<h4>2. 有缓冲 channel：内部确实有一块存元素的内存</h4>
+<pre><code class="language-go">ch := make(chan int, 3)
+</code></pre>
+<p>这是一个容量为 3 的 buffered channel。</p>
+<p>内部大致包括：</p>
+<ol>
+<li>channel 元数据：容量、当前元素数、是否关闭、锁等；</li>
+<li>一个<strong>环形缓冲区</strong>，可以容纳 3 个 <code>int</code>；</li>
+<li>等待发送和接收的 goroutine 队列。</li>
+</ol>
+<p>可以粗略画成：</p>
+<pre><code class="language-text">ch
+ │
+ ▼
++------------------------------------+
+| hchan                              |
+|  qcount = 2                        |
+|  dataqsiz = 3                      |
+|  buf ───────────────┐              |
+|  sendq               |              |
+|  recvq               |              |
++----------------------|-------------+
+                       ▼
+              +---+---+---+
+              | 1 | 2 |   |
+              +---+---+---+
+                环形缓冲区
+</code></pre>
+<p>所以，对 buffered channel 来说，确实存在用于暂存元素的堆内存。</p>
+<p>但要注意，channel 发送的是“元素的值”：</p>
+<pre><code class="language-go">ch &lt;- x
+</code></pre>
+<ul>
+<li>若 <code>x</code> 是 <code>int</code>、结构体等，通常会将值复制进 channel 的缓冲区。</li>
+<li>若 <code>x</code> 是指针、slice、map、接口等，复制进去的是它们的引用头/指针；它们指向的实际数据不一定被复制。</li>
+</ul>
+<p>例如：</p>
+<pre><code class="language-go">ch := make(chan []int, 1)
+
+data := []int{1, 2, 3}
+ch &lt;- data
+</code></pre>
+<p>channel 缓冲区里保存的是 slice header（指向底层数组的引用、长度、容量），不是把 <code>[1,2,3]</code> 的数组内容完整复制一份。</p>
+<h4>3. 无缓冲 channel：没有“存消息的队列”</h4>
+<pre><code class="language-go">ch := make(chan int)
+</code></pre>
+<p>这是无缓冲 channel，容量为 0。</p>
+<p>它不用于积压数据；发送和接收必须配对发生：</p>
+<pre><code class="language-go">ch &lt;- 1     // 必须等某个 goroutine 接收
+x := &lt;-ch   // 必须等某个 goroutine 发送
+</code></pre>
+<p>例如：</p>
+<pre><code class="language-go">ch := make(chan int)
+
+go func() {
+    ch &lt;- 42
+}()
+
+fmt.Println(&lt;-ch)
+</code></pre>
+<p>无缓冲 channel 仍然有底层 runtime 对象，也通常在堆上；只是没有用于缓存多个元素的环形数组。</p>
+<p>它内部更重要的是维护：</p>
+<ul>
+<li>等待发送的 goroutine；</li>
+<li>等待接收的 goroutine；</li>
+<li>同步和唤醒机制。</li>
+</ul>
+<p>当发送方和接收方相遇时，数据可以直接从发送方交给接收方（具体实现细节由 runtime 决定），然后双方继续执行。</p>
+<p>所以无缓冲 channel 的本质更偏向：<strong>同步点（rendezvous）</strong>。</p>
+<h4>4. channel 不只是内存，还是同步原语</h4>
+<p>channel 最重要的价值不只是“存数据”，而是提供 goroutine 间的：</p>
+<ul>
+<li>通信；</li>
+<li>阻塞与唤醒；</li>
+<li>并发同步；</li>
+<li>内存可见性保证。</li>
+</ul>
+<p>例如：</p>
+<pre><code class="language-go">var x int
+done := make(chan struct{})
+
+go func() {
+    x = 100
+    close(done)
+}()
+
+&lt;-done
+fmt.Println(x) // 可以可靠地看到 100
+</code></pre>
+<p>这里 <code>&lt;-done</code> 不仅是在等待 goroutine 完成，也建立了同步关系：在 <code>close(done)</code> 前的写入，对收到关闭信号的一方是可见的。</p>
+<p>可以粗略理解为：</p>
+<ul>
+<li><code>ch &lt;- v</code> 与对应的 <code>&lt;-ch</code></li>
+<li><code>close(ch)</code> 与收到关闭状态的 <code>&lt;-ch</code></li>
+</ul>
+<p>之间，提供了 Go 内存模型定义的 happens-before 关系。</p>
+<h4>5. <code>chan</code> 是引用类型，赋值不会复制底层 channel</h4>
+<pre><code class="language-go">ch1 := make(chan int, 1)
+ch2 := ch1
+
+ch1 &lt;- 10
+fmt.Println(&lt;-ch2) // 10
+</code></pre>
+<p><code>ch1</code> 和 <code>ch2</code> 指向的是同一个底层 channel 对象，不会复制出两个队列。</p>
+<p>同样：</p>
+<pre><code class="language-go">func f(ch chan int) {
+    ch &lt;- 1
+}
+</code></pre>
+<p>把 channel 传给函数时，传递的是 channel 这个引用值的副本，底层仍然是同一个 channel。</p>
+<h4>6. <code>nil channel</code> 和已关闭 channel</h4>
+<h5><code>nil channel</code></h5>
+<pre><code class="language-go">var ch chan int // nil
+</code></pre>
+<p>它没有关联任何底层 runtime channel 对象：</p>
+<ul>
+<li>向它发送：永久阻塞；</li>
+<li>从它接收：永久阻塞；</li>
+<li><code>close(ch)</code>：panic。</li>
+</ul>
+<pre><code class="language-go">var ch chan int
+// ch &lt;- 1       // 永久阻塞
+// &lt;-ch          // 永久阻塞
+// close(ch)     // panic
+</code></pre>
+<h5>已关闭 channel</h5>
+<pre><code class="language-go">ch := make(chan int, 1)
+close(ch)
+</code></pre>
+<p>底层对象还在，只是状态变成关闭：</p>
+<ul>
+<li>再发送：panic；</li>
+<li>接收：可以继续读完缓冲区已有的数据；</li>
+<li>缓冲区为空后继续接收：立刻返回元素类型零值和 <code>ok == false</code>。</li>
+</ul>
+<pre><code class="language-go">v, ok := &lt;-ch
+</code></pre>
+<h4>总结</h4>
+<p>可以这样记：</p>
+<blockquote>
+<p><code>chan</code> 是一个由 Go runtime 管理的引用类型并发对象；底层通常在堆上，包含同步状态、等待 goroutine 的队列，以及（如果是 buffered channel）用于保存元素的环形缓冲区。</p>
+</blockquote>
+<p>因此：</p>
+<ul>
+<li><strong>它通常涉及堆内存，但不只是“一块内存”</strong>；</li>
+<li><strong>无缓冲 channel 主要是同步机制，不存积压消息</strong>；</li>
+<li><strong>有缓冲 channel 才有真正用于暂存元素的内部队列</strong>；</li>
+<li><strong>channel 的发送、接收、关闭还带有重要的并发同步语义</strong>。</li>
+</ul>
+<h4>问</h4>
+<p>channel 的出现是为了解决 goroutine 的一些信息同步问题？</p>
+<h4>答</h4>
+<p>可以。先不管 Go 的底层实现，把 <code>goroutine</code> 和 <code>channel</code> 想象成现实中的“工人”和“传送带”。</p>
+<h4>一、先理解 goroutine：同时工作的“小工人”</h4>
+<p>普通代码通常从上到下一步步执行：</p>
+<pre><code class="language-go">fmt.Println(&quot;第一件事&quot;)
+fmt.Println(&quot;第二件事&quot;)
+</code></pre>
+<p>而在函数前加 <code>go</code>：</p>
+<pre><code class="language-go">go doSomething()
+</code></pre>
+<p>就相当于安排了一个“小工人”去执行 <code>doSomething()</code>，原来的代码不会站在原地等它完成，而是继续向下执行。</p>
+<p>例如：</p>
+<pre><code class="language-go">func work() {
+    fmt.Println(&quot;工作完成&quot;)
+}
+
+func main() {
+    go work()
+
+    fmt.Println(&quot;主程序继续执行&quot;)
+}
+</code></pre>
+<p>这里可能会同时存在：</p>
+<ul>
+<li>主 goroutine：执行 <code>main</code></li>
+<li>新 goroutine：执行 <code>work</code></li>
+</ul>
+<p>你暂时可以把 goroutine 理解为：</p>
+<blockquote>
+<p>一个可以和其他代码同时工作的轻量级任务。</p>
+</blockquote>
+<h4>二、多个 goroutine 同时工作会遇到什么问题？</h4>
+<p>假设有两个 goroutine：</p>
+<ul>
+<li>goroutine A 负责计算数据；</li>
+<li>goroutine B 负责使用数据。</li>
+</ul>
+<p>那么就会遇到几个问题：</p>
+<ol>
+<li>A 如何把数据交给 B？</li>
+<li>B 怎么知道 A 已经把数据准备好了？</li>
+<li>如果 B 先执行，它是否应该等待 A？</li>
+<li>A 完成后，如何通知 B？</li>
+<li>如果要停止所有 goroutine，该如何通知？</li>
+<li>多个 goroutine 同时修改同一个变量，会不会发生混乱？</li>
+</ol>
+<p><code>channel</code> 就是 Go 用来解决这类 goroutine <strong>通信和协作问题</strong>的重要工具。</p>
+<h4>三、channel 可以理解成“传送带”或“邮箱”</h4>
+<p>假设有两个工人：</p>
+<pre><code class="language-text">工人 A  ----数据----&gt;  工人 B
+</code></pre>
+<p>channel 就是它们中间的传送带：</p>
+<pre><code class="language-text">工人 A  ---&gt;  channel  ---&gt;  工人 B
+</code></pre>
+<p>在 Go 中可以这样创建 channel：</p>
+<pre><code class="language-go">ch := make(chan int)
+</code></pre>
+<p>它的意思是：</p>
+<blockquote>
+<p>创建一个只能传递 <code>int</code> 类型数据的 channel。</p>
+</blockquote>
+<p>向 channel 里发送数据：</p>
+<pre><code class="language-go">ch &lt;- 42
+</code></pre>
+<p>从 channel 里接收数据：</p>
+<pre><code class="language-go">value := &lt;-ch
+</code></pre>
+<p>箭头可以帮助理解数据方向：</p>
+<pre><code class="language-go">ch &lt;- 42       // 42 进入 ch
+value := &lt;-ch  // 从 ch 取出数据，放入 value
+</code></pre>
+<h4>四、最简单的完整例子</h4>
+<pre><code class="language-go">package main
+
+import &quot;fmt&quot;
+
+func main() {
+    ch := make(chan int)
+
+    go func() {
+        ch &lt;- 42
+    }()
+
+    value := &lt;-ch
+    fmt.Println(value)
+}
+</code></pre>
+<p>运行结果：</p>
+<pre><code class="language-text">42
+</code></pre>
+<p>逐步解释：</p>
+<h5>第一步：创建 channel</h5>
+<pre><code class="language-go">ch := make(chan int)
+</code></pre>
+<p>创建一条用来传递整数的“传送带”。</p>
+<h5>第二步：启动 goroutine</h5>
+<pre><code class="language-go">go func() {
+    ch &lt;- 42
+}()
+</code></pre>
+<p>新 goroutine 把 <code>42</code> 发送进 channel。</p>
+<h5>第三步：接收数据</h5>
+<pre><code class="language-go">value := &lt;-ch
+</code></pre>
+<p>主 goroutine 从 channel 中接收数据。</p>
+<p>如果新 goroutine 还没有发送，主 goroutine会在这里等待。</p>
+<p>这种等待叫作<strong>阻塞</strong>：</p>
+<blockquote>
+<p>当前 goroutine 暂时停下来，直到它等待的事情发生。</p>
+</blockquote>
+<h5>第四步：继续执行</h5>
+<p>收到 <code>42</code> 后，主 goroutine继续运行：</p>
+<pre><code class="language-go">fmt.Println(value)
+</code></pre>
+<h4>五、channel 同时完成两件事</h4>
+<p>上面的代码中：</p>
+<pre><code class="language-go">ch &lt;- 42
+value := &lt;-ch
+</code></pre>
+<p>不仅仅是在传递一个数字，它实际上完成了两件事。</p>
+<h5>1. 传递数据</h5>
+<p><code>42</code> 从一个 goroutine 传递给了另一个 goroutine。</p>
+<h5>2. 同步执行时机</h5>
+<p>如果接收方先运行：</p>
+<pre><code class="language-go">value := &lt;-ch
+</code></pre>
+<p>但现在还没有数据，那么接收方会等待。</p>
+<p>对于无缓冲 channel，如果发送方执行：</p>
+<pre><code class="language-go">ch &lt;- 42
+</code></pre>
+<p>但还没有接收方，那么发送方也会等待。</p>
+<p>所以 channel 不只是“装数据的盒子”，它还可以控制 goroutine 什么时候等待、什么时候继续。</p>
+<p>这就是这里所说的<strong>同步</strong>。</p>
+<h4>六、什么是“无缓冲 channel”？</h4>
+<p>下面创建的是无缓冲 channel：</p>
+<pre><code class="language-go">ch := make(chan int)
+</code></pre>
+<p>无缓冲可以理解为：</p>
+<blockquote>
+<p>channel 中间没有仓库，发送方必须把数据直接交到接收方手里。</p>
+</blockquote>
+<p>像两个人面对面交文件：</p>
+<pre><code class="language-text">发送方拿着文件等待  &lt;----&gt;  接收方伸手接文件
+</code></pre>
+<p>只有发送方和接收方都准备好了，这次传递才会完成。</p>
+<p>例如：</p>
+<pre><code class="language-go">ch := make(chan int)
+
+go func() {
+    ch &lt;- 100
+}()
+
+value := &lt;-ch
+</code></pre>
+<p>这里发送和接收形成了一次配对。</p>
+<p>无缓冲 channel 特别适合：</p>
+<ul>
+<li>传递数据；</li>
+<li>同时确认对方已经接收；</li>
+<li>让两个 goroutine 在某个时间点同步。</li>
+</ul>
+<h4>七、什么是“有缓冲 channel”？</h4>
+<p>也可以创建一个带容量的 channel：</p>
+<pre><code class="language-go">ch := make(chan int, 3)
+</code></pre>
+<p>这里的 <code>3</code> 表示 channel 最多可以暂时存放 3 个整数。</p>
+<p>可以把它理解成一个有 3 个位置的小仓库：</p>
+<pre><code class="language-text">发送方 ---&gt; [ 数据 ][ 数据 ][ 空位 ] ---&gt; 接收方
+</code></pre>
+<p>发送方可以先把数据放进去：</p>
+<pre><code class="language-go">ch &lt;- 10
+ch &lt;- 20
+ch &lt;- 30
+</code></pre>
+<p>只要仓库还没满，发送方通常不需要等接收方立刻来取。</p>
+<p>当仓库满了以后，如果继续发送：</p>
+<pre><code class="language-go">ch &lt;- 40
+</code></pre>
+<p>发送方就需要等待，直到接收方取走一个数据、腾出位置。</p>
+<p>同样，如果仓库空了，接收方执行：</p>
+<pre><code class="language-go">value := &lt;-ch
+</code></pre>
+<p>接收方会等待，直到有新数据到来。</p>
+<p>简单对比：</p>
+<table>
+<thead>
+<tr>
+<th>类型</th>
+<th>创建方式</th>
+<th>特点</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>无缓冲 channel</td>
+<td><code>make(chan int)</code></td>
+<td>发送方和接收方需要直接配对</td>
+</tr>
+<tr>
+<td>有缓冲 channel</td>
+<td><code>make(chan int, 3)</code></td>
+<td>可以暂时存放一定数量的数据</td>
+</tr>
+</tbody>
+</table>
+<h4>八、为什么不直接使用普通变量？</h4>
+<p>当然可以让多个 goroutine 使用同一个变量：</p>
+<pre><code class="language-go">var value int
+</code></pre>
+<p>一个 goroutine 写：</p>
+<pre><code class="language-go">value = 42
+</code></pre>
+<p>另一个 goroutine读：</p>
+<pre><code class="language-go">fmt.Println(value)
+</code></pre>
+<p>但问题是：它们可能同时执行。</p>
+<p>接收方可能在发送方写入之前就读了：</p>
+<pre><code class="language-text">接收方先读取：得到 0
+发送方后写入：改成 42
+</code></pre>
+<p>如果多个 goroutine 同时修改同一个数据，还可能出现 <strong>data race（数据竞争）</strong>。</p>
+<p>数据竞争可以简单理解为：</p>
+<blockquote>
+<p>多个 goroutine 在没有协调的情况下，同时读写同一份数据，导致结果不可预测。</p>
+</blockquote>
+<p>传统做法是使用：</p>
+<ul>
+<li>共享变量；</li>
+<li>锁 <code>sync.Mutex</code>；</li>
+<li>表示数据是否准备好的状态，例如 <code>ready</code>。</li>
+</ul>
+<p>大概会变成：</p>
+<pre><code class="language-go">var value int
+var ready bool
+var mu sync.Mutex
+</code></pre>
+<p>写入方需要加锁、修改、解锁：</p>
+<pre><code class="language-go">mu.Lock()
+value = 42
+ready = true
+mu.Unlock()
+</code></pre>
+<p>读取方还需要反复检查数据是否准备好。</p>
+<p>这样需要程序员自己处理：</p>
+<ul>
+<li>什么时候加锁；</li>
+<li>什么时候解锁；</li>
+<li>数据有没有准备好；</li>
+<li>如何让等待方暂停；</li>
+<li>如何唤醒等待方；</li>
+<li>如何避免不断检查产生的 CPU 浪费；</li>
+<li>如何避免忘记解锁。</li>
+</ul>
+<p>而使用 channel：</p>
+<pre><code class="language-go">ch := make(chan int)
+
+go func() {
+    ch &lt;- 42
+}()
+
+value := &lt;-ch
+</code></pre>
+<p>“数据是 <code>42</code>”和“数据已经准备好了”这两件事，被合并在了一起：</p>
+<ul>
+<li>没有数据时，接收方自动等待；</li>
+<li>有数据时，接收方得到数据并继续运行。</li>
+</ul>
+<h4>九、Go 推荐的是“通过通信来协作”</h4>
+<p>Go 的 channel 借鉴了 CSP（Communicating Sequential Processes，通信顺序进程）的思想。</p>
+<p>Go 中有一句常见的话：</p>
+<blockquote>
+<p>不要通过共享内存来通信；应该通过通信来共享内存。</p>
+</blockquote>
+<p>英文是：</p>
+<blockquote>
+<p>Don't communicate by sharing memory; share memory by communicating.</p>
+</blockquote>
+<p>简单理解：</p>
+<h5>方式一：直接共享数据</h5>
+<pre><code class="language-text">goroutine A ─┐
+             ├─ 同时操作同一个变量
+goroutine B ─┘
+</code></pre>
+<p>这时通常需要锁来保护数据。</p>
+<h5>方式二：通过 channel 交接数据</h5>
+<pre><code class="language-text">goroutine A ---&gt; channel ---&gt; goroutine B
+</code></pre>
+<p>数据明确地从一个 goroutine 交给另一个 goroutine，很多时候会更容易理解。</p>
+<p>这并不意味着 Go 禁止使用锁，也不意味着 channel 可以替代所有锁。它只是提供了另一种更适合某些场景的协作方式。</p>
+<h4>十、channel 的常见用途</h4>
+<h5>1. 传递数据或任务</h5>
+<p>一个 goroutine 生产任务，另一个 goroutine 处理任务：</p>
+<pre><code class="language-go">jobs := make(chan string)
+
+go func() {
+    jobs &lt;- &quot;任务1&quot;
+    jobs &lt;- &quot;任务2&quot;
+    close(jobs)
+}()
+
+for job := range jobs {
+    fmt.Println(&quot;正在处理：&quot;, job)
+}
+</code></pre>
+<p>执行过程可以理解为：</p>
+<pre><code class="language-text">生产者 ---&gt; jobs channel ---&gt; 消费者
+</code></pre>
+<p>这里：</p>
+<pre><code class="language-go">close(jobs)
+</code></pre>
+<p>表示：</p>
+<blockquote>
+<p>不会再向这个 channel 发送新任务了。</p>
+</blockquote>
+<p>接收方使用：</p>
+<pre><code class="language-go">for job := range jobs
+</code></pre>
+<p>会不断接收数据，直到 channel 被关闭并且里面的数据全部取完。</p>
+<p>这是典型的<strong>生产者—消费者模式</strong>。</p>
+<p>如果有多个处理任务的 goroutine，就可以构成 <strong>worker pool（工作池）</strong>。</p>
+<p>如果数据依次经过多个处理阶段，就可以构成 <strong>pipeline（流水线）</strong>。</p>
+<h5>2. 等待 goroutine 完成</h5>
+<p>有时不需要传递具体数据，只需要知道：</p>
+<blockquote>
+<p>这个 goroutine 已经完成了。</p>
+</blockquote>
+<p>可以这样写：</p>
+<pre><code class="language-go">done := make(chan struct{})
+
+go func() {
+    // 做一些工作
+
+    close(done)
+}()
+
+&lt;-done
+fmt.Println(&quot;工作已经完成&quot;)
+</code></pre>
+<p>解释：</p>
+<pre><code class="language-go">&lt;-done
+</code></pre>
+<p>会等待 <code>done</code> 被关闭。</p>
+<p><code>struct{}</code> 是一个不包含字段的空结构体：</p>
+<pre><code class="language-go">struct{}{}
+</code></pre>
+<p>当 channel 只用来发送信号、不需要携带具体数据时，经常使用：</p>
+<pre><code class="language-go">chan struct{}
+</code></pre>
+<h5>3. 发送停止通知</h5>
+<p>一个 goroutine 可能一直运行，我们希望通知它停止：</p>
+<pre><code class="language-go">stop := make(chan struct{})
+
+go func() {
+    for {
+        select {
+        case &lt;-stop:
+            fmt.Println(&quot;收到停止通知&quot;)
+            return
+        default:
+            // 继续工作
+        }
+    }
+}()
+
+close(stop)
+</code></pre>
+<p>这里：</p>
+<pre><code class="language-go">close(stop)
+</code></pre>
+<p>相当于广播：</p>
+<blockquote>
+<p>不会再有新的信号了，现在停止吧。</p>
+</blockquote>
+<p>所有正在等待：</p>
+<pre><code class="language-go">&lt;-stop
+</code></pre>
+<p>的 goroutine 都能发现 <code>stop</code> 已经关闭。</p>
+<p>其中 <code>select</code> 可以简单理解为：</p>
+<blockquote>
+<p>同时等待多个 channel 操作，看哪一个先准备好。</p>
+</blockquote>
+<p>不过，在真实项目里，如果涉及：</p>
+<ul>
+<li>请求取消；</li>
+<li>超时；</li>
+<li>跨越多个函数的停止通知；</li>
+<li>一整条调用链的生命周期控制；</li>
+</ul>
+<p>通常优先使用：</p>
+<pre><code class="language-go">context.Context
+</code></pre>
+<p>它是 Go 专门提供的取消和超时机制。</p>
+<h5>4. 限制同时工作的 goroutine 数量</h5>
+<p>假设有 100 个任务，但最多只允许 3 个任务同时执行。</p>
+<p>可以使用容量为 3 的 channel：</p>
+<pre><code class="language-go">sem := make(chan struct{}, 3)
+</code></pre>
+<p>执行任务前，先往里面放一个标记：</p>
+<pre><code class="language-go">sem &lt;- struct{}{}
+</code></pre>
+<p>任务完成后，取出一个标记：</p>
+<pre><code class="language-go">&lt;-sem
+</code></pre>
+<p>示例：</p>
+<pre><code class="language-go">sem := make(chan struct{}, 3)
+
+for i := 0; i &lt; 10; i++ {
+    sem &lt;- struct{}{}
+
+    go func(id int) {
+        defer func() {
+            &lt;-sem
+        }()
+
+        fmt.Println(&quot;执行任务&quot;, id)
+    }(i)
+}
+</code></pre>
+<p>因为 channel 最多只能放 3 个标记，所以最多只有 3 个任务能够同时进入执行阶段。</p>
+<p>这种使用方式类似于<strong>信号量</strong>。</p>
+<h5>5. 同时等待多个事件</h5>
+<p>例如程序可能需要等待：</p>
+<ul>
+<li>收到任务；</li>
+<li>收到停止通知；</li>
+<li>到达超时时间。</li>
+</ul>
+<p>可以使用 <code>select</code>：</p>
+<pre><code class="language-go">select {
+case job := &lt;-jobs:
+    fmt.Println(&quot;收到任务：&quot;, job)
+
+case &lt;-stop:
+    fmt.Println(&quot;收到停止通知&quot;)
+
+case &lt;-time.After(3 * time.Second):
+    fmt.Println(&quot;等待超时&quot;)
+}
+</code></pre>
+<p>哪个事件先发生，就执行对应的分支。</p>
+<p>这是 channel 非常重要的能力。</p>
+<h4>十一、channel 不只是传递信息，还保证“前面的修改能被看到”</h4>
+<p>看一个例子：</p>
+<pre><code class="language-go">var x int
+done := make(chan struct{})
+
+go func() {
+    x = 100
+    close(done)
+}()
+
+&lt;-done
+fmt.Println(x)
+</code></pre>
+<p>这里的执行逻辑是：</p>
+<ol>
+<li>新 goroutine 把 <code>x</code> 修改为 <code>100</code>；</li>
+<li>新 goroutine 关闭 <code>done</code>；</li>
+<li>主 goroutine 等待 <code>done</code> 关闭；</li>
+<li>等待结束后读取 <code>x</code>。</li>
+</ol>
+<p>主 goroutine能够可靠地看到：</p>
+<pre><code class="language-text">100
+</code></pre>
+<p>channel 不只是让 goroutine 等待，它还提供了 Go 内存模型中的同步保证。</p>
+<p>简单理解就是：</p>
+<blockquote>
+<p>当 channel 告诉你“前面的工作已经完成”时，这个工作产生的修改也能被正确看到。</p>
+</blockquote>
+<p>更专业的说法是，它建立了某种 <strong>happens-before（先发生于）关系</strong>，但初学时只需要记住：</p>
+<blockquote>
+<p>channel 不仅同步执行顺序，还保证同步之前写入的数据对另一方可见。</p>
+</blockquote>
+<h4>十二、channel 不是所有同步问题的最佳答案</h4>
+<p>虽然 channel 很重要，但不能把所有并发问题都改成 channel。</p>
+<h5>适合使用 channel 的情况</h5>
+<p>channel 通常适合：</p>
+<ul>
+<li>在 goroutine 之间传递数据；</li>
+<li>传递任务或事件；</li>
+<li>生产者—消费者模式；</li>
+<li>pipeline（流水线）；</li>
+<li>worker pool（工作池）；</li>
+<li>等待任务完成；</li>
+<li>发送停止信号；</li>
+<li>控制并发数量；</li>
+<li>使用 <code>select</code> 等待多个事件。</li>
+</ul>
+<h5>适合使用 Mutex 的情况</h5>
+<p>如果只是保护一个大家都要访问的共享变量，使用锁可能更直接：</p>
+<pre><code class="language-go">type Counter struct {
+    mu sync.Mutex
+    n  int
+}
+
+func (c *Counter) Inc() {
+    c.mu.Lock()
+    c.n++
+    c.mu.Unlock()
+}
+</code></pre>
+<p>这里 <code>mu</code> 是锁。</p>
+<p>执行：</p>
+<pre><code class="language-go">c.mu.Lock()
+</code></pre>
+<p>表示：</p>
+<blockquote>
+<p>我要修改数据，其他 goroutine 先不要同时修改。</p>
+</blockquote>
+<p>执行：</p>
+<pre><code class="language-go">c.mu.Unlock()
+</code></pre>
+<p>表示：</p>
+<blockquote>
+<p>我修改完了，其他 goroutine 可以继续了。</p>
+</blockquote>
+<p>如果只是对计数器做一次简单的 <code>n++</code>，为了使用 channel 专门启动一个 goroutine，再向它发送加一请求，反而可能更复杂、开销更大。</p>
+<h4>十三、不同问题应该选择不同工具</h4>
+<p>可以先记住下面这张表：</p>
+<table>
+<thead>
+<tr>
+<th>需求</th>
+<th>常用工具</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>goroutine 之间传递数据、任务、事件</td>
+<td><code>channel</code></td>
+</tr>
+<tr>
+<td>等待某个事件发生</td>
+<td><code>channel</code></td>
+</tr>
+<tr>
+<td>同时等待多个事件</td>
+<td><code>channel + select</code></td>
+</tr>
+<tr>
+<td>保护共享变量</td>
+<td><code>sync.Mutex</code> / <code>sync.RWMutex</code></td>
+</tr>
+<tr>
+<td>等待多个 goroutine 全部完成</td>
+<td><code>sync.WaitGroup</code></td>
+</tr>
+<tr>
+<td>简单的原子计数或状态修改</td>
+<td><code>sync/atomic</code></td>
+</tr>
+<tr>
+<td>取消、超时、请求生命周期控制</td>
+<td><code>context.Context</code></td>
+</tr>
+</tbody>
+</table>
+<p>因此，channel 不是锁的完全替代品。</p>
+<p>一个简单的判断方式是：</p>
+<ul>
+<li><strong>重点是“把东西交给另一个 goroutine”</strong>：考虑 channel；</li>
+<li><strong>重点是“保护大家共同访问的东西”</strong>：考虑锁；</li>
+<li><strong>重点是“等一批 goroutine 全部结束”</strong>：考虑 <code>WaitGroup</code>；</li>
+<li><strong>重点是“通知整条调用链取消或超时”</strong>：考虑 <code>context</code>。</li>
+</ul>
+<h4>十四、回到你的问题：channel 是为了解决信息同步吗？</h4>
+<p>答案是：</p>
+<blockquote>
+<p>是，但不只是“同步信息”。</p>
+</blockquote>
+<p>更准确地说，channel 主要帮助 goroutine 完成三件事：</p>
+<h5>1. 传递信息</h5>
+<pre><code class="language-go">ch &lt;- 42
+value := &lt;-ch
+</code></pre>
+<p>把数据从一个 goroutine 传给另一个。</p>
+<h5>2. 同步执行时机</h5>
+<p>没有数据时，接收方等待；某些情况下没有接收方时，发送方也等待。</p>
+<h5>3. 保证内存可见性</h5>
+<p>发送、接收或关闭 channel，可以让一个 goroutine 在前面完成的修改被另一个 goroutine正确看到。</p>
+<p>最后可以用一句话记住：</p>
+<blockquote>
+<p>goroutine 是同时工作的“小工人”，channel 是它们之间传递数据、发送通知和协调工作节奏的“传送带”。它通常用于通信和同步，但不是所有并发问题都应该使用 channel。</p>
+</blockquote>
+</div>
+        </div>
+      </dialog>
+    </div><p>这两轮问答都答到了同一个问题的两面：「chan 是不是一块堆内存」和「chan 是不是为了同步」。它们其实指向同一件东西 —— 一个<strong>由四部分组成的 runtime 对象</strong>，其中只有一块装元素。</p>
+<p>这篇把原文压成两张图：这个对象长什么样，以及一次发送会走哪条路。</p>
+<p>先把「一块堆内存」这个说法拆开。它至少混了三层：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>你在说哪一层</th><th>它是什么</th><th>在哪</th><th>本机实测占多少</th></tr></thead><tbody><tr><th>那个变量 <code>ch</code></th><td data-label="它是什么">你代码里的一个名字，内容是 8 字节指针</td><td data-label="在哪">跟着它所在的作用域走，通常就在栈上或者结构体里</td><td data-label="本机实测占多少">8 字节</td></tr><tr><th>runtime 的 <code>hchan</code> 对象</th><td data-label="它是什么"><code>make(chan ...)</code> 造出来的东西，元数据都在这</td><td data-label="在哪">堆</td><td data-label="本机实测占多少">112 字节（arm64）</td></tr><tr><th>装元素的那块 <code>buf</code></th><td data-label="它是什么">环形缓冲区，只在容量大于 0、且元素不是零大小时才有</td><td data-label="在哪">堆（可能和 <code>hchan</code> 同一块，也可能分开，见 §04）</td><td data-label="本机实测占多少"><code>容量 × 元素大小</code></td></tr></tbody></table></div><p>而真正让 channel 成为 channel 的，<strong>不是其中任何一块内存</strong>，是两条等待队列加一把锁。§03 会看到：一次发送甚至可以不碰缓冲区。</p>
+<h2 id="四块东西各在哪"><span class="num">01</span>四块东西，各在哪</h2>
+<figure class="archfig" data-arch style="--arch-max-width:1586px" data-boundaries="nested" data-pano data-parts='{"chvar":{"label":"ch 变量","sub":"你代码里的那个名字","detail":"它和 `make` 造出来的对象是两样东西。`var ch chan int` 声明了一个 8 字节的变量，但它是 nil —— 没有指向任何 hchan，所以发送和接收都会永久阻塞。`make` 之后它才指向一个真实对象。","facts":{"大小":"8 字节","在哪":"跟着作用域","是 nil 时":"没有 hchan"}},"hchan":{"label":"runtime 的 hchan","sub":"元数据、两条链、一把锁","detail":"这个类型的字段随版本变化，但四组东西一直在：队列状态（qcount / dataqsiz）、两个游标（sendx / recvx）、两条等待链（sendq / recvq）、以及保护它们的锁。","facts":{"分配":"mallocgc","本机实测":"112 字节","为什么加锁":"多个 G 会同时进来"}},"ring":{"label":"环形缓冲区","sub":"唯一真正装元素的地方","detail":"元素按 sendx 写进去、按 recvx 读出来，两个游标追上就环回。容量 0 时 runtime 不给它分配内存，`buf` 指向 hchan 自己 —— 见 §04。","facts":{"多大":"dataqsiz × elemsize","谁写":"chansend 路径②","谁读":"chanrecv 路径②"}},"suds":{"label":"sudog 链","sub":"被挂住的 G","detail":"发送方放不下时不会复制数据 —— 它把自己包成一个 sudog，里面存的是「值在哪个地址」，挂到 sendq 上然后 park。所以一个卡住的 channel 里，数据还在发送方的栈上。","facts":{"谁造":"acquireSudog","记住":"值的地址","什么时候消失":"被唤醒 à"}}}' data-tours='[{"id":"blocks","label":"数一数一共几块","steps":[{"at":["chvar"],"text":"先说最外层：你在代码里写的 `ch`，本身只是一个 8 字节的指针。它不是对象，只是一个名字。"},{"at":["hchan"],"text":"一次 `make` 一定造出这个。所有状态都在这 112 字节里：装了几个、能装几个、两个游标、关没关、谁在等。"},{"at":["ring"],"text":"这是唯一装元素的地方。容量 0 时它根本不存在 —— 所以「chan 是一块堆内存」在无缓冲 channel 上就不成立。"},{"at":["suds"],"text":"有人被卡住时才有它。注意 sudog 里存的是值的地址，不是值的副本。"}]},{"id":"swap","label":"变的是什么","steps":[{"at":["chvar","hchan"],"text":"复制 `ch` 只是复制那 8 字节，两个名字指同一个 hchan。这是「引用类型」的全部含义。"},{"at":["hchan","ring"],"text":"关闭 channel 只改 hchan 里的 `closed`，缓冲区里的元素一个都不动 —— 已经放进去的还能读完。"}]}]' data-frames='[{"id":"stack","boundary":0,"kind":"classification","label":"栈 · 只有这个名字","detail":"你写的 `ch` 变量本身只有 8 字节，存的是一个指针。把它赋给别的变量、当参数传进函数，复制的都是这 8 字节 —— 底层还是同一个 hchan。","members":["chvar"],"depth":1},{"id":"heap","boundary":1,"kind":"contains","label":"堆 · make 的时候造的","detail":"一次 `make` 至少造出 hchan；`buf` 和 sudog 是它的附属。搞清楚「一共几块」要把 makechan 的三个分支分开看（§04）。","members":["hchan","ring","suds"],"depth":1}]'>
+      <div class="arch-boundary-ui">
+          <div class="arch-boundary-toolbar"><span class="arch-boundary-label">边界</span>
+            <button type="button" data-boundary-mode="nested" aria-pressed="true">多层归属框</button>
+            <button type="button" data-boundary-mode="flat" aria-pressed="false">只留一层分区</button>
+            <button type="button" data-arch-reset>恢复全图</button>
+          </div>
+          <div class="arch-address-box" aria-live="polite"><div data-arch-address>点一个零件，看完整归属路径；点一个区域标题，看这一层的含义。</div>
+            <div data-arch-frame-detail>最外框表示逻辑资源域，不表示所有对象在一块内存里。每层边界的标题说明分组依据。</div></div>
+        </div>
+      <div class="arch-canvas"><svg viewBox="0 0 1300 500" role="img" aria-labelledby="chan-parts-archify-diagram-title chan-parts-archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
+        <title id="chan-parts-archify-diagram-title">chan 由四块东西组成，只有一块装元素</title>
+        <desc id="chan-parts-archify-diagram-description">「是一块堆内存吗」—— 先把「一块」拆成四块再答</desc>
+        <!-- Definitions -->
+        <defs>
+          <marker id="chan-parts-arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-default" />
+          </marker>
+          <marker id="chan-parts-arrowhead-emphasis" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-emphasis" />
+          </marker>
+          <marker id="chan-parts-arrowhead-security" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-security" />
+          </marker>
+          <marker id="chan-parts-arrowhead-dashed" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-dashed" />
+          </marker>
+          <pattern id="chan-parts-grid" width="40" height="40" patternUnits="userSpaceOnUse">
+            <path d="M 40 0 L 0 0 0 40" class="c-grid" stroke-width="0.5"/>
+          </pattern>
+        </defs>
+
+        <!-- Background Grid -->
+        <rect width="100%" height="100%" fill="url(#chan-parts-grid)" />
+
+        <!-- Boundaries (behind everything) -->
+        <g class="arch-frame" data-frame="stack" data-depth="1" data-frame-flat="false" data-frame-kind="classification" role="button" tabindex="0" aria-pressed="false" aria-label="栈 · 只有这个名字"><title>你写的 `ch` 变量本身只有 8 字节，存的是一个指针。把它赋给别的变量、当参数传进函数，复制的都是这 8 字节 —— 底层还是同一个 hchan。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="0" data-frame-members="chvar" x="10" y="152" width="242" height="164" rx="12" class="c-region" stroke-width="1"/>
+        <text x="18" y="170" class="t-cloud" font-size="9" font-weight="600">栈 · 只有这个名字</text></g>
+
+        <g class="arch-frame" data-frame="heap" data-depth="1" data-frame-flat="false" data-frame-kind="contains" role="button" tabindex="0" aria-pressed="false" aria-label="堆 · make 的时候造的"><title>一次 `make` 至少造出 hchan；`buf` 和 sudog 是它的附属。搞清楚「一共几块」要把 makechan 的三个分支分开看（§04）。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="1" data-frame-members="hchan ring suds" x="280" y="26" width="950" height="390" rx="12" class="c-region" stroke-width="1"/>
+        <text x="288" y="44" class="t-cloud" font-size="9" font-weight="600">堆 · make 的时候造的</text></g>
+
+        <!-- Connection paths (before components for correct z-order) -->
+        <path data-edge-from="chvar" data-edge-to="hchan" data-edge-label="一个指针" data-edge-key="0" data-edge-id="e1" data-composition-points="226,234;268,234;268,210;310,210" d="M 226 234 L 260 234 Q 268 234 268 226 L 268 218 Q 268 210 276 210 L 310 210" class="a-default" stroke-width="1.5" marker-end="url(#chan-parts-arrowhead)"/>
+        <path data-edge-from="hchan" data-edge-to="ring" data-edge-label="buf 指过去" data-edge-key="1" data-edge-id="e2" data-composition-points="666,203;718,203;718,124;770,124" d="M 666 203 L 710 203 Q 718 203 718 195 L 718 132 Q 718 124 726 124 L 770 124" class="a-default" stroke-width="1.5" marker-end="url(#chan-parts-arrowhead)"/>
+        <path data-edge-from="hchan" data-edge-to="suds" data-edge-label="sendq / recvq" data-edge-key="2" data-edge-id="e3" data-composition-points="666,217;718,217;718,313;770,313" d="M 666 217 L 710 217 Q 718 217 718 225 L 718 305 Q 718 313 726 313 L 770 313" class="a-default" stroke-width="1.5" marker-end="url(#chan-parts-arrowhead)"/>
+
+        <!-- Components -->
+        <g id="chan-parts-node-chvar" data-nb="1" data-node-id="chvar" data-node-label="ch 变量" tabindex="0" role="button" aria-label="Focus ch 变量, 你代码里的那个名字, 栈：只有这个名字本身" aria-pressed="false" data-node-kind="external" data-node-sublabel="你代码里的那个名字" data-node-context="栈：只有这个名字本身">
+          <title>ch 变量 · 你代码里的那个名字 · 栈：只有这个名字本身</title>
+          <rect x="36" y="178" width="190" height="112" rx="6" class="c-mask"/>
+          <rect x="36" y="178" width="190" height="112" rx="6" class="c-external" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="external" class="semantic-sigil s-external" transform="translate(42 184) scale(0.6875)">
+            <rect x="2.5" y="5" width="8.5" height="8" rx="1.5"/>
+            <path d="M8 2.5h5.5V8M13.5 2.5 7.5 8.5"/>
+          </g>
+          <rect class="nb-badge" x="173.2" y="186" width="40.8" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="193.6" y="197" font-size="8" text-anchor="middle">8 字节</text>
+          <text class="nb-title" x="70" y="199" font-size="10.5" font-weight="600">ch 变量</text>
+          <line class="nb-hr" x1="44" y1="206" x2="218" y2="206"/>
+          <text class="nb-k" x="48" y="230" font-size="9">内容</text><text class="nb-v" x="121.8" y="230" font-size="9">一个指针</text>
+          <text class="nb-k" x="48" y="244" font-size="9">赋给别的变量</text><text class="nb-v" x="121.8" y="244" font-size="9">复制这 8 字节</text>
+          <text class="nb-k" x="48" y="258" font-size="9">传进函数</text><text class="nb-v" x="121.8" y="258" font-size="9">同上</text>
+          <text class="nb-note" x="48" y="282" font-size="8">它不装元素，也不记录状态</text>
+        </g>
+
+        <g id="chan-parts-node-hchan" data-nb="1" data-node-id="hchan" data-node-label="hchan" tabindex="0" role="button" aria-label="Focus hchan, runtime 造的对象, 堆：make 的时候一次造出来的" aria-pressed="false" data-node-kind="backend" data-node-sublabel="runtime 造的对象" data-node-context="堆：make 的时候一次造出来的">
+          <title>hchan · runtime 造的对象 · 堆：make 的时候一次造出来的</title>
+          <rect x="310" y="120" width="356" height="180" rx="6" class="c-mask"/>
+          <rect x="310" y="120" width="356" height="180" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(316 126) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <rect class="nb-badge" x="603.6" y="128" width="50.4" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="628.8" y="139" font-size="8" text-anchor="middle">112 字节</text>
+          <text class="nb-title" x="344" y="141" font-size="10.5" font-weight="600">hchan</text>
+          <line class="nb-hr" x1="318" y1="148" x2="658" y2="148"/>
+          <text class="nb-k" x="322" y="185" font-size="9">队列状态</text><text class="nb-v" x="374.2" y="185" font-size="9">qcount / dataqsiz</text>
+          <text class="nb-k" x="322" y="199" font-size="9">两个游标</text><text class="nb-v" x="374.2" y="199" font-size="9">sendx / recvx</text>
+          <text class="nb-k" x="322" y="213" font-size="9">关闭标记</text><text class="nb-v" x="374.2" y="213" font-size="9">closed</text>
+          <text class="nb-k" x="322" y="227" font-size="9">元素类型</text><text class="nb-v" x="374.2" y="227" font-size="9">elemtype / elemsize</text>
+          <text class="nb-k" x="322" y="241" font-size="9">两条链</text><text class="nb-v" x="374.2" y="241" font-size="9">sendq / recvq</text>
+          <text class="nb-k" x="322" y="255" font-size="9">一把锁</text><text class="nb-v" x="374.2" y="255" font-size="9">lock 保护以上全部</text>
+          <text class="nb-note" x="322" y="292" font-size="8">一次 make 一定分配它</text>
+        </g>
+
+        <g id="chan-parts-node-ring" data-nb="1" data-node-id="ring" data-node-label="buf · 环形缓冲区" tabindex="0" role="button" aria-label="Focus buf · 环形缓冲区, 堆：make 的时候一次造出来的" aria-pressed="false" data-node-kind="database" data-node-context="堆：make 的时候一次造出来的">
+          <title>buf · 环形缓冲区 · 堆：make 的时候一次造出来的</title>
+          <rect x="770" y="56" width="430" height="136" rx="6" class="c-mask"/>
+          <rect x="770" y="56" width="430" height="136" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(776 62) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <rect class="nb-badge" x="1147.2" y="64" width="40.8" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="1167.6" y="75" font-size="8" text-anchor="middle">装元素</text>
+          <text class="nb-title" x="804" y="77" font-size="10.5" font-weight="600">buf · 环形缓冲区</text>
+          <line class="nb-hr" x1="778" y1="84" x2="1192" y2="84"/>
+          <text class="nb-k" x="782" y="120" font-size="9">多大</text><text class="nb-v" x="839.6" y="120" font-size="9">dataqsiz × elemsize</text>
+          <text class="nb-k" x="782" y="134" font-size="9">怎么用</text><text class="nb-v" x="839.6" y="134" font-size="9">环形，靠 sendx / recvx 两个游标</text>
+          <text class="nb-k" x="782" y="148" font-size="9">容量 0 时</text><text class="nb-v" x="839.6" y="148" font-size="9">这块不存在</text>
+          <text class="nb-note" x="782" y="184" font-size="8">buf 指向它</text>
+        </g>
+
+        <g id="chan-parts-node-suds" data-nb="1" data-node-id="suds" data-node-label="sudog 链" tabindex="0" role="button" aria-label="Focus sudog 链, 堆：make 的时候一次造出来的" aria-pressed="false" data-node-kind="messagebus" data-node-context="堆：make 的时候一次造出来的">
+          <title>sudog 链 · 堆：make 的时候一次造出来的</title>
+          <rect x="770" y="240" width="430" height="146" rx="6" class="c-mask"/>
+          <rect x="770" y="240" width="430" height="146" rx="6" class="c-messagebus" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="messagebus" class="semantic-sigil s-messagebus" transform="translate(776 246) scale(0.6875)">
+            <path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h11"/>
+            <circle cx="5" cy="4.5" r="1" class="sigil-fill"/>
+            <circle cx="10.5" cy="8" r="1" class="sigil-fill"/>
+            <circle cx="7" cy="11.5" r="1" class="sigil-fill"/>
+          </g>
+          <rect class="nb-badge" x="1128.0" y="248" width="60.0" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="1158.0" y="259" font-size="8" text-anchor="middle">有人等才有</text>
+          <text class="nb-title" x="804" y="261" font-size="10.5" font-weight="600">sudog 链</text>
+          <line class="nb-hr" x1="778" y1="268" x2="1192" y2="268"/>
+          <text class="nb-k" x="782" y="309" font-size="9">谁造的</text><text class="nb-v" x="834.2" y="309" font-size="9">acquireSudog</text>
+          <text class="nb-k" x="782" y="323" font-size="9">记住什么</text><text class="nb-v" x="834.2" y="323" font-size="9">值在哪个地址</text>
+          <text class="nb-k" x="782" y="337" font-size="9">挂在哪</text><text class="nb-v" x="834.2" y="337" font-size="9">sendq 或 recvq 上</text>
+          <text class="nb-note" x="782" y="378" font-size="8">数据还在对方栈上，sudog 只记地址</text>
+        </g>
+
+        <!-- Connection labels -->
+        <g data-detail="context" data-edge-from="chvar" data-edge-to="hchan" data-edge-label="一个指针" data-edge-key="0" data-edge-id="e1">
+          <rect x="243.8" y="202" width="48.4" height="14" rx="3" class="c-mask"/>
+          <text x="268" y="212" class="t-muted" font-size="8" text-anchor="middle">一个指针</text>
+        </g>
+        <g data-detail="context" data-edge-from="hchan" data-edge-to="ring" data-edge-label="buf 指过去" data-edge-key="1" data-edge-id="e2">
+          <rect x="689" y="143.5" width="58" height="14" rx="3" class="c-mask"/>
+          <text x="718" y="153.5" class="t-muted" font-size="8" text-anchor="middle">buf 指过去</text>
+        </g>
+        <g data-detail="context" data-edge-from="hchan" data-edge-to="suds" data-edge-label="sendq / recvq" data-edge-key="2" data-edge-id="e3">
+          <rect x="681.8" y="245" width="72.4" height="14" rx="3" class="c-mask"/>
+          <text x="718" y="255" class="t-muted" font-size="8" text-anchor="middle">sendq / recvq</text>
+        </g>
+
+        <!-- Legend -->
+        <g data-legend data-legend-bridge>
+          <text x="40" y="464" class="t-primary" font-size="12" font-weight="650">Legend</text>
+          <g data-legend-semantic-kind="backend" data-legend-kind="backend" data-legend-label="Backend" data-legend-x="40" data-legend-baseline="484" data-legend-width="78">
+            <rect x="40" y="475" width="16" height="10" rx="2.5" class="c-backend" stroke-width="1"/>
+            <text x="62" y="484" class="t-muted" font-size="10" font-weight="500">Backend</text>
+          </g>
+          <g data-legend-semantic-kind="database" data-legend-kind="database" data-legend-label="Database" data-legend-x="140" data-legend-baseline="484" data-legend-width="83">
+            <rect x="140" y="475" width="16" height="10" rx="2.5" class="c-database" stroke-width="1"/>
+            <text x="162" y="484" class="t-muted" font-size="10" font-weight="500">Database</text>
+          </g>
+          <g data-legend-semantic-kind="messagebus" data-legend-kind="messagebus" data-legend-label="Message bus" data-legend-x="245" data-legend-baseline="484" data-legend-width="98">
+            <rect x="245" y="475" width="16" height="10" rx="2.5" class="c-messagebus" stroke-width="1"/>
+            <text x="267" y="484" class="t-muted" font-size="10" font-weight="500">Message bus</text>
+          </g>
+          <g data-legend-semantic-kind="external" data-legend-kind="external" data-legend-label="External" data-legend-x="365" data-legend-baseline="484" data-legend-width="83">
+            <rect x="365" y="475" width="16" height="10" rx="2.5" class="c-external" stroke-width="1"/>
+            <text x="387" y="484" class="t-muted" font-size="10" font-weight="500">External</text>
+          </g>
+        </g>
+      </svg></div>
+      <figcaption>从右边进去。<code>hchan</code> 是骨架，<code>buf</code> 和两条 sudog 链都挂在它上面；只有 <code>buf</code> 装元素。点零件看它自己装了什么，或者用下面的导览走一遍。</figcaption>
+      <div class="pano-ui"></div>
+      <p class="arch-hint"><span class="idle">点头上的任意一个框看它的关系，点区域标题看分组含义，点零件看完整归属路径；用「对比两个零件」出一张对照表</span><span class="focused">再点一次空白处取消</span></p>
+    </figure><h2 id="变量不等于对象"><span class="num">02</span>变量不等于对象</h2>
+<p>三种写法的差别只在「有没有 hchan」：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-go">var a chan int          // a = nil，没有 hchan。发送、接收都永久阻塞
+b := make(chan int, 3)  // b 指向一个 hchan，buf 里有 3 格
+c := b                  // c 和 b 是同一个 hchan 的两个名字
+</code></pre></div>
+<p><code>c := b</code> 复制的是那 8 字节指针。所以给函数传 channel 也只是传指针的副本 —— 函数里往 channel 塞一个值，调用方看得到。</p>
+<p><code>make</code> 才真正分配内存。本机跑 <code>testing.Benchmark</code> 量到：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">Go go1.26.2 darwin/arm64
+make(chan int)          容量0         112.0 B/op   1.00 allocs/op
+make(chan int, 3)        容量3        144.0 B/op   1.00 allocs/op
+make(chan int, 100)      容量100     1024.0 B/op   1.00 allocs/op
+make(chan []int)         元素含指针    112.0 B/op   1.00 allocs/op
+make(chan []int, 3)      元素含指针    192.0 B/op   2.00 allocs/op
+make(chan struct{})      零大小元素    112.0 B/op   1.00 allocs/op
+make(chan struct{}, 100) 零大小+容量   112.0 B/op   1.00 allocs/op
+</code></pre></div>
+<p>112 这个数字是 hchan 本身。容量 3 的 <code>chan int</code> 是 112 + 3×8 = 136，分配器取整到 144。<strong>注意最后两行：容量 100 的 <code>chan struct{}</code> 也只要 112 字节</strong> —— 因为元素大小是 0，<code>buf</code> 不需要空间。</p>
+<h2 id="一次-ch-v-走哪条路"><span class="num">03</span>一次 <code>ch &lt;- v</code> 走哪条路</h2>
+<p>这是回答「是不是一块内存」最直接的证据。runtime 里发送一共三条路径，按顺序试：</p>
+<div class="cards" data-cols="3"><div class="ccard tone-amber">
+          <span class="tag tone-amber">先试这条</span>
+          <h4>① recvq 有人等</h4>
+          <p>直接交接，绕过缓冲区</p>
+          <div class="cbody"><p><code>chansend</code> 一进来就 <code>c.recvq.dequeue()</code>。拿到一个在等的接收者，就把 v <strong>直接拷进它的目标地址</strong>：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-go">if sg := c.recvq.dequeue(); sg != nil {
+    // We pass the value we want to send
+    // directly to the receiver, bypassing
+    // the channel buffer (if any).
+    send(c, sg, ep, func() { unlock(&amp;c.lock) }, 3)
+    return true
+}
+</code></pre></div>
+<p>注释里的 <code>bypassing the channel buffer (if any)</code> 是原文。<mark class="mk-blue">这条路上缓冲区一步没动。</mark></p>
+<p>无缓冲 channel 走的就是这条 —— 所以它从来没有「存过」数据。</p>
+</div>
+          
+        </div><div class="ccard tone-blue">
+          <span class="tag tone-blue">有缓冲才有</span>
+          <h4>② 缓冲区有空位</h4>
+          <p>写进环形缓冲区</p>
+          <div class="cbody"><p>条件 <code>c.qcount &lt; c.dataqsiz</code>。成立就把 v 拷进 <code>buf[sendx]</code>，sendx 前进一格，qcount 加一。</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-go">qp := chanbuf(c, c.sendx)
+typedmemmove(c.elemtype, qp, ep)
+c.sendx++
+if c.sendx == c.dataqsiz { c.sendx = 0 }
+c.qcount++
+</code></pre></div>
+<p>这是唯一的「数据真的被存进那块堆内存」的路径。<code>typedmemmove</code> 是值拷贝 —— 元素类型里有什么就拷什么（§05）。</p>
+</div>
+          
+        </div><div class="ccard tone-red">
+          <span class="tag tone-red">阻塞</span>
+          <h4>③ 都满了</h4>
+          <p>挂到 sendq 上，park</p>
+          <div class="cbody"><p>前两条都不成立，就造一个 sudog：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-go">mysg := acquireSudog()
+mysg.elem.set(ep)   // 记住值在哪个地址
+mysg.g = gp
+c.sendq.enqueue(mysg)
+gopark(chanparkcommit, ...)
+</code></pre></div>
+<p><strong>注意 <code>mysg.elem.set(ep)</code> 存的是地址，不是值的副本。</strong> 数据还在发送方的栈上，sudog 只是记住了它在哪。</p>
+<p>接收方一到，会沿着这条链把值拷走，再把发送方唤醒。</p>
+</div>
+          
+        </div></div><p>这三条路解释了为什么「一块内存」的说法站不住：</p>
+<ul>
+<li>无缓冲 channel 永远走 ① 或 ③，<strong>一次也不写缓冲区</strong>；</li>
+<li>走 ③ 时数据也<strong>没被复制到 channel 里</strong>，还在发送方的栈上；</li>
+<li>只有走 ② 才是真正的「存进那块堆内存」。</li>
+</ul>
+<div class="demo" data-widget="chan-lab" data-config="{&quot;cap&quot;:3}">
+      <div class="demo-head">
+        <span class="title">有缓冲 · 亲手走一遍三条路</span>
+        <span class="status" data-status>先连点两次「发送一个值」，再点「接收一个值」</span>
+        <span class="spacer"></span>
+        
+      </div>
+      <div class="demo-body custom" data-mount></div>
+    </div><p>按这个顺序点，你会看到三条路：</p>
+<ol>
+<li><strong>发送 ×2</strong> → 路径 ②，两个值进了 <code>buf[0]</code> 和 <code>buf[1]</code>，sendx 从 0 走到 2</li>
+<li><strong>发送</strong> → 路径 ②，填满 <code>buf[2]</code>，qcount 到 3</li>
+<li><strong>发送</strong> → 路径 ③，缓冲区满了，值挂到 sendq（注意 qcount 没变）</li>
+<li><strong>接收</strong> → 路径 ①，先拿走队头，再把 sendq 里的值填进同一个槽位 —— 因为队列是满的，一头出一头进</li>
+</ol>
+<div class="demo" data-widget="chan-lab" data-config="{&quot;cap&quot;:0}">
+      <div class="demo-head">
+        <span class="title">无缓冲 · 同样的按钮，完全不同的走法</span>
+        <span class="status" data-status>点「发送」看它直接卡住</span>
+        <span class="spacer"></span>
+        
+      </div>
+      <div class="demo-body custom" data-mount></div>
+    </div><p>容量 0 时状态栏里的 <code>dataqsiz</code> 是 0，缓冲区那块直接显示「没有这块」。这时：</p>
+<ul>
+<li><strong>发送</strong> → 路径 ③，直接挂起（<code>qcount &lt; dataqsiz</code> 变成 <code>0 &lt; 0</code>，永远不成立）</li>
+<li><strong>接收</strong> → 路径 ③，也挂起</li>
+<li>只有「一边已经在等、另一边来了」才走 ① —— 两个 goroutine 在那里碰头</li>
+</ul>
+<h2 id="makechan堆上到底几块"><span class="num">04</span>makechan：堆上到底几块</h2>
+<p><code>makechan</code> 分三个分支，直接决定「一次分配还是两次」：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>你写的</th><th>走哪个分支</th><th>分配几次</th><th>本机实测</th></tr></thead><tbody><tr><th><code>make(chan int)</code></th><td data-label="走哪个分支"><code>mem == 0</code></td><td data-label="分配几次">1 次（只有 hchan）</td><td data-label="本机实测">112 B</td></tr><tr><th><code>make(chan struct{}, 100)</code></th><td data-label="走哪个分支"><code>mem == 0</code>（元素大小是 0）</td><td data-label="分配几次">1 次（只有 hchan）</td><td data-label="本机实测">112 B</td></tr><tr><th><code>make(chan int, 3)</code></th><td data-label="走哪个分支">元素不含指针：hchan 和 buf 一次分配完</td><td data-label="分配几次">1 次</td><td data-label="本机实测">144 B</td></tr><tr><th><code>make(chan []int, 3)</code></th><td data-label="走哪个分支">元素含指针：分两次</td><td data-label="分配几次">2 次</td><td data-label="本机实测">192 B</td></tr></tbody></table></div><p>源码里对应的三段：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-go">switch {
+case mem == 0:
+    // 容量 0，或者元素大小 0
+    c = (*hchan)(mallocgc(hchanSize, nil, true))
+    // Race detector uses this location for synchronization.
+    c.buf = c.raceaddr()
+case !elem.Pointers():
+    // 元素里没有指针：hchan 和 buf 一次分配完，buf 紧跟在后面
+    c = (*hchan)(mallocgc(hchanSize+mem, nil, true))
+    c.buf = add(unsafe.Pointer(c), hchanSize)
+default:
+    // 元素里有指针：分开分配，让 GC 单独盯着 buf
+    c = new(hchan)
+    c.buf = mallocgc(mem, elem, true)
+}
+</code></pre></div>
+<p><mark class="mk-blue">第一条分支是最关键的一行：<code>c.buf = c.raceaddr()</code>。</mark> 无缓冲 channel 的 <code>buf</code> 指向 <code>hchan</code> 自己 —— 不是「一块空的缓冲区」，是「根本没有缓冲区」。所以对 <code>make(chan int)</code> 来说，堆上就是一块 112 字节，里面不含任何元素槽位。</p>
+<p>第三条分支解释了一个反直觉的结果：<code>chan []int</code> 无缓冲只分配 1 次（112 B），加了容量就变 2 次（192 B）—— 因为只有这时候才需要一块能被 GC 单独标记的 buf。</p>
+<h2 id="缓冲区里放的是什么"><span class="num">05</span>缓冲区里放的是什么</h2>
+<p><code>typedmemmove</code> 是<strong>值拷贝</strong>，不是「把变量搬进去」。所以放进去的东西取决于元素类型：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>元素类型</th><th>缓冲区里存的</th><th>原来的变量还能改吗</th></tr></thead><tbody><tr><th><code>int</code>、<code>struct{}</code>、普通结构体</th><td data-label="缓冲区里存的">整个值的一份副本</td><td data-label="原来的变量还能改吗">能。改原变量不影响 channel 里那份</td></tr><tr><th>指针、<code>slice</code>、<code>map</code>、<code>interface</code></th><td data-label="缓冲区里存的">引用头的一份副本（指针 / 三个字 / 两个字）</td><td data-label="原来的变量还能改吗">引用头能改，<strong>它指向的那块数据共享</strong></td></tr></tbody></table></div><div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-go">type T struct{ A, B int }
+
+ch1 := make(chan T, 1)
+t := T{1, 2}
+ch1 &lt;- t        // 整个 T 拷进去
+t.A = 99        // 对 ch1 里那份没有影响
+
+ch2 := make(chan []int, 1)
+data := []int{1, 2, 3}
+ch2 &lt;- data     // 只拷 slice header（指针 + len + cap）
+data[0] = 99    // 会影响 ch2 里那份 —— 它们指向同一个底层数组
+</code></pre></div>
+<p>所以「缓冲区里存了什么」不是 channel 决定的，是<strong>元素类型</strong>决定的。这也解释了为什么用 channel 传大结构体时，拷的是整个结构体 —— 不想拷就传指针。</p>
+<h2 id="三条跟着来的语义"><span class="num">06</span>三条跟着来的语义</h2>
+<p>原文第 4、6 节讲了 nil、关闭和内存可见性。把它们的边界摆在一起：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>channel 的状态</th><th>发送</th><th>接收</th><th>关闭</th></tr></thead><tbody><tr><th>nil（<code>var ch chan int</code>）</th><td data-label="发送">永久阻塞</td><td data-label="接收">永久阻塞</td><td data-label="关闭">panic</td></tr><tr><th>正常，但缓冲满了 / 空了</th><td data-label="发送">阻塞（挂到 sendq）</td><td data-label="接收">阻塞（挂到 recvq）</td><td data-label="关闭">唤醒所有等待者</td></tr><tr><th>已关闭，缓冲区里还有元素</th><td data-label="发送">panic</td><td data-label="接收">继续读完，然后返回零值</td><td data-label="关闭">panic（重复关闭）</td></tr><tr><th>已关闭，缓冲区已空</th><td data-label="发送">panic</td><td data-label="接收">立刻返回零值 + <code>ok == false</code></td><td data-label="关闭">panic</td></tr></tbody></table></div><p>nil channel 的「永久阻塞」不是超时，是字面意义上的永不返回。源码里那句调用写着：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-go">gopark(nil, nil, waitReasonChanSendNilChan, traceBlockForever, 2)
+</code></pre></div>
+<p><code>traceBlockForever</code> —— 永不被唤醒。</p>
+<p>关闭的顺序也值得记住：<code>closechan</code> 先把 <code>closed</code> 置 1，然后<strong>清空 recvq</strong>（把每个等待接收者的目标地址写成零值）和 <strong>sendq</strong>（这些发送者被唤醒后 panic），最后才 unlock 并逐个唤醒。所以「关闭时缓冲区里剩下的元素」不会被清掉，它们还能被读出来。</p>
+<h3 id="happens-before-是第四样东西">happens-before 是第四样东西</h3>
+<p>内存模型对 channel 有四条规则，逐条对应你在代码里能看到的动作：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>你做的动作</th><th>保证了什么</th></tr></thead><tbody><tr><th>发送 <code>ch &lt;- v</code></th><td data-label="保证了什么">发送<strong>发生在</strong>对应接收完成之前</td></tr><tr><th>关闭 <code>close(ch)</code></th><td data-label="保证了什么">关闭<strong>发生在</strong>「因为已关闭而返回零值」的接收之前</td></tr><tr><th>无缓冲接收 <code>&lt;-ch</code></th><td data-label="保证了什么">接收<strong>发生在</strong>对应发送完成之前（所以两边真的碰头了）</td></tr><tr><th>第 k 次接收</th><td data-label="保证了什么">发生在容量为 C 的 channel 上第 k+C 次发送完成之前</td></tr></tbody></table></div><p>第四条是前三条的推广：它让一个容量为 C 的 channel 可以当计数信号量用 —— channel 里的元素个数就是「正在使用的人数」，容量就是「同时最多几个人」。</p>
+<p><mark class="mk-blue">这四条是 channel 除了搬数据之外真正给你的东西。</mark> 前三条在本机都能复现；第四条是内存模型文档里的原话，不在 runtime 代码里。</p>
+<h2 id="什么时候别用-channel"><span class="num">07</span>什么时候别用 channel</h2>
+<p>原文第十二、十三节说得比很多教程都准，这里只压成一张表：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>你真正要做的</th><th>先考虑</th><th>为什么</th></tr></thead><tbody><tr><th>把一个东西交给另一个 goroutine</th><td data-label="先考虑"><code>chan</code> 或 <code>chan</code> + <code>select</code></td><td data-label="为什么">交接本身就是语义，channel 的阻塞正好表达「还没准备好」</td></tr><tr><th>等一批 goroutine 全部结束</th><td data-label="先考虑"><code>sync.WaitGroup</code></td><td data-label="为什么">你不需要传数据，只需要一个计数，<code>WaitGroup</code> 干的就这一件事</td></tr><tr><th>保护一个共享变量</th><td data-label="先考虑"><code>sync.Mutex</code> / <code>RWMutex</code></td><td data-label="为什么">为了 <code>n++</code> 专门起一个 goroutine 再发消息过去，比加锁更慢也更绕</td></tr><tr><th>一个计数器自增</th><td data-label="先考虑"><code>sync/atomic</code></td><td data-label="为什么"><code>n++</code> 在多核上不是一步，但 <code>atomic.AddInt64</code> 是</td></tr><tr><th>取消、超时、整条调用链</th><td data-label="先考虑"><code>context.Context</code></td><td data-label="为什么">关闭一个 channel 只能广播一次，<code>context</code> 能带值和截止时间往下传</td></tr></tbody></table></div><p>判断只需要一句话：<strong>重点在「把东西交给谁」就用 channel，重点在「保护同一份东西」就用锁。</strong></p>
+<div class="summary">
+      <h3 id="回到那个问题">回到那个问题</h3>
+      <p><code>chan</code> 不是「一块堆内存」，是<mark class="mk-blue">一个 112 字节的对象，加上一块可能不存在的元素缓冲区</mark>。</p>
+<p>它的核心不是任何一块内存，而是那两条等待队列：发送方和接收方在队列上碰头，数据从一个人的栈直接拷到另一个人的栈 —— 缓冲区只是「暂时没人接」时的落脚点。</p>
+
+    </div><h2 id="速查">速查</h2>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>你手上这个</th><th>它是什么</th><th>关键点</th></tr></thead><tbody><tr><th><code>var ch chan int</code></th><td data-label="它是什么">8 字节的 nil</td><td data-label="关键点">没有 hchan，收发都永久阻塞，close 会 panic</td></tr><tr><th><code>make(chan int)</code></th><td data-label="它是什么">112 字节的 hchan</td><td data-label="关键点"><code>buf</code> 指向自己，没有元素槽位</td></tr><tr><th><code>make(chan int, 3)</code></th><td data-label="它是什么">112 + 24 字节，一次分配</td><td data-label="关键点"><code>buf</code> 紧跟在 hchan 后面</td></tr><tr><th><code>make(chan []int, 3)</code></th><td data-label="它是什么">两次分配</td><td data-label="关键点">元素含指针，buf 要被 GC 单独盯着</td></tr><tr><th><code>ch &lt;- v</code> 返回了</th><td data-label="它是什么">走了路径 ① 或 ②</td><td data-label="关键点">要么直接交接，要么写进了 buf</td></tr><tr><th><code>ch &lt;- v</code> 卡住了</th><td data-label="它是什么">走了路径 ③</td><td data-label="关键点">值还在你的栈上，sendq 上只挂了一个记录地址的 sudog</td></tr><tr><th><code>close(ch)</code></th><td data-label="它是什么">只改了 <code>closed</code></td><td data-label="关键点">缓冲区里的元素一个没动，还能读完</td></tr></tbody></table></div><div class="quiz"><details>
+        <summary>无缓冲 channel 上有「一块装元素的堆内存」吗？</summary>
+        <div class="a"><p>没有。</p>
+<p><code>make(chan int)</code> 只分配 hchan 那 112 字节，<code>makechan</code> 走的是 <code>mem == 0</code> 分支，<code>c.buf = c.raceaddr()</code> —— buf 指向 hchan 自己，一个元素槽位也没有。</p>
+<p>所以无缓冲 channel 的发送只有两条路：recvq 上有人等就<strong>直接交接</strong>（路径 ①），没人等就<strong>挂起</strong>（路径 ③）。它从来没有「把数据存起来」这个动作。</p>
+</div>
+      </details><details>
+        <summary><code>ch &lt;- v</code> 卡住的时候，v 被复制进 channel 了吗？</summary>
+        <div class="a"><p>没有。发送方把自己包成一个 sudog，<code>mysg.elem.set(ep)</code> 存的是 <strong>v 的地址</strong>，然后挂到 sendq 上 park。</p>
+<p>数据还在发送方的栈上。接收方到达时才沿着 sudog 把值拷走（无缓冲时直接从发送方栈拷到接收方栈），再唤醒发送方。</p>
+<p>这也解释了为什么阻塞中的 channel 不占「元素的副本」空间。</p>
+</div>
+      </details><details>
+        <summary><code>make(chan []int, 3)</code> 为什么比 <code>make(chan int, 3)</code> 多一次分配？</summary>
+        <div class="a"><p>因为元素里有指针。</p>
+<p><code>makechan</code> 看 <code>elem.Pointers()</code>：不含指针时把 hchan 和 buf 放在<strong>同一次</strong> <code>mallocgc</code> 里（<code>hchanSize+mem</code>），buf 紧跟在 hchan 后面；含指针时分两次，让 GC 能单独扫描 buf 那块。</p>
+<p>本机实测：<code>chan int, 3</code> = 144 B / 1 次分配，<code>chan []int, 3</code> = 192 B / 2 次分配。</p>
+</div>
+      </details></div>
+
+    <footer>
+      <span>chan 是一块堆内存吗：四块东西，三条路</span>
+      <span>最后更新 2026-11-01 · 单文件可离线打开</span>
+    </footer>
+  </main>
+</div>
+
+<script src="../../assets/app.js?v=33978e3b4d"></script>
+</body>
+</html>
