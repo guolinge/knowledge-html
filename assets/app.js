@@ -12610,6 +12610,150 @@ WIDGETS['mysql-2pc-crash'] = (root) => {
     render();
   };
 
+  /* ============================================================
+     控件：byte-walker —— 同一堆八位组，换一个镜片重看一遍
+     ------------------------------------------------------------
+     一根带子（bytes）不动，换的是「谁在读它」。每个镜片写一串 steps，
+     每步覆盖一段字节 [from, to]。点亮这一段的十六进制，同时点亮右边
+     那一列的字符 —— 于是「可读的字节」和「有结构的字节」是不是重合，
+     一眼就看出来了。
+
+     config:
+       bytes: "50524920…"            十六进制串，空格随便加
+       bytesPerRow: 16
+       lenses:
+         - { label, sub, tone, steps: [{ span: [a, b], tag, tone, note, out }] }
+  ============================================================ */
+  WIDGETS['byte-walker'] = (root) => {
+    const cfg = cfgOf(root);
+    const hex = String(cfg.bytes || '').replace(/[^0-9a-fA-F]/g, '');
+    const bytes = [];
+    for (let i = 0; i + 1 < hex.length; i += 2) bytes.push(parseInt(hex.slice(i, i + 2), 16));
+    const lenses = (cfg.lenses || []).filter(
+      (l) => l && Array.isArray(l.steps) && l.steps.length,
+    );
+    if (!bytes.length || !lenses.length) return;
+
+    const per = Number(cfg.bytesPerRow) || 16;
+    let box = mountOf(root);
+    const statusEl = root.querySelector('[data-status]');
+    /* 内层再套一层 .bw：外壳 .demo-body.custom 的 display 会盖掉挂载点上写的
+       display，写在挂载点上就只剩 0 间距，visual-check 会报「块之间只有 0px」。 */
+    const wrap = el('div', 'bw');
+    box.append(wrap);
+    box = wrap;
+
+    let li = 0;
+    let si = 0;
+
+    /* —— 镜片按钮 —— */
+    const lensRow = el('div', 'bw-lenses');
+    const lensBtns = lenses.map((l, k) => {
+      const b = el('button', 'bw-lens');
+      b.style.setProperty('--bw-tone', 'var(--' + (l.tone || 'blue') + ')');
+      b.append(el('b', '', l.label || '镜片 ' + (k + 1)));
+      if (l.sub) b.append(el('span', '', l.sub));
+      b.addEventListener('click', () => { li = k; si = 0; draw(); });
+      lensRow.append(b);
+      return b;
+    });
+
+    /* —— 字节带：偏移 + 十六进制 + 字符 —— */
+    const band = el('div', 'bw-band');
+    const cellEls = [];
+    const ascEls = [];
+    const ascNp = [];
+    for (let start = 0; start < bytes.length; start += per) {
+      const end = Math.min(start + per, bytes.length);
+      const row = el('div', 'bw-row');
+      row.append(el('span', 'bw-off', start.toString(16).padStart(4, '0')));
+      const cells = el('div', 'bw-cells');
+      const ascs = el('div', 'bw-ascs');
+      for (let i = start; i < end; i += 1) {
+        const c = el('span', 'bw-cell', bytes[i].toString(16).padStart(2, '0'));
+        cells.append(c);
+        cellEls[i] = c;
+        const printable = bytes[i] >= 0x20 && bytes[i] < 0x7f;
+        const a = el(
+          'span',
+          'bw-asc' + (printable ? '' : ' np'),
+          printable ? String.fromCharCode(bytes[i]) : '\u00b7',
+        );
+        ascs.append(a);
+        ascEls[i] = a;
+        ascNp[i] = !printable;
+      }
+      row.append(cells, el('span', 'bw-gap'), ascs);
+      band.append(row);
+    }
+
+    /* —— 下一步 / 上一步 —— */
+    const nav = el('div', 'bw-nav');
+    const prevBtn = el('button', 'bw-btn', '\u25c0 上一步');
+    const nextBtn = el('button', 'bw-btn', '下一步 \u25b6');
+    const posEl = el('span', 'bw-pos');
+    nav.append(prevBtn, nextBtn, posEl);
+
+    /* —— 这一步在做什么 —— */
+    const detail = el('div', 'bw-detail');
+    const tagEl = el('span', 'bw-tag');
+    const noteEl = el('p', 'bw-note');
+    const outEl = el('div', 'bw-out');
+    detail.append(tagEl, noteEl, outEl);
+
+    box.append(lensRow, band, nav, detail);
+
+    function draw() {
+      const lens = lenses[li];
+      const steps = lens.steps;
+      if (si > steps.length - 1) si = steps.length - 1;
+      if (si < 0) si = 0;
+
+      lensBtns.forEach((b, i) => b.classList.toggle('on', i === li));
+
+      /* 先全部复位，再把「走过的」和「这一步」重新涂色 */
+      for (let i = 0; i < bytes.length; i += 1) {
+        cellEls[i].className = 'bw-cell';
+        ascEls[i].className = 'bw-asc' + (ascNp[i] ? ' np' : '');
+      }
+      for (let s = 0; s < si; s += 1) {
+        const sp = steps[s].span || [];
+        for (let i = sp[0]; i <= sp[1]; i += 1) {
+          if (cellEls[i]) cellEls[i].className = 'bw-cell done';
+        }
+      }
+
+      const cur = steps[si];
+      const span = cur.span || [0, 0];
+      const tone = cur.tone || lens.tone || 'blue';
+      for (let i = span[0]; i <= span[1]; i += 1) {
+        if (cellEls[i]) cellEls[i].className = 'bw-cell t-' + tone;
+        if (ascEls[i]) ascEls[i].className = 'bw-asc t-' + tone;
+      }
+
+      detail.style.setProperty('--bw-tone', 'var(--' + tone + ')');
+      detail.style.setProperty('--bw-soft', 'var(--' + tone + '-soft)');
+      tagEl.textContent = cur.tag || '';
+      tagEl.hidden = !cur.tag;
+      /* richText 是**追加**进 host 的，不清空就会把走到的每一步说明叠在一起 */
+      noteEl.textContent = '';
+      richText(noteEl, cur.note || '');
+      outEl.textContent = cur.out || '';
+
+      posEl.textContent =
+        '第 ' + (si + 1) + ' / ' + steps.length + ' 步 \u00b7 字节 0x' +
+        span[0].toString(16).padStart(2, '0') + '\u2013' +
+        span[1].toString(16).padStart(2, '0');
+      prevBtn.disabled = si === 0;
+      nextBtn.disabled = si === steps.length - 1;
+      if (statusEl) statusEl.textContent = lens.label || '';
+    }
+
+    prevBtn.addEventListener('click', () => { si -= 1; draw(); });
+    nextBtn.addEventListener('click', () => { si += 1; draw(); });
+    draw();
+  };
+
   /* ---------- 挂载 ---------- */
   document.querySelectorAll('[data-widget]').forEach((root) => {
     var name = root.getAttribute('data-widget');
