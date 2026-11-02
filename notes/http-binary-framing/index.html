@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>「HTTP/1.1 是文本、HTTP/2 是二进制」到底在说什么</title>
-<meta name="description" content="两者都跑在 TCP 上，而 TCP 搬的就是字节 —— 那「文本」和「二进制」在比什么？这篇用真实抓到的字节把两种定界方式摆在一起：1.1 靠扫可打印字符找边界，2 靠帧头里一个 24 位整数跳过去。区别在定界，不在介质。" />
+<title>从字节看懂 HTTP/1.1 与 HTTP/2：报文、分块和帧</title>
+<meta name="description" content="从十六进制和 TCP 字节流入手，逐步看懂 HTTP/1.1 的头部、消息体和 chunked，以及 HTTP/2 的帧头、流和多路复用；结合可互动的真实字节样例。" />
 <link rel="stylesheet" href="../../assets/theme.css?v=19aa345f51" />
   <link rel="stylesheet" href="../../assets/blocks.css?v=bb15413b7c" />
   <link rel="stylesheet" href="../../assets/archify-embed.css?v=68fec0b81b" />
@@ -27,39 +27,40 @@
   <aside class="toc" id="toc">
       <p class="toc-title">目录</p>
       <a href="../../index.html" class="sub">← 全部笔记</a>
-      <a href="#同一堆字节两种写法">同一堆字节，两种写法</a>
-      <a href="#tcp-那头没有消息这种东西">TCP 那头没有「消息」这种东西</a>
-      <a href="#http11-造边界在字节里找字">HTTP/1.1 造边界：在字节里找字</a>
-      <a href="#连长度都是字符" class="sub">连长度都是字符</a>
-      <a href="#代价有两条" class="sub">代价有两条</a>
-      <a href="#http2-造边界在固定位置读一个数">HTTP/2 造边界：在固定位置读一个数</a>
-      <a href="#实测一次真实连接的前-110-个字节" class="sub">实测：一次真实连接的前 110 个字节</a>
-      <a href="#代价" class="sub">代价</a>
-      <a href="#长度前缀买到了什么">长度前缀买到了什么</a>
-      <a href="#一个更硬的例子hpack-里的-37-个字节">一个更硬的例子：HPACK 里的 37 个字节</a>
-      <a href="#所以那两句话在说什么">所以那两句话在说什么</a>
-      <a href="#两个标题都不干净" class="sub">两个标题都不干净</a>
-      <a href="#rfc-自己怎么说的" class="sub">RFC 自己怎么说的</a>
-      <a href="#http3-为什么还是二进制帧">HTTP/3 为什么还是二进制帧</a>
-      <a href="#一句话" class="sub">一句话</a>
-      <a href="#速查">速查</a>
+      <a href="#字节十六进制和字符">字节、十六进制和字符</a>
+      <a href="#十六进制转储左边的数字是什么" class="sub">十六进制转储左边的数字是什么？</a>
+      <a href="#tcp-交付字节不交付-http-消息">TCP 交付字节，不交付 HTTP 消息</a>
+      <a href="#http11空行之后还要判断消息体">HTTP/1.1：空行之后，还要判断消息体</a>
+      <a href="#空行结束的是头部不一定是整条报文" class="sub">空行结束的是头部，不一定是整条报文</a>
+      <a href="#chunkedhttp-自己给每块写长度">chunked：HTTP 自己给每块写长度</a>
+      <a href="#找边界的工作与出错的风险">找边界的工作与出错的风险</a>
+      <a href="#扫描头部不等于扫描整份消息体" class="sub">扫描头部，不等于扫描整份消息体</a>
+      <a href="#body-里有空行会不会误判" class="sub">body 里有空行，会不会误判？</a>
+      <a href="#如果长度给错了呢" class="sub">如果长度给错了呢？</a>
+      <a href="#http2每帧开头固定-9-个字节">HTTP/2：每帧开头固定 9 个字节</a>
+      <a href="#帧结束和消息结束是两个边界" class="sub">帧结束和消息结束，是两个边界</a>
+      <a href="#流编号让不同请求的帧可以交错">流编号让不同请求的帧可以交错</a>
+      <a href="#延伸把真实-http2-字节和-hpack-对起来">延伸：把真实 HTTP/2 字节和 HPACK 对起来</a>
+      <a href="#放回整体http11http2http3">放回整体：HTTP/1.1、HTTP/2、HTTP/3</a>
+      <a href="#回到最初的问题" class="sub">回到最初的问题</a>
+      <a href="#自测">自测</a>
   </aside>
 
   <main>
     <div class="hero">
       <span class="eyebrow">● 网络协议 · HTTP</span>
-      <h1>「HTTP/1.1 是文本、HTTP/2 是二进制」到底在说什么</h1>
-      <p class="lede">两者都跑在 TCP 上，而 TCP 搬的就是字节 —— 那「文本」和「二进制」在比什么？这篇用真实抓到的字节把两种定界方式摆在一起：1.1 靠扫可打印字符找边界，2 靠帧头里一个 24 位整数跳过去。区别在定界，不在介质。</p>
+      <h1>从字节看懂 HTTP/1.1 与 HTTP/2：报文、分块和帧</h1>
+      <p class="lede">从十六进制和 TCP 字节流入手，逐步看懂 HTTP/1.1 的头部、消息体和 chunked，以及 HTTP/2 的帧头、流和多路复用；结合可互动的真实字节样例。</p>
     </div>
 
 
-    <div class="provenance"><span><b>来源</b> RFC 9112 (HTTP/1.1)：§2.1 报文语法、§2.2 必须按八位组解析、§6.3 body 长度的七种情形、§7.1 chunked、§9.3.2 pipelining 的顺序要求 — https://www.rfc-editor.org/rfc/rfc9112.txt · RFC 9113 (HTTP/2)：§3.4 连接前言的十六进制、§4.1 帧头 9 字节、§4.2 SETTINGS_MAX_FRAME_SIZE 的 2^14–2^24-1、§5 流与复用 — https://www.rfc-editor.org/rfc/rfc9113.txt · RFC 7541 (HPACK)：§5.1 整数前缀编码、§5.2 字符串字面量（含 Huffman）、附录 A 61 条静态表、附录 B Huffman 码表 — https://www.rfc-editor.org/rfc/rfc7541.txt · RFC 9110 (HTTP Semantics)：§5.5 字段值允许 obs-text（%x80-FF） — https://www.rfc-editor.org/rfc/rfc9110.txt · RFC 9114 (HTTP/3)：§7.2 帧格式为 Type(i) + Length(i) + Payload — https://www.rfc-editor.org/rfc/rfc9114.txt · 本机实测：本地 socket 服务器抓 curl 8.7.1 的 HTTP/1.1 请求，89 字节；hexdump 见 §01 · 本机实测：本地服务器发 chunked 响应 99 字节，含 5\r\nHello\r\n6\r\n world\r\n0\r\n\r\n；见 §03 · 本机实测：curl --http2-prior-knowledge 对本地端口，客户端首包 110 字节（前言 24 + SETTINGS 27 + WINDOW_UPDATE 13 + HEADERS 46）；见 §04 · 本机实测：同一连接上两个并发请求留下两个 HEADERS 帧，stream=1（载荷 34B）与 stream=3（载荷 9B）；见 §05、§06 · 本机实测：用 7 字节缓冲 recv 一条 49 字节响应，读 8 次，把 \r\n\r\n 从中间劈开；见 §02 · 本机实测：按 RFC 7541 附录 B 的 257 条码表解 37 字节 HPACK 载荷，得 :method GET / :scheme http / :authority 127.0.0.1:18081 / :path /hello / user-agent curl/8.7.1 / accept */* · High Performance Browser Networking, Ch.12 HTTP/2：把两者分别称作 newline-delimited plaintext 与 length-prefixed binary，并说明「交错并重组」是 HTTP/2 最重要的增强 — https://hpbn.co/http2/ · HTTP request smuggling（Content-Length 与 Transfer-Encoding 被不同中间件各取一个用） — https://portswigger.net/web-security/request-smuggling</span><span><b>生成</b> 2026-11-01</span></div>
+    <div class="provenance"><span><b>来源</b> <a href="https://www.rfc-editor.org/rfc/rfc9293.html#section-2.2" target="_blank" rel="noopener">www.rfc-editor.org/rfc/rfc9293.html#section-2.2</a> · <a href="https://www.rfc-editor.org/rfc/rfc9110.html#section-5.5" target="_blank" rel="noopener">www.rfc-editor.org/rfc/rfc9110.html#section-5.5</a> · <a href="https://www.rfc-editor.org/rfc/rfc9112.html" target="_blank" rel="noopener">www.rfc-editor.org/rfc/rfc9112.html</a> · <a href="https://www.rfc-editor.org/rfc/rfc9113.html" target="_blank" rel="noopener">www.rfc-editor.org/rfc/rfc9113.html</a> · <a href="https://www.rfc-editor.org/rfc/rfc7541.html" target="_blank" rel="noopener">www.rfc-editor.org/rfc/rfc7541.html</a> · <a href="https://www.rfc-editor.org/rfc/rfc9114.html" target="_blank" rel="noopener">www.rfc-editor.org/rfc/rfc9114.html</a> · <a href="https://www.rfc-editor.org/rfc/rfc9000.html#section-2.2" target="_blank" rel="noopener">www.rfc-editor.org/rfc/rfc9000.html#section-2.2</a> · <a href="https://www.rfc-editor.org/rfc/rfc9204.html#section-2.1.2" target="_blank" rel="noopener">www.rfc-editor.org/rfc/rfc9204.html#section-2.1.</a> · <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/Messages" target="_blank" rel="noopener">developer.mozilla.org/en-US/docs/Web/HTTP/Guides</a> · <a href="https://everything.curl.dev/http/versions/http2.html" target="_blank" rel="noopener">everything.curl.dev/http/versions/http2.html</a> · <a href="https://portswigger.net/web-security/request-smuggling" target="_blank" rel="noopener">portswigger.net/web-security/request-smuggling</a> · <a href="https://hpbn.co/http2/" target="_blank" rel="noopener">hpbn.co/http2/</a> · 2026-11-02 本机复现：curl 8.7.1 的 HTTP/1.1 请求 89 字节、chunked 响应 99 字节、明文 HTTP/2 输入 110 字节；Go x/net/http2/hpack v0.43.0 解码 37 字节字段块。</span><span><b>生成</b> 2026-11-01</span></div>
     <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">网络协议</span> <span class="tag tone-muted">HTTP</span> <span class="tag tone-muted">HTTP/1.1</span> <span class="tag tone-muted">HTTP/2</span> <span class="tag tone-muted">TCP</span> <span class="tag tone-muted">HPACK</span></span></div>
 
-<p>两个说法你都听过：HTTP/1.1 是文本协议，HTTP/2 是二进制协议。可它们都跑在 TCP 上，而 TCP 搬的本来就是字节。字节没有「文本」和「二进制」之分 —— <code>0x47</code> 你叫它 <code>G</code> 也行，叫它十进制 71 也行。</p>
-<p>所以这两句话比的不是「线上跑什么」。它们比的是同一件事：<strong>这份协议怎么在一根没有边界的字节流上，重新切出一条一条能认出来的消息。</strong></p>
-<p>这篇把真实抓到的字节摆在一起，看两种切法各自怎么做。先看全貌。</p>
-<figure class="archfig" data-arch style="--arch-max-width:1586px" data-boundaries="nested" data-pano data-parts='{"wire":{"label":"TCP 连接上的字节流","sub":"上面两种定界都发生在这根带子的内容里","detail":"TCP 只承诺顺序和完整，不承诺你能从中分出消息。`recv()` 返回多少字节是它自己决定的 —— 把 `\\r\\n\\r\\n` 从中间劈开是正常行为，不是错误。","facts":{"提供":"有序八位组","不提供":"消息边界","谁补上":"第 7 层"}},"h1":{"label":"HTTP/1.1 · 换行定界","sub":"用可打印字符标出每条消息的头和尾","detail":"起始行、字段行、空行、body。空行告诉对方「头部完了」，`Content-Length` 或 chunked 告诉它 body 到哪。扫描器必须逐个字节前进，因为「下一个边界在哪」取决于内容，不取决于前面的某个数字。","facts":{"定界符":"0d 0a、20、3a","动作":"逐字节扫描","切出单位":"整条消息"}},"h2":{"label":"HTTP/2 · 长度定界","sub":"每帧开头固定 9 字节，前 3 个是载荷长度","detail":"读帧头拿到长度，直接跳到帧尾 —— 载荷里写了什么，定界这一层不需要知道。这个「跳过」的能力，就是后面流复用的前提。","facts":{"定界符":"24 位整数","动作":"读固定位置再跳","切出单位":"帧"}},"r1":{"label":"一次一个响应","sub":"一条消息是最小单位，拆不开","detail":"消息内部没有可以让别人插进去的位置，所以同一条连接上第二个响应只能等第一个发完。浏览器的应对是开多条连接，这也是 1.1 时代域名分片这类做法存在的原因。","facts":{"单位":"整条消息","交错":"做不到","绕法":"多条连接"}},"r2":{"label":"一条连接跑多个流","sub":"帧自带流号，到了按流号归位","detail":"因为每一帧都能被独立跳过、独立识别，两端的帧可以交错发送。接收方每收到一帧，看流号就知道交给谁 —— 不用等前一条流结束，也不用看懂载荷。","facts":{"单位":"帧","交错":"可以","代价":"人读不出来"}}}' data-tours='[{"id":"cut","label":"两种切法走一遍","steps":[{"at":["wire"],"text":"先看左边：TCP 交给你的只有这一根带子，上面没有消息也没有边界。"},{"at":["wire","h1"],"text":"1.1 的做法是往后找 `0d 0a 0d 0a`。它必须逐字节前进，读到哪为止取决于内容。"},{"at":["wire","h2"],"text":"2 的做法是先读 9 个字节，从里面取出长度，然后直接跳过去。载荷写了什么它都不看。"},{"at":["h1","r1"],"text":"扫描切出来的是一整条消息，消息内部没有别人可以插进去的位置 —— 所以一条连接上只能有一个响应在路上。"},{"at":["h2","r2"],"text":"长度前缀让每一帧都能被独立跳过、独立识别，于是不同流的帧可以交错 —— 一条连接就够了。"}]},{"id":"same","label":"变的是什么，没变的是什么","steps":[{"at":["h1","h2"],"text":"换掉的只有定界方式。方法、状态码、字段名、body 的含义一个都没变。"},{"at":["wire"],"text":"线上跑的也一直是同一堆八位组。所以「TCP 上是二进制」这句话区分不了这两者。"}]}]' data-frames='[{"id":"tcp","boundary":0,"kind":"contains","label":"TCP 连接提供的东西","detail":"一根有序的八位组流。它保证不丢、不重、不错位，不保证你能从中分出「一条消息」——消息边界是上面那层自己加的。","members":["wire"],"depth":1},{"id":"l7","boundary":1,"kind":"classification","label":"第 7 层 · 只换定界方式","detail":"方法、状态码、字段、body 这些语义从 1.1 到 2 一个都没变。变的只有两件事：怎么切出边界，以及切出的最小单位有多大。","members":["h1","h2","r1","r2"],"depth":1}]'>
+<p>在浏览器里访问一个地址，客户端和服务器要交换 HTTP 请求与响应。底下的 TCP 负责传送字节，但它不会替 HTTP 标出“这一条请求到哪里结束”。</p>
+<p>这篇用同一组可核对的字节，回答四个问题：字节和字符有什么关系？HTTP/1.1 怎么确定头部与消息体？<code>chunked</code> 在哪一层工作？HTTP/2 的帧又怎样分开、归属到不同请求？</p>
+<p>先认识三个东西：<strong>字节</strong>是这里最小的计数单位，一个字节有 8 位；<strong>报文</strong>是一次 HTTP 请求或响应；<strong>帧</strong>是 HTTP/2 组织数据的单位，一条请求或响应可以由多个帧组成。</p>
+<figure class="archfig" data-arch style="--arch-max-width:1593px" data-boundaries="nested" data-pano data-parts='{"wire":{"label":"TCP 的有序字节流","sub":"一次读取不是一条消息","detail":"假设连接正常，TCP 按顺序交付字节。发送端一次写入的数据，接收端可能分多次读到；多次写入也可能被一次读到。","facts":{"单位":"字节","read 边界":"不代表报文边界","方向":"各自有序"}},"h1":{"label":"HTTP/1.1 报文","sub":"先找头部结束，再确定消息体长度","detail":"起始行和头字段按行读取；空行结束头部。消息体是否存在以及如何结束，还要看请求方法、状态码和长度字段等规则。","facts":{"头部":"起始行 + 字段 + 空行","消息体":"长度 / 分块等","表达":"多数头部文字可读"}},"h2":{"label":"HTTP/2 帧","sub":"固定帧头加可变长度载荷","detail":"每帧的 9 字节帧头包括长度、类型、标记和流编号。判断这一帧的边界不必在载荷里找分隔符；处理帧时仍需按类型解析必要内容。","facts":{"帧头":"9 字节","长度":"载荷的字节数","归属":"流编号"}},"r1":{"label":"HTTP/1.1 响应按序","sub":"可以先发送多个请求，响应仍按顺序发回","detail":"同一连接上的响应不能把各自的正文交错在一起，但一个响应本身可以流式地分多次发送。","facts":{"请求流水线":"可以","响应顺序":"与请求一致","响应正文":"可分批"}},"r2":{"label":"HTTP/2 多条流","sub":"给帧编号后，接收方知道交给哪条流","detail":"一条连接可以有多条流，不同流的帧按协议规则交错。每条流的请求和响应分别标记发送结束；TCP 丢包造成的阻塞仍可能影响整条连接。","facts":{"帧归属":"流编号","结束":"END_STREAM","传输层":"仍是 TCP"}}}' data-tours='[{"id":"path","label":"从字节到消息","steps":[{"at":["wire"],"text":"TCP 把一个方向的数据交成有序字节流，一次读取的大小不代表一条请求。"},{"at":["wire","h1"],"text":"在 HTTP/1.1 场景中，接收方先按行找到头部空行，再根据规则确定消息体边界。"},{"at":["h1","r1"],"text":"一条连接可以复用，也可以流水线发送请求；响应仍要按请求顺序返回。"},{"at":["wire","h2"],"text":"在 HTTP/2 场景中，接收方读取固定 9 字节帧头，再按其中的长度消费载荷。"},{"at":["h2","r2"],"text":"帧头的流编号告诉接收方帧属于谁，不同流的帧可以按规则交错。"}]}]' data-frames='[{"id":"tcp","boundary":0,"kind":"contains","label":"TCP 传给应用什么","detail":"每个方向提供有序字节流，不提供 HTTP 报文边界。连接也可能因错误提前结束。","members":["wire"],"depth":1},{"id":"http","boundary":1,"kind":"classification","label":"HTTP 怎样解释字节","detail":"两个版本都表达请求、响应、字段和消息体，但编码、边界和多请求的组织方式不同。","members":["h1","h2","r1","r2"],"depth":1}]'>
       <div class="arch-boundary-ui">
           <div class="arch-boundary-toolbar"><span class="arch-boundary-label">边界</span>
             <button type="button" data-boundary-mode="nested" aria-pressed="true">多层归属框</button>
@@ -69,9 +70,9 @@
           <div class="arch-address-box" aria-live="polite"><div data-arch-address>点一个零件，看完整归属路径；点一个区域标题，看这一层的含义。</div>
             <div data-arch-frame-detail>最外框表示逻辑资源域，不表示所有对象在一块内存里。每层边界的标题说明分组依据。</div></div>
         </div>
-      <div class="arch-canvas"><svg viewBox="0 0 1300 600" role="img" aria-labelledby="http-wire-archify-diagram-title http-wire-archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
-        <title id="http-wire-archify-diagram-title">同一根字节带，两种定界</title>
-        <desc id="http-wire-archify-diagram-description">TCP 给的东西一样；不一样的是第 7 层怎么在这根带子上重新切出边界</desc>
+      <div class="arch-canvas"><svg viewBox="0 0 1180 600" role="img" aria-labelledby="http-wire-archify-diagram-title http-wire-archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
+        <title id="http-wire-archify-diagram-title">HTTP 如何从 TCP 字节流中识别消息</title>
+        <desc id="http-wire-archify-diagram-description">分别看 HTTP/1.1 的报文和 HTTP/2 的帧</desc>
         <!-- Definitions -->
         <defs>
           <marker id="http-wire-arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
@@ -95,471 +96,459 @@
         <rect width="100%" height="100%" fill="url(#http-wire-grid)" />
 
         <!-- Boundaries (behind everything) -->
-        <g class="arch-frame" data-frame="tcp" data-depth="1" data-frame-flat="false" data-frame-kind="contains" role="button" tabindex="0" aria-pressed="false" aria-label="TCP 连接提供的东西"><title>一根有序的八位组流。它保证不丢、不重、不错位，不保证你能从中分出「一条消息」——消息边界是上面那层自己加的。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="0" data-frame-members="wire" x="10" y="210" width="282" height="192" rx="12" class="c-region" stroke-width="1"/>
-        <text x="18" y="228" class="t-cloud" font-size="9" font-weight="600">TCP 连接提供的东西</text></g>
+        <g class="arch-frame" data-frame="tcp" data-depth="1" data-frame-flat="false" data-frame-kind="contains" role="button" tabindex="0" aria-pressed="false" aria-label="TCP 传给应用什么"><title>每个方向提供有序字节流，不提供 HTTP 报文边界。连接也可能因错误提前结束。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="0" data-frame-members="wire" x="10" y="210" width="282" height="192" rx="12" class="c-region" stroke-width="1"/>
+        <text x="18" y="228" class="t-cloud" font-size="9" font-weight="600">TCP 传给应用什么</text></g>
 
-        <g class="arch-frame" data-frame="l7" data-depth="1" data-frame-flat="false" data-frame-kind="classification" role="button" tabindex="0" aria-pressed="false" aria-label="第 7 层 · 只换定界方式"><title>方法、状态码、字段、body 这些语义从 1.1 到 2 一个都没变。变的只有两件事：怎么切出边界，以及切出的最小单位有多大。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="1" data-frame-members="h1 h2 r1 r2" x="330" y="90" width="948" height="432" rx="12" class="c-region" stroke-width="1"/>
-        <text x="338" y="108" class="t-cloud" font-size="9" font-weight="600">第 7 层 · 只换定界方式</text></g>
+        <g class="arch-frame" data-frame="http" data-depth="1" data-frame-flat="false" data-frame-kind="classification" role="button" tabindex="0" aria-pressed="false" aria-label="HTTP 怎样解释字节"><title>两个版本都表达请求、响应、字段和消息体，但编码、边界和多请求的组织方式不同。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="1" data-frame-members="h1 h2 r1 r2" x="304" y="90" width="862" height="432" rx="12" class="c-region" stroke-width="1"/>
+        <text x="312" y="108" class="t-cloud" font-size="9" font-weight="600">HTTP 怎样解释字节</text></g>
 
         <!-- Connection paths (before components for correct z-order) -->
-        <path data-edge-from="wire" data-edge-to="h1" data-edge-label="边界得自己造" data-edge-key="0" data-edge-id="b1" data-composition-points="266,299;311,299;311,186;356,186" d="M 266 299 L 303 299 Q 311 299 311 291 L 311 194 Q 311 186 319 186 L 356 186" class="a-default" stroke-width="1.5" marker-end="url(#http-wire-arrowhead)"/>
-        <path data-edge-from="wire" data-edge-to="h2" data-edge-label="边界得自己造" data-edge-key="1" data-edge-id="b2" data-composition-points="266,313;311,313;311,426;356,426" d="M 266 313 L 303 313 Q 311 313 311 321 L 311 418 Q 311 426 319 426 L 356 426" class="a-default" stroke-width="1.5" marker-end="url(#http-wire-arrowhead)"/>
-        <path data-edge-from="h1" data-edge-to="r1" data-edge-label="消息不能再拆" data-edge-key="2" data-edge-id="b3" data-composition-points="712,186;866,186" d="M 712 186 L 866 186" class="a-default" stroke-width="1.5" marker-end="url(#http-wire-arrowhead)"/>
-        <path data-edge-from="h2" data-edge-to="r2" data-edge-label="帧可以拆开" data-edge-key="3" data-edge-id="b4" data-composition-points="712,426;866,426" d="M 712 426 L 866 426" class="a-default" stroke-width="1.5" marker-end="url(#http-wire-arrowhead)"/>
+        <path data-edge-from="wire" data-edge-to="h1" data-edge-label="按 1.1 解析" data-edge-key="0" data-edge-id="b1" data-composition-points="266,299;298,299;298,186;330,186" d="M 266 299 L 290 299 Q 298 299 298 291 L 298 194 Q 298 186 306 186 L 330 186" class="a-default" stroke-width="1.5" marker-end="url(#http-wire-arrowhead)"/>
+        <path data-edge-from="wire" data-edge-to="h2" data-edge-label="按 2 解析" data-edge-key="1" data-edge-id="b2" data-composition-points="266,313;298,313;298,426;330,426" d="M 266 313 L 290 313 Q 298 313 298 321 L 298 418 Q 298 426 306 426 L 330 426" class="a-default" stroke-width="1.5" marker-end="url(#http-wire-arrowhead)"/>
+        <path data-edge-from="h1" data-edge-to="r1" data-edge-label="响应按序" data-edge-key="2" data-edge-id="b3" data-composition-points="660,186;760,186" d="M 660 186 L 760 186" class="a-default" stroke-width="1.5" marker-end="url(#http-wire-arrowhead)"/>
+        <path data-edge-from="h2" data-edge-to="r2" data-edge-label="按流号分发" data-edge-key="3" data-edge-id="b4" data-composition-points="660,426;760,426" d="M 660 426 L 760 426" class="a-default" stroke-width="1.5" marker-end="url(#http-wire-arrowhead)"/>
 
         <!-- Components -->
-        <g id="http-wire-node-wire" data-nb="1" data-node-id="wire" data-node-label="TCP 连接" tabindex="0" role="button" aria-label="Focus TCP 连接, 一根字节流, TCP 只提供这个" aria-pressed="false" data-node-kind="cloud" data-node-sublabel="一根字节流" data-node-context="TCP 只提供这个">
-          <title>TCP 连接 · 一根字节流 · TCP 只提供这个</title>
+        <g id="http-wire-node-wire" data-nb="1" data-node-id="wire" data-node-label="TCP 字节流" tabindex="0" role="button" aria-label="Focus TCP 字节流, 示例：连接的一个方向, 传输层：连接的一个方向" aria-pressed="false" data-node-kind="external" data-node-sublabel="示例：连接的一个方向" data-node-context="传输层：连接的一个方向">
+          <title>TCP 字节流 · 示例：连接的一个方向 · 传输层：连接的一个方向</title>
           <rect x="36" y="236" width="230" height="140" rx="6" class="c-mask"/>
-          <rect x="36" y="236" width="230" height="140" rx="6" class="c-cloud" stroke-width="1.5"/>
-          <g aria-hidden="true" data-semantic-sigil="cloud" class="semantic-sigil s-cloud" transform="translate(42 242) scale(0.6875)">
-            <path d="M4.3 12.5h7.3a2.4 2.4 0 0 0 .2-4.8 4 4 0 0 0-7.5-1.3A3.1 3.1 0 0 0 4.3 12.5Z"/>
+          <rect x="36" y="236" width="230" height="140" rx="6" class="c-external" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="external" class="semantic-sigil s-external" transform="translate(42 242) scale(0.6875)">
+            <rect x="2.5" y="5" width="8.5" height="8" rx="1.5"/>
+            <path d="M8 2.5h5.5V8M13.5 2.5 7.5 8.5"/>
           </g>
           <rect class="nb-badge" x="213.2" y="244" width="40.8" height="15" rx="7.5"/>
-          <text class="nb-badge-t" x="233.6" y="255" font-size="8" text-anchor="middle">无边界</text>
-          <text class="nb-title" x="70" y="257" font-size="10.5" font-weight="600">TCP 连接</text>
+          <text class="nb-badge-t" x="233.6" y="255" font-size="8" text-anchor="middle">传输层</text>
+          <text class="nb-title" x="70" y="257" font-size="10.5" font-weight="600">TCP 字节流</text>
           <line class="nb-hr" x1="44" y1="264" x2="258" y2="264"/>
-          <text class="nb-k" x="48" y="302" font-size="9">里面是什么</text><text class="nb-v" x="111.0" y="302" font-size="9">一堆八位组</text>
-          <text class="nb-k" x="48" y="316" font-size="9">有没有边界</text><text class="nb-v" x="111.0" y="316" font-size="9">没有</text>
-          <text class="nb-k" x="48" y="330" font-size="9">谁切的</text><text class="nb-v" x="111.0" y="330" font-size="9">上面那层自己</text>
-          <text class="nb-note" x="48" y="368" font-size="8">一次 read 拿到多少字节，和消息边界无关</text>
+          <text class="nb-k" x="48" y="302" font-size="9">交给应用</text><text class="nb-v" x="100.2" y="302" font-size="9">有序字节</text>
+          <text class="nb-k" x="48" y="316" font-size="9">读到多少</text><text class="nb-v" x="100.2" y="316" font-size="9">每次不固定</text>
+          <text class="nb-k" x="48" y="330" font-size="9">报文边界</text><text class="nb-v" x="100.2" y="330" font-size="9">由 HTTP 判断</text>
+          <text class="nb-note" x="48" y="368" font-size="8">连接有两个方向，图中只看一个</text>
         </g>
 
-        <g id="http-wire-node-h1" data-nb="1" data-node-id="h1" data-node-label="HTTP/1.1 · 换行定界" tabindex="0" role="button" aria-label="Focus HTTP/1.1 · 换行定界, 第 7 层：方法、状态码、头部、body 都不变，只换定界方式" aria-pressed="false" data-node-kind="backend" data-node-context="第 7 层：方法、状态码、头部、body 都不变，只换定界方式">
-          <title>HTTP/1.1 · 换行定界 · 第 7 层：方法、状态码、头部、body 都不变，只换定界方式</title>
-          <rect x="356" y="116" width="356" height="140" rx="6" class="c-mask"/>
-          <rect x="356" y="116" width="356" height="140" rx="6" class="c-backend" stroke-width="1.5"/>
-          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(362 122) scale(0.6875)">
+        <g id="http-wire-node-h1" data-nb="1" data-node-id="h1" data-node-label="HTTP/1.1 · 头部与消息体" tabindex="0" role="button" aria-label="Focus HTTP/1.1 · 头部与消息体, 应用层：两种 HTTP 协议的组织方式" aria-pressed="false" data-node-kind="backend" data-node-context="应用层：两种 HTTP 协议的组织方式">
+          <title>HTTP/1.1 · 头部与消息体 · 应用层：两种 HTTP 协议的组织方式</title>
+          <rect x="330" y="116" width="330" height="140" rx="6" class="c-mask"/>
+          <rect x="330" y="116" width="330" height="140" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(336 122) scale(0.6875)">
             <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
           </g>
-          <rect class="nb-badge" x="668.8" y="124" width="31.2" height="15" rx="7.5"/>
-          <text class="nb-badge-t" x="684.4" y="135" font-size="8" text-anchor="middle">扫描</text>
-          <text class="nb-title" x="390" y="137" font-size="10.5" font-weight="600">HTTP/1.1 · 换行定界</text>
-          <line class="nb-hr" x1="364" y1="144" x2="704" y2="144"/>
-          <text class="nb-k" x="368" y="175" font-size="9">第一步</text><text class="nb-v" x="409.4" y="175" font-size="9">往后找 0d 0a 0d 0a</text>
-          <text class="nb-k" x="368" y="189" font-size="9">第二步</text><text class="nb-v" x="409.4" y="189" font-size="9">读 Content-Length 的值</text>
-          <text class="nb-k" x="368" y="203" font-size="9">第三步</text><text class="nb-v" x="409.4" y="203" font-size="9">往后数那么多个字节</text>
-          <text class="nb-k" x="368" y="217" font-size="9">绕法</text><text class="nb-v" x="409.4" y="217" font-size="9">chunked 每段再报长度</text>
-          <text class="nb-note" x="368" y="248" font-size="8">定界符全是可打印字符</text>
+          <rect class="nb-badge" x="616.8" y="124" width="31.2" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="632.4" y="135" font-size="8" text-anchor="middle">报文</text>
+          <text class="nb-title" x="364" y="137" font-size="10.5" font-weight="600">HTTP/1.1 · 头部与消息体</text>
+          <line class="nb-hr" x1="338" y1="144" x2="652" y2="144"/>
+          <text class="nb-k" x="342" y="182" font-size="9">起始行与字段</text><text class="nb-v" x="415.8" y="182" font-size="9">按行读取</text>
+          <text class="nb-k" x="342" y="196" font-size="9">头部结束</text><text class="nb-v" x="415.8" y="196" font-size="9">空行</text>
+          <text class="nb-k" x="342" y="210" font-size="9">消息体</text><text class="nb-v" x="415.8" y="210" font-size="9">长度或分块等规则</text>
+          <text class="nb-note" x="342" y="248" font-size="8">空行不一定是整条报文的结尾</text>
         </g>
 
-        <g id="http-wire-node-h2" data-nb="1" data-node-id="h2" data-node-label="HTTP/2 · 长度定界" tabindex="0" role="button" aria-label="Focus HTTP/2 · 长度定界, 第 7 层：方法、状态码、头部、body 都不变，只换定界方式" aria-pressed="false" data-node-kind="backend" data-node-context="第 7 层：方法、状态码、头部、body 都不变，只换定界方式">
-          <title>HTTP/2 · 长度定界 · 第 7 层：方法、状态码、头部、body 都不变，只换定界方式</title>
-          <rect x="356" y="356" width="356" height="140" rx="6" class="c-mask"/>
-          <rect x="356" y="356" width="356" height="140" rx="6" class="c-backend" stroke-width="1.5"/>
-          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(362 362) scale(0.6875)">
+        <g id="http-wire-node-h2" data-nb="1" data-node-id="h2" data-node-label="HTTP/2 · 帧与流" tabindex="0" role="button" aria-label="Focus HTTP/2 · 帧与流, 应用层：两种 HTTP 协议的组织方式" aria-pressed="false" data-node-kind="backend" data-node-context="应用层：两种 HTTP 协议的组织方式">
+          <title>HTTP/2 · 帧与流 · 应用层：两种 HTTP 协议的组织方式</title>
+          <rect x="330" y="356" width="330" height="140" rx="6" class="c-mask"/>
+          <rect x="330" y="356" width="330" height="140" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(336 362) scale(0.6875)">
             <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
           </g>
-          <rect class="nb-badge" x="668.8" y="364" width="31.2" height="15" rx="7.5"/>
-          <text class="nb-badge-t" x="684.4" y="375" font-size="8" text-anchor="middle">跳读</text>
-          <text class="nb-title" x="390" y="377" font-size="10.5" font-weight="600">HTTP/2 · 长度定界</text>
-          <line class="nb-hr" x1="364" y1="384" x2="704" y2="384"/>
-          <text class="nb-k" x="368" y="415" font-size="9">第一步</text><text class="nb-v" x="409.4" y="415" font-size="9">读固定 9 字节帧头</text>
-          <text class="nb-k" x="368" y="429" font-size="9">拿到</text><text class="nb-v" x="409.4" y="429" font-size="9">Length（24 位）+ 流号</text>
-          <text class="nb-k" x="368" y="443" font-size="9">第二步</text><text class="nb-v" x="409.4" y="443" font-size="9">跳过 Length 个字节</text>
-          <text class="nb-k" x="368" y="457" font-size="9">内容</text><text class="nb-v" x="409.4" y="457" font-size="9">从不需要看</text>
-          <text class="nb-note" x="368" y="488" font-size="8">定界符是固定位置的整数字段</text>
+          <rect class="nb-badge" x="626.4" y="364" width="21.6" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="637.2" y="375" font-size="8" text-anchor="middle">帧</text>
+          <text class="nb-title" x="364" y="377" font-size="10.5" font-weight="600">HTTP/2 · 帧与流</text>
+          <line class="nb-hr" x1="338" y1="384" x2="652" y2="384"/>
+          <text class="nb-k" x="342" y="422" font-size="9">每帧开头</text><text class="nb-v" x="399.6" y="422" font-size="9">固定 9 字节</text>
+          <text class="nb-k" x="342" y="436" font-size="9">前 3 字节</text><text class="nb-v" x="399.6" y="436" font-size="9">本帧载荷长度</text>
+          <text class="nb-k" x="342" y="450" font-size="9">流编号</text><text class="nb-v" x="399.6" y="450" font-size="9">识别帧的归属</text>
+          <text class="nb-note" x="342" y="488" font-size="8">帧长不是整条 HTTP 消息体的长度</text>
         </g>
 
-        <g id="http-wire-node-r1" data-nb="1" data-node-id="r1" data-node-label="一次一个" tabindex="0" role="button" aria-label="Focus 一次一个, 第 7 层：方法、状态码、头部、body 都不变，只换定界方式" aria-pressed="false" data-node-kind="database" data-node-context="第 7 层：方法、状态码、头部、body 都不变，只换定界方式">
-          <title>一次一个 · 第 7 层：方法、状态码、头部、body 都不变，只换定界方式</title>
-          <rect x="866" y="116" width="386" height="140" rx="6" class="c-mask"/>
-          <rect x="866" y="116" width="386" height="140" rx="6" class="c-database" stroke-width="1.5"/>
-          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(872 122) scale(0.6875)">
-            <ellipse cx="8" cy="4" rx="5" ry="2"/>
-            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+        <g id="http-wire-node-r1" data-nb="1" data-node-id="r1" data-node-label="响应按顺序发送" tabindex="0" role="button" aria-label="Focus 响应按顺序发送, 应用层：两种 HTTP 协议的组织方式" aria-pressed="false" data-node-kind="backend" data-node-context="应用层：两种 HTTP 协议的组织方式">
+          <title>响应按顺序发送 · 应用层：两种 HTTP 协议的组织方式</title>
+          <rect x="760" y="116" width="380" height="140" rx="6" class="c-mask"/>
+          <rect x="760" y="116" width="380" height="140" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(766 122) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
           </g>
-          <rect class="nb-badge" x="1208.8" y="124" width="31.2" height="15" rx="7.5"/>
-          <text class="nb-badge-t" x="1224.4" y="135" font-size="8" text-anchor="middle">串行</text>
-          <text class="nb-title" x="900" y="137" font-size="10.5" font-weight="600">一次一个</text>
-          <line class="nb-hr" x1="874" y1="144" x2="1244" y2="144"/>
-          <text class="nb-k" x="878" y="175" font-size="9">切成</text><text class="nb-v" x="930.2" y="175" font-size="9">一整条消息</text>
-          <text class="nb-k" x="878" y="189" font-size="9">拆得开吗</text><text class="nb-v" x="930.2" y="189" font-size="9">拆不开</text>
-          <text class="nb-k" x="878" y="203" font-size="9">所以</text><text class="nb-v" x="930.2" y="203" font-size="9">响应必须按序返回</text>
-          <text class="nb-k" x="878" y="217" font-size="9">代价</text><text class="nb-v" x="930.2" y="217" font-size="9">只能开多条连接</text>
-          <text class="nb-note" x="878" y="248" font-size="8">RFC 9112 §9.3.2 明文要求</text>
+          <rect class="nb-badge" x="1077.6" y="124" width="50.4" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="1102.8" y="135" font-size="8" text-anchor="middle">响应顺序</text>
+          <text class="nb-title" x="794" y="137" font-size="10.5" font-weight="600">响应按顺序发送</text>
+          <line class="nb-hr" x1="768" y1="144" x2="1132" y2="144"/>
+          <text class="nb-k" x="772" y="182" font-size="9">请求</text><text class="nb-v" x="802.6" y="182" font-size="9">可以流水线发送</text>
+          <text class="nb-k" x="772" y="196" font-size="9">响应</text><text class="nb-v" x="802.6" y="196" font-size="9">同连接按请求顺序</text>
+          <text class="nb-k" x="772" y="210" font-size="9">正文</text><text class="nb-v" x="802.6" y="210" font-size="9">可以分批传送</text>
+          <text class="nb-note" x="772" y="248" font-size="8">不同响应的字节不能交错</text>
         </g>
 
-        <g id="http-wire-node-r2" data-nb="1" data-node-id="r2" data-node-label="一条连接跑多个流" tabindex="0" role="button" aria-label="Focus 一条连接跑多个流, 第 7 层：方法、状态码、头部、body 都不变，只换定界方式" aria-pressed="false" data-node-kind="database" data-node-context="第 7 层：方法、状态码、头部、body 都不变，只换定界方式">
-          <title>一条连接跑多个流 · 第 7 层：方法、状态码、头部、body 都不变，只换定界方式</title>
-          <rect x="866" y="356" width="386" height="140" rx="6" class="c-mask"/>
-          <rect x="866" y="356" width="386" height="140" rx="6" class="c-database" stroke-width="1.5"/>
-          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(872 362) scale(0.6875)">
-            <ellipse cx="8" cy="4" rx="5" ry="2"/>
-            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+        <g id="http-wire-node-r2" data-nb="1" data-node-id="r2" data-node-label="不同流的帧可交错" tabindex="0" role="button" aria-label="Focus 不同流的帧可交错, 应用层：两种 HTTP 协议的组织方式" aria-pressed="false" data-node-kind="backend" data-node-context="应用层：两种 HTTP 协议的组织方式">
+          <title>不同流的帧可交错 · 应用层：两种 HTTP 协议的组织方式</title>
+          <rect x="760" y="356" width="380" height="140" rx="6" class="c-mask"/>
+          <rect x="760" y="356" width="380" height="140" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(766 362) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
           </g>
-          <rect class="nb-badge" x="1199.2" y="364" width="40.8" height="15" rx="7.5"/>
-          <text class="nb-badge-t" x="1219.6" y="375" font-size="8" text-anchor="middle">多个流</text>
-          <text class="nb-title" x="900" y="377" font-size="10.5" font-weight="600">一条连接跑多个流</text>
-          <line class="nb-hr" x1="874" y1="384" x2="1244" y2="384"/>
-          <text class="nb-k" x="878" y="415" font-size="9">切成</text><text class="nb-v" x="919.4" y="415" font-size="9">帧</text>
-          <text class="nb-k" x="878" y="429" font-size="9">为什么</text><text class="nb-v" x="919.4" y="429" font-size="9">每帧自带流号与长度</text>
-          <text class="nb-k" x="878" y="443" font-size="9">所以</text><text class="nb-v" x="919.4" y="443" font-size="9">不同流的帧可以交错</text>
-          <text class="nb-k" x="878" y="457" font-size="9">代价</text><text class="nb-v" x="919.4" y="457" font-size="9">人读不出来</text>
-          <text class="nb-note" x="878" y="488" font-size="8">一条连接就够，帧到了按流号归位</text>
+          <rect class="nb-badge" x="1077.6" y="364" width="50.4" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="1102.8" y="375" font-size="8" text-anchor="middle">多路复用</text>
+          <text class="nb-title" x="794" y="377" font-size="10.5" font-weight="600">不同流的帧可交错</text>
+          <line class="nb-hr" x1="768" y1="384" x2="1132" y2="384"/>
+          <text class="nb-k" x="772" y="422" font-size="9">一条连接</text><text class="nb-v" x="824.2" y="422" font-size="9">多条逻辑流</text>
+          <text class="nb-k" x="772" y="436" font-size="9">不同流</text><text class="nb-v" x="824.2" y="436" font-size="9">帧可以交错</text>
+          <text class="nb-k" x="772" y="450" font-size="9">结束发送</text><text class="nb-v" x="824.2" y="450" font-size="9">END_STREAM 标志</text>
+          <text class="nb-note" x="772" y="488" font-size="8">帧边界与消息结束是两件事</text>
         </g>
 
         <!-- Connection labels -->
-        <g data-detail="context" data-edge-from="wire" data-edge-to="h1" data-edge-label="边界得自己造" data-edge-key="0" data-edge-id="b1">
-          <rect x="271.2" y="208.5" width="67.6" height="14" rx="3" class="c-mask"/>
-          <text x="305" y="218.5" class="t-muted" font-size="8" text-anchor="middle">边界得自己造</text>
+        <g data-detail="context" data-edge-from="wire" data-edge-to="h1" data-edge-label="按 1.1 解析" data-edge-key="0" data-edge-id="b1">
+          <rect x="260.6" y="208.5" width="62.8" height="14" rx="3" class="c-mask"/>
+          <text x="292" y="218.5" class="t-muted" font-size="8" text-anchor="middle">按 1.1 解析</text>
         </g>
-        <g data-detail="context" data-edge-from="wire" data-edge-to="h2" data-edge-label="边界得自己造" data-edge-key="1" data-edge-id="b2">
-          <rect x="271.2" y="363.5" width="67.6" height="14" rx="3" class="c-mask"/>
-          <text x="305" y="373.5" class="t-muted" font-size="8" text-anchor="middle">边界得自己造</text>
+        <g data-detail="context" data-edge-from="wire" data-edge-to="h2" data-edge-label="按 2 解析" data-edge-key="1" data-edge-id="b2">
+          <rect x="265.4" y="363.5" width="53.199999999999996" height="14" rx="3" class="c-mask"/>
+          <text x="292" y="373.5" class="t-muted" font-size="8" text-anchor="middle">按 2 解析</text>
         </g>
-        <g data-detail="context" data-edge-from="h1" data-edge-to="r1" data-edge-label="消息不能再拆" data-edge-key="2" data-edge-id="b3">
-          <rect x="755.2" y="166" width="67.6" height="14" rx="3" class="c-mask"/>
-          <text x="789" y="176" class="t-muted" font-size="8" text-anchor="middle">消息不能再拆</text>
+        <g data-detail="context" data-edge-from="h1" data-edge-to="r1" data-edge-label="响应按序" data-edge-key="2" data-edge-id="b3">
+          <rect x="685.8" y="166" width="48.4" height="14" rx="3" class="c-mask"/>
+          <text x="710" y="176" class="t-muted" font-size="8" text-anchor="middle">响应按序</text>
         </g>
-        <g data-detail="context" data-edge-from="h2" data-edge-to="r2" data-edge-label="帧可以拆开" data-edge-key="3" data-edge-id="b4">
-          <rect x="760" y="406" width="58" height="14" rx="3" class="c-mask"/>
-          <text x="789" y="416" class="t-muted" font-size="8" text-anchor="middle">帧可以拆开</text>
+        <g data-detail="context" data-edge-from="h2" data-edge-to="r2" data-edge-label="按流号分发" data-edge-key="3" data-edge-id="b4">
+          <rect x="681" y="406" width="58" height="14" rx="3" class="c-mask"/>
+          <text x="710" y="416" class="t-muted" font-size="8" text-anchor="middle">按流号分发</text>
         </g>
 
         <!-- Legend -->
-        <g data-legend data-legend-bridge>
-          <text x="40" y="564" class="t-primary" font-size="12" font-weight="650">Legend</text>
-          <g data-legend-semantic-kind="backend" data-legend-kind="backend" data-legend-label="Backend" data-legend-x="40" data-legend-baseline="584" data-legend-width="78">
-            <rect x="40" y="575" width="16" height="10" rx="2.5" class="c-backend" stroke-width="1"/>
-            <text x="62" y="584" class="t-muted" font-size="10" font-weight="500">Backend</text>
-          </g>
-          <g data-legend-semantic-kind="database" data-legend-kind="database" data-legend-label="Database" data-legend-x="140" data-legend-baseline="584" data-legend-width="83">
-            <rect x="140" y="575" width="16" height="10" rx="2.5" class="c-database" stroke-width="1"/>
-            <text x="162" y="584" class="t-muted" font-size="10" font-weight="500">Database</text>
-          </g>
-          <g data-legend-semantic-kind="cloud" data-legend-kind="cloud" data-legend-label="Cloud" data-legend-x="245" data-legend-baseline="584" data-legend-width="68">
-            <rect x="245" y="575" width="16" height="10" rx="2.5" class="c-cloud" stroke-width="1"/>
-            <text x="267" y="584" class="t-muted" font-size="10" font-weight="500">Cloud</text>
-          </g>
-        </g>
+
       </svg></div>
-      <figcaption>从左边那根带子进去。两个解析器读的是同一根带子，虚线框里换掉的只是定界方式 —— 方法、状态码、头部、body 这些语义一样。点零件看它具体怎么做，或者用下面的导览走一遍。</figcaption>
+      <figcaption>从左边的 TCP 字节流看起。上下是两种不同的协议场景，不是让一条连接同时使用两个版本；图中只展示连接的一个方向。</figcaption>
       <div class="pano-ui"></div>
       <p class="arch-hint"><span class="idle">点头上的任意一个框看它的关系，点区域标题看分组含义，点零件看完整归属路径；用「对比两个零件」出一张对照表</span><span class="focused">再点一次空白处取消</span></p>
-    </figure><h2 id="同一堆字节两种写法"><span class="num">01</span>同一堆字节，两种写法</h2>
-<p>起一个只打印原始字节的服务，让 curl 发一个请求过去，收到的 89 个字节是这些：</p>
+    </figure><h2 id="字节十六进制和字符"><span class="num">01</span>字节、十六进制和字符</h2>
+<p>先看 <code>GET</code> 的三个字节。下面三行只是同一份数据的不同展示方式：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">二进制写法     01000111   01000101   01010100
+十六进制写法      47         45         54
+按 ASCII 显示      G          E          T
+</code></pre></div>
+<p>例如，一个字节的值 <code>0x47</code>，按 ASCII 解释是 <code>G</code>。<code>47</code> 是十六进制<strong>写法</strong>，不代表传输了字符 <code>4</code> 和 <code>7</code>；那两个字符分别是字节 <code>0x34</code> 和 <code>0x37</code>。</p>
+<p>ASCII 还约定了控制字符。回车是 <code>0x0d</code>，换行是 <code>0x0a</code>，两个连起来常写成 <code>\r\n</code>。<mark class="mk-blue"><code>\r\n</code> 是方便阅读的记号，实际是两个字节，不是反斜杠和字母组成的四个字节。</mark></p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>字节</th><th>按 ASCII 看</th><th>说明</th></tr></thead><tbody><tr><th><code>47</code></th><td data-label="按 ASCII 看"><code>G</code></td><td data-label="说明">可打印字符</td></tr><tr><th><code>20</code></th><td data-label="按 ASCII 看">空格</td><td data-label="说明">可打印字符</td></tr><tr><th><code>0d 0a</code></th><td data-label="按 ASCII 看"><code>\r\n</code></td><td data-label="说明">回车加换行，不能直接显示成图形</td></tr><tr><th><code>2e</code></th><td data-label="按 ASCII 看"><code>.</code></td><td data-label="说明">真的英文句点</td></tr></tbody></table></div><h3 id="十六进制转储左边的数字是什么">十六进制转储左边的数字是什么？</h3>
+<p>下面是一次请求的开头。中间每两个十六进制数字代表一个字节；右边是按 ASCII 显示的样子。</p>
 <div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">0000  47 45 54 20 2f 68 65 6c 6c 6f 20 48 54 54 50 2f  |GET /hello HTTP/|
 0010  31 2e 31 0d 0a 48 6f 73 74 3a 20 31 32 37 2e 30  |1.1..Host: 127.0|
-0020  2e 30 2e 31 3a 31 38 30 38 30 0d 0a 55 73 65 72  |.0.1:18080..User|
-0030  2d 41 67 65 6e 74 3a 20 63 75 72 6c 2f 38 2e 37  |-Agent: curl/8.7|
-0040  2e 31 0d 0a 41 63 63 65 70 74 3a 20 74 65 78 74  |.1..Accept: text|
-0050  2f 68 74 6d 6c 0d 0a 0d 0a                       |/html....|
 </code></pre></div>
-<p>右边那一列是同一堆字节按 ASCII 解释出来的结果。左边是十六进制。<strong>它们不是两样东西</strong>，是同一份数据的两种记法。</p>
-<p><code>0x47</code> 就是 <code>G</code>。<code>0x0d 0x0a</code> 是回车加换行，写作 <code>\r\n</code> —— ASCII 表不给这两个码位配图形字符，所以 hexdump 的右列拿点来占位。</p>
-<p>「文本」这个标签能指的全部，就是这件事：这堆字节里每一个都落在可打印 ASCII 的范围内，所以你把它当字符串打印出来，得到的正好是协议的样子。协议里每个有意义的分界，都用了几个有名字的字符：空格 <code>0x20</code>、冒号 <code>0x3a</code>、斜杠 <code>0x2f</code>、换行 <code>0x0a</code>。</p>
-<p><mark class="mk-amber">可读不等于有结构。</mark> 你把上面那段当字符读，读到的是 <code>GET /hello HTTP/1.1</code>；但这一行字里哪一段是方法、哪一段是路径，ASCII 本身不告诉你。结构在下一层：谁规定「第一个空格之前是方法」，谁就把意义填了进去。</p>
+<p><code>0000</code>、<code>0010</code> 是工具加的<strong>偏移量</strong>：本行第一个字节从整份数据的哪里开始。偏移从 0 数起，用十六进制表示；<code>0x10</code> 等于十进制 16，所以第二行从第 16 个字节开始。偏移量本身没有在请求里传输。</p>
+<p>右侧的 <code>.</code> 有时是不可打印字节的占位符，有时是真正的句点 <code>0x2e</code>，要结合中间一列看。本页的互动字节带用 <code>·</code> 标示不可打印字节，真实句点仍显示为 <code>.</code>。</p>
 <div class="callout tone-muted">
-      <span class="ic">📐</span>
-      <div><p>后面统一用「八位组」（octet）这个词。它和「字节」是同一个东西，RFC 里习惯写 octet，因为 <code>byte</code> 在老标准里不一定是 8 位。这里按 RFC 的口径：8 位、取值 <code>0x00</code>–<code>0xFF</code>。</p>
+      <span class="ic">📌</span>
+      <div><p>这份请求的字母和标点可以按 ASCII 阅读，行尾还有不可打印的回车、换行。文本也不只限于 ASCII；例如中文通常会用 UTF-8 等编码。HTTP 消息体还可能是一张图片或其他任意字节。</p>
 </div>
-    </div><h2 id="tcp-那头没有消息这种东西"><span class="num">02</span>TCP 那头没有「消息」这种东西</h2>
-<p>TCP 交付的是一根字节流：字节按顺序到达，不丢、不重、不错位。它不交付消息。</p>
-<p>这件事可以用 <code>recv()</code> 的返回值直接看到。下面那条响应声明 <code>Content-Length: 11</code>，body 是 <code>Hello world</code>；服务端故意分两次写出去。客户端用 7 字节的缓冲区去读：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">第 1 次 recv(7) → b'HTTP/1.'      (7 字节)
-第 2 次 recv(7) → b'1 200 O'      (7 字节)
-第 3 次 recv(7) → b'K\r\nCont'    (7 字节)
-第 4 次 recv(7) → b'ent-Len'      (7 字节)
-第 5 次 recv(7) → b'gth: 11'      (7 字节)
-第 6 次 recv(7) → b'\r\n\r'       (3 字节)
-第 7 次 recv(7) → b'\nHello '     (7 字节)
-第 8 次 recv(7) → b'world'        (5 字节)
+    </div><h2 id="tcp-交付字节不交付-http-消息"><span class="num">02</span>TCP 交付字节，不交付 HTTP 消息</h2>
+<p>TCP 在连接的每个方向上提供有序字节流。假设发送方一次写入以下内容：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">GET /hello HTTP/1.1\r\n
 </code></pre></div>
-<p>第 6 次和第 7 次之间，头部的结束标记 <code>\r\n\r\n</code> 被从中间劈开了。任何写着「一次 read 拿到一条完整消息」的代码，在这里都会错。</p>
-<p><mark class="mk-blue"><strong>所以「TCP 上是二进制」这句话对 HTTP/1.1 和 HTTP/2 同样成立，它区分不了两者。</strong></mark> 真正的差别在更上面一层：谁负责把边界重新造出来。</p>
-<div class="callout tone-violet">
-      <span class="ic">💡</span>
-      <div><p>TCP 不保留边界，UDP 保留 —— 一次 <code>recvfrom()</code> 拿到一个完整报文，长度由内核告诉你。所以「消息边界」这件事在 TCP 上不是天生的，<mark class="mk-blue">上面那层必须自己补</mark>。</p>
-</div>
-    </div><h2 id="http11-造边界在字节里找字"><span class="num">03</span>HTTP/1.1 造边界：在字节里找字</h2>
-<p>RFC 9112 把报文语法直接写成这样：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">HTTP-message   = start-line CRLF
-                 *( field-line CRLF )
-                 CRLF
-                 [ message-body ]
+<p>接收方完全可能分三次读到：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">第 1 次读取    GET /he
+第 2 次读取    llo HTTP/1.
+第 3 次读取    1\r\n
 </code></pre></div>
-<p>读法：先一行起始行，然后若干行字段，<strong>一个空行表示头部结束</strong>，后面跟可选的消息体。</p>
-<p>这个语法里没有长度字段。想知道 body 有多长，得去别处找。RFC 9112 §6.3 按优先级列了七种情形，落到日常只有四种：</p>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>报文长什么样</th><th>怎么找边界</th><th>边界从哪来</th></tr></thead><tbody><tr><th>HEAD、1xx、204、304 的响应</th><td data-label="怎么找边界">空行之后直接结束</td><td data-label="边界从哪来">状态码本身说明了没有 body</td></tr><tr><th>带 <code>Transfer-Encoding: chunked</code></th><td data-label="怎么找边界">一段段读，每段自己报长度</td><td data-label="边界从哪来">每段前面那串十六进制字符</td></tr><tr><th>带 <code>Content-Length: N</code></th><td data-label="怎么找边界">往后数 N 个字节</td><td data-label="边界从哪来">字段里的那个十进制数</td></tr><tr><th>都没有（只可能是响应）</th><td data-label="怎么找边界">一直读到连接关闭</td><td data-label="边界从哪来">连接的结束</td></tr></tbody></table></div><h3 id="连长度都是字符">连长度都是字符</h3>
-<p>chunked 是最能说明问题的一种。下面这条响应只有 99 个字节，服务端分三块写出 body：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">0000  48 54 54 50 2f 31 2e 31 20 32 30 30 20 4f 4b 0d  |HTTP/1.1 200 OK.|
-0010  0a 43 6f 6e 74 65 6e 74 2d 54 79 70 65 3a 20 74  |.Content-Type: t|
-0020  65 78 74 2f 70 6c 61 69 6e 0d 0a 54 72 61 6e 73  |ext/plain..Trans|
-0030  66 65 72 2d 45 6e 63 6f 64 69 6e 67 3a 20 63 68  |fer-Encoding: ch|
-0040  75 6e 6b 65 64 0d 0a 0d 0a 35 0d 0a 48 65 6c 6c  |unked....5..Hell|
-0050  6f 0d 0a 36 0d 0a 20 77 6f 72 6c 64 0d 0a 30 0d  |o..6.. world..0.|
-0060  0a 0d 0a                                         |...|
-</code></pre></div>
-<p>把 <code>\r\n\r\n</code> 之后那一段拆开：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">35 0d 0a            &quot;5\r\n&quot;        ← 这一块 5 个字节
-48 65 6c 6c 6f      &quot;Hello&quot;
-0d 0a               &quot;\r\n&quot;
-36 0d 0a            &quot;6\r\n&quot;        ← 这一块 6 个字节
-20 77 6f 72 6c 64   &quot; world&quot;
-0d 0a               &quot;\r\n&quot;
-30 0d 0a            &quot;0\r\n&quot;        ← 0 号块：到此结束
-0d 0a               &quot;\r\n&quot;
-</code></pre></div>
-<p>长度本身也写成了字符。<code>5</code> 是 <code>0x35</code>，<code>6</code> 是 <code>0x36</code>，<code>0</code> 是 <code>0x30</code>。解析器得先把 <code>0x30</code> 这个字节当成字符 <code>'0'</code>，再按十六进制读出数字，才知道下一块有几个字节。</p>
-<p><mark class="mk-blue">这就是「文本协议」的全部内容：<strong>结构信息被写成字符。</strong></mark></p>
-<h3 id="代价有两条">代价有两条</h3>
-<div class="cards" data-cols="2"><div class="ccard tone-amber">
+<p>这是一个<strong>示意</strong>，三段拼起来还是发送方写出的字节。实际每次读到多少取决于缓冲区、数据到达时机等；一次读取也可能包含多次写入的数据。</p>
+<div class="cards" data-cols="2"><div class="ccard tone-blue">
           
-          <h4>解析器必须扫</h4>
-          <p>不能跳，只能一格格往前</p>
-          <div class="cbody"><p>「下一个边界在哪」这件事，解析器只知道要找什么，不知道要找多远。</p>
-<p>读到第几个字节才算完，取决于内容本身。所以扫描的长度跟消息大小成正比，而不跟消息条数成正比。</p>
+          <h4>TCP 负责传输</h4>
+          
+          <div class="cbody"><p>在连接正常时按顺序交付字节，并处理传输中的丢失和重传。连接也可能失败，应用需要处理提前结束或错误。</p>
 </div>
           
-        </div><div class="ccard tone-red">
+        </div><div class="ccard tone-violet">
           
-          <h4>边界可能和内容撞车</h4>
-          <p>长度给错，切出来的就不是一条消息</p>
-          <div class="cbody"><p>body 里如果恰好出现 <code>\r\n\r\n</code>，扫描器会不会误判？这正是 <code>Content-Length</code> 和 <code>Transfer-Encoding</code> 必须给准的原因。</p>
-<p>两个都出现时，RFC 9112 §6.3 第 3 条要求按错误处理 —— 因为前端后端各挑一个来用，就会看到两条不同的消息序列。请求走私（request smuggling）的根就在这里。</p>
+          <h4>HTTP 负责解释</h4>
+          
+          <div class="cbody"><p>HTTP 接收字节、保存解析进度，并按协议判断头部、消息体或帧的边界。不能把一次 <code>read</code> 当成一条完整报文。</p>
 </div>
           
-        </div></div><div class="demo" data-widget="byte-walker" data-config="{&quot;bytes&quot;:&quot;474554202f68656c6c6f20485454502f312e310d0a486f73743a203132372e302e302e313a31383038300d0a557365722d4167656e743a206375726c2f382e372e310d0a4163636570743a20746578742f68746d6c0d0a0d0a&quot;,&quot;lenses&quot;:[{&quot;label&quot;:&quot;当字符读&quot;,&quot;sub&quot;:&quot;一个一个字符念下去&quot;,&quot;tone&quot;:&quot;blue&quot;,&quot;steps&quot;:[{&quot;span&quot;:[0,20],&quot;tag&quot;:&quot;起始行&quot;,&quot;note&quot;:&quot;这 21 个字节打出可打印 ASCII：`GET`、空格、`/hello`、空格、`HTTP/1.1`，最后 `0d 0a` 是行尾。右列和它在同一行对齐。&quot;},{&quot;span&quot;:[21,43],&quot;tag&quot;:&quot;Host 字段行&quot;,&quot;note&quot;:&quot;`0x48` 是 `H`、`0x6f` 是 `o`、`0x3a` 是 `:`。冒号后面的值就是主机和端口。&quot;},{&quot;span&quot;:[44,66],&quot;tag&quot;:&quot;User-Agent 字段行&quot;,&quot;note&quot;:&quot;到这里为止，89 个字节里没有一个落在不可打印区间 —— 右列全是实实在在的字符。&quot;},{&quot;span&quot;:[67,84],&quot;tag&quot;:&quot;Accept 字段行&quot;,&quot;note&quot;:&quot;`text/html` 这四个字符是值，`0d 0a` 是这一行的结束。&quot;},{&quot;span&quot;:[85,88],&quot;tag&quot;:&quot;空行&quot;,&quot;note&quot;:&quot;只剩四个字节：`0d 0a 0d 0a`。右列念不出东西，但它是整条报文最关键的四字节 —— 下一组镜片会说明为什么。&quot;}]},{&quot;label&quot;:&quot;当 1.1 解析器读&quot;,&quot;sub&quot;:&quot;同样是这 89 个字节&quot;,&quot;tone&quot;:&quot;violet&quot;,&quot;steps&quot;:[{&quot;span&quot;:[0,20],&quot;tag&quot;:&quot;用空格切三段&quot;,&quot;note&quot;:&quot;读到行尾，按空格切成三段：方法 `GET`、请求目标 `/hello`、版本 `HTTP/1.1`。切法是规格规定的，ASCII 不告诉你。&quot;},{&quot;span&quot;:[21,43],&quot;tag&quot;:&quot;字段名到冒号为止&quot;,&quot;note&quot;:&quot;冒号左边是字段名，右边去掉首尾空格是值。每遇到一个 `0d 0a` 就收一条。&quot;},{&quot;span&quot;:[44,66],&quot;tag&quot;:&quot;同样的动作重复一次&quot;,&quot;note&quot;:&quot;1.1 的解析器在这一层没有「跳过」这个动作 —— 它必须把这些字节全看一遍，才知道该往哪走。&quot;},{&quot;span&quot;:[67,84],&quot;tag&quot;:&quot;最后一条字段&quot;,&quot;note&quot;:&quot;收完这一条，它还不知道头部结束没有。答案在下一个字节里。&quot;},{&quot;span&quot;:[85,88],&quot;tag&quot;:&quot;空行 = 头部到此结束&quot;,&quot;note&quot;:&quot;**这一条是 HTTP/1.1 的核心**：它没有长度字段，靠这四字节告诉对方「头完了」。注意这四字节没法从上下文推出来 —— 只能读到那里才知道。&quot;},{&quot;span&quot;:[85,88],&quot;tag&quot;:&quot;那 body 有多长&quot;,&quot;note&quot;:&quot;这条请求既没有 `Transfer-Encoding` 也没有 `Content-Length`，按 RFC 9112 §6.3 第 7 条，请求的 body 长度为 0。所以这 89 个字节就是一条完整报文。&quot;}]}]}">
+        </div></div><p>发送方调用 <code>write</code> 的次数、TCP 分段、接收方调用 <code>read</code> 的次数，以及 HTTP 的消息或帧边界，是不同层面的事情。HTTP/1.1 和 HTTP/2 都要面对这个字节流。</p>
+<h2 id="http11空行之后还要判断消息体"><span class="num">03</span>HTTP/1.1：空行之后，还要判断消息体</h2>
+<p>一条 HTTP/1.1 <strong>请求报文</strong>通常由起始行、头部字段、空行和可选的消息体组成。下面的 <code>\r\n</code> 用来标出真实的行尾；额外的排版换行、箭头和中文注释都不是传输的内容。</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">GET /hello HTTP/1.1\r\n              ← 起始行
+Host: 127.0.0.1:18080\r\n             ← 头部字段
+User-Agent: curl/8.7.1\r\n            ← 头部字段
+Accept: text/html\r\n                 ← 头部字段
+\r\n                                  ← 空行：头部结束
+</code></pre></div>
+<p>起始行里的 <code>GET</code> 是方法，<code>/hello</code> 是请求目标，<code>HTTP/1.1</code> 是版本。ASCII 告诉我们字节对应什么字符；<strong>HTTP 的语法</strong>告诉我们这些字符各代表什么。</p>
+<p>先在下面选“按行解析”，再点“下一步”。这是本机 <code>curl 8.7.1</code> 发出的那 89 个字节；另一种读法可以对照字符和控制字节。</p>
+<div class="demo" data-widget="byte-walker" data-config="{&quot;bytes&quot;:&quot;474554202f68656c6c6f20485454502f312e310d0a486f73743a203132372e302e302e313a31383038300d0a557365722d4167656e743a206375726c2f382e372e310d0a4163636570743a20746578742f68746d6c0d0a0d0a&quot;,&quot;lenses&quot;:[{&quot;label&quot;:&quot;按行解析&quot;,&quot;sub&quot;:&quot;看每一行在请求中的作用&quot;,&quot;tone&quot;:&quot;violet&quot;,&quot;steps&quot;:[{&quot;span&quot;:[0,20],&quot;tag&quot;:&quot;起始行&quot;,&quot;note&quot;:&quot;以 `0d 0a` 结束。HTTP 按规则读出方法 `GET`、目标 `/hello` 和版本 `HTTP/1.1`。\n&quot;},{&quot;span&quot;:[21,43],&quot;tag&quot;:&quot;Host 字段行&quot;,&quot;note&quot;:&quot;`Host` 字段给出请求的目标主机和端口；末尾同样是 `0d 0a`。\n&quot;},{&quot;span&quot;:[44,67],&quot;tag&quot;:&quot;User-Agent 字段行&quot;,&quot;note&quot;:&quot;字段值是 `curl/8.7.1`；高亮包括这行末尾的两个控制字节。\n&quot;},{&quot;span&quot;:[68,86],&quot;tag&quot;:&quot;Accept 字段行&quot;,&quot;note&quot;:&quot;字段值是 `text/html`。最后的 `0d 0a` 结束这一行，但此时还要看后面有没有空行。\n&quot;},{&quot;span&quot;:[85,88],&quot;tag&quot;:&quot;头部结束&quot;,&quot;note&quot;:&quot;前两个字节结束 `Accept` 行，后两个字节是空行。这条请求没有 `Transfer-Encoding` 或 `Content-Length`，因此按规则没有消息体；89 个字节就是整条请求。\n&quot;}]},{&quot;label&quot;:&quot;看字节与字符&quot;,&quot;sub&quot;:&quot;看同一批字节如何显示&quot;,&quot;tone&quot;:&quot;blue&quot;,&quot;steps&quot;:[{&quot;span&quot;:[0,2],&quot;tag&quot;:&quot;三个字节，三个字母&quot;,&quot;note&quot;:&quot;`47 45 54` 按 ASCII 显示为 `GET`；数字和字母是同一份数据的两种展示。\n&quot;},{&quot;span&quot;:[3,3],&quot;tag&quot;:&quot;空格&quot;,&quot;note&quot;:&quot;`0x20` 是空格。HTTP 在这一行用空格分隔方法、请求目标和版本。\n&quot;},{&quot;span&quot;:[19,20],&quot;tag&quot;:&quot;控制字符&quot;,&quot;note&quot;:&quot;`0d 0a` 是回车和换行，不是可打印字符；右边用 `·` 占位。\n&quot;},{&quot;span&quot;:[30,30],&quot;tag&quot;:&quot;真正的句点&quot;,&quot;note&quot;:&quot;这里的 `0x2e` 是 IP 地址里真实的 `.`，不是控制字符的占位符。\n&quot;}]}]}">
       <div class="demo-head">
-        <span class="title">89 个字节，换两种读法</span>
-        <span class="status" data-status>点镜片切换，再点「下一步」</span>
+        <span class="title">89 字节的请求：从字符走到 HTTP 结构</span>
+        <span class="status" data-status>切换读法，再用上一步 / 下一步沿字节走</span>
         <span class="spacer"></span>
         
       </div>
       <div class="demo-body custom" data-mount></div>
-    </div><h2 id="http2-造边界在固定位置读一个数"><span class="num">04</span>HTTP/2 造边界：在固定位置读一个数</h2>
-<p>HTTP/2 换了个办法：它规定每个帧的开头固定 9 个字节，前三字节表示这一帧的载荷有多长。</p>
+    </div><h3 id="空行结束的是头部不一定是整条报文">空行结束的是头部，不一定是整条报文</h3>
+<p>最后一个字段行的结尾是 <code>\r\n</code>；紧跟着的空行又是一个 <code>\r\n</code>。所以常在字节里看到 <code>0d 0a 0d 0a</code>。如果消息有 body，body 从这之后开始，但<strong>不能只靠空行知道它有多长</strong>。</p>
+<p>下面是正常报文中的常见判断，按适用情况选择，不是完整的异常处理流程：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>场景</th><th>消息体怎样结束</th><th>例子或条件</th></tr></thead><tbody><tr><th>对 HEAD 的响应，或状态码为 1xx / 204 / 304 的响应</th><td data-label="消息体怎样结束">空行之后这条响应结束，没有消息体</td><td data-label="例子或条件">HEAD 是请求方法；某些响应即使带 Content-Length 也没有消息体</td></tr><tr><th>使用 chunked 的普通报文</th><td data-label="消息体怎样结束">按每块长度读取，直到结束块和尾部结束</td><td data-label="例子或条件"><code>Transfer-Encoding: chunked</code></td></tr><tr><th>有有效 Content-Length 的普通报文</th><td data-label="消息体怎样结束">空行之后读取 N 个字节</td><td data-label="例子或条件"><code>Content-Length: 5</code> 对应 5 字节内容</td></tr><tr><th>请求没有 Transfer-Encoding，也没有 Content-Length</th><td data-label="消息体怎样结束">消息体长度为 0</td><td data-label="例子或条件">本节的 89 字节 GET 请求</td></tr><tr><th>普通响应没有上述长度信息</th><td data-label="消息体怎样结束">读到连接关闭</td><td data-label="例子或条件">只适用于需要以连接关闭确定边界的响应</td></tr></tbody></table></div><p>这个表省略了成功的 <code>CONNECT</code> 响应切换为隧道、无效长度等特殊情形。完整优先级见 <a href="https://www.rfc-editor.org/rfc/rfc9112.html#section-6.3">RFC 9112 §6.3</a>。</p>
+<p><code>Content-Length</code> 里的数按<strong>十进制</strong>理解，单位是字节，不是字符。例如 <code>hello</code> 是 5 个 ASCII 字节；<code>你好</code> 用 UTF-8 编码是 6 个字节。</p>
+<h2 id="chunkedhttp-自己给每块写长度"><span class="num">04</span>chunked：HTTP 自己给每块写长度</h2>
+<p>当发送方开始发送时还不知道消息体总长度，可以使用 HTTP/1.1 的 <code>Transfer-Encoding: chunked</code>。它把内容编码成若干块，每块先写长度，再写数据；最后用长度为 0 的块收尾。</p>
+<p>假设应用要发送 <code>Hello world</code>。下面是<strong>编码后的消息体</strong>；<code>\r\n</code> 仍代表两个真实字节，排版换行不另计：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">5\r\n
+Hello\r\n
+6\r\n
+ world\r\n
+0\r\n
+\r\n
+</code></pre></div>
+<div class="pipe"><div class="lane tone-blue">
+        <div class="lane-meta">
+          <span class="ln">第 1 块</span>
+          <b>5 → Hello</b>
+          <small>长度是 5，接收方读取后面的 5 个字节</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>大小行</b>
+        <small>5\r\n</small>
+        <span class="tag tone-blue">长度 5</span>
+      </div><div class="pnode">
+        <b>数据</b>
+        <small>Hello</small>
+        <span class="tag tone-blue">5 字节</span>
+      </div><div class="pnode">
+        <b>块后行尾</b>
+        <small>\r\n</small>
+        <span class="tag tone-blue">2 字节</span>
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">继续读下一块<span class="note">接收方已经知道第一块结束在哪里</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-violet">
+        <div class="lane-meta">
+          <span class="ln">第 2 块</span>
+          <b>6 → 空格 + world</b>
+          <small>前面的空格也是内容，所以一共 6 个字节</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>大小行</b>
+        <small>6\r\n</small>
+        <span class="tag tone-violet">长度 6</span>
+      </div><div class="pnode">
+        <b>数据</b>
+        <small>␠world</small>
+        <span class="tag tone-violet">6 字节</span>
+      </div><div class="pnode">
+        <b>块后行尾</b>
+        <small>\r\n</small>
+        <span class="tag tone-violet">2 字节</span>
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">没有更多数据<span class="note">仍要读取结束块和尾部结束</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-green">
+        <div class="lane-meta">
+          <span class="ln">结束</span>
+          <b>0 → 不再有数据块</b>
+          <small>本例没有尾部字段，0 行后面的空行标记编码结束</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>结束块</b>
+        <small>0\r\n</small>
+        <span class="tag tone-green">长度 0</span>
+      </div><div class="pnode">
+        <b>尾部结束</b>
+        <small>\r\n</small>
+        <span class="tag tone-green">空行</span>
+      </div></div>
+      </div></div><p>把大小行、行尾和结束标记去掉，应用拿到的是 <code>Hello world</code>，共 11 字节。本机的完整 HTTP/1.1 响应是 99 字节，其中下面展示的分块编码部分占 26 字节。</p>
+<div class="demo" data-widget="byte-walker" data-config="{&quot;bytes&quot;:&quot;350d0a48656c6c6f0d0a360d0a20776f726c640d0a300d0a0d0a&quot;,&quot;lenses&quot;:[{&quot;label&quot;:&quot;接收方逐块读&quot;,&quot;sub&quot;:&quot;长度行、数据、块结束&quot;,&quot;tone&quot;:&quot;violet&quot;,&quot;steps&quot;:[{&quot;span&quot;:[0,2],&quot;tag&quot;:&quot;第一块的大小行&quot;,&quot;note&quot;:&quot;`35` 是字符 `5`；按十六进制读出长度 5。后面的 `0d 0a` 结束大小行。\n&quot;,&quot;out&quot;:&quot;长度 = 5 字节&quot;},{&quot;span&quot;:[3,7],&quot;tag&quot;:&quot;读取第一块数据&quot;,&quot;note&quot;:&quot;接着准确读取 5 个字节，得到 `Hello`。\n&quot;,&quot;out&quot;:&quot;已得到 Hello&quot;},{&quot;span&quot;:[8,9],&quot;tag&quot;:&quot;第一块结束&quot;,&quot;note&quot;:&quot;读取这块数据后面的 `0d 0a`。它属于分块格式，不属于应用内容。\n&quot;},{&quot;span&quot;:[10,12],&quot;tag&quot;:&quot;第二块的大小行&quot;,&quot;note&quot;:&quot;字符 `6` 表示后面有 6 个字节，行尾仍是 `0d 0a`。\n&quot;,&quot;out&quot;:&quot;长度 = 6 字节&quot;},{&quot;span&quot;:[13,18],&quot;tag&quot;:&quot;读取第二块数据&quot;,&quot;note&quot;:&quot;这 6 字节是一个空格加 `world`；空格也是内容。\n&quot;,&quot;out&quot;:&quot;已得到 Hello world&quot;},{&quot;span&quot;:[19,20],&quot;tag&quot;:&quot;第二块结束&quot;,&quot;note&quot;:&quot;第二块数据后的 `0d 0a` 也是分块格式的一部分。\n&quot;},{&quot;span&quot;:[21,23],&quot;tag&quot;:&quot;长度为 0&quot;,&quot;note&quot;:&quot;`0\\r\\n` 表示没有更多数据块。后面还可能有尾部字段；本例没有。\n&quot;},{&quot;span&quot;:[24,25],&quot;tag&quot;:&quot;尾部结束&quot;,&quot;note&quot;:&quot;没有尾部字段时，再读一个空行；到这里分块编码才完整结束。\n&quot;}]},{&quot;label&quot;:&quot;应用拿到的内容&quot;,&quot;sub&quot;:&quot;只拼接数据块&quot;,&quot;tone&quot;:&quot;green&quot;,&quot;steps&quot;:[{&quot;span&quot;:[3,7],&quot;tag&quot;:&quot;内容的前 5 字节&quot;,&quot;note&quot;:&quot;第一块中的 `Hello` 会交给应用。大小行和两侧的行尾不会成为内容。\n&quot;,&quot;out&quot;:&quot;Hello&quot;},{&quot;span&quot;:[13,18],&quot;tag&quot;:&quot;内容的后 6 字节&quot;,&quot;note&quot;:&quot;第二块是空格加 `world`；两块拼起来是 `Hello world`。\n&quot;,&quot;out&quot;:&quot;Hello world（11 字节）&quot;}]}]}">
+      <div class="demo-head">
+        <span class="title">一步一步读取两个 chunk</span>
+        <span class="status" data-status>先按接收方的步骤走，再切到“应用拿到的内容”</span>
+        <span class="spacer"></span>
+        
+      </div>
+      <div class="demo-body custom" data-mount></div>
+    </div><p>块长度写成<strong>十六进制字符</strong>：例如 <code>A</code> 表示十进制 10，字符 <code>A</code> 自己的字节值是 <code>0x41</code>。解析器读完长度行后，按长度读取数据；即使数据内部包含 <code>\r\n</code>，也不会误当成块结束。</p>
+<div class="callout tone-blue">
+      <span class="ic">💡</span>
+      <div><p><code>chunked</code> 是 <mark class="mk-blue">HTTP/1.1 对消息体的编码方式</mark>，不是 TCP 的发送开关。一个 chunk 可以被分多次 TCP 读取，一个读取也可能包含多个 chunk。已知总长度时，<code>Content-Length</code> 也可以用于边生成边发送。</p>
+</div>
+    </div><h2 id="找边界的工作与出错的风险"><span class="num">05</span>找边界的工作与出错的风险</h2>
+<h3 id="扫描头部不等于扫描整份消息体">扫描头部，不等于扫描整份消息体</h3>
+<p>HTTP/1.1 的头部没有固定的总长度；接收方要找到每行结尾和结束头部的空行。头部越长，要检查的头部字节通常越多。</p>
+<p>但头部解析完之后，如果规则给出 <code>Content-Length: 8</code>，接收方就按数量读取 8 个字节；如果是 chunked，就逐块读长度行，再按该块长度读取。<strong>不需要在整段 body 里搜索 <code>\r\n\r\n</code> 来找结束位置。</strong> 接收和消费数据本身仍然要花时间，也不能跳到 TCP 中尚未到达的字节。</p>
+<h3 id="body-里有空行会不会误判">body 里有空行，会不会误判？</h3>
+<p>下面的 body 是 <code>ab\r\n\r\ncd</code>。其中 <code>\r\n\r\n</code> 确实出现在内容里，但它总共仍是 8 个字节：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">Content-Length: 8\r\n
+\r\n
+ab\r\n\r\ncd
+
+body 的 8 个字节：61 62 0d 0a 0d 0a 63 64
+</code></pre></div>
+<p>正确的解析器已经在第一个空行后进入了“读取 body”的阶段；按长度读满 8 个字节即可。body 中的换行是数据，不会被当成第二个头部结束符。</p>
+<h3 id="如果长度给错了呢">如果长度给错了呢？</h3>
+<p>假设发送方本来想把 <code>hello</code> 作为第一条请求的 body，后面紧接着下一条请求 <code>GET /next…</code>。保持字节不变，只改变<strong>假设声明的长度</strong>，看接收方会把哪里当成下一条的开头：</p>
+<div class="demo" data-widget="byte-walker" data-config="{&quot;bytes&quot;:&quot;68656c6c6f474554202f6e657874&quot;,&quot;lenses&quot;:[{&quot;label&quot;:&quot;长度 = 5&quot;,&quot;sub&quot;:&quot;符合发送方预期&quot;,&quot;tone&quot;:&quot;green&quot;,&quot;steps&quot;:[{&quot;span&quot;:[0,4],&quot;tag&quot;:&quot;第一条 body&quot;,&quot;note&quot;:&quot;读取 5 字节，body 是 `hello`。&quot;,&quot;out&quot;:&quot;body = hello&quot;},{&quot;span&quot;:[5,7],&quot;tag&quot;:&quot;下一条请求的开头&quot;,&quot;note&quot;:&quot;接下来的字节从 `GET` 开始，正好是预期位置。&quot;,&quot;out&quot;:&quot;下一条从 GET 开始&quot;}]},{&quot;label&quot;:&quot;长度 = 4&quot;,&quot;sub&quot;:&quot;声明偏短&quot;,&quot;tone&quot;:&quot;amber&quot;,&quot;steps&quot;:[{&quot;span&quot;:[0,3],&quot;tag&quot;:&quot;第一条 body&quot;,&quot;note&quot;:&quot;只读 4 字节，接收方认为 body 是 `hell`。&quot;,&quot;out&quot;:&quot;body = hell&quot;},{&quot;span&quot;:[4,7],&quot;tag&quot;:&quot;下一条请求的开头&quot;,&quot;note&quot;:&quot;原本属于 body 的 `o` 留了下来，后续从 `oGET` 开始，而不是预期的 `GET`。&quot;,&quot;out&quot;:&quot;下一条从 oGET 开始&quot;}]},{&quot;label&quot;:&quot;长度 = 6&quot;,&quot;sub&quot;:&quot;声明偏长&quot;,&quot;tone&quot;:&quot;red&quot;,&quot;steps&quot;:[{&quot;span&quot;:[0,5],&quot;tag&quot;:&quot;第一条 body&quot;,&quot;note&quot;:&quot;如果后续请求已经到达，第 6 个字节 `G` 会被算进前一条 body。&quot;,&quot;out&quot;:&quot;body = helloG&quot;},{&quot;span&quot;:[6,7],&quot;tag&quot;:&quot;下一条请求的开头&quot;,&quot;note&quot;:&quot;剩下的起点变成 `ET`。如果第 6 字节还没到，接收方则会继续等待。&quot;,&quot;out&quot;:&quot;下一条从 ET 开始&quot;}]}]}">
+      <div class="demo-head">
+        <span class="title">同一串字节，长度错一位会怎样？</span>
+        <span class="status" data-status>分别点长度 4、5、6；每个读法再点“下一步”</span>
+        <span class="spacer"></span>
+        
+      </div>
+      <div class="demo-body custom" data-mount></div>
+    </div><p>在客户端、前端代理和后端服务器之间，如果不同设备对同一段请求使用了不同的边界，后端可能把前端当作 body 的一部分字节解释成另一条请求。这类<strong>请求走私</strong>的关键是解析结果不一致；不是 body 里出现 <code>\r\n\r\n</code> 就会发生。</p>
+<div class="callout tone-amber">
+      <span class="ic">⚠</span>
+      <div><p>发送方不得在同一条 HTTP/1.1 报文中同时发送 <code>Transfer-Encoding</code> 和 <code>Content-Length</code>。对收到这两个字段的普通请求，<code>Transfer-Encoding</code> 优先；服务器可以拒绝，或仅按它处理，但响应后必须关闭连接。选择转发的中间设备还须先移除收到的 <code>Content-Length</code>。完整条件见 <a href="https://www.rfc-editor.org/rfc/rfc9112.html#section-6.1">RFC 9112 §6.1</a> 和 <a href="https://www.rfc-editor.org/rfc/rfc9112.html#section-6.3">§6.3</a>。</p>
+</div>
+    </div><h2 id="http2每帧开头固定-9-个字节"><span class="num">06</span>HTTP/2：每帧开头固定 9 个字节</h2>
+<p>HTTP/2 不再用 HTTP/1.1 的 chunked 格式组织消息体。它把通信数据组织成<strong>帧</strong>：每帧先有固定 9 字节的帧头，后面跟长度可变的载荷。</p>
+<p>HTTP/2 仍然可以有 <code>Content-Length</code> 头字段，但它和帧头里的 <code>Length</code> 不是同一个东西：后者只说明<strong>当前帧的载荷</strong>有多长。</p>
 <figure class="memmap" data-memmap>
-      <figcaption class="mm-title">HTTP/2 帧头：固定 9 个字节<span class="mm-cap-sub">RFC 9113 §4.1</span></figcaption>
+      <figcaption class="mm-title">先看帧头，再读取载荷<span class="mm-cap-sub">HTTP/2 帧头固定 9 字节；偏移从本帧的第 0 字节开始</span></figcaption>
       <div class="mm-stack"><div class="mm-seg tone-amber" style="--mm-size:3">
         <div class="mm-body">
           <div class="mm-head"><b>Length</b></div>
-          <p class="mm-sub">无符号 24 位整数。字节数不含这 9 个字节的头</p>
+          <p class="mm-sub">前 3 字节拼成无符号整数，表示本帧载荷有多少字节；不含帧头</p>
         </div>
         <div class="mm-side">
               
-              <span class="mm-mark">0x00–0x02 · 3 字节</span>
+              <span class="mm-mark">偏移 0–2 · 3 字节</span>
             </div>
       </div><div class="mm-seg tone-blue" style="--mm-size:1">
         <div class="mm-body">
           <div class="mm-head"><b>Type</b></div>
-          <p class="mm-sub">0x00 DATA · 0x01 HEADERS · 0x04 SETTINGS · 0x08 WINDOW_UPDATE</p>
+          <p class="mm-sub">帧类型：DATA、HEADERS、SETTINGS 等</p>
         </div>
         <div class="mm-side">
               
-              <span class="mm-mark">0x03 · 1 字节</span>
+              <span class="mm-mark">偏移 3 · 1 字节</span>
             </div>
       </div><div class="mm-seg tone-blue" style="--mm-size:1">
         <div class="mm-body">
           <div class="mm-head"><b>Flags</b></div>
-          <p class="mm-sub">每种帧自己定义；这个类型没用到的位必须忽略</p>
+          <p class="mm-sub">标志位；每个帧类型定义自己使用的标志</p>
         </div>
         <div class="mm-side">
               
-              <span class="mm-mark">0x04 · 1 字节</span>
+              <span class="mm-mark">偏移 4 · 1 字节</span>
             </div>
       </div><div class="mm-seg tone-violet" style="--mm-size:4">
         <div class="mm-body">
           <div class="mm-head"><b>Stream Identifier</b></div>
-          <p class="mm-sub">最高 1 位保留（发送时必须为 0）。填 0 表示这一帧属于整条连接，不属于任何一条流</p>
+          <p class="mm-sub">最高 1 位保留，其余 31 位是流编号；编号 0 用于连接级帧</p>
         </div>
         <div class="mm-side">
               
-              <span class="mm-mark">0x05–0x08 · 4 字节</span>
+              <span class="mm-mark">偏移 5–8 · 4 字节</span>
             </div>
       </div></div>
       
-      <p class="mm-note">读这 9 个字节就知道「这一帧多长、是什么、属于哪条流」。载荷里写了什么，它不用知道。</p>
-    </figure><p>解析器读这 9 个字节，把前 3 个拼成一个数，就知道后面该跳多远。它不需要看载荷里有什么。</p>
-<p><strong>这个动作和上一节完全不同。</strong> 上一节是往后找，找到那个标记为止；这一节是先问长度，再直接跨过去。前者跑多远取决于内容，后者跑多远取决于帧头里的一个数。</p>
-<p>长度字段只有 24 位，所以一帧的载荷上限是 16777215 字节。实际能发多大由接收方在 <code>SETTINGS_MAX_FRAME_SIZE</code> 里声明：初值 2^14（16384），可以往上报到 2^24−1（RFC 9113 §4.2、§6.5.2）。</p>
-<h3 id="实测一次真实连接的前-110-个字节">实测：一次真实连接的前 110 个字节</h3>
-<p>用 curl 直接对本地端口说 h2（prior knowledge，跳过协商），服务端收到的是这 110 个字节：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">0000  50 52 49 20 2a 20 48 54 54 50 2f 32 2e 30 0d 0a  |PRI * HTTP/2.0..|
-0010  0d 0a 53 4d 0d 0a 0d 0a 00 00 12 04 00 00 00 00  |..SM............|
-0020  00 00 03 00 00 00 64 00 04 00 a0 00 00 00 02 00  |......d.........|
-0030  00 00 00 00 00 04 08 00 00 00 00 00 3e 7f 00 01  |............&gt;...|
-0040  00 00 25 01 05 00 00 00 01 82 86 41 8b 08 9d 5c  |..%........A...\|
-0050  0b 81 70 dc 0b c0 78 3f 04 85 62 72 d1 41 ff 7a  |..p...x?..br.A.z|
-0060  88 25 b6 50 c3 cb ba b8 7f 53 03 2a 2f 2a        |.%.P.....S.*/*|
+      <p class="mm-note">9 字节的是帧头；后面还有 Length 指定数量的载荷字节。</p>
+    </figure><p>假设流 1 已由之前的 HEADERS 帧建立，下面是一个 DATA 帧。它的载荷是 <code>hello</code>；此例没有填充字节。竖线仅用于分组，不是实际传输的字节。</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">00 00 05 | 00 | 01 | 00 00 00 01 | 68 65 6c 6c 6f
+  长度     类型  标志      流编号           载荷
+   5      DATA  结束       1              hello
 </code></pre></div>
-<p>看右列。<strong>前 24 个字符是能读的</strong>：<code>PRI * HTTP/2.0</code>，一个换行，<code>SM</code>，又一个换行。从第 25 个字节开始，右列全变成点。</p>
-<p>那 24 个字节是连接前言（RFC 9113 §3.4），规格里把它的十六进制整个写了出来：<code>0x505249202a20485454502f322e300d0a0d0a534d0d0a0d0a</code> —— 和上面抓到的逐字节相同。</p>
-<p>它有个明确的用途：一个只会说 HTTP/1.1 的服务器收到 <code>PRI * HTTP/2.0\r\n\r\n</code>，会把它当成一条畸形请求，回一个错误然后关掉连接。<code>PRI</code> 不是合法的 HTTP 方法，所以这条失败路径是确定的。</p>
-<p><mark class="mk-blue"><strong>一个被叫做「二进制协议」的东西，开口第一件事是先发 24 个字节的 ASCII。</strong></mark></p>
-<p>同一根带子上，前 24 个字节是文本，从第 25 个字节起不是。这就是「文本」和「二进制」这对词不够用的地方 —— 它们描述的不是连接，甚至不是协议，而是<strong>你手指着的那一段字节</strong>。</p>
-<div class="demo" data-widget="byte-walker" data-config="{&quot;bytes&quot;:&quot;505249202a20485454502f322e300d0a0d0a534d0d0a0d0a000012040000000000000300000064000400a000000002000000000000040800000000003e7f0001000025010500000000018286418b089d5c0b8170dc0bc0783f04856272d141ff7a8825b650c3cbbab87f53032a2f2a&quot;,&quot;lenses&quot;:[{&quot;label&quot;:&quot;当字符读&quot;,&quot;sub&quot;:&quot;右列能念出来的部分&quot;,&quot;tone&quot;:&quot;blue&quot;,&quot;steps&quot;:[{&quot;span&quot;:[0,23],&quot;tag&quot;:&quot;连接前言&quot;,&quot;note&quot;:&quot;24 个字节，全是可打印 ASCII：`PRI * HTTP/2.0`、回车换行、`SM`、回车换行。这不是注释，是 RFC 9113 §3.4 规定要发的第一批字节。&quot;},{&quot;span&quot;:[24,109],&quot;tag&quot;:&quot;剩下 86 个字节&quot;,&quot;note&quot;:&quot;右列全变成点：`0x00`–`0x1f` 是控制码，`0x80` 以上不在 ASCII 表里。这三个帧头、三帧载荷，按字符读出来一个字母也没有 —— 除了一处 `*/*`。&quot;}]},{&quot;label&quot;:&quot;当 HTTP/2 帧读&quot;,&quot;sub&quot;:&quot;同一根带子，另一套结构&quot;,&quot;tone&quot;:&quot;violet&quot;,&quot;steps&quot;:[{&quot;span&quot;:[0,23],&quot;tag&quot;:&quot;前言（不属于任何帧）&quot;,&quot;note&quot;:&quot;这 24 个字节在帧层之外。它们的作用是让 HTTP/1.1 服务器立刻拒绝这条连接。&quot;},{&quot;span&quot;:[24,26],&quot;tag&quot;:&quot;读 3 个字节的 Length&quot;,&quot;note&quot;:&quot;`00 00 12` = 18。24 位大端无符号整数。&quot;,&quot;out&quot;:&quot;Length = 18&quot;},{&quot;span&quot;:[27,32],&quot;tag&quot;:&quot;再读 6 个字节&quot;,&quot;note&quot;:&quot;类型、标志、流号各占多少位是规格定死的，所以这 6 个字节的位置不用猜。&quot;,&quot;out&quot;:&quot;Type = 0x04 SETTINGS  ·  Flags = 0x00  ·  Stream = 0（整条连接）&quot;},{&quot;span&quot;:[33,50],&quot;tag&quot;:&quot;按 Length 跳 18 个字节&quot;,&quot;note&quot;:&quot;这 18 个字节装的是三条设置，6 字节一条：`MAX_CONCURRENT_STREAMS = 100`、`INITIAL_WINDOW_SIZE = 10485760`、`ENABLE_PUSH = 0`。==注意它没有「数」这 18 个字节 —— 是长度告诉它到哪为止。==&quot;},{&quot;span&quot;:[51,53],&quot;tag&quot;:&quot;下一个帧，重新读长度&quot;,&quot;note&quot;:&quot;游标刚好停在上一帧的末尾。没有空行、没有分隔符，下一个帧头直接从下一个字节开始。&quot;,&quot;out&quot;:&quot;Length = 4&quot;},{&quot;span&quot;:[54,63],&quot;tag&quot;:&quot;6 字节头 + 跳 4 字节&quot;,&quot;note&quot;:&quot;`0x08` 是 WINDOW_UPDATE。载荷 4 个字节是连接级窗口的增量 —— 帧层不关心它是什么，只知道长度 4，跳过。&quot;,&quot;out&quot;:&quot;Type = 0x08 WINDOW_UPDATE  ·  Flags = 0x00  ·  Stream = 0&quot;},{&quot;span&quot;:[64,66],&quot;tag&quot;:&quot;第三个帧的 Length&quot;,&quot;note&quot;:&quot;`00 00 25` = 37。后面那 37 个字节就是下一个镜片要拆的东西。&quot;,&quot;out&quot;:&quot;Length = 37&quot;},{&quot;span&quot;:[67,72],&quot;tag&quot;:&quot;6 字节头&quot;,&quot;note&quot;:&quot;`0x05` 的两个位都置上了：`END_STREAM`（这条流不再有数据）和 `END_HEADERS`（头就这一个帧）。流号 1 是客户端开的第一个流。&quot;,&quot;out&quot;:&quot;Type = 0x01 HEADERS  ·  Flags = 0x05  ·  Stream = 1&quot;},{&quot;span&quot;:[73,109],&quot;tag&quot;:&quot;载荷交给上一层&quot;,&quot;note&quot;:&quot;帧层到此为止：它切出了 37 个字节，交给 HPACK 去解。至于这 37 个字节里写的是哪些头，帧层不看。&quot;}]}]}">
+<div class="demo" data-widget="byte-walker" data-config="{&quot;bytes&quot;:&quot;00000500010000000168656c6c6f&quot;,&quot;lenses&quot;:[{&quot;label&quot;:&quot;按帧解析&quot;,&quot;sub&quot;:&quot;9 字节帧头 + 5 字节载荷&quot;,&quot;tone&quot;:&quot;violet&quot;,&quot;steps&quot;:[{&quot;span&quot;:[0,2],&quot;tag&quot;:&quot;Length · 3 字节&quot;,&quot;note&quot;:&quot;`00 00 05` 按高位在前拼成 `0x000005`，值为 5。这是载荷长度，不包含帧头。\n&quot;,&quot;out&quot;:&quot;本帧载荷 = 5 字节&quot;},{&quot;span&quot;:[3,3],&quot;tag&quot;:&quot;Type · 1 字节&quot;,&quot;note&quot;:&quot;`0x00` 表示 DATA 帧，可承载请求或响应的消息体数据。\n&quot;,&quot;out&quot;:&quot;类型 = DATA&quot;},{&quot;span&quot;:[4,4],&quot;tag&quot;:&quot;Flags · 1 字节&quot;,&quot;note&quot;:&quot;对 DATA 帧，`0x01` 设置了 `END_STREAM`：发送方在这条流上的发送方向结束；另一方向可能仍在进行。\n&quot;,&quot;out&quot;:&quot;END_STREAM = 1&quot;},{&quot;span&quot;:[5,8],&quot;tag&quot;:&quot;Stream Identifier · 4 字节&quot;,&quot;note&quot;:&quot;最高位是保留位，剩下 31 位表示流编号；这里的编号是 1。\n&quot;,&quot;out&quot;:&quot;流编号 = 1&quot;},{&quot;span&quot;:[9,13],&quot;tag&quot;:&quot;读取 5 字节载荷&quot;,&quot;note&quot;:&quot;`68 65 6c 6c 6f` 按 ASCII 显示为 `hello`。本帧共 9 + 5 = 14 字节，接下来的偏移 14 是下一帧起点。\n&quot;,&quot;out&quot;:&quot;本帧结束；下一帧从偏移 14 开始&quot;}]},{&quot;label&quot;:&quot;看字符显示&quot;,&quot;sub&quot;:&quot;帧头和载荷不必都是可读字符&quot;,&quot;tone&quot;:&quot;blue&quot;,&quot;steps&quot;:[{&quot;span&quot;:[0,8],&quot;tag&quot;:&quot;二进制帧头&quot;,&quot;note&quot;:&quot;这些字节按固定位置解释为数值，不是 ASCII 字符串 `005`。例如长度里的 `05` 是一个值为 5 的字节。\n&quot;},{&quot;span&quot;:[9,13],&quot;tag&quot;:&quot;恰好可读的载荷&quot;,&quot;note&quot;:&quot;此例载荷恰好是 ASCII 字母；DATA 载荷也可以包含不可打印字节。\n&quot;}]}]}">
       <div class="demo-head">
-        <span class="title">110 个字节，按帧读一遍</span>
-        <span class="status" data-status>点镜片切换，再点「下一步」</span>
+        <span class="title">14 字节的 HTTP/2 DATA 帧</span>
+        <span class="status" data-status>逐步读取帧头，再看后面的载荷</span>
         <span class="spacer"></span>
         
       </div>
       <div class="demo-body custom" data-mount></div>
-    </div><h3 id="代价">代价</h3>
-<p>代价很直接：人读不出来。那 37 字节的载荷，你没法像读 <code>GET /hello</code> 那样读它 —— 调试得有工具，抓包看到一片十六进制也得靠解码器。</p>
-<p>这笔账是划算的，下一节说为什么。</p>
-<h2 id="长度前缀买到了什么"><span class="num">05</span>长度前缀买到了什么</h2>
-<p>长度前缀真正多给的，只有一个能力：<strong>跳过</strong>。</p>
-<p>跳过的意义在于，一个只负责搬运的中间件，可以在完全不理解载荷的情况下，把帧按自己的需要重新排队。HTTP/2 就是靠这一点做流复用的：一条连接上可以有多个并发的流，两端的帧可以交错发送（RFC 9113 §5）。</p>
-<p>HTTP/1.1 做不到。不是「没实现」，是结构上不允许：</p>
-<ul>
-<li>它的边界靠扫描，而扫描的前提是<strong>内容里不会出现那个标记</strong>；</li>
-<li>它切出来的最小单位是「一整条消息」，消息内部没有别人可以插进去的位置；</li>
-<li>规格本身也要求 pipelining 的响应按请求到达的顺序返回（RFC 9112 §9.3.2）。</li>
-</ul>
-<p>所以浏览器对付 HTTP/1.1 的办法是<strong>开多条连接</strong> —— 一条卡住，别的还能走。</p>
+    </div><p>判断<strong>这一帧</strong>到哪结束，只需知道帧头位置和载荷长度：<code>00 00 05</code> 是整数 5，接收方在 9 字节帧头后再消费 5 字节。它不需要在载荷中搜索结束符，但仍需接收字节、校验帧，并按帧类型处理内容。</p>
+<p>这个长度不一定等于整条 HTTP 消息体长度，也不总是应用正文长度：例如 DATA 帧可以带填充；HEADERS 或 SETTINGS 帧的载荷装的是其他信息。</p>
+<p>每帧都要额外带 9 字节帧头；帧头里的整数和标志也不能像普通文本一样直接阅读，排查时通常需要协议解码工具。分帧带来的组织能力并不保证每次请求都比 HTTP/1.1 快。</p>
+<h3 id="帧结束和消息结束是两个边界">帧结束和消息结束，是两个边界</h3>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>要判断什么</th><th>依据</th><th>例子</th></tr></thead><tbody><tr><th>当前帧在哪里结束</th><td data-label="依据">9 字节帧头里的 Length</td><td data-label="例子">本例是帧头 9 + 载荷 5</td></tr><tr><th>这一方向的请求或响应是否发送结束</th><td data-label="依据">HEADERS 或 DATA 上的 END_STREAM 标志</td><td data-label="例子">本例 DATA 的 Flags 是 0x01</td></tr><tr><th>TCP 连接是否结束</th><td data-label="依据">连接关闭或出错</td><td data-label="例子">与某一个帧的结束不是同一回事</td></tr></tbody></table></div><p>Length 是 24 位，能表示的最大载荷长度是 <code>2²⁴ − 1 = 16,777,215</code> 字节。实际每帧能发多少由<strong>接收方</strong>的 <code>SETTINGS_MAX_FRAME_SIZE</code> 限定，初始为 16,384 字节，可设置得更大；部分帧类型还有自己的大小限制。一个较大的消息体可以分成多个 DATA 帧。</p>
+<h2 id="流编号让不同请求的帧可以交错"><span class="num">07</span>流编号让不同请求的帧可以交错</h2>
+<p>**流（stream）**是 HTTP/2 一条连接中的逻辑通道。一次请求及其响应通常使用同一流编号：客户端和服务器各自按这个编号发送帧。流不是另一条 TCP 连接。</p>
+<p>下面只看<strong>服务器发回响应的方向</strong>。假设响应 1 很长，响应 2 比较短：</p>
 <div class="ow">
   <div class="ow-case">
     <div class="ow-head">
       <span class="tag tone-blue">HTTP/1.1</span>
-      <b>一条连接上，一次只有一个响应在路上</b>
-      <small>RFC 9112 §9.3.2：即使客户端 pipelining 连发请求，服务端「MUST send the corresponding responses in the same order that the requests were received」。</small>
+      <b>响应按请求顺序发送</b>
+      <small>客户端可以不等响应就继续发送请求；服务器仍按请求顺序发送对应响应。</small>
     </div>
-    <div class="ow-axis">这条连接上，字节从左往右依次出现 →</div>
-    <div class="ow-band">
-      <div class="ow-blk tone-blue">请求 1</div>
-      <div class="ow-blk tone-blue">响应 1</div>
-      <div class="ow-blk tone-blue">请求 2</div>
-      <div class="ow-blk tone-blue">响应 2</div>
-      <div class="ow-fill">请求 3 的响应只能排在这后面</div>
+    <div class="ow-axis">服务器 → 客户端：只画这一方向的字节顺序</div>
+    <div class="ow-band" style="overflow-x: auto;">
+      <div class="ow-blk tone-blue">响应 1<em>头部</em></div>
+      <div class="ow-blk tone-blue">响应 1<em>body 第一部分</em></div>
+      <div class="ow-blk tone-blue">响应 1<em>body 剩余部分</em></div>
+      <div class="ow-blk tone-violet">响应 2<em>头部与 body</em></div>
     </div>
-    <div class="ow-note">响应 2 必须整条发完，响应 3 才能开始。中间没有可以插进去的位置 —— 因为<strong>一条消息就是最小单位</strong>，拆不开。</div>
+    <div class="ow-note">响应 1 可以分多次发送，但响应 2 的字节不能插进响应 1 的消息体。</div>
   </div>
   <div class="ow-case">
     <div class="ow-head">
       <span class="tag tone-violet">HTTP/2</span>
-      <b>一条连接上，两个流的帧交错出现</b>
-      <small>RFC 9113 §5：一条连接里可以有多条并发流，两端都可以交错发送不同流的帧。</small>
+      <b>不同流的帧可以交错</b>
+      <small>示意每个 HEADERS 块都在一个帧内结束；两条流此前已经建立。</small>
     </div>
-    <div class="ow-axis">同样一根带子，同样从左往右 →</div>
-    <div class="ow-band">
-      <div class="ow-blk tone-blue grow">HEADERS<em>流 1</em></div>
-      <div class="ow-blk tone-violet grow">HEADERS<em>流 3</em></div>
-      <div class="ow-blk tone-blue grow">DATA<em>流 1</em></div>
-      <div class="ow-blk tone-violet grow">DATA<em>流 3</em></div>
-      <div class="ow-blk tone-blue grow">DATA<em>流 1</em></div>
-      <div class="ow-blk tone-violet grow">DATA<em>流 3</em></div>
+    <div class="ow-axis">服务器 → 客户端：同一连接上的帧依次送出</div>
+    <div class="ow-band" style="overflow-x: auto;">
+      <div class="ow-blk tone-blue">HEADERS<em>流 1</em></div>
+      <div class="ow-blk tone-violet">HEADERS<em>流 3</em></div>
+      <div class="ow-blk tone-blue">DATA<em>流 1</em></div>
+      <div class="ow-blk tone-violet">DATA<em>流 3</em></div>
+      <div class="ow-blk tone-blue">DATA<em>流 1</em></div>
     </div>
-    <div class="ow-note">接收方每收到一帧，看帧头里的流号就知道该交给谁。它不用等前一条流结束，也不用看懂载荷。</div>
+    <div class="ow-note">接收方按帧头里的流编号归属数据；帧仍通过同一个方向的字节流依次到达。</div>
   </div>
 </div>
-<p>上面 HTTP/2 那一行不是编的。让 curl 在同一条连接上同时请求两个地址，服务端收到的字节按帧切开是这样的：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">0040  len=34  type=1 (HEADERS) flags=0x05 stream=1
-006b  len=9   type=1 (HEADERS) flags=0x05 stream=3
+<p>这里依靠的是<strong>分帧、流编号和流状态等规则一起工作</strong>，不只是“知道长度就能交错”。例如，一组尚未结束的 HEADERS / CONTINUATION 字段块必须连续发送，不能在中间插入其他流的帧。</p>
+<p>HTTP/2 可以减少 HTTP/1.1 在同一连接上等待前一个响应的限制，但它仍运行在 TCP 之上：如果 TCP 某段字节丢失，后面的字节可能都得等待重传，这会影响同一连接上的多个流。实际快慢还取决于网络、实现和服务器行为。</p>
+<h2 id="延伸把真实-http2-字节和-hpack-对起来"><span class="num">08</span>延伸：把真实 HTTP/2 字节和 HPACK 对起来</h2>
+<p>上面的 14 字节帧是为学习构造的例子。下面这一组是本机复现的明文 HTTP/2 连接：<code>curl 8.7.1</code> 使用 <code>--http2-prior-knowledge</code> 请求本地服务。服务端<strong>累计</strong>读到 110 字节，不代表它们必须在一个 TCP 包或一次读取中到达。</p>
+<p>先是 24 字节的客户端连接前言，然后是三个帧：</p>
+<div class="demo" data-widget="byte-walker" data-config="{&quot;bytes&quot;:&quot;505249202a20485454502f322e300d0a0d0a534d0d0a0d0a000012040000000000000300000064000400a000000002000000000000040800000000003e7f00010000250105000000018286418b089d5c0b8170dc0bc0783f04856272d141ff7a8825b650c3cbbab87f53032a2f2a&quot;,&quot;lenses&quot;:[{&quot;label&quot;:&quot;从前言走到帧&quot;,&quot;sub&quot;:&quot;24 字节前言 + 3 个帧&quot;,&quot;tone&quot;:&quot;violet&quot;,&quot;steps&quot;:[{&quot;span&quot;:[0,23],&quot;tag&quot;:&quot;客户端连接前言&quot;,&quot;note&quot;:&quot;这是 24 字节的固定前言，包含 16 个可打印 ASCII 字节和 8 个回车／换行控制字节；它本身不是帧。\n&quot;,&quot;out&quot;:&quot;前言 = 24 字节&quot;},{&quot;span&quot;:[24,32],&quot;tag&quot;:&quot;SETTINGS 帧头&quot;,&quot;note&quot;:&quot;前三字节 `00 00 12` 按十六进制是 18；类型 `04` 是 SETTINGS，流编号为 0，表示连接级帧。\n&quot;,&quot;out&quot;:&quot;帧头 9 字节；载荷 18 字节&quot;},{&quot;span&quot;:[33,50],&quot;tag&quot;:&quot;SETTINGS 载荷&quot;,&quot;note&quot;:&quot;这是三个 6 字节的设置项。确定这一帧的边界靠帧头长度；处理设置时仍要解析载荷。\n&quot;},{&quot;span&quot;:[51,59],&quot;tag&quot;:&quot;WINDOW_UPDATE 帧头&quot;,&quot;note&quot;:&quot;`00 00 04` 表示载荷 4 字节，类型 `08` 是 WINDOW_UPDATE，流编号为 0。\n&quot;,&quot;out&quot;:&quot;帧头 9 字节；载荷 4 字节&quot;},{&quot;span&quot;:[60,63],&quot;tag&quot;:&quot;WINDOW_UPDATE 载荷&quot;,&quot;note&quot;:&quot;这 4 字节携带连接级流量控制的窗口增量。\n&quot;},{&quot;span&quot;:[64,72],&quot;tag&quot;:&quot;HEADERS 帧头&quot;,&quot;note&quot;:&quot;`00 00 25` 按十六进制是 37；类型 `01` 是 HEADERS，流编号为 1。标志 `05` 包含 END_HEADERS 和 END_STREAM。\n&quot;,&quot;out&quot;:&quot;帧头 9 字节；载荷 37 字节&quot;},{&quot;span&quot;:[73,109],&quot;tag&quot;:&quot;HEADERS 载荷&quot;,&quot;note&quot;:&quot;这 37 字节是 HPACK 编码后的请求头字段块。客户端的请求发送方向已结束，服务器仍可以在流 1 上返回响应。\n&quot;}]},{&quot;label&quot;:&quot;从字节看头字段&quot;,&quot;sub&quot;:&quot;本例的 HPACK 编码&quot;,&quot;tone&quot;:&quot;blue&quot;,&quot;steps&quot;:[{&quot;span&quot;:[73,73],&quot;tag&quot;:&quot;一个字节对应一条字段&quot;,&quot;note&quot;:&quot;`82` 是 HPACK 的索引表示：查静态表第 2 项，得到 `:method: GET`。\n&quot;,&quot;out&quot;:&quot;:method: GET&quot;},{&quot;span&quot;:[74,74],&quot;tag&quot;:&quot;第二个静态表索引&quot;,&quot;note&quot;:&quot;`86` 对应静态表第 6 项，得到 `:scheme: http`。\n&quot;,&quot;out&quot;:&quot;:scheme: http&quot;},{&quot;span&quot;:[75,87],&quot;tag&quot;:&quot;主机和端口&quot;,&quot;note&quot;:&quot;这一段包含字段名的索引和 Huffman 编码的值；解码后是 `:authority: 127.0.0.1:18081`。\n&quot;},{&quot;span&quot;:[88,94],&quot;tag&quot;:&quot;请求路径&quot;,&quot;note&quot;:&quot;这一段解码后得到 `:path: /hello`。\n&quot;},{&quot;span&quot;:[95,104],&quot;tag&quot;:&quot;User-Agent&quot;,&quot;note&quot;:&quot;这一段解码后得到 `user-agent: curl/8.7.1`。\n&quot;},{&quot;span&quot;:[105,109],&quot;tag&quot;:&quot;Accept&quot;,&quot;note&quot;:&quot;这一段解码后得到 `accept: */*`；末尾三个字节是可直接显示的 `*/*`。\n&quot;}]}]}">
+      <div class="demo-head">
+        <span class="title">110 字节：前言、两个控制帧、一个请求头帧</span>
+        <span class="status" data-status>按顺序点“下一步”；第二种读法对应 HEADERS 的内容</span>
+        <span class="spacer"></span>
+        
+      </div>
+      <div class="demo-body custom" data-mount></div>
+    </div><p><strong>HPACK 是 HTTP/2 的头字段压缩格式</strong>。它既能引用预定义的静态表，也能在条件允许时使用动态表和 Huffman 编码；动态表会受大小限制并可能淘汰条目，通信双方需要维持各自方向上的编码／解码状态。37 字节的字段块经解码后得到：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">:method:    GET
+:scheme:    http
+:authority: 127.0.0.1:18081
+:path:      /hello
+user-agent: curl/8.7.1
+accept:     */*
 </code></pre></div>
-<p>两次请求在同一个连接里同时开着，流号 1 和 3。顺带注意第二帧的载荷只有 9 字节 —— 为什么，下一节。</p>
-<div class="callout tone-amber">
-      <span class="ic">⚠</span>
-      <div><p>这里容易被读成「HTTP/2 更快，因为它用二进制」。顺序反了：<mark class="mk-blue">二进制是<strong>为了</strong>能交错才选的手段，不是速度的理由。</mark> 单看一个请求，HTTP/2 的帧头加 HPACK 未必比一行文本省字节；省下来的是连接数和排队时间。</p>
-</div>
-    </div><h2 id="一个更硬的例子hpack-里的-37-个字节"><span class="num">06</span>一个更硬的例子：HPACK 里的 37 个字节</h2>
-<p>上一节的 HEADERS 帧，载荷是这 37 个字节：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">82 86 41 8b 08 9d 5c 0b 81 70 dc 0b c0 78 3f 04 85
-62 72 d1 41 ff 7a 88 25 b6 50 c3 cb ba b8 7f 53 03
-2a 2f 2a
-</code></pre></div>
-<p>按 RFC 7541（HPACK）解出来是六个字段：</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">82                →  索引 2              :method: GET
-86                →  索引 6              :scheme: http
-41 8b 08 9d 5c 0b 81 70 dc 0b c0 78 3f  →  索引 1 + Huffman  :authority: 127.0.0.1:18081
-04 85 62 72 d1 41 ff  →  索引 4 + Huffman  :path: /hello
-7a 88 25 b6 50 c3 cb ba b8 7f  →  索引 58 + Huffman  user-agent: curl/8.7.1
-53 03 2a 2f 2a    →  索引 19            accept: */*              ← 最后三字节是原样的 `*/*`
-</code></pre></div>
-<p>一个字节就能表示 <code>:method: GET</code>，原因是 <code>82</code> 同时干了两件事：最高位 <code>1</code> 说明「这是一个索引」，剩下 7 位 <code>0x02</code> 说明「查静态表第 2 条」。静态表是 RFC 7541 附录 A 里那张 61 行的表，第 2 行写的就是 <code>:method: GET</code>。</p>
-<p><code>41</code> 是另一种模式：最高两位 <code>01</code> 表示「字面量，并且要加进动态表」，剩下 6 位是名字的索引（1 = <code>:authority</code>），后面跟值。</p>
-<p><code>0x8b</code> = <code>10001011</code>：最高位 <code>1</code> 表示这个字符串用了 Huffman 编码，剩下 7 位 <code>0x0b</code> = 11 是编码后的字节数。所以后面跟 11 个字节，解出来是 <code>127.0.0.1:18081</code> —— 15 个字符压成 11 个字节。</p>
-<p>倒数第四个字节 <code>03</code> 的最高位是 0，表示没压缩，紧跟的那三个字节原样就是 <code>*/*</code>。这是整段载荷里唯一一眼能读的部分。</p>
-<div class="callout tone-violet">
-      <span class="ic">🧩</span>
-      <div><p>静态表解不了新出现的名字，于是 HPACK 还有一张<strong>动态表</strong>：加进去的条目按顺序编号接在静态表后面，两端各自维护、逐帧同步。</p>
-<p>回到§05 那个 9 字节的 HEADERS 载荷 —— 第二次请求的 <code>:authority</code>、<code>user-agent</code>、<code>accept</code> 已经拿到了动态表里的编号，不必再发字符串。<mark class="mk-blue"><strong>省字节靠的是这份两端同步的状态，不是靠某种更紧的编码格式。</strong></mark></p>
-</div>
-    </div><p>这也是这里几乎只能选二进制的原因：索引、Huffman、动态表这三样，都要求接收方持有一份和发送方一致的编号表，而且它们按位、按字节切分。写成文本只会更长，也更容易读错。</p>
-<h2 id="所以那两句话在说什么"><span class="num">07</span>所以那两句话在说什么</h2>
-<p>把整条链摆在一起：</p>
-<div class="compare-wrap"><table class="compare"><thead><tr><th></th><th>HTTP/1.1</th><th>HTTP/2</th></tr></thead><tbody><tr><th>TCP 给了什么</th><td data-label="HTTP/1.1">八位组流，没有边界</td><td data-label="HTTP/2">同一件事</td></tr><tr><th>边界从哪来</th><td data-label="HTTP/1.1">扫 <code>\r\n\r\n</code>；再按 <code>Content-Length</code> 数，或按 chunked 自报长度走</td><td data-label="HTTP/2">帧头里 24 位的 Length 字段</td></tr><tr><th>定界符是什么</th><td data-label="HTTP/1.1">ASCII 里的几个特殊字节（<code>0d 0a</code>、<code>20</code>、<code>3a</code>）</td><td data-label="HTTP/2">一个整数</td></tr><tr><th>解析器怎么做</th><td data-label="HTTP/1.1">逐字节扫描，跑到哪由内容决定</td><td data-label="HTTP/2">读固定 9 字节，跳到哪由长度决定</td></tr><tr><th>切出的最小单位</th><td data-label="HTTP/1.1">一整条消息</td><td data-label="HTTP/2">帧</td></tr><tr><th>一条连接同时跑几个</th><td data-label="HTTP/1.1">一个进行中的响应（所以要开多条连接）</td><td data-label="HTTP/2">多个流交错</td></tr><tr><th>人能不能直接读</th><td data-label="HTTP/1.1">大体能</td><td data-label="HTTP/2">不能</td></tr><tr><th>线上跑的到底是什么</th><td data-label="HTTP/1.1">八位组</td><td data-label="HTTP/2">八位组</td></tr></tbody></table></div><p>三句话：</p>
-<ol>
-<li><strong>传输层是同一堆八位组。</strong> 「TCP 上是二进制」对它俩都成立，所以这句话不能用来区分它们。</li>
-<li><strong>「文本」说的是定界方式</strong> —— 把结构写成可打印字符。整份报文的骨架（空格、冒号、CRLF、<code>Content-Length</code> 后面那个数字本身）都落在 ASCII 里。</li>
-<li><strong>「二进制」说的是另一种定界方式</strong> —— 把结构写成固定位置的整数字段。</li>
-</ol>
-<p>两种选法各买到了不同的东西。文本定界让解析器必须扫、还可能和内容撞车，换来的是：用 telnet 连上 80 端口手敲几行就是一个合法请求，出问题时屏幕上看到的字节就是协议本身。HTTP/2 换过来了：解析器只读固定位置、帧可以交错，代价是你必须有一个工具才能把一片十六进制变回头。</p>
-<p>HPBN 用的词比「文本」「二进制」准：HTTP/1.x 是 <strong>newline-delimited plaintext</strong>（换行定界），HTTP/2 是 <strong>length-prefixed binary</strong>（长度前缀二进制）。<mark class="mk-blue">区别在破折号前面那半，不在后面那半。</mark></p>
-<div class="callout tone-violet">
-      <span class="ic">⚖</span>
-      <div><p>更准确的说法不是「HTTP/2 是二进制协议」，而是「HTTP/2 的<strong>帧层</strong>用长度前缀定界」。</p>
-<p>「二进制协议」这个词把三件事混成了一件：字节能不能当字符读、边界靠什么定、载荷里装的是不是文本。这三件事互不绑定 —— 下面两个反例说的就是这个。</p>
-</div>
-    </div><h3 id="两个标题都不干净">两个标题都不干净</h3>
-<p><strong>「HTTP/1.1 是文本」有两处不准。</strong></p>
-<p>body 可以是任意字节。gzip 压缩过的 HTML、一张 JPEG、一段 protobuf，都和「文本」无关 —— 这时报文是「文本头部 + 二进制 body」的混合体。RFC 9112 §2.1 的语法里，<code>message-body</code> 就是个 <code>*OCTET</code>，没有任何字符集约束。</p>
-<p>字段值也不限于 ASCII。RFC 9110 §5.5 允许 <code>obs-text</code>（<code>%x80</code>–<code>%xFF</code>），虽然新定义的字段都要求只用可见 ASCII，而且接收方应当把这类字节当不透明数据处理。</p>
-<p><strong>「HTTP/2 是二进制」也不干净。</strong> 开头那 24 字节连接前言就是 ASCII，而且是故意的。</p>
-<h3 id="rfc-自己怎么说的">RFC 自己怎么说的</h3>
-<p>RFC 9112 §2.2 有一句比这里任何总结都准：</p>
-<blockquote>
-<p>A recipient MUST parse an HTTP message as a sequence of octets in an encoding that is a superset of US-ASCII.</p>
-</blockquote>
-<p>紧接着还警告：按 Unicode 字符流去解析会<strong>产生安全漏洞</strong>，因为不同字符串库处理非法多字节序列的方式不一致，尤其当这些序列里带 <code>%x0A</code> 的时候。</p>
-<p>所以 HTTP/1.1 的正确读法也是「一堆八位组」。只是这堆八位组恰好大多落在可打印 ASCII 里。</p>
-<p><mark class="mk-blue">「文本」描述的是这堆字节的外形，不是解析器该拿什么类型去接。</mark></p>
-<h2 id="http3-为什么还是二进制帧"><span class="num">08</span>HTTP/3 为什么还是二进制帧</h2>
-<p>HTTP/3 把传输层从 TCP 换成 QUIC（跑在 UDP 上），帧格式也重写了一遍：类型和长度都改成变长整数（RFC 9114 §7.2）。</p>
-<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">HTTP/3 Frame Format {
-  Type (i),            ← 变长整数
-  Length (i),          ← 变长整数
-  Frame Payload (..),
-}
-</code></pre></div>
-<p><strong>长度前缀还在。</strong> 换掉的只是下面那层。</p>
-<p>这说明 HTTP/2 引入二进制帧解决的不是带宽，而是定界和交错这两个问题 —— 换成 UDP 之后这两个问题照样得解决。TCP 上的队头阻塞是另一个问题，它靠换传输层解决，跟帧格式无关。</p>
-<p>所以谱系里有两根独立的线：</p>
-<div class="compare-wrap"><table class="compare"><thead><tr><th></th><th>定界方式</th><th>传输层</th></tr></thead><tbody><tr><th>HTTP/1.1</th><td data-label="定界方式">换行定界</td><td data-label="传输层">TCP</td></tr><tr><th>HTTP/2</th><td data-label="定界方式">长度前缀定界</td><td data-label="传输层">TCP</td></tr><tr><th>HTTP/3</th><td data-label="定界方式">长度前缀定界（变长整数版）</td><td data-label="传输层">QUIC over UDP</td></tr></tbody></table></div><p>两件事是分开改的。把「二进制帧」和「跑在 UDP 上」混成一次升级，就说不清 HTTP/2 到底解决了什么。</p>
+<p>帧边界与头字段压缩是两件事：帧头告诉解析器<strong>载荷在哪里</strong>，HPACK 才告诉它<strong>这些字节表示哪些字段</strong>。一个字段块也可能跨 HEADERS 和 CONTINUATION 帧，不能只靠“跳过载荷”来完成 HTTP 的全部处理。</p>
+<p>本例使用明文的本地 HTTP/2。通常访问 HTTPS 时，HTTP/2 帧会经过 TLS 加密后再交给 TCP；直接查看网络上的 TCP 字节，通常先看到的是 TLS 记录和密文，需要解密才能看到帧。</p>
+<h2 id="放回整体http11http2http3"><span class="num">09</span>放回整体：HTTP/1.1、HTTP/2、HTTP/3</h2>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>对比的问题</th><th>HTTP/1.1</th><th>HTTP/2</th><th>HTTP/3</th></tr></thead><tbody><tr><th>底下的传输</th><td data-label="HTTP/1.1">TCP</td><td data-label="HTTP/2">TCP</td><td data-label="HTTP/3">QUIC over UDP</td></tr><tr><th>主要组织方式</th><td data-label="HTTP/1.1">文本形式的起始行与字段；消息体另按规则定界</td><td data-label="HTTP/2">固定 9 字节帧头加可变载荷</td><td data-label="HTTP/3">QUIC 流中的帧；类型和长度用变长整数</td></tr><tr><th>多个请求</th><td data-label="HTTP/1.1">可复用连接和流水线请求；响应按顺序返回</td><td data-label="HTTP/2">同一连接上不同流的帧可按规则交错</td><td data-label="HTTP/3">不同请求使用 QUIC 流</td></tr><tr><th>头字段压缩</th><td data-label="HTTP/1.1">没有 HTTP/2 的 HPACK 机制</td><td data-label="HTTP/2">HPACK</td><td data-label="HTTP/3">QPACK</td></tr></tbody></table></div><p>HTTP/3 的 QUIC 流在传输层分别交付：丢失某条流的数据时，不必像 TCP 的单条字节流那样等待缺失位置之后的所有流。若一个丢失的 QUIC 包包含多个流的数据，这些流都可能受影响；共享拥塞控制、流量控制或 QPACK 状态也可能带来等待。因此它不是“任何情况下都没有阻塞”。</p>
 <div class="summary">
-      <h3 id="一句话">一句话</h3>
-      <p><code>TCP</code> 只交一根字节流，边界是 <code>HTTP</code> 自己造的：<mark class="mk-blue">1.1 用可打印字符造，2 用整数字段造</mark>。</p>
-<p>所以「文本」说的是「几个字节被约定成结构」，不是「线上跑的不是二进制」。要判断某一段到底是不是文本，看的是那一小段字节，不是协议版本。</p>
+      <h3 id="回到最初的问题">回到最初的问题</h3>
+      <p>TCP 传的是字节；ASCII 是解释部分字节的一种方式。HTTP/1.1 先按行读头部，再用长度、分块等规则确定消息体；HTTP/2 用固定帧头中的长度确定帧边界，再用流编号组织帧。</p>
+<p><mark class="mk-blue">头部结束、一个帧结束、整条消息结束，是不同的问题。</mark></p>
 
-    </div><h2 id="速查">速查</h2>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>你手上这一段</th><th>它是什么</th><th>怎么判断</th></tr></thead><tbody><tr><th><code>47 45 54 20 ...</code></th><td data-label="它是什么">可打印 ASCII</td><td data-label="怎么判断">每个字节落在 <code>0x20</code>–<code>0x7e</code>，右列念得出字符</td></tr><tr><th><code>00 00 12 04 00 ...</code></th><td data-label="它是什么">帧头里的整数字段</td><td data-label="怎么判断">位置固定、宽度固定，念不出字符也正常</td></tr><tr><th><code>0d 0a</code></th><td data-label="它是什么">CRLF，1.1 的行分隔符</td><td data-label="怎么判断">两个字节，右列显示成点</td></tr><tr><th><code>\r\n\r\n</code></th><td data-label="它是什么">1.1 头部结束</td><td data-label="怎么判断">连续四个字节，1.1 靠它判断头部到头了</td></tr><tr><th><code>35 0d 0a 48 65 6c 6c 6f</code></th><td data-label="它是什么">1.1 chunked 的一块</td><td data-label="怎么判断"><code>0x35</code> 是字符「5」，读成十六进制 5，后面跟 5 个字节</td></tr><tr><th><code>82 86 41 8b</code></th><td data-label="它是什么">HPACK 索引与 Huffman 前缀</td><td data-label="怎么判断">最高位 <code>1</code> = 索引；<code>01</code> 开头 = 字面量加进动态表</td></tr></tbody></table></div><div class="cards" data-cols="2"><div class="ccard tone-green">
-          
-          <h4>它确实像文本</h4>
-          <p>三个特征都对得上</p>
-          <div class="cbody"><p>每个字节落在可打印区间（<code>0x20</code>–<code>0x7e</code>，加上 <code>0x0d</code>、<code>0x0a</code>）；结构靠约定的字符序列分界；打印出来能直接当协议的样子读。</p>
-</div>
-          
-        </div><div class="ccard tone-red">
-          
-          <h4>别用这三样判断</h4>
-          <p>都不是定界问题</p>
-          <div class="cbody"><p>别用协议版本判断：同一个 HTTP/2 连接的开头就是 24 个 ASCII 字节。</p>
-<p>别用有没有长度字段判断：那是定界方式，和字符集无关。</p>
-<p>别用 body 是图片还是文本判断：那是载荷，不是定界。</p>
-</div>
-          
-        </div></div><div class="quiz"><details>
-        <summary>HTTP/2 的连接前言是 24 个可打印 ASCII 字节。那 HTTP/2 还能叫二进制协议吗？</summary>
-        <div class="a"><p>能叫，但这个标签说的是<strong>帧层怎么定界</strong>，不是「每个字节都不可打印」。</p>
-<p>同一个连接里，第 1–24 字节是 ASCII，第 25 字节起是帧头里的整数字段。用一个词去盖整根带子，本来就盖不住。</p>
+    </div><h2 id="自测">自测</h2>
+<div class="quiz"><details>
+        <summary>一条 HTTP/1.1 请求没有 Content-Length，也没有 Transfer-Encoding。空行后还要等 body 吗？</summary>
+        <div class="a"><p>不需要。按 HTTP/1.1 的请求定界规则，这种请求的消息体长度为 0。普通响应在没有其他长度规则时，则可能以连接关闭确定结束。</p>
 </div>
       </details><details>
-        <summary>为什么 HTTP/2 能把两个请求的帧交错发，HTTP/1.1 不能？</summary>
-        <div class="a"><p>1.1 切出来的最小单位是一整条消息，消息内部没有别人能插进去的位置；而且它的边界靠扫描，扫描的前提是「内容里不出现那个标记」。</p>
-<p>HTTP/2 的帧自带长度和流号，接收方读到一帧就知道该交给谁、下一帧从哪开始，于是可以直接跳到下一帧。跳到下一帧这件事，就是交错的全部前提。</p>
+        <summary>chunked 是 TCP 的分包开关吗？</summary>
+        <div class="a"><p>不是。它是 HTTP/1.1 对消息体的编码：每块写十六进制长度和数据，最后用 0 长度块与尾部结束。TCP 的发送、分段和读取边界不等于 chunk 边界。</p>
 </div>
       </details><details>
-        <summary>如果 HTTP/1.1 的 body 里恰好出现了 <code>\r\n\r\n</code>，解析器会切错吗？</summary>
-        <div class="a"><p>不会 —— 前提是头部给了 <code>Content-Length</code> 或 <code>Transfer-Encoding</code>。这两种情况下 body 长度已知，读的时候根本不看内容。</p>
-<p>真正会切错的是两个长度声明互相矛盾的时候（<code>Content-Length</code> 与 <code>Transfer-Encoding</code> 并存）。RFC 9112 §6.3 第 3 条要求按错误处理，请求走私正是利用这一点。</p>
+        <summary>Content-Length 为 8，body 是 ab\r\n\r\ncd，内容里的空行会结束消息吗？</summary>
+        <div class="a"><p>不会。解析器已经进入读取 body 的阶段，并按长度消费 8 个字节；其中的 <code>\r\n\r\n</code> 是内容。</p>
+</div>
+      </details><details>
+        <summary>HTTP/2 帧头里 Length 是 5，是不是整个响应只剩 5 字节？</summary>
+        <div class="a"><p>不是。它只表示当前帧的载荷是 5 字节，不含 9 字节帧头；一条响应可以有多个帧。发送方向是否结束还要看 <code>END_STREAM</code> 等流状态。</p>
 </div>
       </details></div>
 
     <footer>
-      <span>「HTTP/1.1 是文本、HTTP/2 是二进制」到底在说什么</span>
-      <span>最后更新 2026-11-01 · 单文件可离线打开</span>
+      <span>从字节看懂 HTTP/1.1 与 HTTP/2：报文、分块和帧</span>
+      <span>最后更新 2026-11-02 · 单文件可离线打开</span>
     </footer>
   </main>
 </div>
