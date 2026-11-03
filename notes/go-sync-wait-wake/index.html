@@ -1,0 +1,600 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-has-toc="1">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Go channel、信号量与 Mutex：等待、唤醒和调度</title>
+<meta name="description" content="从传数据、限制并发和保护共享数据三个场景出发，串起 channel 的等待队列、Mutex 使用的运行时信号量，以及 goroutine 从挂起到再次执行的全过程。" />
+<link rel="stylesheet" href="../../assets/theme.css?v=19aa345f51" />
+  <link rel="stylesheet" href="../../assets/blocks.css?v=bb15413b7c" />
+  <link rel="stylesheet" href="../../assets/archify-embed.css?v=68fec0b81b" />
+</head>
+<body>
+<div id="progress"></div>
+<div id="tocScrim"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
+    <a class="brand" href="../../index.html"><span class="dot"></span>知识笔记</a>
+    
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="toc" id="toc">
+      <p class="toc-title">目录</p>
+      <a href="../../index.html" class="sub">← 全部笔记</a>
+      <a href="#三个东西各解决什么问题">三个东西，各解决什么问题？</a>
+      <a href="#先认-gmp" class="sub">先认 G、M、P</a>
+      <a href="#一张图等待队列通向同一个调度器">一张图：等待队列通向同一个调度器</a>
+      <a href="#等待可运行运行g-走过哪几种状态">等待、可运行、运行：G 走过哪几种状态？</a>
+      <a href="#channel接收方没数据谁把它叫醒">channel：接收方没数据，谁把它叫醒？</a>
+      <a href="#mutex有人占着锁等待者会去哪">Mutex：有人占着锁，等待者会去哪？</a>
+      <a href="#mutex-里的-runtime-信号量和应用限流是什么关系">Mutex 里的 runtime 信号量，和应用限流是什么关系？</a>
+      <a href="#如果唤醒比准备睡觉更早到呢" class="sub">如果“唤醒”比“准备睡觉”更早到呢？</a>
+      <a href="#应用层计数信号量用-channel-限制两个名额">应用层计数信号量：用 channel 限制两个名额</a>
+      <a href="#另一种实现xsyncsemaphoreweighted" class="sub">另一种实现：x/sync/semaphore.Weighted</a>
+      <a href="#两把容易混淆的锁以及内存可见性">两把容易混淆的锁，以及内存可见性</a>
+      <a href="#本机观察三个等待者三种原因">本机观察：三个等待者，三种原因</a>
+      <a href="#遇到问题时先问哪一层">遇到问题时，先问哪一层？</a>
+      <a href="#把三条线收回来" class="sub">把三条线收回来</a>
+      <a href="#自测">自测</a>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow">● Go 并发 · 同步与调度</span>
+      <h1>Go channel、信号量与 Mutex：等待、唤醒和调度</h1>
+      <p class="lede">从传数据、限制并发和保护共享数据三个场景出发，串起 channel 的等待队列、Mutex 使用的运行时信号量，以及 goroutine 从挂起到再次执行的全过程。</p>
+    </div>
+
+
+    <div class="provenance"><span><b>来源</b> <a href="https://github.com/golang/go/blob/go1.26.2/src/runtime/chan.go" target="_blank" rel="noopener">github.com/golang/go/blob/go1.26.2/src/runtime/c</a> · <a href="https://github.com/golang/go/blob/go1.26.2/src/runtime/sema.go" target="_blank" rel="noopener">github.com/golang/go/blob/go1.26.2/src/runtime/s</a> · <a href="https://github.com/golang/go/blob/go1.26.2/src/runtime/proc.go" target="_blank" rel="noopener">github.com/golang/go/blob/go1.26.2/src/runtime/p</a> · <a href="https://github.com/golang/go/blob/go1.26.2/src/runtime/runtime2.go" target="_blank" rel="noopener">github.com/golang/go/blob/go1.26.2/src/runtime/r</a> · <a href="https://github.com/golang/go/blob/go1.26.2/src/runtime/HACKING.md" target="_blank" rel="noopener">github.com/golang/go/blob/go1.26.2/src/runtime/H</a> · <a href="https://github.com/golang/go/blob/go1.26.2/src/internal/sync/mutex.go" target="_blank" rel="noopener">github.com/golang/go/blob/go1.26.2/src/internal/</a> · <a href="https://github.com/golang/go/blob/go1.26.2/src/internal/sync/runtime.go" target="_blank" rel="noopener">github.com/golang/go/blob/go1.26.2/src/internal/</a> · <a href="https://github.com/golang/go/blob/go1.26.2/src/sync/mutex.go" target="_blank" rel="noopener">github.com/golang/go/blob/go1.26.2/src/sync/mute</a> · <a href="https://github.com/golang/sync/blob/v0.18.0/semaphore/semaphore.go" target="_blank" rel="noopener">github.com/golang/sync/blob/v0.18.0/semaphore/se</a> · <a href="https://go.dev/ref/mem" target="_blank" rel="noopener">go.dev/ref/mem</a> · <a href="https://go.dev/ref/spec#Channel_types" target="_blank" rel="noopener">go.dev/ref/spec#Channel_types</a> · <a href="https://pkg.go.dev/golang.org/x/sync@v0.18.0/semaphore" target="_blank" rel="noopener">pkg.go.dev/golang.org/x/sync@v0.18.0/semaphore</a> · <a href="https://go.dev/blog/pipelines" target="_blank" rel="noopener">go.dev/blog/pipelines</a> · <a href="https://go.dev/doc/diagnostics" target="_blank" rel="noopener">go.dev/doc/diagnostics</a> · <a href="https://go.dev/blog/race-detector" target="_blank" rel="noopener">go.dev/blog/race-detector</a> · 2026-11-03 本机复现：Go 1.26.2 darwin/arm64；分别观察 channel 接收、Mutex 争用和 channel 限流发送的等待与唤醒，并核对 runtime trace 状态转换。</span><span><b>生成</b> 2026-11-03</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">Go</span> <span class="tag tone-muted">channel</span> <span class="tag tone-muted">信号量</span> <span class="tag tone-muted">Mutex</span> <span class="tag tone-muted">goroutine</span> <span class="tag tone-muted">runtime</span></span></div>
+
+<p>三个 goroutine 同时遇到了麻烦：一个在等 channel 里的数据，一个在等空闲名额，另一个在等 <code>Mutex</code>。它们都“等住了”，但<strong>等的条件不同，登记的位置也不同</strong>。</p>
+<p>这篇要把这些问题连起来：谁负责登记等待者？谁改变条件并唤醒它？唤醒后又是谁安排它继续执行？先看使用场景，再沿着一份整体图和三个分步例子往下走。</p>
+<p>文中的 G1、G2 等名字是为了说明过程而选的<strong>示意场景</strong>，不是承诺调度器一定按这个顺序运行。运行时内部实现以本机 <strong>Go 1.26.2</strong> 为例；语言和标准库保证的行为会单独说明，内部字段、队列和调度策略可能随版本变化。</p>
+<h2 id="三个东西各解决什么问题"><span class="num">01</span>三个东西，各解决什么问题？</h2>
+<div class="cards" data-cols="3"><div class="ccard tone-blue">
+          
+          <h4>channel · 交接数据或通知</h4>
+          
+          <div class="cbody"><p>一个 goroutine 发送，另一个接收。没有可接收的数据时，接收操作可能需要等待。</p>
+</div>
+          <pre>ch := make(chan int)
+value := &lt;-ch
+</pre>
+        </div><div class="ccard tone-violet">
+          
+          <h4>信号量 · 限制同时使用的人数</h4>
+          
+          <div class="cbody"><p>假设只有两个名额，第三个使用者要等有人归还名额。带缓冲的 channel <strong>可以</strong>实现这种应用层限流。</p>
+</div>
+          <pre>slots := make(chan struct{}, 2)
+slots &lt;- struct{}{} // 占一个名额
+&lt;-slots             // 归还一个名额
+</pre>
+        </div><div class="ccard tone-green">
+          
+          <h4>Mutex · 保护共享数据</h4>
+          
+          <div class="cbody"><p>多个 goroutine 修改同一份数据时，用 <code>sync.Mutex</code> 让受保护的代码段互斥执行。</p>
+</div>
+          <pre>mu.Lock()
+count++
+mu.Unlock()
+</pre>
+        </div></div><p>这三个东西有联系，但不是同义词：channel 本身可以传值；计数信号量描述“最多同时占用多少份资源”；Mutex 主要用于互斥访问。<strong>容量为 2 的信号量不等于互斥锁</strong>，因为它允许两个人同时进入，不能单靠它保护两个人共同修改的普通变量。</p>
+<p>使用缓冲 channel 只是实现应用层信号量的一种选择。下面还会看到 <code>golang.org/x/sync/semaphore</code>，以及名字相近但作用不同的 <strong>runtime 内部信号量</strong>。</p>
+<h3 id="先认-gmp">先认 G、M、P</h3>
+<table>
+<thead>
+<tr>
+<th>名称</th>
+<th>这里把它理解成什么</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>G</strong></td>
+<td>一个 goroutine，以及 runtime 为它保存的状态</td>
+</tr>
+<tr>
+<td><strong>M</strong></td>
+<td>执行 Go 代码的操作系统线程</td>
+</tr>
+<tr>
+<td><strong>P</strong></td>
+<td>执行 Go 代码所需的一组运行时资源和调度许可；不是一个 CPU 核心</td>
+</tr>
+</tbody>
+</table>
+<p>**Go runtime（运行时）**是随 Go 程序一起工作的部分，负责 goroutine 调度、内存管理等事情。一个正在执行 Go 代码的 G，通常由持有 P 的 M 执行。G 因 channel 或 <code>sync.Mutex</code> 等待而挂起后，调度器可以安排其他可运行的 G；这不保证整个程序或操作系统线程永远不会因其他原因阻塞。</p>
+<h2 id="一张图等待队列通向同一个调度器"><span class="num">02</span>一张图：等待队列通向同一个调度器</h2>
+<p>先认识图中的一张“登记单”：<strong><code>sudog</code> 是 runtime 用来记录某个 G 正在参与等待的对象</strong>。它不是 goroutine 本身；一个 G 在 <code>select</code> 中可能同时有多张等待登记单。</p>
+<figure class="archfig" data-arch style="--arch-max-width:1586px" data-boundaries="nested" data-pano data-parts='{"permit":{"label":"应用层计数信号量","sub":"控制有多少工作可以同时占用资源","detail":"图里只示范一种写法：向容量为 2 的 channel 发送空值表示占用，接收一个值表示归还。它和 sync.Mutex 用的 runtime 信号量不是同一个对象。","facts":{"意图":"限制并发数","一种实现":"缓冲 channel","另一种实现":"x/sync/semaphore"}},"channel":{"label":"channel 对象","sub":"可以传值，也能让收发双方等待","detail":"Go 1.26.2 的 hchan 保存可选缓冲区、发送和接收等待队列，以及一把 runtime 内部锁。直接配对、写缓冲区或等待是不同分支。","facts":{"缓冲":"可选","等待队列":"sendq / recvq","内部锁":"runtime.mutex"}},"chanwait":{"label":"channel 等待队列","sub":"还不能完成收发的 G","detail":"普通阻塞操作把等待记录 sudog 放入对应 channel 的 sendq 或 recvq，然后通过 gopark 进入等待。匹配的对端或关闭操作会处理这些等待者。","facts":{"队列归属":"具体 hchan","记录":"sudog → G","挂起":"gopark"}},"mutex":{"label":"sync.Mutex","sub":"保护应用中的共享数据","detail":"无争用时先尝试原子操作；有争用时可能先短暂自旋，再通过内部信号量等待。G1 是示例中的持锁者，但 sync.Mutex 不记录“只能由谁解锁”的所有权。","facts":{"快路径":"原子比较并设置","慢路径":"可能自旋或等待","实现字段":"state / sema"}},"semawait":{"label":"runtime 信号量等待队列","sub":"sync.Mutex 慢路径使用的睡眠 / 唤醒设施","detail":"Mutex 的 sema 字段地址被映射到 semaRoot；root 按地址查找等待记录。多个地址可能落在同一个 root，但不会因此变成同一把锁。","facts":{"键":"sema 地址","登记":"sudog","唤醒入口":"Semrelease"}},"scheduler":{"label":"调度器","sub":"把已解除等待的 G 安排回执行","detail":"goready 使 G 从 waiting 变为 runnable，并放到可运行队列相关位置。M 和 P 之后选择它运行；对于普通模式的 Mutex，恢复后仍可能需要竞争锁。","facts":{"首先":"waiting → runnable","然后":"等待被选中","执行":"runnable → running"}}}' data-tours='[{"id":"channel-wake","label":"channel 等数据怎么醒","steps":[{"at":["channel"],"text":"接收方执行 `<-ch`，如果没有数据或匹配的发送方，就需要等待。"},{"at":["channel","chanwait"],"text":"runtime 在这个 channel 的 recvq 登记 sudog，并通过 gopark 挂起接收方 G。"},{"at":["chanwait","scheduler"],"text":"发送方配对后取出等待者；释放内部锁，再通过 goready 让它变为 runnable。"},{"at":["scheduler"],"text":"G 在可运行队列等待调度，后来由 M 和 P 执行，接收调用才继续返回。"}]},{"id":"mutex-wake","label":"Mutex 等锁怎么醒","steps":[{"at":["mutex"],"text":"G2 竞争一把已经被使用的 Mutex；如果快路径失败，它可能先短暂自旋。"},{"at":["mutex","semawait"],"text":"仍拿不到时，慢路径以该 Mutex 的 sema 地址登记等待者并挂起 G2。"},{"at":["semawait","scheduler"],"text":"解锁路径可能调用 Semrelease，找出等待者并让 G2 重新变为 runnable。"},{"at":["scheduler"],"text":"普通模式下 G2 醒来并不等于已经拿到锁；它恢复执行后仍可能与后来者竞争。"}]},{"id":"permit-example","label":"信号量和 channel 什么关系","steps":[{"at":["permit","channel"],"text":"应用可以用容量为 2 的缓冲 channel 记录两个占用名额；这只是计数信号量的一种实现。"},{"at":["channel","chanwait"],"text":"两个名额都占用时，第三个发送者会在这个 channel 的 sendq 等待。"},{"at":["chanwait","scheduler"],"text":"有人接收并归还名额后，等待者可被唤醒；之后仍要经过调度才能继续执行。"}]}]' data-frames='[{"id":"channel-path","boundary":0,"kind":"logical","label":"channel 路径 · 限流只是一个使用例子","detail":"计数信号量是一种用途；图中只画出用缓冲 channel 实现的一种方式。普通 channel 也可以用来传数据，等待者放在该 channel 的 sendq 或 recvq 中。","members":["permit","channel","chanwait"],"depth":1},{"id":"mutex-path","boundary":1,"kind":"logical","label":"sync.Mutex 竞争路径","detail":"Go 1.26.2 的 sync.Mutex 在竞争慢路径上使用 runtime 信号量登记等待者；并不是把 channel 的等待者放进这条队列。","members":["mutex","semawait"],"depth":1},{"id":"scheduler-path","boundary":2,"kind":"logical","label":"唤醒后的调度","detail":"解除等待后，G 先变成 runnable，再由调度器安排 M 和 P 执行。对象等待队列与调度器的可运行队列承担不同职责。","members":["scheduler"],"depth":1}]'>
+      <div class="arch-boundary-ui">
+          <div class="arch-boundary-toolbar"><span class="arch-boundary-label">边界</span>
+            <button type="button" data-boundary-mode="nested" aria-pressed="true">多层归属框</button>
+            <button type="button" data-boundary-mode="flat" aria-pressed="false">只留一层分区</button>
+            <button type="button" data-arch-reset>恢复全图</button>
+          </div>
+          <div class="arch-address-box" aria-live="polite"><div data-arch-address>点一个零件，看完整归属路径；点一个区域标题，看这一层的含义。</div>
+            <div data-arch-frame-detail>最外框表示逻辑资源域，不表示所有对象在一块内存里。每层边界的标题说明分组依据。</div></div>
+        </div>
+      <div class="arch-canvas"><svg viewBox="0 0 1220 720" role="img" aria-labelledby="go-sync-map-archify-diagram-title go-sync-map-archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
+        <title id="go-sync-map-archify-diagram-title">Go 的同步等待与唤醒</title>
+        <desc id="go-sync-map-archify-diagram-description">A architecture diagram generated by Archify.</desc>
+        <!-- Definitions -->
+        <defs>
+          <marker id="go-sync-map-arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-default" />
+          </marker>
+          <marker id="go-sync-map-arrowhead-emphasis" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-emphasis" />
+          </marker>
+          <marker id="go-sync-map-arrowhead-security" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-security" />
+          </marker>
+          <marker id="go-sync-map-arrowhead-dashed" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-dashed" />
+          </marker>
+          <pattern id="go-sync-map-grid" width="40" height="40" patternUnits="userSpaceOnUse">
+            <path d="M 40 0 L 0 0 0 40" class="c-grid" stroke-width="0.5"/>
+          </pattern>
+        </defs>
+
+        <!-- Background Grid -->
+        <rect width="100%" height="100%" fill="url(#go-sync-map-grid)" />
+
+        <!-- Boundaries (behind everything) -->
+        <g class="arch-frame" data-frame="channel-path" data-depth="1" data-frame-flat="false" data-frame-kind="logical" role="button" tabindex="0" aria-pressed="false" aria-label="channel 路径 · 限流只是一个使用例子"><title>计数信号量是一种用途；图中只画出用缓冲 channel 实现的一种方式。普通 channel 也可以用来传数据，等待者放在该 channel 的 sendq 或 recvq 中。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="0" data-frame-members="permit channel chanwait" x="11" y="96" width="853" height="208" rx="12" class="c-region" stroke-width="1"/>
+        <text x="19" y="114" class="t-cloud" font-size="9" font-weight="600">channel 路径 · 限流只是一个使用例子</text></g>
+
+        <g class="arch-frame" data-frame="mutex-path" data-depth="1" data-frame-flat="false" data-frame-kind="logical" role="button" tabindex="0" aria-pressed="false" aria-label="sync.Mutex 竞争路径"><title>Go 1.26.2 的 sync.Mutex 在竞争慢路径上使用 runtime 信号量登记等待者；并不是把 channel 的等待者放进这条队列。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="1" data-frame-members="mutex semawait" x="296" y="446" width="568" height="208" rx="12" class="c-region" stroke-width="1"/>
+        <text x="304" y="464" class="t-cloud" font-size="9" font-weight="600">sync.Mutex 竞争路径</text></g>
+
+        <g class="arch-frame" data-frame="scheduler-path" data-depth="1" data-frame-flat="false" data-frame-kind="logical" role="button" tabindex="0" aria-pressed="false" aria-label="唤醒后的调度"><title>解除等待后，G 先变成 runnable，再由调度器安排 M 和 P 执行。对象等待队列与调度器的可运行队列承担不同职责。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="2" data-frame-members="scheduler" x="916" y="246" width="298" height="248" rx="12" class="c-region" stroke-width="1"/>
+        <text x="924" y="264" class="t-cloud" font-size="9" font-weight="600">唤醒后的调度</text></g>
+
+        <!-- Connection paths (before components for correct z-order) -->
+        <path data-edge-from="permit" data-edge-to="channel" data-edge-label="缓冲 chan 示例" data-edge-key="0" data-edge-id="permit-channel" data-composition-points="250,200;330,200" d="M 250 200 L 330 200" class="a-default" stroke-width="1.5" marker-end="url(#go-sync-map-arrowhead)"/>
+        <path data-edge-from="channel" data-edge-to="chanwait" data-edge-label="条件不满足" data-edge-key="1" data-edge-id="channel-wait" data-composition-points="545,200;620,200" d="M 545 200 L 620 200" class="a-default" stroke-width="1.5" marker-end="url(#go-sync-map-arrowhead)"/>
+        <path data-edge-from="mutex" data-edge-to="semawait" data-edge-label="竞争后等待" data-edge-key="2" data-edge-id="mutex-wait" data-composition-points="535,550;620,550" d="M 535 550 L 620 550" class="a-default" stroke-width="1.5" marker-end="url(#go-sync-map-arrowhead)"/>
+        <path data-edge-from="chanwait" data-edge-to="scheduler" data-edge-label="配对或关闭" data-edge-key="3" data-edge-id="channel-ready" data-composition-points="840,200;890,200;890,363;940,363" d="M 840 200 L 882 200 Q 890 200 890 208 L 890 355 Q 890 363 898 363 L 940 363" class="a-default" stroke-width="1.5" marker-end="url(#go-sync-map-arrowhead)"/>
+        <path data-edge-from="semawait" data-edge-to="scheduler" data-edge-label="释放后唤醒" data-edge-key="4" data-edge-id="mutex-ready" data-composition-points="840,550;890,550;890,377;940,377" d="M 840 550 L 882 550 Q 890 550 890 542 L 890 385 Q 890 377 898 377 L 940 377" class="a-default" stroke-width="1.5" marker-end="url(#go-sync-map-arrowhead)"/>
+
+        <!-- Components -->
+        <g id="go-sync-map-node-permit" data-nb="1" data-node-id="permit" data-node-label="应用层计数信号量" tabindex="0" role="button" aria-label="Focus 应用层计数信号量, channel 路径：示例应用与等待队列" aria-pressed="false" data-node-kind="external" data-node-context="channel 路径：示例应用与等待队列">
+          <title>应用层计数信号量 · channel 路径：示例应用与等待队列</title>
+          <rect x="35" y="120" width="215" height="160" rx="6" class="c-mask"/>
+          <rect x="35" y="120" width="215" height="160" rx="6" class="c-external" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="external" class="semantic-sigil s-external" transform="translate(41 126) scale(0.6875)">
+            <rect x="2.5" y="5" width="8.5" height="8" rx="1.5"/>
+            <path d="M8 2.5h5.5V8M13.5 2.5 7.5 8.5"/>
+          </g>
+          <rect class="nb-badge" x="187.6" y="128" width="50.4" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="212.8" y="139" font-size="8" text-anchor="middle">应用语义</text>
+          <text class="nb-title" x="69" y="141" font-size="10.5" font-weight="600">应用层计数信号量</text>
+          <line class="nb-hr" x1="43" y1="148" x2="242" y2="148"/>
+          <text class="nb-k" x="47" y="196" font-size="9">目的</text><text class="nb-v" x="93.8" y="196" font-size="9">限制同时占用数</text>
+          <text class="nb-k" x="47" y="210" font-size="9">例子</text><text class="nb-v" x="93.8" y="210" font-size="9">缓冲 chan 容量 2</text>
+          <text class="nb-k" x="47" y="224" font-size="9">拿 / 还</text><text class="nb-v" x="93.8" y="224" font-size="9">发送 / 接收</text>
+          <text class="nb-note" x="47" y="272" font-size="8">也有其他实现，不等于 runtime sema</text>
+        </g>
+
+        <g id="go-sync-map-node-channel" data-nb="1" data-node-id="channel" data-node-label="channel" tabindex="0" role="button" aria-label="Focus channel, channel 路径：示例应用与等待队列" aria-pressed="false" data-node-kind="backend" data-node-context="channel 路径：示例应用与等待队列">
+          <title>channel · channel 路径：示例应用与等待队列</title>
+          <rect x="330" y="120" width="215" height="160" rx="6" class="c-mask"/>
+          <rect x="330" y="120" width="215" height="160" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(336 126) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <rect class="nb-badge" x="482.6" y="128" width="50.4" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="507.8" y="139" font-size="8" text-anchor="middle">用户 API</text>
+          <text class="nb-title" x="364" y="141" font-size="10.5" font-weight="600">channel</text>
+          <line class="nb-hr" x1="338" y1="148" x2="537" y2="148"/>
+          <text class="nb-k" x="342" y="196" font-size="9">数据</text><text class="nb-v" x="394.2" y="196" font-size="9">可直接交接或缓冲</text>
+          <text class="nb-k" x="342" y="210" font-size="9">等待</text><text class="nb-v" x="394.2" y="210" font-size="9">sendq / recvq</text>
+          <text class="nb-k" x="342" y="224" font-size="9">内部保护</text><text class="nb-v" x="394.2" y="224" font-size="9">runtime.mutex</text>
+          <text class="nb-note" x="342" y="272" font-size="8">发送、接收或关闭可能解除等待</text>
+        </g>
+
+        <g id="go-sync-map-node-chanwait" data-nb="1" data-node-id="chanwait" data-node-label="channel 等待队列" tabindex="0" role="button" aria-label="Focus channel 等待队列, channel 路径：示例应用与等待队列" aria-pressed="false" data-node-kind="backend" data-node-context="channel 路径：示例应用与等待队列">
+          <title>channel 等待队列 · channel 路径：示例应用与等待队列</title>
+          <rect x="620" y="120" width="220" height="160" rx="6" class="c-mask"/>
+          <rect x="620" y="120" width="220" height="160" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(626 126) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <rect class="nb-badge" x="787.2" y="128" width="40.8" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="807.6" y="139" font-size="8" text-anchor="middle">等条件</text>
+          <text class="nb-title" x="654" y="141" font-size="10.5" font-weight="600">channel 等待队列</text>
+          <line class="nb-hr" x1="628" y1="148" x2="832" y2="148"/>
+          <text class="nb-k" x="632" y="196" font-size="9">登记</text><text class="nb-v" x="662.6" y="196" font-size="9">sudog 指向 G</text>
+          <text class="nb-k" x="632" y="210" font-size="9">存放</text><text class="nb-v" x="662.6" y="210" font-size="9">该 channel 的等待队列</text>
+          <text class="nb-k" x="632" y="224" font-size="9">挂起</text><text class="nb-v" x="662.6" y="224" font-size="9">gopark → waiting</text>
+          <text class="nb-note" x="632" y="272" font-size="8">匹配或关闭后从等待队列取出</text>
+        </g>
+
+        <g id="go-sync-map-node-mutex" data-nb="1" data-node-id="mutex" data-node-label="sync.Mutex" tabindex="0" role="button" aria-label="Focus sync.Mutex, Mutex 竞争路径" aria-pressed="false" data-node-kind="backend" data-node-context="Mutex 竞争路径">
+          <title>sync.Mutex · Mutex 竞争路径</title>
+          <rect x="320" y="470" width="215" height="160" rx="6" class="c-mask"/>
+          <rect x="320" y="470" width="215" height="160" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(326 476) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <rect class="nb-badge" x="472.6" y="478" width="50.4" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="497.8" y="489" font-size="8" text-anchor="middle">用户 API</text>
+          <text class="nb-title" x="354" y="491" font-size="10.5" font-weight="600">sync.Mutex</text>
+          <line class="nb-hr" x1="328" y1="498" x2="527" y2="498"/>
+          <text class="nb-k" x="332" y="546" font-size="9">内部</text><text class="nb-v" x="373.4" y="546" font-size="9">state + sema 字段</text>
+          <text class="nb-k" x="332" y="560" font-size="9">无争用</text><text class="nb-v" x="373.4" y="560" font-size="9">原子尝试获取</text>
+          <text class="nb-k" x="332" y="574" font-size="9">有争用</text><text class="nb-v" x="373.4" y="574" font-size="9">可能自旋后等待</text>
+          <text class="nb-note" x="332" y="622" font-size="8">唤醒等待者不一定马上取得锁</text>
+        </g>
+
+        <g id="go-sync-map-node-semawait" data-nb="1" data-node-id="semawait" data-node-label="runtime 信号量等待" tabindex="0" role="button" aria-label="Focus runtime 信号量等待, Mutex 竞争路径" aria-pressed="false" data-node-kind="backend" data-node-context="Mutex 竞争路径">
+          <title>runtime 信号量等待 · Mutex 竞争路径</title>
+          <rect x="620" y="470" width="220" height="160" rx="6" class="c-mask"/>
+          <rect x="620" y="470" width="220" height="160" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(626 476) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <rect class="nb-badge" x="787.2" y="478" width="40.8" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="807.6" y="489" font-size="8" text-anchor="middle">等唤醒</text>
+          <text class="nb-title" x="654" y="491" font-size="10.5" font-weight="600">runtime 信号量等待</text>
+          <line class="nb-hr" x1="628" y1="498" x2="832" y2="498"/>
+          <text class="nb-k" x="632" y="546" font-size="9">定位</text><text class="nb-v" x="662.6" y="546" font-size="9">sema 地址 → semaRoot</text>
+          <text class="nb-k" x="632" y="560" font-size="9">登记</text><text class="nb-v" x="662.6" y="560" font-size="9">sudog 指向 G</text>
+          <text class="nb-k" x="632" y="574" font-size="9">挂起</text><text class="nb-v" x="662.6" y="574" font-size="9">goparkunlock</text>
+          <text class="nb-note" x="632" y="622" font-size="8">不同 Mutex 可能映射到同一个桶</text>
+        </g>
+
+        <g id="go-sync-map-node-scheduler" data-nb="1" data-node-id="scheduler" data-node-label="Go 调度器" tabindex="0" role="button" aria-label="Focus Go 调度器, 唤醒后的调度" aria-pressed="false" data-node-kind="backend" data-node-context="唤醒后的调度">
+          <title>Go 调度器 · 唤醒后的调度</title>
+          <rect x="940" y="270" width="250" height="200" rx="6" class="c-mask"/>
+          <rect x="940" y="270" width="250" height="200" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(946 276) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <rect class="nb-badge" x="1118.0" y="278" width="60.0" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="1148.0" y="289" font-size="8" text-anchor="middle">Go runtime</text>
+          <text class="nb-title" x="974" y="291" font-size="10.5" font-weight="600">Go 调度器</text>
+          <line class="nb-hr" x1="948" y1="298" x2="1182" y2="298"/>
+          <text class="nb-k" x="952" y="359" font-size="9">goready</text><text class="nb-v" x="998.8" y="359" font-size="9">waiting → runnable</text>
+          <text class="nb-k" x="952" y="373" font-size="9">就绪</text><text class="nb-v" x="998.8" y="373" font-size="9">runnext / P 队列等</text>
+          <text class="nb-k" x="952" y="387" font-size="9">调度</text><text class="nb-v" x="998.8" y="387" font-size="9">M 持有 P 后执行 G</text>
+          <text class="nb-k" x="952" y="401" font-size="9">继续</text><text class="nb-v" x="998.8" y="401" font-size="9">从等待调用处返回</text>
+          <text class="nb-note" x="952" y="462" font-size="8">可运行不代表已经运行</text>
+        </g>
+
+        <!-- Connection labels -->
+        <g data-detail="context" data-edge-from="permit" data-edge-to="channel" data-edge-label="缓冲 chan 示例" data-edge-key="0" data-edge-id="permit-channel">
+          <rect x="251.4" y="180" width="77.2" height="14" rx="3" class="c-mask"/>
+          <text x="290" y="190" class="t-muted" font-size="8" text-anchor="middle">缓冲 chan 示例</text>
+        </g>
+        <g data-detail="context" data-edge-from="channel" data-edge-to="chanwait" data-edge-label="条件不满足" data-edge-key="1" data-edge-id="channel-wait">
+          <rect x="553.5" y="180" width="58" height="14" rx="3" class="c-mask"/>
+          <text x="582.5" y="190" class="t-muted" font-size="8" text-anchor="middle">条件不满足</text>
+        </g>
+        <g data-detail="context" data-edge-from="mutex" data-edge-to="semawait" data-edge-label="竞争后等待" data-edge-key="2" data-edge-id="mutex-wait">
+          <rect x="548.5" y="530" width="58" height="14" rx="3" class="c-mask"/>
+          <text x="577.5" y="540" class="t-muted" font-size="8" text-anchor="middle">竞争后等待</text>
+        </g>
+        <g data-detail="context" data-edge-from="chanwait" data-edge-to="scheduler" data-edge-label="配对或关闭" data-edge-key="3" data-edge-id="channel-ready">
+          <rect x="861" y="261.5" width="58" height="14" rx="3" class="c-mask"/>
+          <text x="890" y="271.5" class="t-muted" font-size="8" text-anchor="middle">配对或关闭</text>
+        </g>
+        <g data-detail="context" data-edge-from="semawait" data-edge-to="scheduler" data-edge-label="释放后唤醒" data-edge-key="4" data-edge-id="mutex-ready">
+          <rect x="861" y="443.5" width="58" height="14" rx="3" class="c-mask"/>
+          <text x="890" y="453.5" class="t-muted" font-size="8" text-anchor="middle">释放后唤醒</text>
+        </g>
+
+        <!-- Legend -->
+
+      </svg></div>
+      <figcaption>从左上角的 channel 或左下角的 Mutex 进入。上面的“应用层信号量”只画出用缓冲 channel 实现限流这一种例子；虚线框按讲解路径分组，不表示对象一定在同一块内存里。</figcaption>
+      <div class="pano-ui"></div>
+      <p class="arch-hint"><span class="idle">点头上的任意一个框看它的关系，点区域标题看分组含义，点零件看完整归属路径；用「对比两个零件」出一张对照表</span><span class="focused">再点一次空白处取消</span></p>
+    </figure><p>图上有两类不同的队列：左侧是“<strong>条件还不满足，谁在等</strong>”；右侧是“<strong>条件已允许它继续，谁可以被调度</strong>”。它们不是同一条队列。</p>
+<h2 id="等待可运行运行g-走过哪几种状态"><span class="num">03</span>等待、可运行、运行：G 走过哪几种状态？</h2>
+<p>以下是一次典型的阻塞和恢复过程，不包含超时、取消、系统调用等所有分支：</p>
+<div class="pipe"><div class="lane tone-blue">
+        <div class="lane-meta">
+          <span class="ln">① 运行</span>
+          <b>G 正在执行</b>
+          <small>调用 channel 接收、发送或 Mutex.Lock</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>G</b>
+        <small>_Grunning</small>
+        <span class="tag tone-blue">正在执行</span>
+      </div><div class="pnode">
+        <b>M + P</b>
+        <small>运行当前 G</small>
+        <span class="tag tone-blue">执行资源</span>
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">条件不满足<span class="note">登记等待，再调用 gopark</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-amber">
+        <div class="lane-meta">
+          <span class="ln">② 等待</span>
+          <b>G 暂时不能继续</b>
+          <small>等待记录放在对应同步对象的等待结构里</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>G</b>
+        <small>_Gwaiting</small>
+        <span class="tag tone-amber">不在运行队列</span>
+      </div><div class="pnode">
+        <b>等待记录</b>
+        <small>sudog → G</small>
+        <span class="tag tone-amber">等待条件</span>
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">别的操作改变条件<span class="note">取出等待者并调用 goready</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-violet">
+        <div class="lane-meta">
+          <span class="ln">③ 可运行</span>
+          <b>G 已经有资格继续</b>
+          <small>状态变为 runnable，等待调度器选择</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>G</b>
+        <small>_Grunnable</small>
+        <span class="tag tone-violet">还没执行</span>
+      </div><div class="pnode">
+        <b>运行队列</b>
+        <small>runnext / P 的队列等</small>
+        <span class="tag tone-violet">等 CPU</span>
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">调度器选择 G<span class="note">某个 M 持有 P 执行它</span></span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-green">
+        <div class="lane-meta">
+          <span class="ln">④ 再次运行</span>
+          <b>G 恢复执行</b>
+          <small>从原来暂停的调用附近继续；是否取得锁要看具体机制</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>G</b>
+        <small>_Grunning</small>
+        <span class="tag tone-green">已被调度</span>
+      </div><div class="pnode">
+        <b>M + P</b>
+        <small>执行 G 的代码</small>
+        <span class="tag tone-green">继续</span>
+      </div></div>
+      </div></div><p><code>gopark</code> 和 <code>goready</code> 是 runtime 内部接口，不需要在普通业务代码中直接调用。Go 1.26.2 中，<code>gopark</code> 经过 <code>park_m</code> 把当前 G 变成 waiting；<code>goready</code> 经过 <code>ready</code> 把它变成 runnable，再交给可运行队列。</p>
+<p>图里的 <code>runnext</code> 是 P 上一个可以优先考虑的槽位；除此之外还有 P 的本地运行队列和全局运行队列。G 最终放在哪里、什么时候运行取决于当时状态，不是“放进 runnext 就一定立即运行”。</p>
+<div class="callout tone-violet">
+      <span class="ic">💡</span>
+      <div><p><mark class="mk-blue">唤醒 = 从等待变为可运行。</mark> 调度器什么时候选中它是下一步；对于普通模式的 Mutex，即使它随后运行，也未必已经获得锁。</p>
+</div>
+    </div><h2 id="channel接收方没数据谁把它叫醒"><span class="num">04</span>channel：接收方没数据，谁把它叫醒？</h2>
+<p>假设 <code>ch := make(chan int)</code>，是一个<strong>无缓冲 channel</strong>。G接收先执行 <code>&lt;-ch</code>，G发送稍后发送 <code>42</code>。下面只描绘一个可能的顺序，省略其他 G 和 P。</p>
+<div class="demo" data-widget="stepper" data-config="{&quot;steps&quot;:[{&quot;label&quot;:&quot;G接收先运行&quot;,&quot;code&quot;:&quot;当前执行：G接收 准备执行 &lt;-ch\nchannel：无缓冲，没有发送者\nrecvq： [空]                 可运行队列：[G发送]\n&quot;,&quot;note&quot;:&quot;没有等待的发送者，接收操作暂时不能完成。G发送已经可运行，但此刻还没有执行发送。\n&quot;},{&quot;label&quot;:&quot;G接收登记并挂起&quot;,&quot;code&quot;:&quot;channel.recvq： [sudog → G接收]\nG接收：waiting              可运行队列：[G发送]\nM + P：进入调度，寻找下一个 G\n&quot;,&quot;note&quot;:&quot;`chanrecv` 创建等待记录，放入该 channel 的 `recvq`，随后经 `gopark` 挂起。登记和释放内部锁由 runtime 协调，避免在交接期间丢失唤醒。\n&quot;},{&quot;label&quot;:&quot;G发送被选中&quot;,&quot;code&quot;:&quot;channel.recvq： [sudog → G接收]\nG接收：waiting              可运行队列：[空]\nM + P：正在执行 G发送\n&quot;,&quot;note&quot;:&quot;G接收没有占用运行队列；示意中调度器选择 G发送，它准备执行 `ch &lt;- 42`。\n&quot;},{&quot;label&quot;:&quot;发送并唤醒&quot;,&quot;code&quot;:&quot;G发送：发送 42，取出 recvq 的等待记录\nchannel.recvq： [空]        G接收：runnable\nP 的 runnext / 运行队列：[G接收]（示意）\n&quot;,&quot;note&quot;:&quot;在此例中发送方把值交给接收方，释放 channel 内部锁后调用 `goready`。G接收已经可运行，但不必此刻就执行。\n&quot;},{&quot;label&quot;:&quot;G接收再次运行&quot;,&quot;code&quot;:&quot;调度器选中：G接收\nM + P：执行 G接收           &lt;-ch 返回 42\nchannel.recvq： [空]\n&quot;,&quot;note&quot;:&quot;G接收在被安排运行后，从暂停处继续，接收表达式返回 `42`。实际调度次序和使用哪个 M / P 不作保证。\n&quot;}]}">
+      <div class="demo-head">
+        <span class="title">接收 → 排队 → 发送 → 唤醒 → 继续</span>
+        <span class="status" data-status>点下一步，对照 channel 等待队列与可运行队列</span>
+        <span class="spacer"></span>
+        
+      </div>
+      <div class="demo-body custom" data-mount></div>
+    </div><p>Go 1.26.2 的 <code>chanrecv</code> 在需要阻塞时把记录放入 <code>recvq</code>，然后调用 <code>gopark(chanparkcommit, ...)</code>。匹配的发送路径从 <code>recvq</code> 取出记录，完成数据交接，释放 channel 内部锁，再调用 <code>goready</code>。</p>
+<p>反方向也类似：发送方不能完成时进入该 channel 的 <code>sendq</code>，匹配的接收方可以解除它的等待。<code>close(ch)</code> 也会唤醒等待者，但结果不同：等待的接收者按关闭规则返回，等待的发送者恢复后会 panic。</p>
+<p>完整的缓冲区和发送分支可回看 <a href="../chan-anatomy/">channel 的组成与三条发送路径</a>。</p>
+<h2 id="mutex有人占着锁等待者会去哪"><span class="num">05</span>Mutex：有人占着锁，等待者会去哪？</h2>
+<p>先看无争用：<code>Lock</code> 尝试用原子操作改变锁状态，成功就直接进入受保护的代码。这里的 **CAS（比较并交换）**可以理解为“只有当前值等于预期值，才把它原子地改成新值”。例如锁状态为 0 时，多个 G 同时尝试把它改成已加锁状态，只有一个能成功。</p>
+<p><strong>只有争用时才可能走到等待路径</strong>；Go 1.26.2 在合适条件下还可能先短暂自旋。自旋就是暂时占用 CPU、反复尝试获取锁，而不是立刻挂起；能否自旋以及持续多久由运行时当时的条件决定。</p>
+<p>下面假设处于 Mutex 的<strong>普通模式</strong>。G1 在示例里先取得锁，G2 等待，后来 G3 也来竞争；这只是一种可能的执行顺序。</p>
+<div class="demo" data-widget="stepper" data-config="{&quot;steps&quot;:[{&quot;label&quot;:&quot;G2 遇到占用的锁&quot;,&quot;code&quot;:&quot;Mutex：已加锁（示意：G1 先取得）\nG2：正在执行 Lock()         信号量等待队列：[空]\n&quot;,&quot;note&quot;:&quot;G2 的快路径失败。图中说 G1 持锁是为了描述这个场景；`sync.Mutex` 本身不记录“只能由哪个 goroutine 解锁”的所有权。\n&quot;},{&quot;label&quot;:&quot;G2 等待&quot;,&quot;code&quot;:&quot;Mutex：仍被使用              信号量等待队列：[sudog → G2]\nG2：waiting                 G1：可以继续工作\n&quot;,&quot;note&quot;:&quot;如果慢路径仍不能获得锁，G2 通过 `runtime_SemacquireMutex` 登记并挂起。实际是否先自旋取决于当时条件。\n&quot;},{&quot;label&quot;:&quot;G1 解锁并唤醒 G2&quot;,&quot;code&quot;:&quot;Mutex：解锁                  信号量等待队列：[空]\nG2：runnable                可运行队列：[G2，G3]（示意）\n&quot;,&quot;note&quot;:&quot;解锁慢路径可以通过 `Semrelease` 唤醒一个等待者。此刻 G2 是可运行，不表示它已经执行或拿到了锁。\n&quot;},{&quot;label&quot;:&quot;G3 先取得锁&quot;,&quot;code&quot;:&quot;Mutex：已加锁（本例中 G3 先取得）\nG2：runnable                等待队列：[空]\n&quot;,&quot;note&quot;:&quot;在普通模式下，这是允许的一种情况：后来者可能在被唤醒的 G2 真正运行并竞争前取得锁。它不是每次都会发生。\n&quot;},{&quot;label&quot;:&quot;G2 再次等待&quot;,&quot;code&quot;:&quot;Mutex：G3 仍在使用           信号量等待队列：[sudog → G2]\nG2：再次 waiting\n&quot;,&quot;note&quot;:&quot;在这个示意分支中，G2 恢复运行后没有竞争成功，随后再次进入等待。真实过程还可能包含自旋或其他竞争结果。\n&quot;},{&quot;label&quot;:&quot;G3 解锁，G2 再次就绪&quot;,&quot;code&quot;:&quot;G3：Unlock()                信号量等待队列：[空]\nG2：runnable                可运行队列：[G2]（示意）\n&quot;,&quot;note&quot;:&quot;释放路径再次选中 G2；它先变为 runnable，仍需等待调度器选择。\n&quot;},{&quot;label&quot;:&quot;G2 运行并取得锁&quot;,&quot;code&quot;:&quot;M + P：执行 G2              G2：Lock() 成功返回\nMutex：已加锁（本例中 G2 取得）\n&quot;,&quot;note&quot;:&quot;假设这次没有其他竞争者先取得锁，G2 才进入受保护的代码段。这个结局是示例，不是固定调度顺序。\n&quot;}]}">
+      <div class="demo-head">
+        <span class="title">普通模式：被唤醒不等于已经拿到锁</span>
+        <span class="status" data-status>点下一步，观察 Mutex、等待队列和可运行队列</span>
+        <span class="spacer"></span>
+        
+      </div>
+      <div class="demo-body custom" data-mount></div>
+    </div><p>Go 1.26.2 的 Mutex 还实现了<strong>饥饿模式</strong>：等待时间较长时，可能改变竞争方式并将锁交给等待者。源码中的约 1 毫秒阈值是实现细节，不是“最多等待 1 毫秒”的保证，也不是业务代码能依赖的公平性契约。</p>
+<h2 id="mutex-里的-runtime-信号量和应用限流是什么关系"><span class="num">06</span>Mutex 里的 runtime 信号量，和应用限流是什么关系？</h2>
+<p><code>sync.Mutex</code> 在 Go 1.26.2 中包含一个内部实现，后者维护 <code>state</code> 和 <code>sema</code> 字段。<code>state</code> 记录锁及等待相关状态；<code>sema</code> 的地址用于运行时等待与唤醒。</p>
+<div class="tree" data-tree><ul class="tlist"><li class="has-kids">
+            <div class="tnode tone-blue" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>runtime 的 semtable（全局散列表）</b>
+              
+              <span class="tnote">输入 &amp;m1.sema，经地址映射找到一个桶；这张表不属于 m1</span>
+            </div>
+            <ul class="tlist"><li class="has-kids">
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>semaRoot：散列表中的一个桶</b>
+              
+              <span class="tnote">Go 1.26.2 中按地址查找；不同地址可能映射到同一个桶</span>
+            </div>
+            <ul class="tlist"><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>地址 &amp;m1.sema</b>
+              
+              <span class="tnote">对应该地址的等待记录，例如 sudog → G2 / G3</span>
+            </div>
+            
+          </li><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>地址 &amp;m2.sema</b>
+              
+              <span class="tnote">示意另一个地址碰巧落在同一桶；仍是不同的等待对象</span>
+            </div>
+            
+          </li></ul>
+          </li></ul>
+          </li></ul></div><p>具体实现使用按地址组织的树和等待记录链表；图里的 <code>m1</code>、<code>m2</code> 和“落在同一桶”是示意。<mark class="mk-blue">等待者不直接排在 Mutex 对象内部；<code>sema</code> 的地址用来找到对应的 runtime 等待记录。</mark></p>
+<p><code>runtime/sema.go</code> 的注释特别强调：这组内部函数主要为其他同步原语提供<strong>配对的睡眠与唤醒</strong>，即使唤醒和睡眠发生竞争也要避免遗漏。它不是业务代码直接调用的公共计数信号量 API。</p>
+<h3 id="如果唤醒比准备睡觉更早到呢">如果“唤醒”比“准备睡觉”更早到呢？</h3>
+<p>以某个 runtime 信号量的一个等待者为例，假设同一桶里没有其他等待者，简化成两种先后顺序：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>顺序</th><th>释放先到</th><th>等待登记先到</th></tr></thead><tbody><tr><th>第一次检查</th><td data-label="释放先到">等待者发现计数暂时不可用，准备登记</td><td data-label="等待登记先到">等待者发现计数暂时不可用，准备登记</td></tr><tr><th>发生竞争</th><td data-label="释放先到">释放方先增加计数；此时没有已登记等待者</td><td data-label="等待登记先到">等待者在 root 锁下登记、再次检查，随后入队并挂起</td></tr><tr><th>如何继续</th><td data-label="释放先到">等待者在 root 锁下再次检查，发现并消费已增加的计数，不再入睡</td><td data-label="等待登记先到">释放方看到有等待者，按地址取出它并唤醒</td></tr></tbody></table></div><p>Go 1.26.2 的 <code>semacquire1</code> 会在持有 <code>semaRoot</code> 的锁时先登记 <code>nwait</code>、再检查一次计数；<code>semrelease1</code> 先增加计数，再判断和查找等待者。这样上面两种竞态都不会因为“通知太早”而无期限睡下去。真实实现还处理其他竞争、队列顺序和交接细节。</p>
+<h2 id="应用层计数信号量用-channel-限制两个名额"><span class="num">07</span>应用层计数信号量：用 channel 限制两个名额</h2>
+<p>下面约定：向 <code>slots</code> <strong>发送</strong>一个空值表示占用名额；从中<strong>接收</strong>一个空值表示归还。这个方向是本例的约定，也可以设计成相反方向。</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-go">var slots = make(chan struct{}, 2)
+
+func work() {
+    slots &lt;- struct{}{}         // 取得一个名额；满时等待
+    defer func() { &lt;-slots }() // work 返回时归还
+
+    // 使用受限资源
+}
+</code></pre></div>
+<p>图中的两个圆点是<strong>逻辑上的两个占用名额</strong>。<code>struct{}</code> 是零大小类型，不能据此推断 channel 一定分配了两个存数据的物理字节。</p>
+<div class="demo" data-widget="stepper" data-config="{&quot;steps&quot;:[{&quot;label&quot;:&quot;两个名额已占用&quot;,&quot;code&quot;:&quot;slots 容量：2      逻辑占用：[G1 ●] [G2 ●]\nchannel.sendq：[空]\nG3：准备发送一个空值来占名额\n&quot;,&quot;note&quot;:&quot;按本例约定，已经有两个发送完成，G1、G2 占用两个名额。G3 还没有取得名额。\n&quot;},{&quot;label&quot;:&quot;G3 发送并等待&quot;,&quot;code&quot;:&quot;slots 容量：2      逻辑占用：[G1 ●] [G2 ●]\nchannel.sendq：[sudog → G3]\nG3：waiting\n&quot;,&quot;note&quot;:&quot;缓冲 channel 已满，G3 的发送不能立刻完成；普通阻塞路径把它登记在这个 channel 的 `sendq`，然后挂起。\n&quot;},{&quot;label&quot;:&quot;G1 归还，名额交给 G3&quot;,&quot;code&quot;:&quot;G1 执行 &lt;-slots，归还名额\n逻辑占用：[G2 ●] [G3 ●]（交接后）\nchannel.sendq：[空]         G3：runnable\n&quot;,&quot;note&quot;:&quot;Go 1.26.2 的满缓冲接收路径会取走队头元素，并把等待发送者的元素补进槽位，再唤醒 G3。因此占用数可能仍是 2；交接已由接收方完成，但 G3 的发送调用要等它被调度后才返回。\n&quot;},{&quot;label&quot;:&quot;G3 被调度后开始工作&quot;,&quot;code&quot;:&quot;逻辑占用：[G2 ●] [G3 ●]   channel.sendq：[空]\nM + P：执行 G3             G3 的发送调用返回\n&quot;,&quot;note&quot;:&quot;G3 被调度后继续执行。等它的工作结束，`defer` 中的接收操作归还名额。真实程序要保证每次成功占用都对应一次归还。\n&quot;}]}">
+      <div class="demo-head">
+        <span class="title">容量为 2：第三个工作者怎样等到名额？</span>
+        <span class="status" data-status>从占满名额走到等待者恢复执行</span>
+        <span class="spacer"></span>
+        
+      </div>
+      <div class="demo-body custom" data-mount></div>
+    </div><h3 id="另一种实现xsyncsemaphoreweighted">另一种实现：<code>x/sync/semaphore.Weighted</code></h3>
+<p><code>golang.org/x/sync/semaphore</code> 是单独的模块，不是 Go 标准库。它提供可以一次申请多个名额、并能用 <code>context</code> 取消等待的 <code>Weighted</code>。以 <strong>v0.18.0</strong> 源码为例，它把几种东西组合在一起：</p>
+<div class="tree" data-tree><ul class="tlist"><li class="has-kids">
+            <div class="tnode tone-violet" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>semaphore.Weighted</b>
+              
+              <span class="tnote">一个应用层计数信号量实现，不是 runtime/sema.go 里的内部设施</span>
+            </div>
+            <ul class="tlist"><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>size / cur</b>
+              
+              <span class="tnote">总名额与当前已占用的权重</span>
+            </div>
+            
+          </li><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>mu · sync.Mutex</b>
+              
+              <span class="tnote">保护计数和等待者列表的并发修改</span>
+            </div>
+            
+          </li><li class="has-kids">
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>waiters · 等待者列表</b>
+              
+              <span class="tnote">下面展开其中一个等待者；列表可以有多个</span>
+            </div>
+            <ul class="tlist"><li class="has-kids">
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>一个 waiter</b>
+              
+              
+            </div>
+            <ul class="tlist"><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>n</b>
+              
+              <span class="tnote">此等待者申请的名额数</span>
+            </div>
+            
+          </li><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>ready · channel</b>
+              
+              <span class="tnote">条件满足后关闭，用于通知对应等待者</span>
+            </div>
+            
+          </li></ul>
+          </li></ul>
+          </li></ul>
+          </li></ul></div><p>在这个版本中，<code>Acquire</code> 不能立即取得名额时，会登记等待者，再通过 <code>select</code> 等待其 <code>ready</code> 或传入的 <code>context.Done()</code>；后者是外部取消信号，不是 <code>waiter</code> 的字段。<code>Release</code> 更新占用数并通知可满足的等待者。这是<strong>这个库的一种实现</strong>，不是说所有信号量都必须由 Mutex 和 channel 实现。</p>
+<h2 id="两把容易混淆的锁以及内存可见性"><span class="num">08</span>两把容易混淆的锁，以及内存可见性</h2>
+<p>channel 内部也有一个叫 <code>lock</code> 的字段，但它的类型是 <strong>runtime 内部的 <code>mutex</code></strong>，不是业务代码中的 <code>sync.Mutex</code>。它负责短暂保护 <code>hchan</code> 及相关等待记录；channel 操作因为“没数据 / 没空间”而等待，则是上面看到的登记 <code>sudog</code> 和 <code>gopark</code> 路径。</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>对比</th><th>sync.Mutex</th><th>runtime 内部 mutex</th></tr></thead><tbody><tr><th>主要使用者</th><td data-label="sync.Mutex">应用代码和标准库</td><td data-label="runtime 内部 mutex">Go runtime 内部</td></tr><tr><th>保护什么</th><td data-label="sync.Mutex">调用者约定的共享数据</td><td data-label="runtime 内部 mutex">runtime 的内部共享结构，例如 hchan</td></tr><tr><th>竞争等待</th><td data-label="sync.Mutex">可能自旋，再通过 runtime 信号量挂起 G</td><td data-label="runtime 内部 mutex">内部锁竞争时可能直接阻塞 M</td></tr><tr><th>可否直接当业务 API</th><td data-label="sync.Mutex">可以，属于标准库</td><td data-label="runtime 内部 mutex">不可以，属于内部实现</td></tr></tbody></table></div><p>所以，不能简单地说“所有锁都只会挂起 G，也绝不会影响线程”。对于本篇的 channel 收发等待和 <code>sync.Mutex</code> 慢路径，G 可以通过调度器挂起；但 runtime 内部锁、系统调用等情况的线程行为不同。</p>
+<p>同步还涉及数据可见性，不只是“谁先执行”：</p>
+<ul>
+<li>channel 的一次发送，按 Go 内存模型发生在<strong>对应接收完成之前</strong>。</li>
+<li>对同一把 <code>sync.Mutex</code>，前面的 <code>Unlock</code> 与后续的 <code>Lock</code> 建立文档规定的同步关系。</li>
+<li>信号量容量大于 1 时，多个人可以同时进入；对其中共享变量的并发读写，仍要有合适的同步。</li>
+</ul>
+<h2 id="本机观察三个等待者三种原因"><span class="num">09</span>本机观察：三个等待者，三种原因</h2>
+<p>用本篇的实验源码 <code>notes/go-sync-wait-wake/examples/waiters/main.go</code>，在 <strong>Go 1.26.2、darwin/arm64</strong> 上运行一次：一个 G 等 channel 接收，一个 G 等 Mutex，一个 G 在用 channel 取得名额时等发送。下面省略了函数参数地址；goroutine 编号和顺序每次可能不同。</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">main.waitChannel
+  goroutine 22 [chan receive]
+
+main.waitMutex
+  goroutine 23 [sync.Mutex.Lock]
+  internal/sync.runtime_SemacquireMutex
+  internal/sync.(*Mutex).lockSlow
+
+main.waitPermit
+  goroutine 24 [chan send]
+
+改变条件后：channel、mutex、permit 三个等待者都继续完成
+</code></pre></div>
+<p>同一次运行的 runtime trace 中，三个 G 都出现了下面的状态变化：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>示例中的 G</th><th>从运行进入等待</th><th>唤醒与恢复</th></tr></thead><tbody><tr><th>G22 · 等待 channel 数据</th><td data-label="从运行进入等待">Running → Waiting，原因 chan receive</td><td data-label="唤醒与恢复">Waiting → Runnable → Running</td></tr><tr><th>G23 · 等待 Mutex</th><td data-label="从运行进入等待">Running → Waiting，trace 原因 sync</td><td data-label="唤醒与恢复">Waiting → Runnable → Running</td></tr><tr><th>G24 · 等待 channel 名额</th><td data-label="从运行进入等待">Running → Waiting，原因 chan send</td><td data-label="唤醒与恢复">Waiting → Runnable → Running</td></tr></tbody></table></div><p>这只是一次实验，不代表 G 的编号、队列位置或谁先运行总是如此。要在本仓库复现并保存一份新的临时 trace：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-bash">go run ./notes/go-sync-wait-wake/examples/waiters/main.go -trace
+
+# 把下面的路径换成上一条命令输出的 trace 路径
+go tool trace -d=parsed /实际输出的临时文件.trace
+</code></pre></div>
+<p>Go 1.26.2 的 <code>go tool trace</code> 调试模式使用 <code>-d=parsed</code>；不同 Go 版本的工具参数可能不同。需要可视化查看时，也可以对那份文件运行 <code>go tool trace &lt;路径&gt;</code>。</p>
+<h2 id="遇到问题时先问哪一层"><span class="num">10</span>遇到问题时，先问哪一层？</h2>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>现象或疑问</th><th>先检查什么</th><th>不要直接推断什么</th></tr></thead><tbody><tr><th>channel 发送或接收一直不返回</th><td data-label="先检查什么">是否有匹配方、缓冲区是否满或空、channel 是否为 nil、退出和取消路径</td><td data-label="不要直接推断什么">所有 goroutine 都在占用 CPU</td></tr><tr><th>Mutex 等待很久</th><td data-label="先检查什么">持锁代码是否做了慢操作，是否存在高竞争；结合 mutex / block profile 和 trace</td><td data-label="不要直接推断什么">每个等待者醒来都会按 FIFO 取得锁</td></tr><tr><th>信号量限流卡住</th><td data-label="先检查什么">成功取得的名额是否都能归还，取消时是否会退出等待</td><td data-label="不要直接推断什么">channel 缓冲区只要非空就一定有 goroutine 在执行</td></tr><tr><th>已经收到唤醒</th><td data-label="先检查什么">G 是否只是 runnable，是否仍在等待被调度或重新竞争锁</td><td data-label="不要直接推断什么">唤醒等于立刻运行、等于 Mutex 已经拿到手</td></tr></tbody></table></div><p>排查时可以结合 goroutine 栈、block profile、mutex profile 和 <code>go tool trace</code>；这些工具观察的是具体运行情况，采集方式和开销各不相同。不要只根据一次快照判断所有 goroutine 的完整生命周期。</p>
+<div class="summary">
+      <h3 id="把三条线收回来">把三条线收回来</h3>
+      <p>channel 负责交接数据；应用层信号量负责表达可用名额；<code>sync.Mutex</code> 负责互斥。它们的等待条件和登记位置不同：channel 等待者属于 channel，Mutex 慢路径等待者通过 runtime 信号量按地址登记。</p>
+<p><mark class="mk-blue">共同的后半段是：解除等待 → G 变为 runnable → 调度器选择 → G 继续执行。</mark></p>
+
+    </div><h2 id="自测">自测</h2>
+<div class="quiz"><details>
+        <summary>channel 的 recvq、Mutex 的 runtime 信号量等待结构和 P 的运行队列是同一条队列吗？</summary>
+        <div class="a"><p>不是。前两者记录还在等条件的 G；P 的运行队列用于保存可运行的 G。条件满足并唤醒后，G 才会进入调度器的可运行状态。</p>
+</div>
+      </details><details>
+        <summary>被 Mutex 唤醒的 G 是不是一定马上运行，并且已经拿到锁？</summary>
+        <div class="a"><p>不是。唤醒首先让 G 变成 runnable；之后才由调度器选择。在 Go 1.26.2 的普通模式下，恢复后仍可能与后来者竞争。饥饿模式有不同的交接策略。</p>
+</div>
+      </details><details>
+        <summary>容量为 2 的 channel 已满，第三个发送者正在等待。有人接收后，为什么占用数可能仍是 2？</summary>
+        <div class="a"><p>在 Go 1.26.2 的满缓冲接收路径中，runtime 可以把队头元素交给接收方，同时把等待发送者的元素补到槽位，再唤醒发送者。接收方已完成交接，但被唤醒的 G 还要等待调度，发送调用才会返回。</p>
+</div>
+      </details><details>
+        <summary>为什么 runtime 信号量的唤醒即使先于等待登记，也不会简单地丢失？</summary>
+        <div class="a"><p>释放方先增加计数；等待方登记后在 root 锁下再次检查计数。如果释放先发生，等待方可以消费已有计数而不入睡；如果等待登记先完成，释放方可以找到并唤醒等待者。</p>
+</div>
+      </details><details>
+        <summary>channel 或 sync.Mutex 让一个 G 等待，是不是说明所有情况下操作系统线程都不会阻塞？</summary>
+        <div class="a"><p>不是。它们的典型 goroutine 等待路径可以通过 gopark 让 G 挂起，M 和 P 可调度其他 G；但 runtime 内部锁、系统调用等其他情况可能阻塞线程。</p>
+</div>
+      </details></div>
+
+    <footer>
+      <span>Go channel、信号量与 Mutex：等待、唤醒和调度</span>
+      <span>最后更新 2026-11-03 · 单文件可离线打开</span>
+    </footer>
+  </main>
+</div>
+
+<script src="../../assets/app.js?v=33978e3b4d"></script>
+</body>
+</html>
