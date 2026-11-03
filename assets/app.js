@@ -12988,6 +12988,326 @@ WIDGETS['mysql-2pc-crash'] = (root) => {
     reset();
   };
 
+  /* ============================================================
+     控件：cas-lab —— CAS 失败之后，那一次「回到开头」是谁做的
+     ------------------------------------------------------------
+     同一个小循环，两种跑法（有冲突 / 没冲突）× 两种写法（有 for / 没有 for）。
+     每一步只做一件事，并把「这一步是哪一层的代码在跑」写在状态行里。
+     关键那一步（失败 → 回到开头）是整篇的卡点：它是 for 的回边，
+     不是 CPU、不是线程、不是内核做的。
+     ============================================================ */
+  WIDGETS['cas-lab'] = (root) => {
+    const statusEl = root.querySelector('[data-status]');
+    const box = mountOf(root);
+    const wrap = el('div', 'cas');
+    box.append(wrap);
+
+    const LINE = {
+      loop: [
+        { t: 'for {', ind: 0, k: 'for' },
+        { t: 'old := value.Load()', ind: 1, k: 'load' },
+        { t: 'new := old + 1', ind: 1, k: 'calc' },
+        { t: 'if value.CompareAndSwap(old, new) {', ind: 1, k: 'cas' },
+        { t: 'return', ind: 2, k: 'ret' },
+        { t: '}', ind: 1, k: 'end' },
+        { t: '}', ind: 0, k: 'end' },
+      ],
+      once: [
+        { t: 'old := value.Load()', ind: 0, k: 'load' },
+        { t: 'new := old + 1', ind: 0, k: 'calc' },
+        { t: 'ok := value.CompareAndSwap(old, new)', ind: 0, k: 'cas' },
+        { t: 'if ok { return }', ind: 0, k: 'ret' },
+      ],
+    };
+    const AT = { loop: { load: 1, cas: 3, ret: 4, jump: 1 }, once: { load: 0, cas: 2, ret: 3 } };
+
+    /* ---------- 每一步：只记「这一刻」的状态 ---------- */
+    function build(sc, mode) {
+      const S = {
+        val: 10,
+        a: { old: null, nw: null, res: null, tries: 0, done: false },
+        b: { old: null, nw: null, res: null, tries: 0, done: false },
+      };
+      const steps = [];
+      const snap = (o) => steps.push(Object.assign({
+        val: S.val, read: null, wrote: null,
+        a: Object.assign({}, S.a), b: Object.assign({}, S.b),
+      }, o));
+
+      snap({
+        key: 'for', who: null, tone: 'idle', chip: '还没开始',
+        note: '初始 `value = 10`。甲和乙都要把它加一。',
+      });
+
+      S.a.old = 10;
+      snap({
+        key: 'load', who: 'A', read: 'A', tone: 'read', chip: '甲 · 你写的 Load',
+        note: '甲读一次，`old = 10` 存在自己的局部变量里。',
+      });
+
+      if (sc === 'race') {
+        S.b.old = 10;
+        snap({
+          key: 'load', who: 'B', read: 'B', tone: 'read', chip: '乙 · 你写的 Load',
+          note: '乙也读一次，也是 10 —— ==两个人手里握着同一个旧值==。',
+        });
+      }
+
+      S.a.nw = 11;
+      S.a.tries += 1;
+      S.a.res = true;
+      S.val = 11;
+      snap({
+        key: 'cas', who: 'A', wrote: 'A', tone: 'write', chip: '甲 · CompareAndSwap',
+        note: '甲提交：内存里还是 10，于是写入 11，拿到 `true`。',
+      });
+
+      S.a.done = true;
+      snap({
+        key: 'ret', who: 'A', tone: 'ok', chip: '甲 · 你写的 if',
+        note: '甲拿到 `true`，`return` —— 它的循环结束了。',
+      });
+
+      if (sc === 'race') {
+        S.b.nw = 11;
+        S.b.tries += 1;
+        S.b.res = false;
+        snap({
+          key: 'cas', who: 'B', tone: 'fail', chip: '乙 · CompareAndSwap',
+          note: '乙提交：内存里已经是 11，不是它手里的 10 → ==一个字节都不写，返回 false==。',
+        });
+        if (mode === 'loop') {
+          snap({
+            key: 'jump', who: 'B', tone: 'jump', chip: '乙 · for 循环',
+            mem: '乙手里还是旧的 10；内存已经是 11',
+            note: '`false` 走到 for 的末尾，下一次循环从第一行开始 —— ==这一步是你的 for 做的，CPU 早就交差走了==。',
+          });
+          S.b.old = 11;
+          snap({
+            key: 'load', who: 'B', read: 'B', tone: 'read', chip: '乙 · 你写的 Load',
+            note: '乙重新读一次，这次读到 11。',
+          });
+        } else {
+          S.b.done = true;
+          snap({
+            key: 'ret', who: 'B', tone: 'bad', chip: '乙 · 没有循环可回',
+            note: '没有 for 就没有回边：乙拿着 `false` 往下走 —— ==这次加一就这么丢了==。',
+          });
+          snap({
+            key: 'ret', who: null, tone: 'bad', chip: '结果',
+            mem: '乙的读和算都白做了',
+            note: '最终 `value = 11`。乙那次成功的读、算、提交，全白做了。',
+          });
+          return steps;
+        }
+        S.b.nw = 12;
+        S.b.tries += 1;
+        S.b.res = true;
+        S.val = 12;
+        snap({
+          key: 'cas', who: 'B', wrote: 'B', tone: 'write', chip: '乙 · CompareAndSwap',
+          note: '乙再提交：11 → 12，成功。',
+        });
+        S.b.done = true;
+        snap({
+          key: 'ret', who: 'B', tone: 'ok', chip: '乙 · 你写的 if',
+          note: '乙也 `return`。最终 `value = 12`，两次加一都在。',
+        });
+      } else {
+        S.b.old = 11;
+        snap({
+          key: 'load', who: 'B', read: 'B', tone: 'read', chip: '乙 · 你写的 Load',
+          note: '甲已经跑完，乙现在读到的就是 11 —— 没有冲突。',
+        });
+        S.b.nw = 12;
+        S.b.tries += 1;
+        S.b.res = true;
+        S.val = 12;
+        snap({
+          key: 'cas', who: 'B', wrote: 'B', tone: 'write', chip: '乙 · CompareAndSwap',
+          note: '乙提交：11 → 12，一次就成功。',
+        });
+        S.b.done = true;
+        snap({
+          key: 'ret', who: 'B', tone: 'ok', chip: '结果',
+          mem: '两次加一都在',
+          note: '最终 `value = 12`，==一次都没失败 —— 所以平时你根本看不到这个循环在转==。',
+        });
+      }
+      return steps;
+    }
+
+    /* ---------- 骨架 ---------- */
+    const ctl = el('div', 'cas-ctl');
+
+    const g1 = el('div', 'cas-grp');
+    g1.append(el('span', 'cas-glab', '跑法'));
+    const bRace = el('button', 'cas-btn', '两人都读到 10');
+    const bSerial = el('button', 'cas-btn', '甲跑完乙才跑');
+    g1.append(bRace, bSerial);
+
+    const g2 = el('div', 'cas-grp');
+    g2.append(el('span', 'cas-glab', '写法'));
+    const bLoop = el('button', 'cas-btn', 'for 循环重试');
+    const bOnce = el('button', 'cas-btn', '只试一次');
+    g2.append(bLoop, bOnce);
+
+    const nav = el('div', 'cas-nav');
+    const bNext = el('button', 'cas-btn go', '下一步 ▶');
+    const bReset = el('button', 'cas-btn', '重来');
+    nav.append(bNext, bReset);
+
+    ctl.append(g1, g2, nav);
+
+    const mem = el('div', 'cas-mem');
+    const memK = el('span', 'cas-mem-k', '内存里的 value');
+    const memV = el('span', 'cas-mem-v', '10');
+    const memI = el('span', 'cas-mem-i', '初始 10');
+    const memT = el('span', 'cas-mem-t', '');
+    mem.append(memK, memV, memI, memT);
+
+    const stage = el('div', 'cas-stage');
+
+    const sideA = el('div', 'cas-side');
+    const sideB = el('div', 'cas-side');
+    const mkSide = (side, name, cls) => {
+      side.classList.add(cls);
+      side.append(el('div', 'cas-sh', name));
+      const rows = {};
+      ['old', 'nw', 'res', 'tries'].forEach((k) => {
+        const r = el('div', 'cas-sr');
+        r.append(el('span', 'cas-sk', { old: 'old', nw: 'new', res: '上次返回', tries: 'CAS 次数' }[k]));
+        const v = el('b', 'cas-sv', '—');
+        r.append(v);
+        rows[k] = v;
+        side.append(r);
+      });
+      return rows;
+    };
+    const rA = mkSide(sideA, '甲 · goroutine A', 'a');
+    const rB = mkSide(sideB, '乙 · goroutine B', 'b');
+
+    const mid = el('div', 'cas-mid');
+    const codeHead = el('div', 'cas-ch', '两人跑的是同一段代码');
+    const codeBox = el('div', 'cas-code');
+    const jumpBadge = el('div', 'cas-jump', '');
+    mid.append(codeHead, codeBox, jumpBadge);
+
+    stage.append(sideA, mid, sideB);
+
+    const say = el('div', 'cas-say');
+    const sayWho = el('span', 'cas-who', '');
+    const sayNote = el('div', 'cas-note', '');
+    say.append(sayWho, sayNote);
+
+    wrap.append(ctl, mem, stage, say);
+
+    /* ---------- 状态 ---------- */
+    let sc = 'race';
+    let mode = 'loop';
+    let i = 0;
+    let steps = build(sc, mode);
+
+    function markBtns() {
+      [[bRace, sc === 'race'], [bSerial, sc === 'serial']].forEach(([b, on]) => b.classList.toggle('on', on));
+      [[bLoop, mode === 'loop'], [bOnce, mode === 'once']].forEach(([b, on]) => b.classList.toggle('on', on));
+    }
+
+    function drawCode(cur) {
+      codeBox.textContent = '';
+      const lines = LINE[mode];
+      const at = AT[mode];
+      const hot = cur.key && at[cur.key] !== undefined ? at[cur.key] : -1;
+
+      const mkLine = (ln, idx) => {
+        const d = el('div', 'cas-l' + (idx === hot ? ' on' : ''));
+        d.style.paddingLeft = (10 + ln.ind * 18) + 'px';
+        d.append(el('span', 'cas-ln', String(idx + 1)));
+        d.append(el('code', '', ln.t));
+        return d;
+      };
+
+      if (mode === 'loop') {
+        const block = el('div', 'cas-loop' + (cur.key === 'jump' ? ' jump' : ''));
+        const lab = el('span', 'cas-looplab', 'for = 重试');
+        block.append(lab);
+        lines.forEach((ln, idx) => block.append(mkLine(ln, idx)));
+        codeBox.append(block);
+      } else {
+        lines.forEach((ln, idx) => codeBox.append(mkLine(ln, idx)));
+        const no = el('div', 'cas-noloop', '没有 for —— 失败之后没有回边');
+        codeBox.append(no);
+      }
+
+      if (cur.key === 'jump') {
+        jumpBadge.textContent = '';
+        jumpBadge.append(el('b', '', '↺ 回到第 2 行'));
+        jumpBadge.append(document.createTextNode('　这一跳是 for 循环做的，不是 CPU'));
+        jumpBadge.classList.add('on');
+      } else {
+        jumpBadge.classList.remove('on');
+        jumpBadge.textContent = '';
+      }
+    }
+
+    function setSide(rows, s, acting) {
+      rows.old.textContent = s.old === null ? '—' : String(s.old);
+      rows.nw.textContent = s.nw === null ? '—' : String(s.nw);
+      rows.res.textContent = s.res === null ? '—' : (s.res ? 'true' : 'false');
+      rows.res.className = 'cas-sv' + (s.res === null ? '' : (s.res ? ' ok' : ' bad'));
+      rows.tries.textContent = String(s.tries);
+    }
+
+    function draw() {
+      const cur = steps[i];
+      markBtns();
+
+      /* 甲 / 乙 */
+      setSide(rA, cur.a, cur.who === 'A');
+      setSide(rB, cur.b, cur.who === 'B');
+      sideA.classList.toggle('act', cur.who === 'A');
+      sideB.classList.toggle('act', cur.who === 'B');
+      sideA.classList.toggle('done', cur.a.done);
+      sideB.classList.toggle('done', cur.b.done);
+
+      /* 内存 */
+      memV.textContent = String(cur.val);
+      memV.className = 'cas-mem-v' + (cur.wrote ? ' wrote' : '');
+      const bits = [];
+      if (cur.wrote) bits.push((cur.wrote === 'A' ? '甲' : '乙') + ' 刚写入 ' + cur.val);
+      if (cur.read) bits.push((cur.read === 'A' ? '甲' : '乙') + ' 刚读到 ' + cur.val);
+      if (cur.mem) bits.push(cur.mem);
+      memT.textContent = bits.join('　·　');
+
+      /* 代码 */
+      drawCode(cur);
+
+      /* 说明 */
+      sayWho.textContent = cur.chip;
+      sayWho.className = 'cas-who t-' + cur.tone;
+      sayNote.textContent = '';
+      richText(sayNote, cur.note);
+
+      bNext.disabled = i >= steps.length - 1;
+      if (statusEl) statusEl.textContent = '第 ' + (i + 1) + ' / ' + steps.length + ' 步 · ' + cur.chip;
+    }
+
+    function restart() {
+      steps = build(sc, mode);
+      i = 0;
+      draw();
+    }
+
+    bRace.addEventListener('click', () => { sc = 'race'; restart(); });
+    bSerial.addEventListener('click', () => { sc = 'serial'; restart(); });
+    bLoop.addEventListener('click', () => { mode = 'loop'; restart(); });
+    bOnce.addEventListener('click', () => { mode = 'once'; restart(); });
+    bNext.addEventListener('click', () => { if (i < steps.length - 1) { i += 1; draw(); } });
+    bReset.addEventListener('click', restart);
+
+    restart();
+  };
+
   /* ---------- 挂载 ---------- */
   document.querySelectorAll('[data-widget]').forEach((root) => {
     var name = root.getAttribute('data-widget');

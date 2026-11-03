@@ -1,0 +1,578 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-has-toc="1">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>CAS 失败之后：那个「重新读一遍」是谁写的</title>
+<meta name="description" content="for 循环。不是语法糖，不是 CPU，也不是操作系统 —— 那条指令只交回一个 true / false。顺着这一点往下拆：一条 CAS 里四层各负责什么、为什么 Add 不用写 for、为什么 mutex 的第一步也是 CAS、以及竞争一激烈为什么手写 CAS 循环反而最慢。" />
+<link rel="stylesheet" href="../../assets/theme.css?v=19aa345f51" />
+  <link rel="stylesheet" href="../../assets/blocks.css?v=f95746b910" />
+  <link rel="stylesheet" href="../../assets/archify-embed.css?v=68fec0b81b" />
+</head>
+<body>
+<div id="progress"></div>
+<div id="tocScrim"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
+    <a class="brand" href="../../index.html"><span class="dot"></span>知识笔记</a>
+    
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="toc" id="toc">
+      <p class="toc-title">目录</p>
+      <a href="../../index.html" class="sub">← 全部笔记</a>
+      <a href="#一次-cas-里谁负责哪一段">一次 CAS 里，谁负责哪一段</a>
+      <a href="#那条指令只做一件事比一下相等才写">那条指令只做一件事：比一下，相等才写</a>
+      <a href="#亲手点一遍失败之后那一步是谁跳的">亲手点一遍：失败之后那一步是谁跳的</a>
+      <a href="#那为什么-add-不用写循环">那为什么 Add 不用写循环</a>
+      <a href="#线程和操作系统在这件事里负责什么">线程和操作系统在这件事里负责什么</a>
+      <a href="#那为什么不用-mutex因为-mutex-的第一步也是-cas">那为什么不用 mutex：因为 mutex 的第一步也是 CAS</a>
+      <a href="#实测抢的人一多手写-cas-循环反而最慢">实测：抢的人一多，手写 CAS 循环反而最慢</a>
+      <a href="#怎么选一句话一档">怎么选，一句话一档</a>
+      <a href="#自测">自测</a>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow">● CPU · 并发</span>
+      <h1>CAS 失败之后：那个「重新读一遍」是谁写的</h1>
+      <p class="lede">for 循环。不是语法糖，不是 CPU，也不是操作系统 —— 那条指令只交回一个 true / false。顺着这一点往下拆：一条 CAS 里四层各负责什么、为什么 Add 不用写 for、为什么 mutex 的第一步也是 CAS、以及竞争一激烈为什么手写 CAS 循环反而最慢。</p>
+    </div>
+
+
+    <div class="provenance"><span><b>来源</b> 本机 objdump（Go 1.26.2 / Apple M4）：CAS = CASAL + CMP/CSET；Add = LDADDAL；Mutex.Lock 快路径 = CASAL + BL lockSlow；amd64 = LOCK CMPXCHGQ + SETE、LOCK XADDQ · 本机 benchmark：每 goroutine 20 万次加一 × 3 次运行（见 §07） · Go sync/atomic 文档 https://cs.opensource.google/go/go/+/refs/tags/go1.26.2:src/sync/atomic/doc.go · Go internal/sync/mutex.go https://cs.opensource.google/go/go/+/refs/tags/go1.26.2:src/internal/sync/mutex.go · Go internal/runtime/atomic/atomic_arm64.s https://cs.opensource.google/go/go/+/refs/tags/go1.26.2:src/internal/runtime/atomic/atomic_arm64.s · Go runtime/proc.go（internal_sync_runtime_canSpin） https://cs.opensource.google/go/go/+/refs/tags/go1.26.2:src/runtime/proc.go · Intel SDM · CMPXCHG https://www.felixcloutier.com/x86/cmpxchg · Intel SDM · LOCK https://www.felixcloutier.com/x86/lock · Arm A64 · CAS / CASAL https://www.scs.stanford.edu/~zyedidia/arm64/cas.html · Arm A64 · STXR https://www.scs.stanford.edu/~zyedidia/arm64/stxr.html · futex(2) man page https://man7.org/linux/man-pages/man2/futex.2.html · Go 内存模型 https://go.dev/ref/mem · Atomic vs mutex, it depends https://madflojo.dev/posts/are-atomic-operations-faster-than-a-mutex</span><span><b>生成</b> 2026-11-03</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">CAS</span> <span class="tag tone-muted">原子操作</span> <span class="tag tone-muted">mutex</span> <span class="tag tone-muted">并发</span> <span class="tag tone-muted">Go</span> <span class="tag tone-muted">arm64</span> <span class="tag tone-muted">CAS 循环</span></span></div>
+
+<p>失败之后那一次「重新取值、重新算、再提交」，是你写的 <code>for</code> 循环在驱动 —— 不是语法糖，不是 CPU 偷偷补上的，也不是操作系统决定的。</p>
+<p>那条指令执行完就退休了，它连你的 <code>for</code> 在哪都不知道。下面把这件事拆成能看见的四层：你的代码、标准库、CPU 指令、runtime 与内核。</p>
+<div class="pq tone-violet">
+      <button class="pq-open" type="button" data-pq-open="pq-1" aria-haspopup="dialog" aria-controls="pq-1">
+        <span class="pq-ic" aria-hidden="true">▤</span>
+        <span class="pq-txt"><b>这两轮的问答原文</b><span class="pq-sub">2 轮问答 · 约 4500 字</span></span>
+        <span class="pq-hint">点开阅读 →</span>
+      </button>
+      <dialog class="pq-dialog" id="pq-1" aria-labelledby="pq-1-t">
+        <div class="pq-panel" tabindex="-1">
+          <div class="pq-head">
+            <div class="pq-ht"><b id="pq-1-t">这两轮的问答原文</b><span class="pq-sub">2 轮问答 · 约 4500 字</span></div>
+            <button class="pq-close" type="button" data-pq-close aria-label="关闭">✕</button>
+          </div>
+          <p class="pq-note">原文照录，只把标题降了一级（否则它们会进本页目录）。错别字没改。</p>
+          <div class="pq-body"><h4>问</h4>
+<p>「看一下这两个图片，了解一下我在研究什么问题。简单来说，就是原子的操作问题，CAS 的问题。</p>
+<p>读取上面这两张图片，您看清楚我在研究什么问题，大概就是原子操作的问题、CAS 的概念性问题。对，我对里面的东西读得还比较懂，比较顺，但我有一个比较困惑的地方：为什么线程的预期值不是 10 之后，它就失败了，但是呢，它会重新取值？这个“重新读取取值再修改”的动作是谁告诉它的？是程序吗？但我程序里好像也没有写相关的代码。是线程吗？还是操作系统啊？</p>
+<p>为什么会这样呢？告诉我，我很疑惑，我要爆炸了！”</p>
+<h4>答</h4>
+<p>用 Go 写很简洁，<strong>不需要引入第三方库</strong>，使用标准库 <code>sync/atomic</code> 即可。</p>
+<h5>直接使用 CAS 重试循环</h5>
+<pre><code class="language-go">func addOne(value *atomic.Int64) {
+	for {
+		// 读取预期值
+		oldValue := value.Load()
+
+		// 计算准备写入的新值
+		newValue := oldValue + 1
+
+		// CAS：当前值仍然等于 oldValue 时，才写入 newValue
+		if value.CompareAndSwap(oldValue, newValue) {
+			return // 修改成功，退出循环
+		}
+
+		// CAS 失败后，for 循环进入下一轮
+		// 下一轮会重新执行 value.Load()
+	}
+}
+</code></pre>
+<p>如果 CAS 失败，执行流程自然来到 <code>for</code> 循环末尾，然后开始下一轮，再次执行 <code>oldValue := value.Load()</code>。</p>
+<p>所以，<strong>“重新读取”这个动作是 <code>for</code> 循环告诉它做的</strong>，不是操作系统自动让它做的。</p>
+<h5>假设两个 goroutine 都读到了 10</h5>
+<pre><code class="language-text">value 初始值 = 10
+
+甲：Load() 得到 10
+乙：Load() 得到 10
+
+甲：CompareAndSwap(10, 11) → 成功
+当前 value = 11
+
+乙：CompareAndSwap(10, 11) → 失败
+因为当前 value 是 11，不再是预期的 10
+
+乙：进入下一轮 for 循环
+乙：Load() 得到 11
+乙：CompareAndSwap(11, 12) → 成功
+
+最终 value = 12
+</code></pre>
+<p>不过，真实运行时不一定刚好产生冲突。也可能甲先完整执行成功，然后乙才读取，此时乙直接读到 <code>11</code>，一次 CAS 就能成功。无论有没有冲突，最终结果都是 <code>12</code>。</p>
+<h5>如果只是想原子地加一，Go 还能更简单</h5>
+<p>实际开发中，如果你只是做 <code>value = value + 1</code>，不需要自己写 CAS 循环，可以直接写 <code>value.Add(1)</code>。<code>Add(1)</code> 已经由 Go 的原子操作机制处理好了，你不需要自己维护 CAS 循环。</p>
+<p>最后再对应到你之前的问题：</p>
+<ul>
+<li><strong>CPU</strong>：执行一次 CAS 原子指令；</li>
+<li><strong><code>CompareAndSwap</code></strong>：告诉程序这次成功还是失败；</li>
+<li><strong><code>for</code> 循环</strong>：失败后重新读取并重试；</li>
+<li><strong>Go 运行时</strong>：负责调度 goroutine；</li>
+<li><strong>操作系统</strong>：负责底层线程调度，但不会替你决定 CAS 失败后要不要重试。</li>
+</ul>
+<h4>问</h4>
+<p>「比较奇怪，为什么上面说除了这个 compare 之外可以用原子操作，但是为什么不用互斥锁mutex?」</p>
+<h4>答</h4>
+<p>当然可以用 <code>mutex</code>。上面的代码不用互斥锁，<strong>只是因为我们正在演示 CAS 和原子操作的工作方式</strong>，不是因为 mutex 不能解决这个问题。</p>
+<p>而且要注意：<code>CompareAndSwap</code> 本身就是一种原子操作，<code>Add(1)</code> 也是一种原子操作，mutex 则是另一种并发控制方案。</p>
+<h5>mutex 是怎样解决问题的</h5>
+<p>初始值是 <code>10</code>。假设甲先拿到锁：甲 Lock 成功 → 读取 10 → 修改为 11 → Unlock。在甲持有锁的时候，乙执行 <code>c.mu.Lock()</code> 会暂时无法进入临界区，必须等甲释放锁。然后乙 Lock 成功 → 读取 11 → 修改为 12 → Unlock。最终结果就是 <code>12</code>。</p>
+<p>这里没有“CAS 失败后重新读取”的问题，因为 mutex 保证同一时刻只有一个 goroutine 能执行受保护的代码。</p>
+<h5>CAS 和 mutex 的核心区别</h5>
+<ul>
+<li><strong>CAS</strong>：大家都可以尝试修改，但修改时检查数据有没有被别人动过。如果被动过了，本次修改失败，重新读取并重试。</li>
+<li><strong>mutex</strong>：在修改之前先拿锁。拿到锁的人执行，其他人暂时不能进入。</li>
+</ul>
+<p>简单类比：mutex 是厕所只有一把钥匙，拿到钥匙的人才能进去；CAS 是大家都可以提交修改，但提交时发现版本过期，就重新读取再提交。</p>
+<h5>为什么简单计数器经常使用 atomic</h5>
+<p>对于单个数字的简单加减，<code>value.Add(1)</code> 比 <code>mu.Lock(); value++; mu.Unlock()</code> 更简洁，原子加法通常也不需要维护显式的锁结构。不过这不代表 atomic 在任何情况下都一定比 mutex 好，这是一种常见误解。</p>
+<p><strong>什么时候适合用 atomic</strong>：计数器、状态开关、单个值的替换、简单统计数据。这些操作通常很短，并且只涉及单个值。</p>
+<p><strong>什么时候应该使用 mutex</strong>：当操作涉及多个步骤、多个变量或者复杂的不变量时，mutex 通常更合适。例如账户转账，需要保证「检查余额 → 扣除余额 → 添加交易记录」属于同一个完整操作。如果只把 <code>balance</code> 做成原子变量，并不能自动保证交易记录和余额始终一致。</p>
+<h5>CAS 不一定比 mutex 更快</h5>
+<p>CAS 经常被称为“无锁操作”，但“无锁”并不表示“没有代价”。如果竞争激烈，很多 goroutine 可能不断发生「读取 → CAS 失败 → 重新读取 → 再次失败」，这会浪费 CPU。</p>
+<p>例如 1 万个 goroutine 都在执行复杂的 CAS 循环，可能出现大量重试。mutex 在竞争严重时可以让等待者暂停，而不是持续抢占和重试，因此有时反而更合适。</p>
+<p>所以不能简单理解为 atomic 一定快、mutex 一定慢，必须结合实际操作和竞争程度判断。</p>
+<h5>三种写法应该怎么选</h5>
+<ul>
+<li>只是加一：优先考虑原子加法 <code>value.Add(1)</code></li>
+<li>为了学习 CAS，或者实现条件更新：使用 CAS 循环</li>
+<li>多个变量、多个操作必须保持整体一致：使用 mutex</li>
+</ul>
+<p>CAS 和 mutex 不是谁完全替代谁，而是不同层次的工具。实际项目里，用 mutex 写完全正确，而且很多复杂场景下，<strong>mutex 反而是更清楚、更稳妥的选择</strong>。</p>
+</div>
+        </div>
+      </dialog>
+    </div><h2 id="一次-cas-里谁负责哪一段"><span class="num">01</span>一次 CAS 里，谁负责哪一段</h2>
+<p>先把「一次 CAS」摊开。上面那三个方块是你写的源码，中间那个红框是它编译出来的东西，最下面那两个不在这条路径上：</p>
+<figure class="archfig" data-arch style="--arch-max-width:1584px" data-boundaries="nested" data-pano data-parts='{"read":{"label":"① 读一次","sub":"value.Load()","detail":"读到 10，放进自己的局部变量。从这个读，到下面那次提交，中间别的 goroutine 完全可以插进来改掉 `value` —— CAS 就是为这段间隙准备的。"},"call":{"label":"② 提交","sub":"CompareAndSwap(old, new)","detail":"这一行进到 CPU 之后只有一条指令。它==只回答「现在还是不是 old」，然后写或不写==。失败时值不变，函数返回 `false`。"},"decide":{"label":"③ 看返回值","sub":"if ok { return }","detail":"你的 `for` 在这里起作用：`false` 就不退出，回到开头再读一次。==这条回边是整个重试的全部来源。=="},"ins":{"label":"一条原子指令","sub":"CASAL / LOCK CMPXCHGQ","detail":"arm64 上是 `CASAL`，x86 上是 `LOCK CMPXCHGQ` 加一条取标志位的 `SETE`。整条指令在用户态执行完，没有中断、没有系统调用、没有线程切换。"},"rt":{"label":"Go runtime","sub":"挑 goroutine","detail":"它只决定这一刻哪个 goroutine 在某个 M 上跑。CAS 成没成功，它不知道也不关心。"},"kern":{"label":"内核","sub":"挑线程上核","detail":"它只决定哪条线程、在哪个核、跑多久。CAS 一次都没进内核 —— 没有 `futex`、没有睡眠、没有唤醒。"}}' data-tours='[{"id":"one-round","label":"一次失败，四层各做了什么","steps":[{"at":["read"],"text":"读一次，拿到 10。这一步和下一步之间有一个空档 —— 别的 goroutine 可以在这个空档里改掉 `value`。"},{"at":["read","call"],"text":"带着 old=10、new=11 去提交。==这两步都是你写的普通代码，不是一个不可分割的整体。=="},{"at":["ins"],"text":"CPU 收到一条指令：现在还是不是 10？不是，就一个字节都不改，交回一个 `false`。"},{"at":["call","decide"],"text":"拿到 `false`。你的 `if` 不返回，`for` 把执行带回开头 —— 这就是「重新取值再修改」的全部来源。"},{"at":["rt","kern"],"text":"==这两层从头到尾没参与。==它们管的是「谁在跑」，不是「跑失败了怎么办」。"}]}]' data-frames='[{"id":"code","boundary":0,"kind":"logical","label":"你的 goroutine：三步都在用户态","detail":"读、算新值、提交、看返回值，全是你的源码。==「失败就再来一次」这句循环没有写在别处，它就在这一步的 `for` 里。==","members":["read","call","decide"],"depth":1},{"id":"cpu","boundary":1,"kind":"contains","label":"CPU：一条指令","detail":"`CompareAndSwap` 被内联成一条原子指令。它做三件事：比较、相等才写、置一个标志位；然后把结果交回给上面的程序。它不会回跳。","members":["ins"],"depth":1},{"id":"idle","boundary":2,"kind":"logical","label":"不在这次操作里","detail":"runtime 决定哪个 goroutine 现在跑，内核决定哪条线程在哪个核上跑。CAS 全程在用户态，一次系统调用都没有，所以这两层的任何东西都看不到、也不需要看到 CAS 的返回值。","members":["rt","kern"],"depth":1}]'>
+      <div class="arch-boundary-ui">
+          <div class="arch-boundary-toolbar"><span class="arch-boundary-label">边界</span>
+            <button type="button" data-boundary-mode="nested" aria-pressed="true">多层归属框</button>
+            <button type="button" data-boundary-mode="flat" aria-pressed="false">只留一层分区</button>
+            <button type="button" data-arch-reset>恢复全图</button>
+          </div>
+          <div class="arch-address-box" aria-live="polite"><div data-arch-address>点一个零件，看完整归属路径；点一个区域标题，看这一层的含义。</div>
+            <div data-arch-frame-detail>最外框表示逻辑资源域，不表示所有对象在一块内存里。每层边界的标题说明分组依据。</div></div>
+        </div>
+      <div class="arch-canvas"><svg viewBox="0 0 1200 770" role="img" aria-labelledby="cas-owner-archify-diagram-title cas-owner-archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
+        <title id="cas-owner-archify-diagram-title">一次 CAS：三步是你写的，下面那一步是 CPU 的</title>
+        <desc id="cas-owner-archify-diagram-description">失败之后要不要再来一次，写在最上面那排方块之间的箭头里；那条指令只交回一个 true / false</desc>
+        <!-- Definitions -->
+        <defs>
+          <marker id="cas-owner-arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-default" />
+          </marker>
+          <marker id="cas-owner-arrowhead-emphasis" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-emphasis" />
+          </marker>
+          <marker id="cas-owner-arrowhead-security" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-security" />
+          </marker>
+          <marker id="cas-owner-arrowhead-dashed" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-dashed" />
+          </marker>
+          <pattern id="cas-owner-grid" width="40" height="40" patternUnits="userSpaceOnUse">
+            <path d="M 40 0 L 0 0 0 40" class="c-grid" stroke-width="0.5"/>
+          </pattern>
+        </defs>
+
+        <!-- Background Grid -->
+        <rect width="100%" height="100%" fill="url(#cas-owner-grid)" />
+
+        <!-- Boundaries (behind everything) -->
+        <g class="arch-frame" data-frame="code" data-depth="1" data-frame-flat="false" data-frame-kind="logical" role="button" tabindex="0" aria-pressed="false" aria-label="你的 goroutine：三步都在用户态"><title>读、算新值、提交、看返回值，全是你的源码。==「失败就再来一次」这句循环没有写在别处，它就在这一步的 `for` 里。==</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="0" data-frame-members="read call decide" x="35" y="40" width="1130" height="230" rx="12" class="c-region" stroke-width="1"/>
+        <text x="43" y="58" class="t-cloud" font-size="9" font-weight="600">你的 goroutine：三步都在用户态</text></g>
+
+        <g class="arch-frame" data-frame="cpu" data-depth="1" data-frame-flat="false" data-frame-kind="contains" role="button" tabindex="0" aria-pressed="false" aria-label="CPU：一条指令"><title>`CompareAndSwap` 被内联成一条原子指令。它做三件事：比较、相等才写、置一个标志位；然后把结果交回给上面的程序。它不会回跳。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="1" data-frame-members="ins" x="415" y="295" width="380" height="220" rx="12" class="c-region" stroke-width="1"/>
+        <text x="423" y="313" class="t-cloud" font-size="9" font-weight="600">CPU：一条指令</text></g>
+
+        <g class="arch-frame" data-frame="idle" data-depth="1" data-frame-flat="false" data-frame-kind="logical" role="button" tabindex="0" aria-pressed="false" aria-label="不在这次操作里"><title>runtime 决定哪个 goroutine 现在跑，内核决定哪条线程在哪个核上跑。CAS 全程在用户态，一次系统调用都没有，所以这两层的任何东西都看不到、也不需要看到 CAS 的返回值。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="2" data-frame-members="rt kern" x="380" y="530" width="610" height="170" rx="12" class="c-region" stroke-width="1"/>
+        <text x="388" y="548" class="t-cloud" font-size="9" font-weight="600">不在这次操作里</text></g>
+
+        <!-- Connection paths (before components for correct z-order) -->
+        <path data-edge-from="read" data-edge-to="call" data-edge-label="带着 old / new" data-edge-key="0" data-edge-id="read-to-call" data-composition-points="340,155;460,155" d="M 340 155 L 460 155" class="a-default" stroke-width="1.5" marker-end="url(#cas-owner-arrowhead)"/>
+        <path data-edge-from="call" data-edge-to="decide" data-edge-label="交回 true / false" data-edge-key="1" data-edge-id="call-to-decide" data-composition-points="750,155;870,155" d="M 750 155 L 870 155" class="a-default" stroke-width="1.5" marker-end="url(#cas-owner-arrowhead)"/>
+        <path data-edge-from="decide" data-edge-to="read" data-edge-label="false：回到开头，重新读一次" data-edge-key="2" data-edge-id="retry" data-composition-points="990,95;990,60;215,60;215,95" d="M 990 95 L 990 68 Q 990 60 982 60 L 223 60 Q 215 60 215 68 L 215 95" class="a-default" stroke-width="1.5" marker-end="url(#cas-owner-arrowhead)"/>
+        <path data-edge-from="call" data-edge-to="ins" data-edge-label="编译成这一条" data-edge-key="3" data-edge-id="call-to-ins" data-composition-points="605,215;605,340" d="M 605 215 L 605 340" class="a-default" stroke-width="1.5" marker-end="url(#cas-owner-arrowhead)"/>
+
+        <!-- Components -->
+        <g id="cas-owner-node-read" data-nb="1" data-node-id="read" data-node-label="① 读一次" tabindex="0" role="button" aria-label="Focus ① 读一次, value.Load(), 你写的 goroutine：三步都在用户态" aria-pressed="false" data-node-kind="backend" data-node-sublabel="value.Load()" data-node-context="你写的 goroutine：三步都在用户态">
+          <title>① 读一次 · value.Load() · 你写的 goroutine：三步都在用户态</title>
+          <rect x="90" y="95" width="250" height="120" rx="6" class="c-mask"/>
+          <rect x="90" y="95" width="250" height="120" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(96 101) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <rect class="nb-badge" x="287.2" y="103" width="40.8" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="307.6" y="114" font-size="8" text-anchor="middle">普通读</text>
+          <text class="nb-title" x="124" y="116" font-size="10.5" font-weight="600">① 读一次</text>
+          <line class="nb-hr" x1="98" y1="123" x2="332" y2="123"/>
+          <text class="nb-k" x="102" y="158" font-size="9">读到</text><text class="nb-v" x="132.6" y="158" font-size="9">10</text>
+          <text class="nb-k" x="102" y="172" font-size="9">算出</text><text class="nb-v" x="132.6" y="172" font-size="9">new = 10 + 1</text>
+          <text class="nb-note" x="102" y="207" font-size="8">这一读和下面那次提交之间，别人可以插进来</text>
+        </g>
+
+        <g id="cas-owner-node-call" data-nb="1" data-node-id="call" data-node-label="② 提交" tabindex="0" role="button" aria-label="Focus ② 提交, CompareAndSwap(old, new), 你写的 goroutine：三步都在用户态" aria-pressed="false" data-node-kind="backend" data-node-sublabel="CompareAndSwap(old, new)" data-node-context="你写的 goroutine：三步都在用户态">
+          <title>② 提交 · CompareAndSwap(old, new) · 你写的 goroutine：三步都在用户态</title>
+          <rect x="460" y="95" width="290" height="120" rx="6" class="c-mask"/>
+          <rect x="460" y="95" width="290" height="120" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(466 101) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <rect class="nb-badge" x="687.6" y="103" width="50.4" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="712.8" y="114" font-size="8" text-anchor="middle">一次提交</text>
+          <text class="nb-title" x="494" y="116" font-size="10.5" font-weight="600">② 提交</text>
+          <line class="nb-hr" x1="468" y1="123" x2="742" y2="123"/>
+          <text class="nb-k" x="472" y="151" font-size="9">比</text><text class="nb-v" x="502.6" y="151" font-size="9">内存里还是 10 吗</text>
+          <text class="nb-k" x="472" y="165" font-size="9">是</text><text class="nb-v" x="502.6" y="165" font-size="9">写入 11，返回 true</text>
+          <text class="nb-k" x="472" y="179" font-size="9">不是</text><text class="nb-v" x="502.6" y="179" font-size="9">值不变，返回 false</text>
+          <text class="nb-note" x="472" y="207" font-size="8">失败也只是一次普通返回</text>
+        </g>
+
+        <g id="cas-owner-node-decide" data-nb="1" data-node-id="decide" data-node-label="③ 看返回值" tabindex="0" role="button" aria-label="Focus ③ 看返回值, if ok { return }, 你写的 goroutine：三步都在用户态" aria-pressed="false" data-node-kind="backend" data-node-sublabel="if ok { return }" data-node-context="你写的 goroutine：三步都在用户态">
+          <title>③ 看返回值 · if ok { return } · 你写的 goroutine：三步都在用户态</title>
+          <rect x="870" y="95" width="240" height="120" rx="6" class="c-mask"/>
+          <rect x="870" y="95" width="240" height="120" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(876 101) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <rect class="nb-badge" x="1042.8" y="103" width="55.2" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="1070.4" y="114" font-size="8" text-anchor="middle">你写的 if</text>
+          <text class="nb-title" x="904" y="116" font-size="10.5" font-weight="600">③ 看返回值</text>
+          <line class="nb-hr" x1="878" y1="123" x2="1102" y2="123"/>
+          <text class="nb-k" x="882" y="158" font-size="9">true</text><text class="nb-v" x="918.0" y="158" font-size="9">return，退出循环</text>
+          <text class="nb-k" x="882" y="172" font-size="9">false</text><text class="nb-v" x="918.0" y="172" font-size="9">回到开头再来一遍</text>
+          <text class="nb-note" x="882" y="207" font-size="8">回到开头 = 重新 Load</text>
+        </g>
+
+        <g id="cas-owner-node-ins" data-nb="1" data-node-id="ins" data-node-label="就是这一条指令" tabindex="0" role="button" aria-label="Focus 就是这一条指令, CASAL / LOCK CMPXCHGQ, CPU：比一下、相等才写、回一个标志位" aria-pressed="false" data-node-kind="security" data-node-sublabel="CASAL / LOCK CMPXCHGQ" data-node-context="CPU：比一下、相等才写、回一个标志位">
+          <title>就是这一条指令 · CASAL / LOCK CMPXCHGQ · CPU：比一下、相等才写、回一个标志位</title>
+          <rect x="460" y="340" width="290" height="130" rx="6" class="c-mask"/>
+          <rect x="460" y="340" width="290" height="130" rx="6" class="c-security" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="security" class="semantic-sigil s-security" transform="translate(466 346) scale(0.6875)">
+            <path d="M8 2.2 13 4v3.5c0 3.1-1.8 5.4-5 6.5-3.2-1.1-5-3.4-5-6.5V4Z"/>
+            <path d="m5.8 8 1.5 1.5 3-3"/>
+          </g>
+          <text class="nb-title" x="494" y="361" font-size="10.5" font-weight="600">就是这一条指令</text>
+          <line class="nb-hr" x1="468" y1="368" x2="742" y2="368"/>
+          <text class="nb-k" x="472" y="401" font-size="9">arm64</text><text class="nb-v" x="508.0" y="401" font-size="9">CASAL x27</text>
+          <text class="nb-k" x="472" y="415" font-size="9">x86</text><text class="nb-v" x="508.0" y="415" font-size="9">LOCK CMPXCHGQ</text>
+          <text class="nb-k" x="472" y="429" font-size="9">返回</text><text class="nb-v" x="508.0" y="429" font-size="9">标志位 → true / false</text>
+          <text class="nb-note" x="472" y="462" font-size="8">用户态执行，不进内核</text>
+        </g>
+
+        <g id="cas-owner-node-rt" data-nb="1" data-node-id="rt" data-node-label="Go runtime" tabindex="0" role="button" aria-label="Focus Go runtime, 挑 goroutine, 这两个从头到尾没被叫到" aria-pressed="false" data-node-kind="external" data-node-sublabel="挑 goroutine" data-node-context="这两个从头到尾没被叫到">
+          <title>Go runtime · 挑 goroutine · 这两个从头到尾没被叫到</title>
+          <rect x="420" y="570" width="250" height="90" rx="6" class="c-mask"/>
+          <rect x="420" y="570" width="250" height="90" rx="6" class="c-external" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="external" class="semantic-sigil s-external" transform="translate(426 576) scale(0.6875)">
+            <rect x="2.5" y="5" width="8.5" height="8" rx="1.5"/>
+            <path d="M8 2.5h5.5V8M13.5 2.5 7.5 8.5"/>
+          </g>
+          <rect class="nb-badge" x="617.2" y="578" width="40.8" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="637.6" y="589" font-size="8" text-anchor="middle">不参与</text>
+          <text class="nb-title" x="454" y="591" font-size="10.5" font-weight="600">Go runtime</text>
+          <line class="nb-hr" x1="428" y1="598" x2="662" y2="598"/>
+          <text class="nb-k" x="432" y="625" font-size="9">管</text><text class="nb-v" x="451.8" y="625" font-size="9">哪个 goroutine 跑</text>
+          <text class="nb-note" x="432" y="652" font-size="8">看不到 CAS 的结果</text>
+        </g>
+
+        <g id="cas-owner-node-kern" data-nb="1" data-node-id="kern" data-node-label="内核" tabindex="0" role="button" aria-label="Focus 内核, 挑线程上核, 这两个从头到尾没被叫到" aria-pressed="false" data-node-kind="external" data-node-sublabel="挑线程上核" data-node-context="这两个从头到尾没被叫到">
+          <title>内核 · 挑线程上核 · 这两个从头到尾没被叫到</title>
+          <rect x="700" y="570" width="250" height="90" rx="6" class="c-mask"/>
+          <rect x="700" y="570" width="250" height="90" rx="6" class="c-external" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="external" class="semantic-sigil s-external" transform="translate(706 576) scale(0.6875)">
+            <rect x="2.5" y="5" width="8.5" height="8" rx="1.5"/>
+            <path d="M8 2.5h5.5V8M13.5 2.5 7.5 8.5"/>
+          </g>
+          <rect class="nb-badge" x="897.2" y="578" width="40.8" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="917.6" y="589" font-size="8" text-anchor="middle">不参与</text>
+          <text class="nb-title" x="734" y="591" font-size="10.5" font-weight="600">内核</text>
+          <line class="nb-hr" x1="708" y1="598" x2="942" y2="598"/>
+          <text class="nb-k" x="712" y="625" font-size="9">管</text><text class="nb-v" x="731.8" y="625" font-size="9">哪条线程上哪个核</text>
+          <text class="nb-note" x="712" y="652" font-size="8">一次都没进来</text>
+        </g>
+
+        <!-- Connection labels -->
+        <g data-detail="context" data-edge-from="read" data-edge-to="call" data-edge-label="带着 old / new" data-edge-key="0" data-edge-id="read-to-call">
+          <rect x="361.4" y="135" width="77.2" height="14" rx="3" class="c-mask"/>
+          <text x="400" y="145" class="t-muted" font-size="8" text-anchor="middle">带着 old / new</text>
+        </g>
+        <g data-detail="context" data-edge-from="call" data-edge-to="decide" data-edge-label="交回 true / false" data-edge-key="1" data-edge-id="call-to-decide">
+          <rect x="764.2" y="135" width="91.6" height="14" rx="3" class="c-mask"/>
+          <text x="810" y="145" class="t-muted" font-size="8" text-anchor="middle">交回 true / false</text>
+        </g>
+        <g data-detail="context" data-edge-from="decide" data-edge-to="read" data-edge-label="false：回到开头，重新读一次" data-edge-key="2" data-edge-id="retry">
+          <rect x="490.2" y="50" width="139.6" height="14" rx="3" class="c-mask"/>
+          <text x="560" y="60" class="t-muted" font-size="8" text-anchor="middle">false：回到开头，重新读一次</text>
+        </g>
+        <g data-detail="context" data-edge-from="call" data-edge-to="ins" data-edge-label="编译成这一条" data-edge-key="3" data-edge-id="call-to-ins">
+          <rect x="656.2" y="265" width="67.6" height="14" rx="3" class="c-mask"/>
+          <text x="690" y="275" class="t-muted" font-size="8" text-anchor="middle">编译成这一条</text>
+        </g>
+
+        <!-- Legend -->
+        <g data-legend data-legend-bridge>
+          <text x="40" y="734" class="t-primary" font-size="12" font-weight="650">Legend</text>
+          <g data-legend-semantic-kind="backend" data-legend-kind="backend" data-legend-label="你写的代码（goroutine 甲）" data-legend-x="40" data-legend-baseline="754" data-legend-width="172">
+            <rect x="40" y="745" width="16" height="10" rx="2.5" class="c-backend" stroke-width="1"/>
+            <text x="62" y="754" class="t-muted" font-size="10" font-weight="500">你写的代码（goroutine 甲）</text>
+          </g>
+          <g data-legend-semantic-kind="security" data-legend-kind="security" data-legend-label="CPU 的一条指令" data-legend-x="234" data-legend-baseline="754" data-legend-width="113">
+            <rect x="234" y="745" width="16" height="10" rx="2.5" class="c-security" stroke-width="1"/>
+            <text x="256" y="754" class="t-muted" font-size="10" font-weight="500">CPU 的一条指令</text>
+          </g>
+          <g data-legend-semantic-kind="external" data-legend-kind="external" data-legend-label="runtime / 内核" data-legend-x="369" data-legend-baseline="754" data-legend-width="113">
+            <rect x="369" y="745" width="16" height="10" rx="2.5" class="c-external" stroke-width="1"/>
+            <text x="391" y="754" class="t-muted" font-size="10" font-weight="500">runtime / 内核</text>
+          </g>
+        </g>
+      </svg></div>
+      <figcaption>从左上角「① 读一次」进去；顺着那条 <code>false</code> 的箭头绕回起点。</figcaption>
+      <div class="pano-ui"></div>
+      <p class="arch-hint"><span class="idle">点头上的任意一个框看它的关系，点区域标题看分组含义，点零件看完整归属路径</span><span class="focused">再点一次空白处取消</span></p>
+    </figure><p>一句话总结这张图：</p>
+<blockquote>
+<p><code>for</code> 负责「再来一次」，<code>CompareAndSwap</code> 负责「这次算不算数」，CPU 那条指令负责「算数的话，写下去」。</p>
+</blockquote>
+<h2 id="那条指令只做一件事比一下相等才写"><span class="num">02</span>那条指令只做一件事：比一下，相等才写</h2>
+<p>x86 手册里 <code>CMPXCHG</code> 的伪代码就这么长，没有循环：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">TEMP := 内存里的值
+IF 累加器 = TEMP
+   THEN ZF := 1;  内存 := 新值      // 相等：写
+   ELSE ZF := 0;  累加器 := TEMP    // 不相等：一个字节都不改
+FI
+</code></pre></div>
+<p><code>ZF</code> 就是那条指令留下的「相等吗」标志位。Go 把它翻成一个 <code>bool</code> 交回给你。两边做法略有差别，但都不是「重试」：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">// amd64：一条指令 + 一条取标志位
+LOCK CMPXCHGQ  BX, 0(CX)
+SETE           AL          ← ZF 直接当返回值
+
+// arm64：一条 CASAL，然后自己比一次
+CASAL          x27, x1, [x2]
+CMP            x27, x0
+CSET           x3, eq      ← 「成没成功」这一步是 CMP + CSET 算出来的
+</code></pre></div>
+<p>arm64 那三行的顺序值得看一眼：<code>CASAL</code> 把当时读到的值留在寄存器里，<strong>成功与否是接下来那条 <code>CMP</code> 算出来的</strong>。硬件交回的是「值 + 标志位」，不是一句「你成功了」。这一层的全部工作到此结束。</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>两条路</th><th>相等（提交成功）</th><th>不相等（提交失败）</th></tr></thead><tbody><tr><th>硬件做了什么</th><td data-label="相等（提交成功）">写入新值，置 ZF=1</td><td data-label="不相等（提交失败）">不写，置 ZF=0</td></tr><tr><th>内存变成了</th><td data-label="相等（提交成功）">11</td><td data-label="不相等（提交失败）">还是 11（谁也没改）</td></tr><tr><th>函数返回</th><td data-label="相等（提交成功）">true</td><td data-label="不相等（提交失败）">false</td></tr><tr><th>你的代码下一步</th><td data-label="相等（提交成功）">return，退出循环</td><td data-label="不相等（提交失败）">回到开头再读一次</td></tr></tbody></table></div><p><strong>CAS 保证的是「比较和写之间没有空档」，不是「从你读到你再写之间没有空档」。</strong></p>
+<p>这两个空档要分开看，混在一起就是这道题最容易卡的地方：</p>
+<table>
+<thead>
+<tr>
+<th>空档在哪</th>
+<th>谁造成的</th>
+<th>谁来兜</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Load</code> 和 <code>CompareAndSwap</code> 之间</td>
+<td>别人改了值，或者你的线程在这中间被换下 CPU</td>
+<td>你的 <code>for</code>：拿到 <code>false</code> 再读一遍</td>
+</tr>
+<tr>
+<td><code>CompareAndSwap</code> 的「比较」和「写」之间</td>
+<td>不存在 —— 一条指令，中间没有缝</td>
+<td>不需要兜</td>
+</tr>
+</tbody>
+</table>
+<p>所以这道题里真正的新信息是：<strong>失败不是「出错了」，失败是一个正常的返回值</strong>。它没有抛异常、没有回滚、没有日志，就是 <code>false</code>。正因为失败这么安静，才需要你自己写点什么去处理它。</p>
+<h2 id="亲手点一遍失败之后那一步是谁跳的"><span class="num">03</span>亲手点一遍：失败之后那一步是谁跳的</h2>
+<p>下面这个小控件把上面那张图跑起来。左边是甲、右边是乙，中间是两人共用的 <code>value</code> 和同一段代码。</p>
+<p>照着这个顺序点：</p>
+<ol>
+<li>保持默认的「两人都读到 10」，点「下一步」直到<strong>第 6 步</strong>：乙的 CAS 返回 <code>false</code>，<code>value</code> 停在 11</li>
+<li><strong>第 7 步是这篇的答案</strong>：执行回到第 2 行，代码框左边那个 <code>for</code> 括号亮起来</li>
+<li>再点两下：乙这次读到 11，提交成功，最终 <code>value = 12</code></li>
+<li>把写法换成「只试一次」重跑：同一个失败，但没有人回到开头，最终停在 <strong>11</strong> —— 乙那次加一丢了</li>
+</ol>
+<div class="demo" data-widget="cas-lab">
+      <div class="demo-head">
+        <span class="title">一个人失败之后，谁让他重新读</span>
+        <span class="status" data-status></span>
+        <span class="spacer"></span>
+        
+      </div>
+      <div class="demo-body custom" data-mount></div>
+    </div><p>第 4 步是这段代码存在的理由。把 <code>for</code> 拿掉，程序不会报错、不会崩，它只是<strong>悄悄少加了一次</strong> —— 这类 bug 最难查，因为没有任何东西提示你。</p>
+<h2 id="那为什么-add-不用写循环"><span class="num">04</span>那为什么 Add 不用写循环</h2>
+<p><code>value.Add(1)</code> 里没有你要写的循环，因为「读、加、写」被压成了一条指令：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">// amd64：一条指令完成读-加-写，不需要「旧值」参与决策
+LOCK XADDQ  AX, 0(CX)
+
+// arm64（有 LSE 的新核，即 ARMv8.1 的原子指令扩展）：同样一条
+LDADDAL     x0, x2, [x1]
+</code></pre></div>
+<p><code>Add</code> 不需要复查「我算的新值还对不对」，因为新值就是「旧值 + delta」，不管中间被谁改过，加上去都成立。<strong>没有需要复查的东西，就不需要重试。</strong></p>
+<p>但老一点的 ARM 核没有 <code>LDADDAL</code>，Go 会把同一个 <code>Add</code> 展开成这样：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">loop:
+  LDAXR   x2, [x1]        ← 独占读
+  ADD     x2, x2, x0      ← 加
+  STLXR   w27, x2, [x1]   ← 独占写，失败时 w27 ≠ 0
+  CBNZ    w27, loop       ← 没落地？整段重来
+</code></pre></div>
+<p><strong>这里确实有一层你看不见的重试。</strong> 但它重试的是另一件事：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>谁在重试</th><th>重试的是什么</th><th>什么时候重试</th><th>要不要你写</th></tr></thead><tbody><tr><th>CPU 的独占写（LL/SC）</th><td data-label="重试的是什么">「这次读改写有没有被别的核打断」</td><td data-label="什么时候重试">独占写没落地</td><td data-label="要不要你写">不用，指令序列自己来</td></tr><tr><th>你的 <code>for</code> 循环</th><td data-label="重试的是什么">「我算出来的新值有没有过期」</td><td data-label="什么时候重试">CAS 返回 <code>false</code></td><td data-label="要不要你写">不用写 —— 它就是那个 <code>for</code></td></tr></tbody></table></div><p>两者不能互相替代，因为只有你知道新值怎么算。硬件可以帮你把「11 写进去」做成不可分割的一步，但它不知道该写 11 还是 12 —— 那是你的 <code>oldValue + 1</code>。</p>
+<p>上面那段 LL/SC 里还有个细节值得看一眼：比较不相等时它 <code>BNE</code> 直接跳到返回 <code>false</code>，<strong>不会拿旧值硬写</strong>。所以这层重试绝不会把过期的值写进去，它只是让「比较 + 写」这一小段不被打断。</p>
+<h2 id="线程和操作系统在这件事里负责什么"><span class="num">05</span>线程和操作系统在这件事里负责什么</h2>
+<p>现在正面回答「是线程吗？还是操作系统啊？」。四层各自管什么：</p>
+<table>
+<thead>
+<tr>
+<th>这一层</th>
+<th>这一步它在做什么</th>
+<th>会不会让你重试</th>
+<th>凭什么</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>你写的代码</td>
+<td>读一次、算新值、看返回值</td>
+<td><strong>会 —— 就是它</strong></td>
+<td>你写的 <code>for</code></td>
+</tr>
+<tr>
+<td>CPU 的一条指令</td>
+<td>比一下，相等才写，回一个标志位</td>
+<td>不会</td>
+<td>指令退休就结束，它不知道下一次循环在哪</td>
+</tr>
+<tr>
+<td>Go runtime</td>
+<td>决定哪个 goroutine 现在跑</td>
+<td>不会</td>
+<td>CAS 成没成功，它拿不到这个信息</td>
+</tr>
+<tr>
+<td>内核</td>
+<td>决定哪条线程、在哪个核、跑多久</td>
+<td>不会</td>
+<td>CAS 全程在用户态，一次系统调用都没有</td>
+</tr>
+</tbody>
+</table>
+<p>两处容易搞混的地方：</p>
+<p><strong>第一，内核确实能让冲突发生。</strong> 你的 <code>Load</code> 和 <code>CompareAndSwap</code> 之间，线程完全可能被换下 CPU，让别的 goroutine 跑一段、把值改掉。这是冲突的来源之一。但换回来之后，决定「要不要再来一次」的还是你的 <code>for</code> —— 内核只负责让谁在跑，不负责让谁重来。</p>
+<p><strong>第二，无竞争的锁也是纯用户态的。</strong> futex 手册写得很直白：无竞争时锁状态就是一个原子的比较交换指令，<code>(Such instructions are performed entirely in user mode, and the kernel maintains no information about the lock state.)</code> 连加锁都不一定进内核，CAS 更不会。</p>
+<h2 id="那为什么不用-mutex因为-mutex-的第一步也是-cas"><span class="num">06</span>那为什么不用 mutex：因为 mutex 的第一步也是 CAS</h2>
+<p>这不是修辞。Go 的 <code>sync.Mutex</code>，<code>Lock()</code> 的第一件事就是一次 CAS：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-go">// src/internal/sync/mutex.go
+func (m *Mutex) Lock() {
+	// Fast path: grab unlocked mutex.
+	if atomic.CompareAndSwapInt32(&amp;m.state, 0, mutexLocked) {
+		return
+	}
+	m.lockSlow()   // 没抢到，才走慢路径
+}
+</code></pre></div>
+<p>反汇编出来是这样（<code>mu.Lock(); counter++; mu.Unlock()</code> 整段的开头）：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">CASAL   w27, w2, [x3]              ← 和你的 CompareAndSwap 是同一条指令
+CMP     w27, wzr
+CSET    x4, eq                     ← 拿到锁了吗
+TBNZ    w4, #0, ...                ← 拿到了，直接往下走
+BL      internal/sync.(*Mutex).lockSlow
+</code></pre></div>
+<p>所以「用 mutex 就不用 CAS 了」这个说法不成立。<strong>mutex 和你的 <code>for</code> 循环，差别只在于「失败之后干什么」</strong>：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>拿到 false 之后</th><th>CAS 循环</th><th>mutex</th></tr></thead><tbody><tr><th>下一步做什么</th><td data-label="CAS 循环">回到开头再抢一次</td><td data-label="mutex">先原地自旋几次，还不行就排队睡觉</td></tr><tr><th>谁在等</th><td data-label="CAS 循环">没有队列，谁抢到算谁的</td><td data-label="mutex">runtime 里有一条等待队列</td></tr><tr><th>竞争者多的时候</th><td data-label="CAS 循环">所有人一起烧 CPU</td><td data-label="mutex">睡着的人不烧 CPU</td></tr><tr><th>公平性</th><td data-label="CAS 循环">没有保证，可能有人一直抢不到</td><td data-label="mutex">等超过 1ms 进入饥饿模式，直接交接</td></tr></tbody></table></div><p><code>lockSlow</code> 里那几件事值得记住：它先做最多 4 次主动自旋（<code>active_spin</code>），还抢不到就调 <code>runtime_SemacquireMutex</code> 把这条 goroutine 挂起；在 Linux 上最终落到 <code>futex</code>，在 macOS 上是内核条件变量。等超过 1ms（<code>starvationThresholdNs</code>），它切成饥饿模式，把锁<strong>直接交接</strong>给队头，不再让新来的人插队。</p>
+<p>一句话：<strong>mutex = 一次 CAS + 一套「失败之后排队睡觉、并且尽量保证公平」的策略。</strong></p>
+<p>你在第 03 节里手写的 <code>for</code>，是这套策略里最简陋的一档：不排队、不让位、不保证公平，只有「再抢一次」。</p>
+<h2 id="实测抢的人一多手写-cas-循环反而最慢"><span class="num">07</span>实测：抢的人一多，手写 CAS 循环反而最慢</h2>
+<p>第 06 节那个结论不只写在注释里。同一台机器（Apple M4，Go 1.26.2），每个 goroutine 做 20 万次加一，三种写法各跑 3 遍：</p>
+<table>
+<thead>
+<tr>
+<th>goroutine 数</th>
+<th>手写 CAS 循环</th>
+<th><code>atomic.Add</code></th>
+<th><code>mutex</code></th>
+<th>CAS 失败率</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>0.85 – 1.66 ms</td>
+<td>0.37 – 0.57 ms</td>
+<td>0.53 – 1.26 ms</td>
+<td>0%</td>
+</tr>
+<tr>
+<td>2</td>
+<td>7.7 – 12.9 ms</td>
+<td>1.9 – 2.4 ms</td>
+<td>6.2 – 11.5 ms</td>
+<td>20 – 28%</td>
+</tr>
+<tr>
+<td>4</td>
+<td>100 – 125 ms</td>
+<td>9.3 – 10.0 ms</td>
+<td>47 – 49 ms</td>
+<td>68 – 73%</td>
+</tr>
+<tr>
+<td>8</td>
+<td>579 – 740 ms</td>
+<td>30 – 37 ms</td>
+<td>95 – 97 ms</td>
+<td>82 – 84%</td>
+</tr>
+</tbody>
+</table>
+<p>读法：</p>
+<ul>
+<li><strong>一个人跑</strong>：三种写法差别不大。CAS 循环略慢，因为它多了一次 <code>Load</code>，还要多判一次分支。</li>
+<li><strong>四个人抢</strong>：手写 CAS 循环已经比 mutex 慢一倍，比 <code>Add</code> 慢十倍。</li>
+<li><strong>八个人抢</strong>：CAS 循环 0.58–0.74 秒，mutex 95 毫秒，<code>Add</code> 31 毫秒。<strong>手写循环比 mutex 慢 6–7 倍</strong>，失败率 82–84% —— 160 万次成功提交背后是 870 万次尝试，等于每一次加一平均白做 5.4 次 CAS。</li>
+</ul>
+<p>原因在失败那一下：每次失败的 CAS 都要把那条缓存行从别人手里抢过来，抢过来才发现值不对；失败的 goroutine 又不退让，立刻回去再抢。抢得越凶，缓存行在两颗核之间来回滚得越快，有用的工作一点没做。</p>
+<p><code>Add</code> 为什么不受影响？因为它一条 <code>LOCK XADD</code> 就完成，没有「抢过来之后发现过期了」这一步 —— 不存在白做的尝试。</p>
+<p>所以「无锁一定比锁快」在竞争激烈时是错的。无锁省掉的是「排队和睡眠」，代价是「白做和重抢」；哪一头更贵，取决于有多少人在抢、每次要干多少活。这里的临界点在本机是 2 到 4 个 goroutine 之间。</p>
+<h2 id="怎么选一句话一档"><span class="num">08</span>怎么选，一句话一档</h2>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>你要做的事</th><th>用什么</th><th>为什么</th></tr></thead><tbody><tr><th>只是加、减、赋值、读一个数</th><td data-label="用什么"><code>Add</code> / <code>Store</code> / <code>Swap</code></td><td data-label="为什么">一条指令就完成，没有需要复查的东西</td></tr><tr><th>「读到旧值，再决定写什么」（余额够不够扣、状态能不能切）</th><td data-label="用什么">CAS 循环</td><td data-label="为什么">新值依赖旧值，只有你能算，只能你自己复查</td></tr><tr><th>几个字段必须一起变（余额 + 流水 + 时间戳）</th><td data-label="用什么">mutex</td><td data-label="为什么">一次 CAS 保护不了第二个字段</td></tr><tr><th>一段业务逻辑要完整走完</th><td data-label="用什么">mutex</td><td data-label="为什么">锁一段代码，比写一套无锁算法好懂也好查</td></tr><tr><th>不确定，也没测过</th><td data-label="用什么">先 mutex</td><td data-label="为什么">正确性更容易保证，量出来是热点再换</td></tr></tbody></table></div><p>这五档其实在问同一个问题：<strong>需要复查的范围有多大。</strong></p>
+<ul>
+<li>一个数、算得出来 → 让硬件一条指令搞定，不用复查</li>
+<li>一个数、但新值要算 → 你必须复查，用 CAS 循环</li>
+<li>不止一个数 → 复查也管不住，改用「一次只让一个人进」</li>
+</ul>
+<h2 id="自测"><span class="num">09</span>自测</h2>
+<div class="quiz"><details>
+        <summary>CAS 返回 <code>false</code> 之后，是谁把执行带回 <code>for</code> 的第一行？</summary>
+        <div class="a"><p>你的 <code>for</code> 循环本身。<code>CompareAndSwap</code> 只是返回了一个 <code>false</code>；CPU 那条指令执行完就结束了，它不知道 <code>for</code> 在哪。回到开头重新 <code>Load</code>，是 <code>for</code> 这个大括号的回边。</p>
+</div>
+      </details><details>
+        <summary>「CAS 是不可分割的」这句话，说的是哪一段时间不可分割？</summary>
+        <div class="a"><p>只指 <code>CompareAndSwap</code> 内部「比较」和「写」之间。从你的 <code>Load</code> 到这次提交之间有一大段空档，别人完全可以插进来 —— CAS 的全部作用就是复查这段空档里值有没有被动过。</p>
+</div>
+      </details><details>
+        <summary>为什么 <code>atomic.Add(1)</code> 不需要你写重试循环？</summary>
+        <div class="a"><p>因为它的新值不依赖「读到的旧值」，加上去永远成立。amd64 上是一条 <code>LOCK XADDQ</code>，新 ARM 上是一条 <code>LDADDAL</code>；老 ARM 上确实有一层 LL/SC 重试，但那层只管「这次读改写有没有被打断」，不需要你参与。</p>
+</div>
+      </details><details>
+        <summary>既然 mutex 的第一步也是 CAS，mutex 到底替你做了什么？</summary>
+        <div class="a"><p>替你决定「失败之后怎么办」：先自旋几次，还不行就挂起排队，等超过 1ms 切饥饿模式直接交接。手写的 <code>for</code> 只会一件事 —— 立刻再抢一次。</p>
+</div>
+      </details></div>
+
+    <footer>
+      <span>CAS 失败之后：那个「重新读一遍」是谁写的</span>
+      <span>最后更新 2026-11-03 · 单文件可离线打开</span>
+    </footer>
+  </main>
+</div>
+
+<script src="../../assets/app.js?v=e60da49d6a"></script>
+</body>
+</html>
