@@ -1,0 +1,618 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-has-toc="1">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>CAS 是缓存一致性协议实现的吗</title>
+<meta name="description" content="不是一条协议就够了。一致性协议管「此刻谁能写这条缓存行」，原子指令管「比较和写入之间插不进别的核」，一致性系统管「同时来的两个请求谁先」，外层代码管「失败了再来一次」。四层各管一段，缺一段就没有 CAS。附两个核抢同一行的完整时序、MESI 状态怎么走，以及本机反汇编里 CAS 与 LL/SC 两条路。" />
+<link rel="stylesheet" href="../../assets/theme.css?v=19aa345f51" />
+  <link rel="stylesheet" href="../../assets/blocks.css?v=bb15413b7c" />
+  <link rel="stylesheet" href="../../assets/archify-embed.css?v=68fec0b81b" />
+</head>
+<body>
+<div id="progress"></div>
+<div id="tocScrim"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
+    <a class="brand" href="../../index.html"><span class="dot"></span>知识笔记</a>
+    
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="toc" id="toc">
+      <p class="toc-title">目录</p>
+      <a href="../../index.html" class="sub">← 全部笔记</a>
+      <a href="#这次追问的八个问题">这次追问的八个问题</a>
+      <a href="#四层各管一段">四层各管一段</a>
+      <a href="#它保证写权限不管你连着做的那三步">它保证写权限，不管你连着做的那三步</a>
+      <a href="#它不是为-cas-造的">它不是为 CAS 造的</a>
+      <a href="#那条指令内部没有缝">那条指令内部没有缝</a>
+      <a href="#两个-cas-同时到谁先">两个 CAS 同时到，谁先</a>
+      <a href="#cas-与-llsc两条路两种失败">CAS 与 LL/SC：两条路，两种失败</a>
+      <a href="#三件事别混一致性原子性顺序">三件事别混：一致性、原子性、顺序</a>
+      <a href="#自测">自测</a>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow">● CPU · 缓存一致性</span>
+      <h1>CAS 是缓存一致性协议实现的吗</h1>
+      <p class="lede">不是一条协议就够了。一致性协议管「此刻谁能写这条缓存行」，原子指令管「比较和写入之间插不进别的核」，一致性系统管「同时来的两个请求谁先」，外层代码管「失败了再来一次」。四层各管一段，缺一段就没有 CAS。附两个核抢同一行的完整时序、MESI 状态怎么走，以及本机反汇编里 CAS 与 LL/SC 两条路。</p>
+    </div>
+
+
+    <div class="provenance"><span><b>来源</b> Intel SDM · LOCK https://www.felixcloutier.com/x86/lock · Intel SDM · CMPXCHG https://www.felixcloutier.com/x86/cmpxchg · Linux 内核 · bus lock https://docs.kernel.org/arch/x86/buslock.html · LWN · split locks https://lwn.net/Articles/790464 · Intel · coherence directory https://www.intel.com/content/www/us/en/support/articles/000099741.html · Wikipedia · MESI https://en.wikipedia.org/wiki/MESI_protocol · Wikipedia · Cache coherence https://en.wikipedia.org/wiki/Cache_coherence · ETH DPHPC · cache coherence 讲义 https://spcl.inf.ethz.ch/Teaching/2014-dphpc/lecture/lecture2-cache-coherence.pdf · C++ 标准 [atomics.types.operations] https://eel.is/c++draft/atomics.types.operations · cppreference · compare_exchange https://en.cppreference.com/w/cpp/atomic/atomic/compare_exchange · Baeldung · ABA problem https://www.baeldung.com/cs/aba-concurrency · Arm · LDXR https://www.scs.stanford.edu/~zyedidia/arm64/ldxr.html · Arm · STXR https://www.scs.stanford.edu/~zyedidia/arm64/stxr.html · 本机实测：otool 反汇编 + 8 goroutine × 20 万次加一（Apple M4 · Go 1.26.2） · 相邻笔记：notes/lock-memory-barriers、notes/lock-layers</span><span><b>生成</b> 2026-11-04</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">CAS</span> <span class="tag tone-muted">缓存一致性</span> <span class="tag tone-muted">MESI</span> <span class="tag tone-muted">原子操作</span> <span class="tag tone-muted">LL/SC</span> <span class="tag tone-muted">并发</span></span></div>
+
+<blockquote>
+<p>CAS 失败之后，重新读一遍的那一步写在外层代码里。接着往下问：那一条 CAS 本身的原子性，是谁保证的？</p>
+<p>不是一条协议就够。协议管「此刻谁能写这条缓存行」，原子指令管「比较和写入之间插不进别的核」，一致性系统管「同时来的两个请求谁先」，外层代码管「失败了再来一次」。四件事各管一段，缺一段就没有 CAS。</p>
+</blockquote>
+<h2 id="这次追问的八个问题"><span class="num">00</span>这次追问的八个问题</h2>
+<div class="pq tone-violet">
+      <button class="pq-open" type="button" data-pq-open="pq-1" aria-haspopup="dialog" aria-controls="pq-1">
+        <span class="pq-ic" aria-hidden="true">▤</span>
+        <span class="pq-txt"><b>问题原文</b><span class="pq-sub">八段答案没有搬进来，每个问题对应下面的一节</span></span>
+        <span class="pq-hint">点开阅读 →</span>
+      </button>
+      <dialog class="pq-dialog" id="pq-1" aria-labelledby="pq-1-t">
+        <div class="pq-panel" tabindex="-1">
+          <div class="pq-head">
+            <div class="pq-ht"><b id="pq-1-t">问题原文</b><span class="pq-sub">八段答案没有搬进来，每个问题对应下面的一节</span></div>
+            <button class="pq-close" type="button" data-pq-close aria-label="关闭">✕</button>
+          </div>
+          <p class="pq-note">问题原样保留，只截掉了过长句子中间的举例。</p>
+          <div class="pq-body"><h4>1 · 从一句晦涩的话开始</h4>
+<blockquote>
+<p>「重试」不是等待某个完成标志。CPU1 不需要先读取某个「CPU0 已完成」的标志。每次重试都重新发起相应的缓存访问……</p>
+<p>上面这段话在说什么呀？为什么语言组织得这么晦涩？</p>
+</blockquote>
+<h4>2 · 底层失败，外层重试</h4>
+<blockquote>
+<p>这个过程，我可以理解为是由于缓存一致性协议的存在：假如 CPU A 已经获得了这个内存的独占权，此时 CPU B 想去修改，它就会执行 CAS 操作。但是它会发现缓存已经失效，或者在想修改的时候，一致性调度系统会告诉它现在有人在修改，所以它就直接失败了。</p>
+<p>所以这个过程可以分两部分：底层部分，CPU B 在失败之后是不会重试的；业务代码部分，在外面才有逻辑去控制它重试。对吗？</p>
+</blockquote>
+<h4>3 · 底层操作和状态转移是一回事吗</h4>
+<blockquote>
+<p>CAS 的底层操作，跟我们说的缓存一致性协议具体的状态转移不是同一个东西，对吧？</p>
+<p>在底层操作中，只要读了值跟预期的不一样，那这个读到的值肯定是现在已经修改完的值，不可能读到一个旧值，对吧？所以 CAS 的操作一定发生在这个值被别的核心修改完之后，我可以这么理解吗？</p>
+</blockquote>
+<h4>4 · 两个核同时读到、同时改</h4>
+<blockquote>
+<p>CAS 只是保证读值是预期的，然后修改值，再把值写到原来的那个地址上，这一套流程是完整的。但是，如果两个核心在读值的时候同时读到了值，然后同时修改，那岂不是会发生混乱，不是预期的效果？</p>
+</blockquote>
+<h4>5 · A 还没写，B 读到了旧值</h4>
+<blockquote>
+<p>比如说 A 发现 X 是 10，准备写入 11 的时候，B 刚好去读这个 X。此时 A 还没写入 11，B 读到发现它还是 10，B 也准备写，怎么办？</p>
+</blockquote>
+<h4>6 · 画个时序图</h4>
+<blockquote>
+<p>你能画一个时序图吗？把 CAS、业务代码，还有底层缓存一致性这个逻辑的时序画出来。我知道这个东西很复杂，如果一张图画不下，你分开几张来画。</p>
+</blockquote>
+<h4>7 · 协议和 CAS 是什么关系</h4>
+<blockquote>
+<p>你没有挑明 CAS 跟缓存一致性协议，或者说这个缓存调度器的关系，它们的关系是什么？是 CAS 由它们两个来实现吗？也就是说，缓存一致性协议和缓存调度器的机制是 CAS 的底层机制，我能这么理解吗？</p>
+</blockquote>
+<h4>8 · 协议只服务 CAS 吗</h4>
+<blockquote>
+<p>我可以理解成，其他的机制也能使用缓存一致性协议，只是缓存一致性协议加上 CAS，能保证这一个原子操作的顺利发生。但是，缓存一致性协议不是专门服务于 CAS 的，对吧？</p>
+</blockquote>
+</div>
+        </div>
+      </dialog>
+    </div><h2 id="四层各管一段"><span class="num">01</span>四层各管一段</h2>
+<p>一次成功的 CAS，路径上只有四件事：</p>
+<ol>
+<li>外层代码读到 10，算出 11，发起一条 CAS，把读到的 10 作为 expected（期望值）传进去。</li>
+<li>这条指令要写 <code>x</code>，先要 <code>x</code> 所在缓存行的独占权。</li>
+<li>一致性系统决定这条行现在归谁：本核拿走，别的核的副本作废。</li>
+<li>拿到独占之后，指令完成比较和条件写入，交回 <code>true</code>。</li>
+</ol>
+<p>失败只改最后一步：交回 <code>false</code>，外层代码回到第 1 步。整条路径上没有一步在读「另一个核完成了没有」的标志；冲突只在比较那一步暴露出来：值不是 expected，这次尝试就结束。</p>
+<p>四层分开看，实际的好处是出问题知道去哪找。「CAS 一直返回 false」和「计数器少了一半」听起来都像并发出了问题，原因却在不同的层：前者是抢的人太多，后者是读和写没包在一起。第 07 节把这份对照列成表。</p>
+<figure class="archfig" data-arch style="--arch-max-width:1587.2px" data-boundaries="nested" data-pano data-parts='{"loop":{"label":"你的 CAS 循环","sub":"唯一知道业务意图的一层","detail":"==它决定「失败之后怎么办」==：重新读、重新算、再来一次。硬件交回 false 之后不会再做任何事。"},"instr":{"label":"一条原子指令","sub":"CASAL / LOCK CMPXCHG","detail":"一条普通用户态指令。执行完直接返回，没有系统调用，也不进内核。"},"line":{"label":"这条缓存行","sub":"M / E / S / I","detail":"想写，先让别的核的副本失效，自己拿到独占。改一个字节也是整行搬，本机一行 128 字节。"},"other":{"label":"另一个核","sub":"同样的 CAS","detail":"它和本核没有直接联系，两边只在「同一条缓存行」上相遇。谁先拿到独占权，由一致性点排。"},"coh":{"label":"一致性点","sub":"仲裁 + 归属 + 失效","detail":"两个核同时申请时，这里决定谁先；后到的那个排在这一轮之后。==它只排先后，不发「有人在改」的通知。=="}}' data-tours='[{"id":"success","label":"一次成功的 CAS 走哪几段","steps":[{"at":["loop"],"text":"外层代码读到 old = 10，算出 new。"},{"at":["loop","instr"],"text":"发起一条 CAS，expected 是 10。"},{"at":["instr","line"],"text":"要写这条行，指令先要它的独占权。"},{"at":["line","coh"],"text":"去一致性点申请；==这条行的所有权在这里换手==。"},{"at":["instr"],"text":"拿到独占之后，比较 10、写入 11，交回 true。"}]},{"id":"bounds","label":"每一层不管什么","steps":[{"at":["coh"],"text":"一致性系统不比较 expected，也不知道你算的是加一还是换指针。"},{"at":["line"],"text":"缓存行状态不约束「读完之后、写回之前」能发生什么。"},{"at":["instr"],"text":"指令不重试，它只交回一个结果。"},{"at":["other"],"text":"另一个核不等你通知，它只是排到后面时自己比较一次。"},{"at":["loop"],"text":"外层代码不决定谁先拿到独占权，它只处理拿到和没拿到。"}]}]' data-frames='[{"id":"soft","boundary":0,"kind":"logical","label":"你的代码","detail":"这一层知道「要对 x 做什么」：加一、换成新节点、抢锁。它不知道缓存行现在是 M 还是 I，也不决定谁先到。","members":["loop"],"depth":1},{"id":"cpu","boundary":1,"kind":"contains","label":"处理器内部","detail":"两个核各自的指令在这里执行，各自持有一份这条行的副本（M / E / S / I）。取独占那一步不能停在半路。","members":["instr","line","other"],"depth":1},{"id":"coh","boundary":2,"kind":"logical","label":"核外的一致性系统","detail":"图上画成独立一层，实际没有中央节点：互连把请求送到归属点，目录记着谁拥有哪条行，各核的缓存控制器负责改自己的状态。","members":["coh"],"depth":1}]'>
+      <div class="arch-boundary-ui">
+          <div class="arch-boundary-toolbar"><span class="arch-boundary-label">边界</span>
+            <button type="button" data-boundary-mode="nested" aria-pressed="true">多层归属框</button>
+            <button type="button" data-boundary-mode="flat" aria-pressed="false">只留一层分区</button>
+            <button type="button" data-arch-reset>恢复全图</button>
+          </div>
+          <div class="arch-address-box" aria-live="polite"><div data-arch-address>点一个零件，看完整归属路径；点一个区域标题，看这一层的含义。</div>
+            <div data-arch-frame-detail>最外框表示逻辑资源域，不表示所有对象在一块内存里。每层边界的标题说明分组依据。</div></div>
+        </div>
+      <div class="arch-canvas"><svg viewBox="0 0 1280 980" role="img" aria-labelledby="cas-layers-archify-diagram-title cas-layers-archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
+        <title id="cas-layers-archify-diagram-title">一条 CAS 里，四层各管一段</title>
+        <desc id="cas-layers-archify-diagram-description">A architecture diagram generated by Archify.</desc>
+        <!-- Definitions -->
+        <defs>
+          <marker id="cas-layers-arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-default" />
+          </marker>
+          <marker id="cas-layers-arrowhead-emphasis" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-emphasis" />
+          </marker>
+          <marker id="cas-layers-arrowhead-security" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-security" />
+          </marker>
+          <marker id="cas-layers-arrowhead-dashed" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-dashed" />
+          </marker>
+          <pattern id="cas-layers-grid" width="40" height="40" patternUnits="userSpaceOnUse">
+            <path d="M 40 0 L 0 0 0 40" class="c-grid" stroke-width="0.5"/>
+          </pattern>
+        </defs>
+
+        <!-- Background Grid -->
+        <rect width="100%" height="100%" fill="url(#cas-layers-grid)" />
+
+        <!-- Boundaries (behind everything) -->
+        <g class="arch-frame" data-frame="soft" data-depth="1" data-frame-flat="false" data-frame-kind="logical" role="button" tabindex="0" aria-pressed="false" aria-label="你的代码"><title>这一层知道「要对 x 做什么」：加一、换成新节点、抢锁。它不知道缓存行现在是 M 还是 I，也不决定谁先到。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="0" data-frame-members="loop" x="68" y="38" width="684" height="194" rx="12" class="c-region" stroke-width="1"/>
+        <text x="76" y="56" class="t-cloud" font-size="9" font-weight="600">你的代码</text></g>
+
+        <g class="arch-frame" data-frame="cpu" data-depth="1" data-frame-flat="false" data-frame-kind="contains" role="button" tabindex="0" aria-pressed="false" aria-label="处理器内部"><title>两个核各自的指令在这里执行，各自持有一份这条行的副本（M / E / S / I）。取独占那一步不能停在半路。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="1" data-frame-members="instr line other" x="68" y="268" width="1174" height="424" rx="12" class="c-region" stroke-width="1"/>
+        <text x="76" y="286" class="t-cloud" font-size="9" font-weight="600">处理器内部</text></g>
+
+        <g class="arch-frame" data-frame="coh" data-depth="1" data-frame-flat="false" data-frame-kind="logical" role="button" tabindex="0" aria-pressed="false" aria-label="核外的一致性系统"><title>图上画成独立一层，实际没有中央节点：互连把请求送到归属点，目录记着谁拥有哪条行，各核的缓存控制器负责改自己的状态。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="2" data-frame-members="coh" x="68" y="728" width="684" height="194" rx="12" class="c-region" stroke-width="1"/>
+        <text x="76" y="746" class="t-cloud" font-size="9" font-weight="600">核外的一致性系统</text></g>
+
+        <!-- Connection paths (before components for correct z-order) -->
+        <path data-edge-from="loop" data-edge-to="instr" data-edge-label="CAS(x, old, new)" data-edge-key="0" data-edge-id="call" data-composition-points="410,210;410,290" d="M 410 210 L 410 290" class="a-default" stroke-width="1.5" marker-end="url(#cas-layers-arrowhead)"/>
+        <path data-edge-from="instr" data-edge-to="loop" data-edge-label="true / false" data-edge-key="1" data-edge-id="verdict" data-composition-points="730,365;790,365;790,135;730,135" d="M 730 365 L 782 365 Q 790 365 790 357 L 790 143 Q 790 135 782 135 L 730 135" class="a-dashed" stroke-width="1.5" marker-end="url(#cas-layers-arrowhead-dashed)"/>
+        <path data-edge-from="instr" data-edge-to="line" data-edge-label="要写：先拿独占" data-edge-key="2" data-edge-id="need" data-composition-points="410,440;410,520" d="M 410 440 L 410 520" class="a-default" stroke-width="1.5" marker-end="url(#cas-layers-arrowhead)"/>
+        <path data-edge-from="line" data-edge-to="coh" data-edge-label="申请独占权，拿到 M 才能写" data-edge-key="3" data-edge-id="ask" data-composition-points="410,670;410,750" d="M 410 670 L 410 750" class="a-default" stroke-width="1.5" marker-end="url(#cas-layers-arrowhead)"/>
+        <path data-edge-from="other" data-edge-to="coh" data-edge-label="同一行，也在申请" data-edge-key="4" data-edge-id="rival" data-composition-points="1060,440;1060,825;730,825" d="M 1060 440 L 1060 817 Q 1060 825 1052 825 L 730 825" class="a-default" stroke-width="1.5" marker-end="url(#cas-layers-arrowhead)"/>
+
+        <!-- Components -->
+        <g id="cas-layers-node-loop" data-nb="1" data-node-id="loop" data-node-label="你的 CAS 循环" tabindex="0" role="button" aria-label="Focus 你的 CAS 循环, 读一次 · 算一次 · 试一次, 你的代码" aria-pressed="false" data-node-kind="external" data-node-sublabel="读一次 · 算一次 · 试一次" data-node-context="你的代码">
+          <title>你的 CAS 循环 · 读一次 · 算一次 · 试一次 · 你的代码</title>
+          <rect x="90" y="60" width="640" height="150" rx="6" class="c-mask"/>
+          <rect x="90" y="60" width="640" height="150" rx="6" class="c-external" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="external" class="semantic-sigil s-external" transform="translate(96 66) scale(0.6875)">
+            <rect x="2.5" y="5" width="8.5" height="8" rx="1.5"/>
+            <path d="M8 2.5h5.5V8M13.5 2.5 7.5 8.5"/>
+          </g>
+          <rect class="nb-badge" x="667.6" y="68" width="50.4" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="692.8" y="79" font-size="8" text-anchor="middle">① 软件层</text>
+          <text class="nb-title" x="124" y="81" font-size="10.5" font-weight="600">你的 CAS 循环</text>
+          <line class="nb-hr" x1="98" y1="88" x2="722" y2="88"/>
+          <rect class="nb-cell" x="102.0" y="125" width="104.0" height="32" rx="4"/><text class="nb-cell-t" x="154.0" y="138" font-size="9" text-anchor="middle">① 读</text><text class="nb-cell-s" x="154.0" y="149" font-size="7.5" text-anchor="middle">old = load(x)</text>
+          <rect class="nb-cell" x="212.0" y="125" width="104.0" height="32" rx="4"/><text class="nb-cell-t" x="264.0" y="138" font-size="9" text-anchor="middle">② 算</text><text class="nb-cell-s" x="264.0" y="149" font-size="7.5" text-anchor="middle">new = f(old)</text>
+          <rect class="nb-cell" x="322.0" y="125" width="104.0" height="32" rx="4"/><text class="nb-cell-t" x="374.0" y="138" font-size="9" text-anchor="middle">③ 试</text><text class="nb-cell-s" x="374.0" y="149" font-size="7.5" text-anchor="middle">CAS(x, old, new)</text>
+          <rect class="nb-cell" x="432.0" y="125" width="104.0" height="32" rx="4"/><text class="nb-cell-t" x="484.0" y="138" font-size="9" text-anchor="middle">成</text><text class="nb-cell-s" x="484.0" y="149" font-size="7.5" text-anchor="middle">退出循环</text>
+          <rect class="nb-cell" x="542.0" y="125" width="104.0" height="32" rx="4"/><text class="nb-cell-t" x="594.0" y="138" font-size="9" text-anchor="middle">败</text><text class="nb-cell-s" x="594.0" y="149" font-size="7.5" text-anchor="middle">回 ① 重算</text>
+          <text class="nb-note" x="102" y="202" font-size="8">重试写在这一层；硬件只交回一个 true / false</text>
+        </g>
+
+        <g id="cas-layers-node-instr" data-nb="1" data-node-id="instr" data-node-label="一条原子指令" tabindex="0" role="button" aria-label="Focus 一条原子指令, 比较和条件写绑在一条里, 处理器内部" aria-pressed="false" data-node-kind="backend" data-node-sublabel="比较和条件写绑在一条里" data-node-context="处理器内部">
+          <title>一条原子指令 · 比较和条件写绑在一条里 · 处理器内部</title>
+          <rect x="90" y="290" width="640" height="150" rx="6" class="c-mask"/>
+          <rect x="90" y="290" width="640" height="150" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(96 296) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <rect class="nb-badge" x="658.0" y="298" width="60.0" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="688.0" y="309" font-size="8" text-anchor="middle">② 一条指令</text>
+          <text class="nb-title" x="124" y="311" font-size="10.5" font-weight="600">一条原子指令</text>
+          <line class="nb-hr" x1="98" y1="318" x2="722" y2="318"/>
+          <rect class="nb-cell" x="102.0" y="355" width="104.0" height="32" rx="4"/><text class="nb-cell-t" x="154.0" y="368" font-size="9" text-anchor="middle">arm64</text><text class="nb-cell-s" x="154.0" y="379" font-size="7.5" text-anchor="middle">CASAL x27, x1, [x0]</text>
+          <rect class="nb-cell" x="212.0" y="355" width="104.0" height="32" rx="4"/><text class="nb-cell-t" x="264.0" y="368" font-size="9" text-anchor="middle">x86</text><text class="nb-cell-s" x="264.0" y="379" font-size="7.5" text-anchor="middle">LOCK CMPXCHG [x], rdx</text>
+          <rect class="nb-cell" x="322.0" y="355" width="104.0" height="32" rx="4"/><text class="nb-cell-t" x="374.0" y="368" font-size="9" text-anchor="middle">交回</text><text class="nb-cell-s" x="374.0" y="379" font-size="7.5" text-anchor="middle">true / false</text>
+          <rect class="nb-cell" x="432.0" y="355" width="104.0" height="32" rx="4"/><text class="nb-cell-t" x="484.0" y="368" font-size="9" text-anchor="middle">不重试</text><text class="nb-cell-s" x="484.0" y="379" font-size="7.5" text-anchor="middle">一次就是一次</text>
+          <text class="nb-note" x="102" y="432" font-size="8">比较和条件写在这一条里，中间插不进别的指令</text>
+        </g>
+
+        <g id="cas-layers-node-line" data-nb="1" data-node-id="line" data-node-label="这条缓存行" tabindex="0" role="button" aria-label="Focus 这条缓存行, M / E / S / I 四种状态, 处理器内部" aria-pressed="false" data-node-kind="database" data-node-sublabel="M / E / S / I 四种状态" data-node-context="处理器内部">
+          <title>这条缓存行 · M / E / S / I 四种状态 · 处理器内部</title>
+          <rect x="90" y="520" width="640" height="150" rx="6" class="c-mask"/>
+          <rect x="90" y="520" width="640" height="150" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(96 526) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <rect class="nb-badge" x="638.8" y="528" width="79.2" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="678.4" y="539" font-size="8" text-anchor="middle">③ 每核一份副本</text>
+          <text class="nb-title" x="124" y="541" font-size="10.5" font-weight="600">这条缓存行</text>
+          <line class="nb-hr" x1="98" y1="548" x2="722" y2="548"/>
+          <rect class="nb-cell" x="102.0" y="585" width="104.0" height="32" rx="4"/><text class="nb-cell-t" x="154.0" y="598" font-size="9" text-anchor="middle">M</text><text class="nb-cell-s" x="154.0" y="609" font-size="7.5" text-anchor="middle">可写 · 最新</text>
+          <rect class="nb-cell" x="212.0" y="585" width="104.0" height="32" rx="4"/><text class="nb-cell-t" x="264.0" y="598" font-size="9" text-anchor="middle">E</text><text class="nb-cell-s" x="264.0" y="609" font-size="7.5" text-anchor="middle">可写 · 干净</text>
+          <rect class="nb-cell" x="322.0" y="585" width="104.0" height="32" rx="4"/><text class="nb-cell-t" x="374.0" y="598" font-size="9" text-anchor="middle">S</text><text class="nb-cell-s" x="374.0" y="609" font-size="7.5" text-anchor="middle">只读 · 可多份</text>
+          <rect class="nb-cell" x="432.0" y="585" width="104.0" height="32" rx="4"/><text class="nb-cell-t" x="484.0" y="598" font-size="9" text-anchor="middle">I</text><text class="nb-cell-s" x="484.0" y="609" font-size="7.5" text-anchor="middle">已失效</text>
+          <text class="nb-note" x="102" y="662" font-size="8">状态说的是「此刻谁能写」，不是「谁先来」</text>
+        </g>
+
+        <g id="cas-layers-node-other" data-nb="1" data-node-id="other" data-node-label="另一个核" tabindex="0" role="button" aria-label="Focus 另一个核, expected 也是 10, 处理器内部" aria-pressed="false" data-node-kind="backend" data-node-sublabel="expected 也是 10" data-node-context="处理器内部">
+          <title>另一个核 · expected 也是 10 · 处理器内部</title>
+          <rect x="900" y="290" width="320" height="150" rx="6" class="c-mask"/>
+          <rect x="900" y="290" width="320" height="150" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(906 296) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <rect class="nb-badge" x="1157.6" y="298" width="50.4" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="1182.8" y="309" font-size="8" text-anchor="middle">同时申请</text>
+          <text class="nb-title" x="934" y="311" font-size="10.5" font-weight="600">另一个核</text>
+          <line class="nb-hr" x1="908" y1="318" x2="1212" y2="318"/>
+          <text class="nb-k" x="912" y="368" font-size="9">expected</text><text class="nb-v" x="964.2" y="368" font-size="9">也是 10</text>
+          <text class="nb-k" x="912" y="382" font-size="9">要的</text><text class="nb-v" x="964.2" y="382" font-size="9">同一行的独占权</text>
+          <text class="nb-note" x="912" y="432" font-size="8">两边的 CAS 只在这条行上相遇</text>
+        </g>
+
+        <g id="cas-layers-node-coh" data-nb="1" data-node-id="coh" data-node-label="一致性点" tabindex="0" role="button" aria-label="Focus 一致性点, 谁拥有这条行 · 谁先, 核外的一致性系统" aria-pressed="false" data-node-kind="database" data-node-sublabel="谁拥有这条行 · 谁先" data-node-context="核外的一致性系统">
+          <title>一致性点 · 谁拥有这条行 · 谁先 · 核外的一致性系统</title>
+          <rect x="90" y="750" width="640" height="150" rx="6" class="c-mask"/>
+          <rect x="90" y="750" width="640" height="150" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(96 756) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <rect class="nb-badge" x="648.4" y="758" width="69.6" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="683.2" y="769" font-size="8" text-anchor="middle">④ 一致性系统</text>
+          <text class="nb-title" x="124" y="771" font-size="10.5" font-weight="600">一致性点</text>
+          <line class="nb-hr" x1="98" y1="778" x2="722" y2="778"/>
+          <rect class="nb-cell" x="102.0" y="815" width="104.0" height="32" rx="4"/><text class="nb-cell-t" x="154.0" y="828" font-size="9" text-anchor="middle">仲裁</text><text class="nb-cell-s" x="154.0" y="839" font-size="7.5" text-anchor="middle">同时来的请求排先后</text>
+          <rect class="nb-cell" x="212.0" y="815" width="104.0" height="32" rx="4"/><text class="nb-cell-t" x="264.0" y="828" font-size="9" text-anchor="middle">归属</text><text class="nb-cell-s" x="264.0" y="839" font-size="7.5" text-anchor="middle">谁的副本最新可写</text>
+          <rect class="nb-cell" x="322.0" y="815" width="104.0" height="32" rx="4"/><text class="nb-cell-t" x="374.0" y="828" font-size="9" text-anchor="middle">失效</text><text class="nb-cell-s" x="374.0" y="839" font-size="7.5" text-anchor="middle">授予一方，其他置 I</text>
+          <rect class="nb-cell" x="432.0" y="815" width="104.0" height="32" rx="4"/><text class="nb-cell-t" x="484.0" y="828" font-size="9" text-anchor="middle">执行</text><text class="nb-cell-s" x="484.0" y="839" font-size="7.5" text-anchor="middle">缓存控制器改状态</text>
+          <rect class="nb-cell" x="542.0" y="815" width="104.0" height="32" rx="4"/><text class="nb-cell-t" x="594.0" y="828" font-size="9" text-anchor="middle">不管</text><text class="nb-cell-s" x="594.0" y="839" font-size="7.5" text-anchor="middle">比较与重试</text>
+          <text class="nb-note" x="102" y="892" font-size="8">它只决定先后，不发「有人在改」的通知</text>
+        </g>
+
+        <!-- Connection labels -->
+        <g data-detail="context" data-edge-from="loop" data-edge-to="instr" data-edge-label="CAS(x, old, new)" data-edge-key="0" data-edge-id="call">
+          <rect x="366.6" y="240" width="86.8" height="14" rx="3" class="c-mask"/>
+          <text x="410" y="250" class="t-muted" font-size="8" text-anchor="middle">CAS(x, old, new)</text>
+        </g>
+        <g data-detail="context" data-edge-from="instr" data-edge-to="loop" data-edge-label="true / false" data-edge-key="1" data-edge-id="verdict">
+          <rect x="756.2" y="240" width="67.6" height="14" rx="3" class="c-mask"/>
+          <text x="790" y="250" class="t-messagebus" font-size="8" text-anchor="middle">true / false</text>
+        </g>
+        <g data-detail="context" data-edge-from="instr" data-edge-to="line" data-edge-label="要写：先拿独占" data-edge-key="2" data-edge-id="need">
+          <rect x="371.4" y="470" width="77.2" height="14" rx="3" class="c-mask"/>
+          <text x="410" y="480" class="t-muted" font-size="8" text-anchor="middle">要写：先拿独占</text>
+        </g>
+        <g data-detail="context" data-edge-from="line" data-edge-to="coh" data-edge-label="申请独占权，拿到 M 才能写" data-edge-key="3" data-edge-id="ask">
+          <rect x="345" y="700" width="130" height="14" rx="3" class="c-mask"/>
+          <text x="410" y="710" class="t-muted" font-size="8" text-anchor="middle">申请独占权，拿到 M 才能写</text>
+        </g>
+        <g data-detail="context" data-edge-from="other" data-edge-to="coh" data-edge-label="同一行，也在申请" data-edge-key="4" data-edge-id="rival">
+          <rect x="1016.6" y="620" width="86.8" height="14" rx="3" class="c-mask"/>
+          <text x="1060" y="630" class="t-muted" font-size="8" text-anchor="middle">同一行，也在申请</text>
+        </g>
+
+        <!-- Legend -->
+        <g data-legend data-legend-bridge>
+          <text x="40" y="944" class="t-primary" font-size="12" font-weight="650">Legend</text>
+          <g data-legend-semantic-kind="backend" data-legend-kind="backend" data-legend-label="处理器" data-legend-x="40" data-legend-baseline="964" data-legend-width="73">
+            <rect x="40" y="955" width="16" height="10" rx="2.5" class="c-backend" stroke-width="1"/>
+            <text x="62" y="964" class="t-muted" font-size="10" font-weight="500">处理器</text>
+          </g>
+          <g data-legend-semantic-kind="database" data-legend-kind="database" data-legend-label="缓存与一致性" data-legend-x="135" data-legend-baseline="964" data-legend-width="103">
+            <rect x="135" y="955" width="16" height="10" rx="2.5" class="c-database" stroke-width="1"/>
+            <text x="157" y="964" class="t-muted" font-size="10" font-weight="500">缓存与一致性</text>
+          </g>
+          <g data-legend-semantic-kind="external" data-legend-kind="external" data-legend-label="软件层" data-legend-x="260" data-legend-baseline="964" data-legend-width="73">
+            <rect x="260" y="955" width="16" height="10" rx="2.5" class="c-external" stroke-width="1"/>
+            <text x="282" y="964" class="t-muted" font-size="10" font-weight="500">软件层</text>
+          </g>
+        </g>
+      </svg></div>
+      <figcaption>从上往下是主路径，左边那条虚线是返回值。右边那个核说明了一件事：同一时刻想写这条行的不止一个，谁先由一致性点决定。</figcaption>
+      <div class="pano-ui"></div>
+      <p class="arch-hint"><span class="idle">点头上的任意一个框看它的关系，点区域标题看分组含义，点零件看完整归属路径</span><span class="focused">再点一次空白处取消</span></p>
+    </figure><p>图上把一致性系统画成一条独立的带，是因为它要<strong>同时</strong>和两个核打交道。真实的部件分散在各处：一致性点（末级缓存或目录）、互连、每个核的缓存控制器。没有一个叫「缓存调度器」的中央部件，一次请求也不是被它统一调度的。</p>
+<h2 id="它保证写权限不管你连着做的那三步"><span class="num">02</span>它保证写权限，不管你连着做的那三步</h2>
+<p>一致性协议要保证的，工程上写成两条：</p>
+<ul>
+<li>一个核写了某个地址，别的核之后读到的是新值（write propagation）；</li>
+<li>同一个地址的多次写，所有核看到的顺序一致（write serialization）。</li>
+</ul>
+<p>两条都只谈<strong>一个地址的读和写</strong>。没有一条谈「你连着做的三个动作要一起生效」。所以下面这段，在一致性协议完全正常的情况下也会丢更新：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-go">var plain int64
+
+for i := 0; i &lt; 8; i++ {
+    go func() {
+        for j := 0; j &lt; 200000; j++ {
+            plain = plain + 1     // 读、加一、写回
+        }
+    }()
+}
+</code></pre></div>
+<p>本机跑四次（Apple M4 · Go 1.26.2）：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>写法</th><th>四次运行数到的次数</th><th>丢了多少</th></tr></thead><tbody><tr><th>8 个 goroutine 各自 <code>plain = plain + 1</code></th><td data-label="四次运行数到的次数"><span class="tag tone-red">38 万 ~ 54 万</span></td><td data-label="丢了多少">106 万 ~ 122 万</td></tr><tr><th>同样的加法，改成 CAS 循环</th><td data-label="四次运行数到的次数"><span class="tag tone-green">160 万，四次都一样</span></td><td data-label="丢了多少">0</td></tr></tbody></table></div><p>每次加一都是一次合法的读、一次合法的写，全程都在一致性协议下。丢掉的那部分不是「某次写没生效」，是很多次「读到的值已经被别人改过了」。</p>
+<p>本机反汇编里，普通加一就是这样三条：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">; 普通 x = x + 1（otool，arm64）
+ldr  x1, [x0]        ; 读
+add  x1, x1, #1      ; 算
+str  x1, [x0]        ; 写
+</code></pre></div>
+<p>三条指令之间，任何一条别的核的写都可以插进来。一致性协议保证每条 <code>ldr</code> / <code>str</code> 看到的是当时的最新副本，它不保证这三条属于同一次加一。</p>
+<div class="callout tone-violet quote">
+      <span class="ic">💡</span>
+      <div><p><mark class="mk-blue">一致性协议让每一次读、每一次写都是对的；它管不了这些读写要不要一起生效。</mark></p>
+</div>
+    </div><div class="callout tone-amber">
+      <span class="ic">⚠</span>
+      <div><p><strong>M 状态不等于原子性。</strong></p>
+<p><code>M</code> 只说明这条行此刻只有本核一份可写副本、内存里那份是旧的。它不是一把持续到三步做完的锁：中间别的核可以来要这条行，这份副本被作废；等 <code>str</code> 执行时再把独占拿回来，写下去的就是算旧了的值。</p>
+</div>
+    </div><h2 id="它不是为-cas-造的"><span class="num">03</span>它不是为 CAS 造的</h2>
+<p>每一次走缓存的普通读、普通写，它都在工作。它不区分这次访问来自普通读、普通写还是原子指令，只回答「这条行现在在谁那里、别的副本要不要作废」。</p>
+<div class="tree" data-tree><ul class="tlist"><li class="has-kids">
+            <div class="tnode tone-violet" data-tree-node>
+              <span class="tcaret" aria-hidden="true"></span>
+              <b>缓存一致性协议</b>
+              
+              <span class="tnote">管一条缓存行的副本、写权限和访问先后</span>
+            </div>
+            <ul class="tlist"><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>普通读</b>
+              
+              <span class="tnote">没有有效副本就去取；取到的是当前最新那份</span>
+            </div>
+            
+          </li><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>普通写</b>
+              
+              <span class="tnote">先拿独占，把别的副本置 I，再写</span>
+            </div>
+            
+          </li><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>原子读改写</b>
+              
+              <span class="tnote">CAS / 交换 / 取加 / test-and-set 都走这条</span>
+            </div>
+            
+          </li><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>LL/SC</b>
+              
+              <span class="tnote">读时打标记，写时检查标记还在不在</span>
+            </div>
+            
+          </li><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>锁</b>
+              
+              <span class="tnote">mutex 的第一步也是一次原子读改写</span>
+            </div>
+            
+          </li><li>
+            <div class="tnode tone-muted" data-tree-node>
+              <span class="tdot" aria-hidden="true"></span>
+              <b>伪共享</b>
+              
+              <span class="tnote">两个变量同一条行，两边轮流抢写权</span>
+            </div>
+            
+          </li></ul>
+          </li></ul></div><p>这张树里只有「原子读改写」和「LL/SC」两支与 CAS 直接相关（区别在第 06 节）；其余四支跟 CAS 没有关系，协议照样为它们工作。</p>
+<p>CAS 是使用者里要求最高的一个。普通写只要「拿到写权限，然后写」；CAS 还要求拿到之后<strong>不许交出去</strong>。后面这一条不是协议给的，是原子指令执行时加的。</p>
+<div class="callout tone-violet">
+      <span class="ic">🧭</span>
+      <div><p><strong>反过来也不成立：不是有了一致性协议就有了 CAS。</strong></p>
+<p>协议只保证同一时刻没有两个核都拿着可写副本，它不会把任意几条指令粘成一条。要在它上面得到 CAS，还得有一条会「占住不放」的原子指令。</p>
+</div>
+    </div><h2 id="那条指令内部没有缝"><span class="num">04</span>那条指令内部没有缝</h2>
+<p>现在回到那个具体问题：A 已经发现 <code>x</code> 是 10、准备写 11，B 这时候去读，读到 10，也准备写，怎么办？</p>
+<p>先分清 B 的那次读排在哪儿。</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>B 的读排在哪儿</th><th>B 看到什么</th><th>会怎样</th></tr></thead><tbody><tr><th>A 的 CAS 之前</th><td data-label="B 看到什么">10</td><td data-label="会怎样">正常。B 之后自己的 CAS 会被排到 A 后面，那时才决定成败</td></tr><tr><th>插进「比较成功、还没写」的中间</th><td data-label="B 看到什么"><span class="tag tone-muted">看不到这个位置</span></td><td data-label="会怎样">这一段对别的核不可分割，只有改前和改后两个状态</td></tr><tr><th>A 的 CAS 之后</th><td data-label="B 看到什么">11</td><td data-label="会怎样">如果 B 拿 10 当 expected，它的 CAS 必然失败</td></tr></tbody></table></div><p>中间那一行是关键：CAS 的「比较」和「写入」对其他核是一个动作。硬件内部当然要花时间，但在这条行的访问顺序里，别的核的冲突操作只能排在它前面或后面，不能插进中间。</p>
+<p>把 CAS 拆成「比较 → 准备写入 → 写入」，是为了讲解。Intel 手册里 CMPXCHG 的伪代码是（<code>accumulator</code> 里放 expected，<code>DEST</code> 是内存里的操作数）：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">TEMP := DEST
+IF accumulator = TEMP
+    THEN ZF := 1; DEST := SRC;
+    ELSE ZF := 0; accumulator := TEMP; DEST := TEMP;
+FI
+</code></pre></div>
+<p>加上 LOCK 前缀之后，这一整段是一个原子操作。手册还写了一句容易漏掉的：比较失败时目标操作数也会被写一次（把旧值写回去），「处理器不会只产生 locked read 而不产生 locked write」。所以一次失败的 CAS 也不是一次纯读。</p>
+<div class="callout tone-amber">
+      <span class="ic">🧱</span>
+      <div><p><strong>原子性以缓存行为单位。</strong></p>
+<p>操作数落在一条行里，处理器锁的是这条行的副本：P6 之后一般不再拉 LOCK# 总线信号，由缓存一致性机制保证这一条指令对内存是原子的（Intel 手册的原话）。跨两条行，或者内存不可缓存，就只能退回去锁总线；按 Linux 内核文档的记法，这样的代价是几千个周期，还会挡住其他核的访存。</p>
+<p>所以对齐、以及「别把热点变量挤在一行」，影响的不只是这一个核的速度。</p>
+</div>
+    </div><h2 id="两个-cas-同时到谁先"><span class="num">05</span>两个 CAS 同时到，谁先</h2>
+<p>两个核可以同时读到 10，也可以同时在寄存器里算出 11。它们不能同时成功，因为两个 CAS 会在一致性点上被排出一个先后。</p>
+<div class="seqd has-grid" data-seq data-n="4" data-segs="[{&quot;from&quot;:1,&quot;to&quot;:3,&quot;label&quot;:&quot;两个请求，一次仲裁&quot;},{&quot;from&quot;:4,&quot;to&quot;:6,&quot;label&quot;:&quot;A 独占的这一段&quot;},{&quot;from&quot;:7,&quot;to&quot;:10,&quot;label&quot;:&quot;B 排在后面&quot;}]"
+      style="--seq-fill:url(#s-fill-1);--seq-open:url(#s-fill-1-open)">
+      <svg class="seqd-svg" aria-hidden="true">
+        <defs>
+          <marker id="s-fill-1" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+          <marker id="s-fill-1-open" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10" fill="none" stroke="currentColor" stroke-width="1.4"/>
+          </marker>
+        </defs>
+      </svg>
+      <div class="seqd-head"><div class="scell"><div class="spart tone-blue" data-id="a">
+          <b>CPU A</b><small>CAS(x, 10, 11)</small>
+        </div></div><div class="scell"><div class="spart tone-violet" data-id="c">
+          <b>一致性系统</b><small>仲裁 + 归属 + 失效</small>
+        </div></div><div class="scell"><div class="spart tone-green" data-id="b">
+          <b>CPU B</b><small>CAS(x, 10, 11)</small>
+        </div></div><div class="scell"><div class="spart tone-muted" data-id="s">
+          <b>B 的循环</b><small>外层代码</small>
+        </div></div></div>
+      <div class="seqd-body"><div class="smsg" data-from="a" data-to="c" data-kind="sync" data-i="1" data-note="1"><span class="snote">1</span><span class="slabel">我要这行的独占权</span></div><div class="smsg" data-from="b" data-to="c" data-kind="sync" data-i="2" data-note="2"><span class="snote">2</span><span class="slabel">我也要</span></div><div class="smsg is-self" data-from="c" data-to="c" data-kind="self" data-i="3" data-note="3"><span class="snote">3</span><span class="slabel">先 A 后 B</span></div><div class="smsg" data-from="c" data-to="a" data-kind="reply" data-i="4" data-note="4"><span class="snote">4</span><span class="slabel">授予 M，B 的副本置 I</span></div><div class="smsg is-self" data-from="a" data-to="a" data-kind="self" data-i="5" data-note="5"><span class="snote">5</span><span class="slabel">10 == 10，写 11</span></div><div class="smsg is-self" data-from="a" data-to="a" data-kind="self" data-i="6" data-note="6"><span class="snote">6</span><span class="slabel">原子操作结束</span></div><div class="smsg" data-from="c" data-to="b" data-kind="reply" data-i="7" data-note="7" style="margin-top:40px"><span class="snote">7</span><span class="slabel">轮到 B，最新值是 11</span></div><div class="smsg is-self" data-from="b" data-to="b" data-kind="self" data-i="8" data-note="8"><span class="snote">8</span><span class="slabel">11 ≠ 10，失败</span></div><div class="smsg" data-from="b" data-to="s" data-kind="reply" data-i="9" data-note="9"><span class="snote">9</span><span class="slabel">交回 false</span></div><div class="smsg is-self" data-from="s" data-to="s" data-kind="self" data-i="10" data-note="10"><span class="snote">10</span><span class="slabel">重读再算</span></div></div>
+    </div><p>拆开看只有三件事：请求、先后、数据。B 不是在「想写的时候被告知有人在改」，它是排到后面、拿到 11 之后自己比较出来的。</p>
+<p>把两个核的副本状态顺着这条时间线列出来：</p>
+<table>
+<thead>
+<tr>
+<th>时刻</th>
+<th>A 的副本</th>
+<th>B 的副本</th>
+<th>这条行的写权限在谁手上</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>一开始</td>
+<td>S · 10</td>
+<td>S · 10</td>
+<td>谁都没有</td>
+</tr>
+<tr>
+<td>两个核都要写</td>
+<td>申请独占</td>
+<td>申请独占</td>
+<td>一致性点在排先后</td>
+</tr>
+<tr>
+<td>A 先拿到</td>
+<td><strong>M · 10</strong></td>
+<td>I</td>
+<td>A</td>
+</tr>
+<tr>
+<td>A 比较并写入</td>
+<td><strong>M · 11</strong></td>
+<td>I</td>
+<td>A</td>
+</tr>
+<tr>
+<td>轮到 B</td>
+<td>I</td>
+<td><strong>M · 11</strong></td>
+<td>B</td>
+</tr>
+</tbody>
+</table>
+<p>第 3、4 行：A 拿到独占时，B 的副本已经置 I 了。B 不是从自己那份失效副本里读，也不是一直等下去；它的请求排在 A 这一段之后，拿到的是带 11 的那份。它拿 10 去比，比不上，返回 <code>false</code>。</p>
+<p>（x86 上这一次失败的尝试也要过一遍写周期，见第 04 节手册那句。）</p>
+<div class="callout tone-violet quote">
+      <span class="ic">🎯</span>
+      <div><p><mark class="mk-blue">失败不是被拦下来的，是比较出来的。</mark></p>
+</div>
+    </div><div class="callout tone-amber">
+      <span class="ic">⚠</span>
+      <div><p><strong>「一致性系统告诉它有人在改，所以直接失败」不成立。</strong></p>
+<p>仲裁只排先后，不发「有人在改」的通知。CAS 只有两种结局：拿到行之后值等于 expected（写），或者不等于（不写）。两种都要先把行拿到手。</p>
+</div>
+    </div><div class="callout tone-amber">
+      <span class="ic">⏱</span>
+      <div><p><strong>读到 11 也不等于「拿到了绝对最新的值」。</strong></p>
+<p>一致性协议只保证同一个地址的写有一个所有核都遵守的顺序；CAS 看到的是这个顺序里排在它前面的最后一个值。软件拿到 <code>false</code> 的时候，那条行可能已经被改成了 12。</p>
+</div>
+    </div><p>同一件事还有另一面：CAS 只比较值。这条行如果从 10 改成 11 又改回 10，最后那次 CAS 会成功，就像中间什么都没发生。这叫 ABA。要识别它，得让比较的对象带上版本号：把版本号和值塞进同一个字，或者换成带戳的引用。</p>
+<p>主内存里可能还是 10。B 不会因此读到 10：协议保证后续的读拿到最新副本，失效的那份不会被读。数据具体从哪里来（另一个核的缓存、共享的末级缓存、内存），取决于实现。</p>
+<p>先后只保证有一个顺序，不保证轮流。某个核可能连续输很多次；重试只保证每次尝试有确定的结果，不保证最终能成功。</p>
+<h2 id="cas-与-llsc两条路两种失败"><span class="num">06</span>CAS 与 LL/SC：两条路，两种失败</h2>
+<p>前面讲的都是 CAS 类指令：一条指令内部完成「比较 + 条件写」。还有一类实现用两条指令拼出同一个语义，叫 LL/SC（load-linked / store-conditional）。</p>
+<p>Arm 的叫法：</p>
+<ul>
+<li><code>LDXR</code>：读一个值，同时把这个物理地址标成「我读过」；</li>
+<li><code>STXR</code>：只有当标记还在时才写，成功返回 0，没写返回 1。</li>
+</ul>
+<p>标记什么时候没了：别的核写了这个地址、中间发生了上下文切换，或者实现自己判断这次不保险。</p>
+<p>本机把 <code>atomic.CompareAndSwapInt64</code> 编出来的指令是这样的（注释是后加的）：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">ldar   x2, [x0]            ; 读当前值
+add    x1, x2, x1          ; 算出 new
+ldrb   w3, [x27, #0x4aa]   ; 一个全局的 CPU 特性字节（省了算页地址的 adrp）
+tbz    w3, #0, slow        ; 没有 LSE 就走慢路径
+mov    x27, x2
+casal  x27, x1, [x0]       ; 有 LSE：一条指令完成比较 + 条件写
+cmp    x27, x2
+cset   x3, eq
+b      done
+slow:
+ldaxr  x27, [x0]           ; 没有 LSE：读，并打下独占标记
+cmp    x27, x2
+b.ne   give_up
+stlxr  w27, x1, [x0]       ; 标记还在才写，返回 0 / 1
+cbnz   w27, slow           ; 没写成，回到 ldaxr 再来一次
+give_up:
+cset   x3, eq
+done:
+mov    x0, x3
+ret
+</code></pre></div>
+<p>从这段里能读出两件事。</p>
+<p>第一，没有 <code>call</code>、没有 <code>svc</code>：最后一条 <code>ret</code> 就回去了。它是一条用户态指令序列，不进内核，失败之后退回的也是你自己那层代码。</p>
+<p>第二，同一个 <code>CompareAndSwap</code> 编出了两条路。先查一个 CPU 特性字节：有这个扩展（Armv8.1 的 LSE 原子指令）就走一条 <code>casal</code>；没有就走 <code>ldaxr</code> / <code>stlxr</code> 那一对，写不成时 <code>cbnz</code> 跳回 <code>ldaxr</code>。这两种实现都是 Arm 架构允许的，同一份 Go 代码要同时跑在新旧核上。</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>对比项</th><th>CAS 类（x86、arm64 LSE）</th><th>LL/SC 类（老 Arm、RISC-V）</th></tr></thead><tbody><tr><th>几条指令</th><td data-label="CAS 类（x86、arm64 LSE）">1 条</td><td data-label="LL/SC 类（老 Arm、RISC-V）">2 条</td></tr><tr><th>成功条件</th><td data-label="CAS 类（x86、arm64 LSE）">当前值等于 expected</td><td data-label="LL/SC 类（老 Arm、RISC-V）">读时打的标记还在</td></tr><tr><th>失败的常见原因</th><td data-label="CAS 类（x86、arm64 LSE）">值已经被改过</td><td data-label="LL/SC 类（老 Arm、RISC-V）">标记被别的写清掉；也可能无故失败</td></tr><tr><th>谁重新读一遍</th><td data-label="CAS 类（x86、arm64 LSE）">外层代码</td><td data-label="LL/SC 类（老 Arm、RISC-V）">外层代码；配对重试可能写在编译器生成的序列里</td></tr></tbody></table></div><div class="callout tone-red">
+      <span class="ic">⚠</span>
+      <div><p><mark class="mk-blue">「CAS 失败 = 有人先改了值」只在 CAS 类指令上成立。</mark></p>
+<p><code>STXR</code> 返回 1 时，值可能根本没变，变的只是标记。C++ 的 <code>compare_exchange_weak</code> 允许无故失败，就是给这类平台留的口子，所以它必须放在循环里。</p>
+</div>
+    </div><p>关于「底层到底重不重试」，要分清三段：</p>
+<table>
+<thead>
+<tr>
+<th>谁在重试</th>
+<th>重试的是哪一段</th>
+<th>会不会替你重算</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>硬件</td>
+<td>不重试。一次 CAS 就是一次尝试</td>
+<td>—</td>
+</tr>
+<tr>
+<td>编译器 / 库生成的序列</td>
+<td>LL/SC 那一对：<code>ldaxr</code> 读、<code>stlxr</code> 写（本机那条 <code>cbnz</code>）</td>
+<td>不会</td>
+</tr>
+<tr>
+<td>外层代码</td>
+<td>整个循环：重读、重算、再试</td>
+<td>会</td>
+</tr>
+</tbody>
+</table>
+<h2 id="三件事别混一致性原子性顺序"><span class="num">07</span>三件事别混：一致性、原子性、顺序</h2>
+<p>这三件事都能让并发代码出错，但由不同的机制保证，症状也不同。</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>事项</th><th>它管什么</th><th>谁保证</th><th>出问题时的症状</th></tr></thead><tbody><tr><th>缓存一致性</th><td data-label="它管什么">同一条缓存行在多个核里的副本，以及谁能写</td><td data-label="谁保证">一致性协议 + 互连</td><td data-label="出问题时的症状">读到已经失效的旧副本（正常不该发生）</td></tr><tr><th>原子性</th><td data-label="它管什么">一次读改写能不能被别的核插进来</td><td data-label="谁保证">原子指令 + 独占的那一段</td><td data-label="出问题时的症状">两个核都以为自己加了一次，结果只加了一次</td></tr><tr><th>内存顺序</th><td data-label="它管什么">不同地址的读写，别的核按什么顺序看见</td><td data-label="谁保证">acquire / release、屏障、语言内存模型</td><td data-label="出问题时的症状">flag 已经可见，flag 指向的 data 还是旧的</td></tr><tr><th>重试策略</th><td data-label="它管什么">失败了要不要再来、来几次、要不要让出</td><td data-label="谁保证">外层代码或库</td><td data-label="出问题时的症状">CAS 循环一直空转，CPU 占满但没进展</td></tr></tbody></table></div><p>缓存一致性和原子性都正常，内存顺序照样可以出错：两个核都按自己的代码顺序执行，别的核看到的却是另一个顺序。这一段在 <a href="../lock-memory-barriers/">锁为什么慢：写缓冲、失效队列和内存屏障</a> 里拆过。</p>
+<p>出问题时，按症状先定位到层：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>看到的症状</th><th>先查哪一层</th><th>常见原因</th></tr></thead><tbody><tr><th>计数少了、状态被覆盖</th><td data-label="先查哪一层">原子性</td><td data-label="常见原因">读-算-写没包在一条原子操作里</td></tr><tr><th>CAS 一直返回 false</th><td data-label="先查哪一层">重试策略</td><td data-label="常见原因">抢的人太多、伪共享；换原子加或锁，或者加退避</td></tr><tr><th>一个线程看到 flag，却读到旧 data</th><td data-label="先查哪一层">内存顺序</td><td data-label="常见原因">store 用了 relaxed，缺 release / acquire</td></tr><tr><th>偶尔读到不该出现的旧值</th><td data-label="先查哪一层">数据竞争</td><td data-label="常见原因">普通变量跨线程共享，既没有原子类型也没有锁</td></tr></tbody></table></div><p>锁是怎么在这条 CAS 上面一层层长出来的（内核和库各补了什么），在 <a href="../lock-layers/">一把锁是怎么一层层长出来的</a> 里。</p>
+<h2 id="自测"><span class="num">08</span>自测</h2>
+<div class="quiz"><details>
+        <summary>一条 CAS 的原子性，是一致性协议保证的吗？</summary>
+        <div class="a"><p>协议只保证一件事：同一时刻没有两个核拿着同一条缓存行的可写副本，一个核写过之后别的核不会读到失效副本。
+「比较和写入之间插不进别的核」是原子指令执行时加的：它拿到独占权之后不交出去，直到这一条指令结束。
+至于失败了要不要再来，协议和指令都不管，写在最外层那个循环里。合起来才是 CAS。</p>
+</div>
+      </details><details>
+        <summary>两个核同时执行 CAS(x, 10, 11)，会不会都成功？</summary>
+        <div class="a"><p>不会。两个核可以同时读到 10，也可以同时算出 11，但两个 CAS 会在一致性点上被排出一个先后。
+先到的那个拿到独占权，看到 10，写入 11；后到的那个拿到的行里已经是 11，和 expected 的 10 比不过，返回 false。
+最终 x 是 11，不是 12。要让两个加一都生效，失败的那个必须回到外层重新读 11、算 12、再试一次。</p>
+</div>
+      </details><details>
+        <summary>A 的 CAS 已经比较成功、还没写入，B 这时候能读到 10 吗？</summary>
+        <div class="a"><p>读不到「这个中间状态」。对别的核来说，比较和写入是一个动作，只有改前和改后两个值。
+B 读到 10 是可能的，但那说明 B 的那次读排在 A 的 CAS 之前。这不破坏任何东西：B 之后执行 CAS 时会被排到 A 后面，拿 10 去和 11 比，失败。</p>
+</div>
+      </details><details>
+        <summary>LL/SC 上，STXR 返回 1 一定是因为值被改了吗？</summary>
+        <div class="a"><p>不一定。STXR 检查的是 LDXR 打下的那个标记，不是值。别的核写过这条行会让标记失效，但中间发生上下文切换、或者实现自己判断这次不保险，也会让 STXR 返回 1，此时值可能一点没变。
+所以 C++ 的 compare_exchange_weak 允许无故失败，必须放在循环里；而「CAS 失败 = 有人先改了值」这句话只对 CAS 类指令成立。</p>
+</div>
+      </details></div>
+
+    <footer>
+      <span>CAS 是缓存一致性协议实现的吗</span>
+      <span>最后更新 2026-11-04 · 单文件可离线打开</span>
+    </footer>
+  </main>
+</div>
+
+<script src="../../assets/app.js?v=33978e3b4d"></script>
+</body>
+</html>
