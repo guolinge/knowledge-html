@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-has-toc="1">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>内存屏障：谁在挡，挡的是什么</title>
+<meta name="description" content="三类屏障各管对角的一格：写屏障管写—写，读屏障管读—读，交叉的两格只有全屏障管。能力在 CPU，指令由编译器和运行时挑，语义由语言内存模型定义，操作系统不在这条链上。业务代码不写屏障；但「读」和「写」一样要进同步区间 —— 顺带说清 return a.balance 里那次读发生在什么时候。" />
+<link rel="stylesheet" href="../../assets/theme.css?v=19aa345f51" />
+  <link rel="stylesheet" href="../../assets/blocks.css?v=bb15413b7c" />
+  <link rel="stylesheet" href="../../assets/archify-embed.css?v=68fec0b81b" />
+</head>
+<body>
+<div id="progress"></div>
+<div id="tocScrim"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
+    <a class="brand" href="../../index.html"><span class="dot"></span>知识笔记</a>
+    
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="toc" id="toc">
+      <p class="toc-title">目录</p>
+      <a href="../../index.html" class="sub">← 全部笔记</a>
+      <a href="#这次的四个问题">这次的四个问题</a>
+      <a href="#三个名字先翻译成哪一对不许换位">三个名字，先翻译成「哪一对不许换位」</a>
+      <a href="#看到-ready却没看到-data是怎么发生的">「看到 ready，却没看到 data」是怎么发生的</a>
+      <a href="#谁提供四层你只碰最上面一层">谁提供：四层，你只碰最上面一层</a>
+      <a href="#业务代码里什么时候轮到你自己写屏障">业务代码里什么时候轮到你自己写屏障</a>
+      <a href="#读一个变量为什么也要加锁">读一个变量，为什么也要加锁</a>
+      <a href="#三条带走">三条带走</a>
+      <a href="#一句话" class="sub">一句话</a>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow">● CPU · 内存顺序</span>
+      <h1>内存屏障：谁在挡，挡的是什么</h1>
+      <p class="lede">三类屏障各管对角的一格：写屏障管写—写，读屏障管读—读，交叉的两格只有全屏障管。能力在 CPU，指令由编译器和运行时挑，语义由语言内存模型定义，操作系统不在这条链上。业务代码不写屏障；但「读」和「写」一样要进同步区间 —— 顺带说清 return a.balance 里那次读发生在什么时候。</p>
+    </div>
+
+
+    <div class="provenance"><span><b>来源</b> Linux 内核 · memory-barriers.txt（写屏障只对 store 偏序，读屏障只对 load 偏序，general barrier 两边都管）https://www.kernel.org/doc/Documentation/memory-barriers.txt · cppreference · atomic_thread_fence（release fence 比 store-release 宽：前面的读写都不能越过后面的 store）https://en.cppreference.com/w/cpp/atomic/atomic_thread_fence · C++ 标准 [atomics.fences]（fence 的 acquire / release 语义与 synchronizes-with 规则）https://eel.is/c++draft/atomics.fences · Go 内存模型（数据竞争定义、Unlock→Lock / send→receive / atomic 的 happens-before、多字读可能撕裂、Don't be clever）https://go.dev/ref/mem · Go 语言规范 · Return statements / Defer statements（带结果的 return 先给结果参数赋值，再执行 deferred 函数）https://go.dev/ref/spec · Go 竞态检测器文档（-race 的报告格式）https://go.dev/doc/articles/race_detector · Arm A64 · CASAL https://www.scs.stanford.edu/~zyedidia/arm64/casal.html · Arm A64 · LDADDAL https://www.scs.stanford.edu/~zyedidia/arm64/ldaddal.html · 本机反汇编（Go 1.26.2 · Apple M4 · otool）：sync.Mutex 的快路径是 casal + ldaddal，没有单独的 dmb；没有 LSE 时走 ldaxr/stlxr · 本机实测（Go 1.26.2 · -race）：Balance 不加锁时，报告 Read at Balance 与 Previous write at Deposit · 相邻笔记：notes/lock-memory-barriers（写缓冲、失效队列、四种重排、屏障的代价）、notes/lock-layers（硬件、内核、库各为锁补了什么）</span><span><b>生成</b> 2026-11-04</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">内存屏障</span> <span class="tag tone-muted">happens-before</span> <span class="tag tone-muted">Go 内存模型</span> <span class="tag tone-muted">Mutex</span> <span class="tag tone-muted">atomic</span> <span class="tag tone-muted">数据竞争</span></span></div>
+
+<blockquote>
+<p>「写屏障保证屏障之前的写必须先于屏障之后的写可见」——这句话里的「可见」没说是谁看，「不能挪到后面」也没说和谁比。三类屏障的定义读起来绕，是因为它们省掉了同一个东西：<strong>这一对操作分别是什么，谁在观察</strong>。</p>
+<p>补上这两项，三句话就变成：写屏障管「写 → 写」，读屏障管「读 → 读」，交叉的两格只有全屏障管。再往下是两个问题：这些屏障由谁提供、你写业务代码时要不要碰；以及为什么连 <code>return a.balance</code> 这种读也要加锁。</p>
+</blockquote>
+<h2 id="这次的四个问题"><span class="num">00</span>这次的四个问题</h2>
+<div class="pq tone-violet">
+      <button class="pq-open" type="button" data-pq-open="pq-1" aria-haspopup="dialog" aria-controls="pq-1">
+        <span class="pq-ic" aria-hidden="true">▤</span>
+        <span class="pq-txt"><b>问题原文</b><span class="pq-sub">四问 · 第一问里粘的三段定义也照录</span></span>
+        <span class="pq-hint">点开阅读 →</span>
+      </button>
+      <dialog class="pq-dialog" id="pq-1" aria-labelledby="pq-1-t">
+        <div class="pq-panel" tabindex="-1">
+          <div class="pq-head">
+            <div class="pq-ht"><b id="pq-1-t">问题原文</b><span class="pq-sub">四问 · 第一问里粘的三段定义也照录</span></div>
+            <button class="pq-close" type="button" data-pq-close aria-label="关闭">✕</button>
+          </div>
+          <p class="pq-note">只收问题，没有搬当时的回答。三段定义保留了原样，方便和下面的翻译对照。</p>
+          <div class="pq-body"><h4>1 · 三句定义看不懂</h4>
+<blockquote>
+<ol>
+<li>
+<p>写屏障（Store Barrier / Write Barrier）保证：屏障之前的「写」，必须先于屏障之后的「写」对其他 CPU 可见。</p>
+</li>
+<li>
+<p>读屏障（Load Barrier / Read Barrier）保证：屏障之前的「读」，不能被挪到屏障之后；屏障之后的读不能被提前到之前。</p>
+</li>
+<li>
+<p>全屏障（Full Barrier）保证屏障两侧的读写都不能随意跨越。</p>
+</li>
+</ol>
+<p>能翻译成人话吗，有点看不懂。</p>
+</blockquote>
+<h4>2 · 为什么锁和原子操作会跟屏障扯上关系</h4>
+<blockquote>
+<p>Go 里的 <code>sync.Mutex</code>、<code>sync/atomic</code>，这个不是锁和原子操作吗，为什么跟内存屏障扯上关系了？</p>
+</blockquote>
+<h4>3 · 屏障是谁提供的</h4>
+<blockquote>
+<p>内存屏障这个逻辑是谁提供的，是编程语言吗，还是操作系统？我在写业务代码的时候需要调用特定的接口吗，还是编程语言帮我抹除了这层差异？</p>
+</blockquote>
+<h4>4 · 为什么读也要锁</h4>
+<blockquote>
+<p>为什么 return 一个变量，也需要 lock 起来？</p>
+</blockquote>
+</div>
+        </div>
+      </dialog>
+    </div><h2 id="三个名字先翻译成哪一对不许换位"><span class="num">01</span>三个名字，先翻译成「哪一对不许换位」</h2>
+<p>三类屏障的区别只有一件事：它挡住的是哪两个方向之间的换位。下面三段各用一小段代码，看它夹在哪两个操作之间。</p>
+<p><strong>写屏障</strong>，夹在两次写之间：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">data = 42
+写屏障
+ready = 1
+</code></pre></div>
+<p>屏障之前的<strong>写</strong>，必须先于屏障之后的<strong>写</strong>被别的核看到。它不管读：既不要求前面的读先完成，也不要求后面的读等谁。</p>
+<p><strong>读屏障</strong>，夹在两次读之间：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">if ready == 1 {
+    读屏障
+    x = data
+}
+</code></pre></div>
+<p>屏障之前的<strong>读</strong>，必须先于屏障之后的<strong>读</strong>生效。它不管写。</p>
+<p><strong>全屏障</strong>，两侧的读写都不许越过去。它比前两个多管两件事：前面的写不能越到后面的读之后，前面的读也不能越到后面的写之后。</p>
+<p>三类放在一张表里，看的是「前一个操作 × 后一个操作」：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>前一个操作</th><th>后一个操作是写</th><th>后一个操作是读</th></tr></thead><tbody><tr><th>是写</th><td data-label="后一个操作是写"><span class="tag tone-green">写屏障</span></td><td data-label="后一个操作是读"><span class="tag tone-amber">只有全屏障</span></td></tr><tr><th>是读</th><td data-label="后一个操作是写"><span class="tag tone-amber">只有全屏障</span></td><td data-label="后一个操作是读"><span class="tag tone-green">读屏障</span></td></tr></tbody></table></div><p>只有对角两格有专门的屏障。交叉的两格（写 → 读、读 → 写）没有对应的「半屏障」，只能上全屏障。这就是「全屏障最强」的具体含义，不是一句形容词。</p>
+<div class="callout tone-violet">
+      <span class="ic">🧭</span>
+      <div><p><strong>名字说的是核心用途，不是精确的覆盖面。</strong></p>
+<p>C++ 标准里的 release fence 比「只管写 → 写」再宽一点：它要求屏障前的<strong>所有读写</strong>都不能越到屏障后的<strong>写</strong>之后；acquire fence 对称。Linux 内核的 <code>smp_wmb</code> / <code>smp_rmb</code> 是更窄的版本，上面那张表按它画。</p>
+<p>Go 不给你选这些，所以这层差异平时碰不到；读 cppreference 时别被绕进去。</p>
+</div>
+    </div><h2 id="看到-ready却没看到-data是怎么发生的"><span class="num">02</span>「看到 ready，却没看到 data」是怎么发生的</h2>
+<p>生产者写 <code>data = 42</code>，再写 <code>ready = 1</code>；消费者看到 <code>ready == 1</code> 之后去读 <code>data</code>。直觉是「通知都到了，货应该也到了」。有至少三种情况会让它不成立：</p>
+<div class="cards" data-cols="3"><div class="ccard tone-amber">
+          <span class="tag tone-amber">源码 → 机器码</span>
+          <h4>编译器重排</h4>
+          <p>只要单线程结果不变，它可以把 <code>ready</code> 的写提到 <code>data</code> 前面</p>
+          
+          
+        </div><div class="ccard tone-blue">
+          <span class="tag tone-blue">指令 → 执行</span>
+          <h4>CPU 乱序执行</h4>
+          <p>两条不相干的指令，谁先算完谁先走</p>
+          
+          
+        </div><div class="ccard tone-violet">
+          <span class="tag tone-violet">执行完 → 别人看见</span>
+          <h4>写缓冲与失效队列</h4>
+          <p>指令退休了，数据还躺在自己的写缓冲里；作废请求也可能只是记了个账</p>
+          
+          
+        </div></div><p>三种原因里的任何一种，都足以让消费者看到 <code>ready == 1</code>、<code>data</code> 还是旧值。屏障管的就是这三种「插队」：在它这一条线上，前面的先发出去，后面的才准走。</p>
+<p>写缓冲怎么排空、失效队列怎么让「作废」晚生效、两个核怎么都读到 0 —— 完整时序在 <a href="../lock-memory-barriers/">锁为什么慢：写缓冲、失效队列和内存屏障</a> 的 §03 和 §04，这里只留结论。</p>
+<div class="callout tone-amber">
+      <span class="ic">🧱</span>
+      <div><p><strong>屏障不让代码暂停，也不刷缓存。</strong></p>
+<p>它做的是等：等前面的写真的发出去，等该收的作废真的生效，然后才放后面的操作过去。所以空转里插一条屏障几乎测不出成本（另一篇在 M1 Max 上量到 +0.2 ns）；贵的是它要等的那笔账。</p>
+</div>
+    </div><h2 id="谁提供四层你只碰最上面一层"><span class="num">03</span>谁提供：四层，你只碰最上面一层</h2>
+<p>「内存屏障是谁提供的」这个问题，答案要分四层。最底下的能力在 CPU，最上面的接口在你手里，中间有两层平时看不见。</p>
+<div class="pipe"><div class="lane tone-blue">
+        <div class="lane-meta">
+          <span class="ln">LAYER 01</span>
+          <b>你的代码</b>
+          <small>只表达意图：这两步有依赖</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>Mutex.Lock / Unlock</b>
+        <small>sync</small>
+        <span class="tag tone-blue">互斥</span>
+      </div><div class="pnode">
+        <b>atomic.Add / Store</b>
+        <small>sync/atomic</small>
+        <span class="tag tone-blue">原子</span>
+      </div><div class="pnode">
+        <b>ch &lt;- / &lt;-ch</b>
+        <small>chan</small>
+        <span class="tag tone-blue">传递</span>
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">语言把这些调用翻译成语义</span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-violet">
+        <div class="lane-meta">
+          <span class="ln">LAYER 02</span>
+          <b>语言内存模型</b>
+          <small>规定哪两步之间有先后</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>happens-before 规则</b>
+        
+        <span class="tag tone-violet">你能依赖的</span>
+      </div><div class="pnode">
+        <b>Unlock → Lock · send → receive</b>
+        
+        <span class="tag tone-violet">同步点</span>
+      </div><div class="pnode">
+        <b>atomic 按 seq_cst 排</b>
+        
+        <span class="tag tone-violet">最强的一档</span>
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">编译器按目标机器挑指令</span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-amber">
+        <div class="lane-meta">
+          <span class="ln">LAYER 03</span>
+          <b>编译器 / 运行时</b>
+          <small>可以重排、合并、提前读</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>重排与删除</b>
+        
+        <span class="tag tone-amber">允许</span>
+      </div><div class="pnode">
+        <b>选 casal / ldaddal / dmb</b>
+        
+        <span class="tag tone-amber">按架构</span>
+      </div></div>
+      </div><div class="conn">
+      <span class="stem"></span>
+      <span class="pill">机器码在 CPU 上跑</span>
+      <span class="stem"></span><span class="head"></span>
+    </div><div class="lane tone-green">
+        <div class="lane-meta">
+          <span class="ln">LAYER 04</span>
+          <b>CPU</b>
+          <small>决定写何时被另一个核看见</small>
+        </div>
+        <div class="lane-body"><div class="pnode">
+        <b>写缓冲 · 失效队列</b>
+        
+        <span class="tag tone-green">让写变慢</span>
+      </div><div class="pnode">
+        <b>缓存行所有权</b>
+        
+        <span class="tag tone-green">谁能写</span>
+      </div><div class="pnode">
+        <b>另一个核</b>
+        
+        <span class="tag tone-green">观察者</span>
+      </div></div>
+      </div></div><p>第二层值得单独说一句：<strong>语言内存模型才是「你能依赖什么」的清单</strong>。它告诉你 <code>Unlock</code> 到下一次 <code>Lock</code> 之间有一条完整的顺序、<code>send</code> 到对应的 <code>receive</code> 之间有一条、atomic 操作按顺序一致排。你照清单写，就不用管底下的指令长什么样。</p>
+<p>第三层有本机的直接证据。Go 的 <code>sync.Mutex</code> 在这里编出来是这样（Go 1.26.2 · Apple M4 · otool）：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">; Lock 快路径
+casal   w27, w2, [x3]      ; 比较并交换；al = acquire + release
+; Unlock 快路径
+ldaddal w2, w4, [x3]       ; 原子加；同样带 acquire + release
+</code></pre></div>
+<p>里面没有一条名字叫 barrier 的指令。顺序语义被编进了指令的变体名：后缀 <code>al</code> 就是 acquire + release。选哪条指令、要不要额外插一条 <code>dmb</code>，由编译器和运行时按目标架构决定。同一份源码在没有 LSE 的机器上会走 <code>ldaxr</code> / <code>stlxr</code> 那一对，语义一样，指令不同。</p>
+<div class="callout tone-violet">
+      <span class="ic">🧭</span>
+      <div><p><strong>操作系统不在这条链上。</strong></p>
+<p>它管调度（哪个线程上哪个核）和虚拟内存；「这条写什么时候对另一个核可见」由 CPU、缓存和编译器决定。Go runtime 在抢不到锁时会请操作系统把线程挂起，那是另一件事，在 <a href="../lock-layers/">一把锁是怎么一层层长出来的</a> 里。</p>
+</div>
+    </div><h2 id="业务代码里什么时候轮到你自己写屏障"><span class="num">04</span>业务代码里什么时候轮到你自己写屏障</h2>
+<p>基本轮不到。先看「你要做什么」和「该用什么」的对应：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>你要做的事</th><th>用什么</th><th>它顺便保证了什么</th><th>什么时候要换别的</th></tr></thead><tbody><tr><th>把一个结果交给另一个 goroutine</th><td data-label="用什么">channel</td><td data-label="它顺便保证了什么">发送之前的写，接收方看得见</td><td data-label="什么时候要换别的">要广播，或者数据很大</td></tr><tr><th>几个字段按一条规则一起变</th><td data-label="用什么">Mutex</td><td data-label="它顺便保证了什么">临界区互斥；Unlock 到下一次 Lock 之间有完整顺序</td><td data-label="什么时候要换别的">临界区里要等 IO，或者读远多于写</td></tr><tr><th>一个计数、一个标志</th><td data-label="用什么">atomic</td><td data-label="它顺便保证了什么">单次操作原子；Go 的原子操作按 seq_cst 排</td><td data-label="什么时候要换别的">两条操作要一起成立（比如「小于 0 就不扣」）</td></tr></tbody></table></div><p>这三样工具都包含了屏障，只是没写在你面前。唯一会轮到你自己写屏障的场合，是你在写运行时、驱动或者无锁数据结构 —— 那时你关心的已经不是业务逻辑，而是这套工具本身怎么实现。Go 内存模型对这件事的态度写在文档开头：</p>
+<div class="callout tone-violet quote">
+      <span class="ic">💬</span>
+      <div><p>If you must read the rest of this document to understand the behavior of your program, you are being too clever. Don't be clever.</p>
+<p>（要是你得读完这份文档才能判断自己程序的行为，那你太聪明了。别这样。）</p>
+</div>
+    </div><p>这句话是设计目标的一部分：你只需要判断「这两步之间有没有同步」，不需要判断「底层要不要插屏障」。</p>
+<div class="callout tone-amber">
+      <span class="ic">⚠</span>
+      <div><p><strong>atomic 不是「只保证原子」。</strong></p>
+<p>Go 文档写的是：所有原子操作「as though executed in some sequentially consistent order」，和 C++ 的 <code>seq_cst</code>、Java 的 <code>volatile</code> 同一档。也就是说它自带屏障效果。</p>
+<p>但「单次操作有顺序」不等于「你的两条操作合起来是对的」。两条 atomic 之间的业务规则（先检查再改、两个字段一起变）仍然要放进同一个同步区间，或者用一条能同时判定的原子操作。</p>
+</div>
+    </div><h2 id="读一个变量为什么也要加锁"><span class="num">05</span>读一个变量，为什么也要加锁</h2>
+<p>先看余额的读接口：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-go">func (a *Account) Balance() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	return a.balance
+}
+</code></pre></div>
+<p><code>return a.balance</code> 不是「把变量本身交出去」。它至少做两件事：先把 <code>a.balance</code> 读进一个临时值，再把这个值交回调用方。规范里写的顺序是「带结果的 return 会先给结果参数赋值，然后才执行 deferred 函数」，所以读的那一刻锁还握着。问题不在 <code>defer</code> 的时机，而在读本身：<strong>它是一次共享访问，和写一样会撞车</strong>。</p>
+<p>把 <code>Balance</code> 的锁去掉，用 <code>-race</code> 跑一遍（本机 Go 1.26.2）：</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">==================
+WARNING: DATA RACE
+Read at 0x00c00019e008 by goroutine 10:
+  main.(*Account).Balance()
+Previous write at 0x00c00019e008 by goroutine 7:
+  main.(*Account).Deposit()
+</code></pre></div>
+<p>工具把两行都指出来了：一次读、一次写，中间没有同步。Go 内存模型对数据竞争的定义是「一个写，和同一个地址上的另一个读或写并发发生，而且这些访问不全是原子访问」—— 一边只读，照样算。</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>对比项</th><th>不加锁</th><th>加锁</th></tr></thead><tbody><tr><th>别人正在写的时候</th><td data-label="不加锁">可能读到旧值；多字的值可能半新半旧</td><td data-label="加锁">等这一轮写完再读</td></tr><tr><th>两次访问之间有顺序吗</th><td data-label="不加锁">没有</td><td data-label="加锁">Unlock 到下一次 Lock 之间有</td></tr><tr><th>Go 内存模型怎么判</th><td data-label="不加锁">data race：程序就是错的</td><td data-label="加锁">没有竞争</td></tr><tr><th>工具会说什么</th><td data-label="不加锁"><code>-race</code> 打印 DATA RACE</td><td data-label="加锁">什么都不打印</td></tr></tbody></table></div><p>「写了一半」不是吓唬人：Go 文档明确说，接口值、map、切片、字符串内部是 <code>(指针, 长度)</code> 或 <code>(指针, 类型)</code> 这样的两字组合，竞争下的读可能拿到新类型配旧指针，后果是内存损坏。</p>
+<p><strong>什么时候可以不加锁</strong>：</p>
+<ul>
+<li>这个对象只在一个 goroutine 里用，没有并发。</li>
+<li>初始化完成之后只读，没有人再写。关键是把「初始化完成」这件事通过同步发布出去（<code>sync.Once</code>、channel，或者启动前做完）。</li>
+<li>单个值，读写都走 <code>atomic</code>。</li>
+</ul>
+<div class="callout tone-amber">
+      <span class="ic">⚠</span>
+      <div><p><strong>返回引用出去，锁就白加了。</strong></p>
+<p><code>return a.balance</code> 返回的是值，安全。<code>return a.items</code>（切片）或 <code>return &amp;a.balance</code> 返回的是「还在被别人改的那块东西」：锁只保护了取到切片头的那一瞬间，元素照样会在你遍历的时候被改。要安全，就让调用方在锁里用，或者返回一份拷贝。</p>
+</div>
+    </div><h2 id="三条带走"><span class="num">06</span>三条带走</h2>
+<ol>
+<li>屏障限制的是<strong>一对操作</strong>的先后，不是时间。它不暂停、不刷缓存，只等前面该完成的完成。</li>
+<li>能力在 CPU，指令由编译器和运行时挑，语义由语言内存模型定义。操作系统不在这条链上。</li>
+<li>业务代码不写屏障：channel、Mutex、atomic 已经把它包在里面。<strong>读和写一样要进同步区间。</strong></li>
+</ol>
+<div class="summary">
+      <h3 id="一句话">一句话</h3>
+      <p>三类屏障各管对角的一格：写—写、读—读；交叉的两格只有全屏障管。
+你写 Go 时碰不到它们 —— 但「碰不到」的前提是用对了工具，<mark class="mk-blue">包括每一次读</mark>。</p>
+
+    </div><div class="quiz"><details>
+        <summary>写屏障能保证「前面的写不会排到后面的读之后」吗？</summary>
+        <div class="a"><p>不能。写屏障只对写和写之间的顺序负责，读屏障只对读和读负责。
+「前面的写 → 后面的读」这一格没有半屏障，只能上全屏障（或者一条带全屏障效果的原子操作）。
+这也是全屏障比分屏障贵的原因：它要等的东西更多。</p>
+</div>
+      </details><details>
+        <summary>插一条内存屏障，会让 CPU 停下来等一会儿吗？</summary>
+        <div class="a"><p>不会让它暂停执行。屏障做的是限制这一对操作的先后：前面的写要真的发出去、该收的作废要真的生效，
+后面的操作才准走。没有东西要等的时候它几乎免费（那篇在 M1 Max 上实测 +0.2 ns），有东西要等时才贵。
+它也不刷缓存 —— 缓存一致是协议一直在做的事。</p>
+</div>
+      </details><details>
+        <summary>sync/atomic 和内存屏障是什么关系？</summary>
+        <div class="a"><p>Go 的原子操作按顺序一致（seq_cst）排，和 C++ 的 seq_cst、Java 的 volatile 同一档，
+所以它自带屏障效果，不需要你另外插。
+但它保证的是单次操作和它周围的顺序：两条 atomic 之间的业务规则（先检查再改、两个字段一起变）仍然要自己保证。</p>
+</div>
+      </details><details>
+        <summary>Balance() 里是先读 balance 再解锁，还是先解锁再读？为什么读也要锁？</summary>
+        <div class="a"><p>先读，再执行 defer 里的 Unlock。带结果的 return 会先把结果参数赋值，然后才跑 deferred 函数，
+所以读的时候锁还在手上。
+读也要锁，是因为读和写会并发：只要有一个写没有同步，这次读就是 data race。
+普通整数可能读到旧值；接口、切片这类两字组合，还可能读到新类型配旧指针。</p>
+</div>
+      </details></div><p>逛完这篇可以接着看两处：<a href="../lock-memory-barriers/">锁为什么慢</a> 讲屏障要等的东西（写缓冲、失效队列）和它的代价；<a href="../lock-layers/">一把锁是怎么一层层长出来的</a> 讲硬件之外，内核和库各补了什么。</p>
+
+
+    <footer>
+      <span>内存屏障：谁在挡，挡的是什么</span>
+      <span>最后更新 2026-11-04 · 单文件可离线打开</span>
+    </footer>
+  </main>
+</div>
+
+<script src="../../assets/app.js?v=33978e3b4d"></script>
+</body>
+</html>
