@@ -27,17 +27,17 @@
   <aside class="toc" id="toc">
       <p class="toc-title">目录</p>
       <a href="../../index.html" class="sub">← 全部笔记</a>
-      <a href="#先把问题摆正调度器不调用线程">先把问题摆正：调度器不「调用」线程</a>
-      <a href="#一张图线程平时待的三个地方">一张图：线程平时待的三个地方</a>
+      <a href="#调度器不做调用">调度器不做「调用」</a>
+      <a href="#线程平时待的三个地方">线程平时待的三个地方</a>
       <a href="#调度器只读-taskstruct-里的几组字段">调度器只读 task_struct 里的几组字段</a>
-      <a href="#五道闸从-taskstruct-到下一条跑谁">五道闸：从 task_struct 到「下一条跑谁」</a>
+      <a href="#六道闸从-taskstruct-到下一条跑谁">六道闸：从 task_struct 到「下一条跑谁」</a>
       <a href="#六层各自按什么排">六层各自按什么排</a>
-      <a href="#线程-a-的一次睡与醒">线程 A 的一次睡与醒</a>
-      <a href="#能跑不等于马上换抢占要等一个安全点">能跑不等于马上换：抢占要等一个安全点</a>
-      <a href="#真正切过去时切的是什么">真正切过去时，切的是什么</a>
-      <a href="#这些机制背后的十条取舍">这些机制背后的十条取舍</a>
+      <a href="#线程-a-的一次阻塞与唤醒">线程 A 的一次阻塞与唤醒</a>
+      <a href="#抢占要等到安全点">抢占要等到安全点</a>
+      <a href="#切换发生时替换了什么">切换发生时替换了什么</a>
+      <a href="#这些机制背后的取舍">这些机制背后的取舍</a>
       <a href="#把字段对到-proc-上">把字段对到 /proc 上</a>
-      <a href="#最后记六个问题">最后记六个问题</a>
+      <a href="#六个问题">六个问题</a>
   </aside>
 
   <main>
@@ -1639,7 +1639,7 @@ CPU 3：正在改变 A 的 CPU affinity。
 6. 用调度分类处理不同目标；
 7. 用长期公平代替机械平均；
 8. 承认目标冲突，并允许策略选择；
-9. 用预算和准入控制避免无法兑现的承诺；
+9. 用预算和准入控制拒绝超出带宽的调度请求；
 10. 在高并发下，把正确性放在首位。
 </code></pre></div>
 <p>如果把它拟人化，CPU 调度器像一个大型医院的分诊系统：</p>
@@ -1655,12 +1655,12 @@ CPU 3：正在改变 A 的 CPU affinity。
 <p>这基本就是操作系统调度器背后的“工程哲学”。</p>
 </div>
       </details></div><hr>
-<h2 id="先把问题摆正调度器不调用线程"><span class="num">01</span>先把问题摆正：调度器不「调用」线程</h2>
-<p>「要不要调用一个线程」这个问法里藏着一个错误的前提。线程不是函数，调度器不会从头调用它一次。它做的是一件更窄的事：</p>
+<h2 id="调度器不做调用"><span class="num">01</span>调度器不做「调用」</h2>
+<p>调度器的工作比「调用一个线程」窄得多：线程不是函数，调度器不会从头执行它一次。每次调度只做一件事。</p>
 <blockquote>
 <p>在某个时刻，从这颗 CPU 能挑的线程里选出一条，如果它不是当前那条，就把 CPU 的现场从旧的换到新的。</p>
 </blockquote>
-<p>所以真正要回答的是四个问题，而且它们不在同一层：</p>
+<p>一次调度要回答四个问题，它们分属不同层次：</p>
 <table>
 <thead>
 <tr>
@@ -1688,14 +1688,14 @@ CPU 3：正在改变 A 的 CPU affinity。
 <tr>
 <td>现在就换吗？</td>
 <td>时机</td>
-<td><code>TIF_NEED_RESCHED</code> 在哪个安全点被兑现</td>
+<td><code>TIF_NEED_RESCHED</code> 在哪个安全点被处理</td>
 </tr>
 </tbody>
 </table>
-<p><mark class="mk-blue">前两个问题不通过，第三条根本轮不到比较。</mark> 把它们混成一句「谁优先级高」，就会得到「实时线程为什么没跑」这类想不通的问题：它可能根本不在候选集合里。第 04 节会把这条线拆成调度器实际走的六道闸。</p>
+<p><mark class="mk-blue">前两个问题不通过，第三个问题没有比较对象。</mark> 把前两个问题与排序混成一句「谁优先级高」，会产生「实时线程为什么没跑」这类疑问：该线程可能根本不在候选集合里。第 04 节把这条线拆成调度器实际走的六道闸。</p>
 <hr>
-<h2 id="一张图线程平时待的三个地方"><span class="num">02</span>一张图：线程平时待的三个地方</h2>
-<p>先看一张地图。左边是等事件的队列，右边是等 CPU 的队列，中间那条路是线程从左边回到右边的过程。</p>
+<h2 id="线程平时待的三个地方"><span class="num">02</span>线程平时待的三个地方</h2>
+<p>下图是两个部分：左边是等事件的队列，右边是等 CPU 的队列，中间是线程从左边回到右边的路径。</p>
 <figure class="archfig" data-arch style="--arch-max-width:1580px" data-boundaries="nested" data-pano data-tours='[{"id":"a-trip","label":"线程 A 的一次睡与醒","steps":[{"at":["wq-disk"],"text":"A 调 read() 要数据，块设备层把它的 wait entry 挂进这个队列；它把状态改成 TASK_INTERRUPTIBLE，然后在 schedule() 里离开 CPU 0 的 rq。"},{"at":["wake"],"text":"磁盘中断处理完，有人对同一个队列调 wake_up()。A 的状态回到 RUNNING，select_task_rq() 决定它去哪颗核。"},{"at":["l-fair"],"text":"在挑中的核上，enqueue_task() 把 A 挂进 fair 层。wakeup_preempt() 这时会判断：要不要立刻抢占当前那条？"},{"at":["cur0"],"text":"下一次 pick_task() 挑到 A，它就变成 rq->curr。switch_to() 恢复 A 的栈和寄存器，核从上次停下的位置继续。"}]},{"id":"layers","label":"五层按什么顺序找","steps":[{"at":["l-stop"],"text":"先看 stop：只有内核自己的停核任务，它不会被抢。"},{"at":["l-dl"],"text":"再看 deadline：最早截止期先跑，但预算用完就被 throttle。"},{"at":["l-rt"],"text":"然后 RT：位图找最高优先级，同级 FIFO 或 RR。"},{"at":["l-fair"],"text":"普通线程在 fair：EEVDF 按虚拟截止期挑。"},{"at":["l-idle"],"text":"都没活才轮到 idle；它永远可运行，所以挑人不会返回空。"}]}]' data-frames='[{"id":"waitq","boundary":0,"kind":"classification","label":"等待队列 · 每个事件一个","detail":"它不是一个全局队列，而是每个会让人等的事件各有一个。磁盘、socket、锁、定时器各自维护自己的链表，挂上去的 entry 指回线程的 task_struct。线程在这里时状态不是 TASK_RUNNING；让出完成后通常也已经不在 rq 上。一个线程可以同时挂在几个等待队列上（poll 一次等多个 fd 就是这样）。","members":["wq-disk","wq-sock","wq-lock","wq-timer"],"depth":1},{"id":"percpu","boundary":1,"kind":"classification","label":"运行队列 · 每颗 CPU 一个","detail":"每颗核一个 struct rq，配一把自己的 rq 锁。可运行但没轮到的线程挂在某颗核的类队列里；同一时刻只会在其中一颗核的队列上。核多了要额外做负载均衡，这是分治的代价。","members":["cur0","l-stop","l-dl","l-rt","l-fair","l-idle","rqN"],"depth":1},{"id":"rq0","boundary":2,"parent":"percpu","kind":"contains","label":"CPU 0 的 rq","detail":"五层从高到低，pick_next_task() 从上往下找第一个有活的类。rq->curr 是当前选中的那条，仍在 on_rq 上，但不在任何有序结构里等；被换下时才按状态决定是回队列还是去等待队列。","members":["cur0","l-stop","l-dl","l-rt","l-fair","l-idle"],"depth":2}]'>
       <div class="arch-boundary-ui">
           <div class="arch-boundary-toolbar"><span class="arch-boundary-label">边界</span>
@@ -1851,7 +1851,7 @@ CPU 3：正在改变 A 的 CPU affinity。
           <text class="nb-title" x="894" y="137" font-size="10.5" font-weight="600">stop</text>
           <line class="nb-hr" x1="868" y1="144" x2="1152" y2="144"/>
           <text class="nb-k" x="872" y="169" font-size="9">谁跑</text><text class="nb-v" x="913.4" y="169" font-size="9">stop_machine 的 stopper</text>
-          <text class="nb-k" x="872" y="183" font-size="9">会被抢</text><text class="nb-v" x="913.4" y="183" font-size="9">不会，它抢一切</text>
+          <text class="nb-k" x="872" y="183" font-size="9">会被抢</text><text class="nb-v" x="913.4" y="183" font-size="9">不会，优先级最高</text>
           <text class="nb-note" x="872" y="208" font-size="8">普通线程和 RT 都到不了这层</text>
         </g>
 
@@ -1989,16 +1989,16 @@ CPU 3：正在改变 A 的 CPU affinity。
       <figcaption>三类位置：等待队列、某颗核的 rq、正在核上跑的 curr。图上走的是线程 A 等磁盘那一次——四条等待队列的唤醒走同一条路，这里只画了磁盘这一条；其它 CPU 的 rq 合并成了一个节点。</figcaption>
       <div class="pano-ui"></div>
       <p class="arch-hint"><span class="idle">点头上的任意一个框看它的关系，点区域标题看分组含义，点零件看完整归属路径</span><span class="focused">再点一次空白处取消</span></p>
-    </figure><p>先记住三句话：</p>
+    </figure><p>这段结构有三条性质：</p>
 <ol>
-<li><strong>等待队列不是一种队列，是每个事件一个。</strong> 「线程在等 IO」这句话，落到内核里是某个具体子系统的链表上多了一个 entry。线程可以同时挂在几个上，但这时它通常已经不在任何 rq 里了。</li>
-<li><strong>运行队列是按核分的。</strong> 一个可运行线程只在某一颗核的 <code>rq</code> 上；不存在一个所有核共享的全局队列。</li>
-<li><strong><code>rq-&gt;curr</code> 不是第六种队列。</strong> 它就是这颗核当前选中的那条，<code>on_rq</code> 仍是 1，但它已经不在红黑树/链表里排队了。</li>
+<li><strong>等待队列不是一种队列，每个事件一个。</strong> 「线程在 IO 上等待」这个说法，落到内核里是某个具体子系统的链表上多了一个 entry。线程可以同时挂在几个上，这时它通常已经不在任何 rq 里。</li>
+<li><strong>运行队列按核划分。</strong> 一个可运行线程只在某一颗核的 <code>rq</code> 上，不存在所有核共享的全局运行队列。</li>
+<li><strong><code>rq-&gt;curr</code> 不是另一种队列。</strong> 它指向这颗核当前选中的线程，<code>on_rq</code> 仍为 1，但该线程已不在红黑树或链表里排队。</li>
 </ol>
-<p><mark class="mk-amber">「一个线程只在一个地方」对运行队列成立，对等待队列不成立。</mark> <code>poll()</code> 一次等多个 fd，同一个 task 会同时挂在几个等待队列上；一旦它被唤醒、变成可运行，就只会在某一颗核的 rq 上。</p>
+<p><mark class="mk-amber">一个线程同时只在一颗核的运行队列上；等待队列不受这一限制。</mark> <code>poll()</code> 一次等多个 fd，同一个 task 会同时挂在几个等待队列上；被唤醒并转为可运行之后，它只会出现在某一颗核的 rq 上。</p>
 <hr>
 <h2 id="调度器只读-taskstruct-里的几组字段"><span class="num">03</span>调度器只读 task_struct 里的几组字段</h2>
-<p>一个 <code>task_struct</code> 有上百个字段，但没有一个函数会从头扫到尾。调度器按固定的顺序读几组，每组回答一个问题。下面按「读它的顺序」排，不是按结构体的字段顺序：</p>
+<p><code>task_struct</code> 有上百个字段，调度器不会从头扫到尾，而是按固定顺序读几组，每组回答一个问题。下表按读取顺序排列，不是结构体的字段顺序：</p>
 <table>
 <thead>
 <tr>
@@ -2065,7 +2065,7 @@ CPU 3：正在改变 A 的 CPU affinity。
 </tr>
 </tbody>
 </table>
-<p><mark class="mk-blue">字段名对不上时，先看它属于哪一组：资格、位置、层级还是类内排序。</mark> 比如「为什么这条线程没被选中」如果发生在 <code>cpus_ptr</code> 上，去比较优先级永远找不到原因。</p>
+<p><mark class="mk-blue">字段名与实际行为对不上时，先确认它属于哪一组：资格、位置、层级还是类内排序。</mark> 例如线程因 <code>cpus_ptr</code> 未被选中时，比较优先级找不到原因。</p>
 <div class="callout tone-amber">
       <span class="ic">🔒</span>
       <div><p><strong>这几组字段大多不能无锁地读改。</strong> 它们的注释直接写清了各自的协议（<code>kernel/sched/core.c</code> 里有一段集中说明）：</p>
@@ -2076,8 +2076,8 @@ CPU 3：正在改变 A 的 CPU affinity。
 </ul>
 <p><mark class="mk-green">还有一处容易读错：<code>on_rq = 1</code> 不严格等于「现在可运行」。</mark> EEVDF 会把刚睡下的任务暂时留在队列里（<code>se.sched_delayed</code>），等它下次被挑到再出队；释放 CPU 的延迟出队也是类似的处理。判断「可运行」要看 <code>task_is_runnable()</code>，不是只看一个 <code>on_rq</code>。</p>
 </div>
-    </div><h2 id="五道闸从-taskstruct-到下一条跑谁"><span class="num">04</span>五道闸：从 task_struct 到「下一条跑谁」</h2>
-<p>把这几个字段串起来，就是调度器每次挑人时走的顺序。每一道闸不通过，后面就不用看了：</p>
+    </div><h2 id="六道闸从-taskstruct-到下一条跑谁"><span class="num">04</span>六道闸：从 task_struct 到「下一条跑谁」</h2>
+<p>把这些字段串起来，就是调度器每次选择时的顺序；某一道不通过，后面的判断不再进行：</p>
 <div class="flowd has-grid" data-flow data-edges="[{&quot;from&quot;:&quot;st&quot;,&quot;to&quot;:&quot;cand&quot;,&quot;label&quot;:&quot;通过&quot;},{&quot;from&quot;:&quot;cand&quot;,&quot;to&quot;:&quot;aff&quot;,&quot;label&quot;:&quot;通过&quot;},{&quot;from&quot;:&quot;aff&quot;,&quot;to&quot;:&quot;cls&quot;,&quot;label&quot;:&quot;通过&quot;},{&quot;from&quot;:&quot;cls&quot;,&quot;to&quot;:&quot;within&quot;,&quot;label&quot;:&quot;有活&quot;},{&quot;from&quot;:&quot;within&quot;,&quot;to&quot;:&quot;pick&quot;,&quot;label&quot;:&quot;挑出 next&quot;}]" style="--flow-marker:url(#fa-1)">
       <svg class="flowd-svg" aria-hidden="true">
         <defs>
@@ -2120,14 +2120,14 @@ CPU 3：正在改变 A 的 CPU affinity。
               <small>是 → 继续跑；否 → context_switch()</small>
             </div></div></div>
       
-    </div><p>每道闸不通过时会发生什么，写在节点的 <code>sub</code> 里；这里再补两句：</p>
+    </div><p>每道闸不通过时的结果写在图中节点的 <code>sub</code> 里，补充如下：</p>
 <ul>
-<li><strong>① 不通过</strong>：它留在等待队列里，调度器不会「顺便看一眼」它。</li>
-<li><strong>② 不通过</strong>：它刚被创建或被唤醒，还没入队；先 <code>enqueue_task()</code>，再谈挑不挑。</li>
-<li><strong>③ 不通过</strong>：不是「优先级不够」，而是这颗核根本不允许；<code>select_task_rq()</code> 会换一颗，或者等 CPU 上线。</li>
-<li><strong>④ 不通过</strong>：五层全空才会走到 idle；idle 永远可运行，所以 <code>pick_next_task()</code> 不会返回空。</li>
-<li><strong>⑤ 不通过</strong>：预算用完的 DL 线程、被 cgroup 节流的 fair 组，可能仍然可运行，但这一轮不参与。</li>
-<li><strong>⑥</strong>：只有 <code>next != curr</code>，才会真的换栈、换寄存器。</li>
+<li><strong>① 不通过</strong>：线程留在等待队列里，不进入本次候选集合。</li>
+<li><strong>② 不通过</strong>：线程刚创建或刚被唤醒，尚未入队；先执行 <code>enqueue_task()</code>。</li>
+<li><strong>③ 不通过</strong>：与优先级无关，这颗核不允许该线程运行；<code>select_task_rq()</code> 会改选另一颗核，或等待 CPU 上线。</li>
+<li><strong>④ 不通过</strong>：前面各层都为空时才走到 idle；idle 线程恒可运行，所以 <code>pick_next_task()</code> 不会返回空。</li>
+<li><strong>⑤ 不通过</strong>：预算用完的 DL 线程、被 cgroup 节流的 fair 组，可能仍可运行，但这一轮不参与选择。</li>
+<li><strong>⑥</strong>：只有 <code>next != curr</code> 时才真正切换栈和寄存器。</li>
 </ul>
 <div class="callout tone-violet">
       <span class="ic">⚡</span>
@@ -2135,7 +2135,7 @@ CPU 3：正在改变 A 的 CPU affinity。
 <p>常见情况是「全是普通线程」，所以这条快路径值得单独写。<mark class="mk-blue">分层是语义，不是每次都要跑满五次函数调用。</mark></p>
 </div>
     </div><h2 id="六层各自按什么排"><span class="num">05</span>六层各自按什么排</h2>
-<p>上一层说「从 stop 往下找」，这一节看每一层内部到底按什么键排序。stop、deadline、RT、fair、idle 这五层是内核固定的调度类，<code>ext</code> 是编译期可选的扩展：</p>
+<p>第 04 节说明了从 stop 向下查找的顺序，本节说明每一层内部的排序键。stop、deadline、RT、fair、idle 是内核固定的调度类，<code>ext</code> 是编译期可选的扩展：</p>
 <table>
 <thead>
 <tr>
@@ -2151,7 +2151,7 @@ CPU 3：正在改变 A 的 CPU affinity。
 <td>stop</td>
 <td><code>rq-&gt;stop</code></td>
 <td>一个指针，不排队</td>
-<td>最高；它抢一切，自己不被抢</td>
+<td>优先级最高，可抢占其他类，不被其他类抢占</td>
 <td>只有 <code>stop_machine()</code> 的 stopper 线程</td>
 </tr>
 <tr>
@@ -2191,12 +2191,11 @@ CPU 3：正在改变 A 的 CPU affinity。
 </tr>
 </tbody>
 </table>
-<p>三个容易踩的地方：</p>
-<p><strong>一、<code>SCHED_IDLE</code> 不是 idle 调度类。</strong> 它仍然挂在 fair 层，只是权重被设成 3（nice 0 是 1024）；idle 调度类里只有每颗核那条 idle 线程。名字像，位置完全不同。</p>
-<p><strong>二、<code>p-&gt;prio</code> 和用户看到的实时优先级是反的。</strong> 用户给 RT 线程的 <code>sched_priority</code> 是 1–99，越大越急；内核里 <code>p-&gt;prio = 99 - rt_priority</code>，所以 RT 80 对应 <code>p-&gt;prio</code> 19。stop 在比较里是 -2，DL 是 -1，fair 是 <code>120 + nice</code>。<mark class="mk-blue">看内核代码时按「数值小 = 更急」读，别拿用户层的数字直接比。</mark></p>
-<p><strong>三、DL 的「最早截止期」不是无条件的。</strong> 线程声明了 <code>runtime / period / deadline</code> 之后，系统先做准入控制：所有 DL 线程的带宽加起来超过上限，<code>sched_setattr()</code> 直接失败。跑起来之后，这一周期预算用完也会被 throttle 到下一个周期。<mark class="mk-blue">它保证的是「按声明给」，不是「永远优先」。</mark></p>
-<h2 id="线程-a-的一次睡与醒"><span class="num">06</span>线程 A 的一次睡与醒</h2>
-<p>把上面这些字段放在一条线程身上走一遍。下面五步是同一个 <code>task_struct</code> 在五个时刻的快照，注意 <code>__state</code>、<code>on_rq</code>、<code>on_cpu</code> 是分别变的：</p>
+<p><strong>一、<code>SCHED_IDLE</code> 不是 idle 调度类。</strong> 它仍然挂在 fair 层，只是权重被设成 3（nice 0 是 1024）；idle 调度类里只有每颗核那条 idle 线程。</p>
+<p><strong>二、<code>p-&gt;prio</code> 与用户侧的实时优先级方向相反。</strong> 用户侧 <code>sched_priority</code> 为 1–99，数值越大优先级越高；内核中 <code>p-&gt;prio = 99 - rt_priority</code>，因此 RT 80 对应 <code>p-&gt;prio</code> 19。stop 为 -2，DL 为 -1，fair 为 <code>120 + nice</code>。<mark class="mk-blue">读内核代码时按「数值越小优先级越高」理解，不要直接比较用户侧的数值。</mark></p>
+<p><strong>三、DL 的「最早截止期」受准入控制约束。</strong> 线程声明 <code>runtime / period / deadline</code> 之后，系统先做准入控制：所有 DL 线程的带宽加起来超过上限时，<code>sched_setattr()</code> 直接失败。运行期间这一周期预算用完，线程会被 throttle 到下一个周期。<mark class="mk-blue">DL 保证的是声明范围内的运行预算；超出预算不获得额外优先级。</mark></p>
+<h2 id="线程-a-的一次阻塞与唤醒"><span class="num">06</span>线程 A 的一次阻塞与唤醒</h2>
+<p>把上述字段放到一条线程上看。下面五步是同一个 <code>task_struct</code> 在五个时刻的快照，<code>__state</code>、<code>on_rq</code>、<code>on_cpu</code> 各自独立变化：</p>
 <div class="jcard">
           <div class="jcard-head">
             <span class="tag tone-green">① 在跑</span>
@@ -2279,16 +2278,16 @@ CPU 3：正在改变 A 的 CPU affinity。
             <b>在哪</b><span>CPU 1 的核</span></div></div>
           
           <p class="jnote">从 CPU 0 换到 CPU 1 也能发生；切换本身不要求同一颗核。</p>
-        </div><p><strong>②→③ 之间那个窗口不会丢唤醒。</strong> 如果 IO 恰好在 A 改完状态、还没执行 <code>schedule()</code> 时完成，<code>try_to_wake_up()</code> 会看到它还在 rq 上：把状态改回 <code>RUNNING</code>，再给当前线程打一个 <code>need_resched</code> 标记。<code>schedule()</code> 随后读到的 <code>prev-&gt;__state</code> 已经是 0，就不会把它从队列上摘下去。两边都在 <code>rq-&gt;lock</code> 下串行化，所以「先检查条件、再睡」这个经典写法不会漏掉事件。</p>
-<p>③ 的 <code>on_rq = 0</code> 是让出完成后的样子。EEVDF 有一个默认开启的延迟出队（<code>DELAY_DEQUEUE</code>）：刚睡下的任务会在同一次 <code>schedule()</code> 里短暂还挂在 rq 上，等挑到它时再摘掉。这是为了少一次「出队又立刻入队」，不是让它继续参与竞争；判断可运行要看 <code>task_is_runnable()</code>。</p>
-<h2 id="能跑不等于马上换抢占要等一个安全点"><span class="num">07</span>能跑不等于马上换：抢占要等一个安全点</h2>
-<p>线程被唤醒、入了队，只说明它重新有资格。要不要立刻从当前线程手里拿走 CPU，是另一件事。</p>
-<p><code>ttwu_do_activate()</code> 里，<code>activate_task()</code> 之后紧接着调用 <code>wakeup_preempt()</code>。它判断的是一件事：要不要给当前线程打 <code>TIF_NEED_RESCHED</code>。</p>
+        </div><p><strong>②→③ 之间那个窗口不会丢失唤醒。</strong> 如果 IO 恰好在 A 改完状态、还没执行 <code>schedule()</code> 时完成，<code>try_to_wake_up()</code> 会看到它仍在 rq 上：把状态改回 <code>RUNNING</code>，再给当前线程设置 <code>need_resched</code> 标记。<code>schedule()</code> 随后读到的 <code>prev-&gt;__state</code> 已经是 0，不会把它从队列上摘下去。两处都在 <code>rq-&gt;lock</code> 下串行化，因此「先检查条件再进入睡眠」这一写法不会漏掉事件。</p>
+<p>③ 中的 <code>on_rq = 0</code> 是让出完成后的状态。EEVDF 默认开启延迟出队（<code>DELAY_DEQUEUE</code>）：刚进入睡眠的任务会在同一次 <code>schedule()</code> 中暂时仍挂在 rq 上，被选中时再移除。这样减少一次「出队后立即入队」；判断线程是否可运行应看 <code>task_is_runnable()</code>，不看 <code>on_rq</code>。</p>
+<h2 id="抢占要等到安全点"><span class="num">07</span>抢占要等到安全点</h2>
+<p>线程被唤醒并入队，只说明它具备运行资格；是否立即从当前线程取得 CPU，是另一个判断。</p>
+<p><code>ttwu_do_activate()</code> 中，<code>activate_task()</code> 之后紧接着调用 <code>wakeup_preempt()</code>。它只判断一件事：是否为当前线程设置 <code>TIF_NEED_RESCHED</code>。</p>
 <ul>
 <li>新线程和当前线程在同一层：调这一层的 <code>wakeup_preempt()</code>。fair 比虚拟截止期，RT 比实时优先级，DL 比 deadline。</li>
 <li>新线程的层比当前高：直接 <code>resched_curr()</code>，再把 <code>rq-&gt;next_class</code> 改成新的层。</li>
 </ul>
-<p>打了标记不等于马上切。内核要等到一个能安全切换的点：</p>
+<p>设置标记不等于立即切换；内核要等到可以安全切换的位置：</p>
 <table>
 <thead>
 <tr>
@@ -2299,11 +2298,11 @@ CPU 3：正在改变 A 的 CPU affinity。
 <tbody>
 <tr>
 <td>新线程层级更高，或同层 RT 优先级更高</td>
-<td>打 <code>TIF_NEED_RESCHED</code>，发 IPI 叫目标核尽快调度</td>
+<td>设置 <code>TIF_NEED_RESCHED</code>，发 IPI 叫目标核尽快调度</td>
 </tr>
 <tr>
 <td>同层 fair，虚拟截止期更早</td>
-<td>由 fair 的 <code>wakeup_preempt()</code> 决定，通常也打标记</td>
+<td>由 fair 的 <code>wakeup_preempt()</code> 决定，通常也设置标记</td>
 </tr>
 <tr>
 <td>当前线程正持自旋锁、或关着抢占</td>
@@ -2323,14 +2322,14 @@ CPU 3：正在改变 A 的 CPU affinity。
 </tr>
 <tr>
 <td>内核是 <code>lazy</code> 抢占，且新线程是 fair</td>
-<td>只打 <code>TIF_NEED_RESCHED_LAZY</code>；回用户态或下一个 tick 才切</td>
+<td>只设置 <code>TIF_NEED_RESCHED_LAZY</code>；回用户态或下一个 tick 才切</td>
 </tr>
 </tbody>
 </table>
-<p>最后一行是 6.13 起才有的模式。它把「内核里正跑到一半的活」尽量跑完，减少「刚放下锁就被抢走、缓存又被冲掉」的情况；实时线程不受这个延迟影响，仍然用 <code>TIF_NEED_RESCHED</code>。</p>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>抢占模型</th><th>内核代码什么时候能让出 CPU</th><th>代价</th></tr></thead><tbody><tr><th>none</th><td data-label="内核代码什么时候能让出 CPU">只在显式 cond_resched() / 阻塞点</td><td data-label="代价">内核路径简单，但延迟不可控</td></tr><tr><th>voluntary</th><td data-label="内核代码什么时候能让出 CPU">none + might_sleep() 处</td><td data-label="代价">兼顾一点延迟和吞吐</td></tr><tr><th>full</th><td data-label="内核代码什么时候能让出 CPU">没有显式关抢占的地方都能切</td><td data-label="代价">延迟低，切换更频繁</td></tr><tr><th>lazy</th><td data-label="内核代码什么时候能让出 CPU">full + fair 的请求延到回用户态或下个 tick</td><td data-label="代价">兼顾响应和缓存，实时任务不走这条</td></tr></tbody></table></div><p><mark class="mk-amber">「不能切」不是调度器犹豫，是切了会坏。</mark> 自旋锁要求持锁期间不睡眠；中断上下文没有普通线程的栈和状态可换；<code>preempt_count</code> 不为 0 时切走，锁的释放顺序就乱了。所以这些地方只打标记，等安全点。</p>
-<h2 id="真正切过去时切的是什么"><span class="num">08</span>真正切过去时，切的是什么</h2>
-<p><code>next != curr</code> 之后，<code>context_switch()</code> 做两件事：如果是跨进程，换地址空间（<code>switch_mm_irqs_off()</code>）；然后 <code>switch_to()</code> 换栈和寄存器。x86-64 的底层核心是这几行（省掉了返回栈缓冲和 canary 的几条）：</p>
+<p>最后一行是 6.13 引入的模式：它让内核中已开始的执行尽量完成，减少刚释放锁就被抢占、缓存被冲刷的情况；实时线程不受这一延迟影响，仍使用 <code>TIF_NEED_RESCHED</code>。</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>抢占模型</th><th>内核代码什么时候能让出 CPU</th><th>代价</th></tr></thead><tbody><tr><th>none</th><td data-label="内核代码什么时候能让出 CPU">只在显式 cond_resched() / 阻塞点</td><td data-label="代价">内核路径简单，但延迟不可控</td></tr><tr><th>voluntary</th><td data-label="内核代码什么时候能让出 CPU">none + might_sleep() 处</td><td data-label="代价">兼顾一点延迟和吞吐</td></tr><tr><th>full</th><td data-label="内核代码什么时候能让出 CPU">没有显式关抢占的地方都能切</td><td data-label="代价">延迟低，切换更频繁</td></tr><tr><th>lazy</th><td data-label="内核代码什么时候能让出 CPU">full + fair 的请求延到回用户态或下个 tick</td><td data-label="代价">兼顾响应和缓存，实时任务不走这条</td></tr></tbody></table></div><p><mark class="mk-amber">这些位置不能切换，原因是切换会破坏所在上下文的状态。</mark> 自旋锁要求持锁期间不进入睡眠；中断上下文没有普通线程的栈可供替换；<code>preempt_count</code> 不为 0 时切换会打乱锁的释放顺序。因此这些位置只设置标记，等到达安全点。</p>
+<h2 id="切换发生时替换了什么"><span class="num">08</span>切换发生时替换了什么</h2>
+<p><code>next != curr</code> 之后，<code>context_switch()</code> 做两件事：如果是跨进程，换地址空间（<code>switch_mm_irqs_off()</code>）；然后 <code>switch_to()</code> 换栈和寄存器。x86-64 的底层实现如下（省略了返回栈缓冲与 canary 相关的若干行）：</p>
 <div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">__switch_to_asm:
     pushq %rbp
     pushq %rbx
@@ -2344,7 +2343,7 @@ CPU 3：正在改变 A 的 CPU affinity。
     ...
     jmp   __switch_to
 </code></pre></div>
-<p>保存的是 <strong>callee-saved 寄存器 + 栈指针</strong>。用户态寄存器早在系统调用或中断入口就压进了内核栈上的 <code>pt_regs</code>，不需要在这里再存一遍。</p>
+<p>保存的是 <strong>callee-saved 寄存器 + 栈指针</strong>。用户态寄存器已在系统调用或中断入口压进内核栈上的 <code>pt_regs</code>，不需要在这里再存一遍。</p>
 <table>
 <thead>
 <tr>
@@ -2371,17 +2370,17 @@ CPU 3：正在改变 A 的 CPU affinity。
 </tr>
 </tbody>
 </table>
-<p>所以线程不是被「调用」一次。它上次在 <code>switch_to()</code> 里被换下，这次从同一个位置返回，继续执行 <code>finish_task_switch()</code> 之后的代码。<mark class="mk-blue">调度器保存的是「停在哪」，不是「从头开始」。</mark></p>
-<h2 id="这些机制背后的十条取舍"><span class="num">09</span>这些机制背后的十条取舍</h2>
-<p>把前面所有机制收成一张表。每一行都是「用某个结构解决一个问题，同时接受一个代价」：</p>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>取舍</th><th>在这个内核里落在哪</th><th>付出的代价</th></tr></thead><tbody><tr><th>先问资格，再问排序</th><td data-label="在这个内核里落在哪">__state、cpus_ptr 是布尔门；不通过就不进比较</td><td data-label="付出的代价">多几步判断，换来语义不混</td></tr><tr><th>等事件和等 CPU 分开</th><td data-label="在这个内核里落在哪">wait_queue 归子系统，rq 归调度器</td><td data-label="付出的代价">唤醒要跨模块调用</td></tr><tr><th>睡下去，不空转</th><td data-label="在这个内核里落在哪">阻塞 + wake_up()，不轮询</td><td data-label="付出的代价">一次上下文切换和一条唤醒路径</td></tr><tr><th>每颗核管自己的队列</th><td data-label="在这个内核里落在哪">每 CPU 一个 rq、一把 rq 锁</td><td data-label="付出的代价">要额外做负载均衡</td></tr><tr><th>能不动就不动</th><td data-label="在这个内核里落在哪">唤醒优先同核 / 热缓存，迁移要过亲和性和收益</td><td data-label="付出的代价">短时间可能不均</td></tr><tr><th>不同目标不进同一个比较器</th><td data-label="在这个内核里落在哪">stop / dl / rt / fair / idle 分层</td><td data-label="付出的代价">高类能饿死低类，只能靠带宽限制兜底</td></tr><tr><th>公平是加权的长期账</th><td data-label="在这个内核里落在哪">nice 权重、EEVDF 的 lag 和虚拟截止期</td><td data-label="付出的代价">单次调度不保证最公平</td></tr><tr><th>承认冲突，把选择权交出去</th><td data-label="在这个内核里落在哪">抢占模型、RT 95%、cgroup quota、affinity</td><td data-label="付出的代价">配错了比默认更慢</td></tr><tr><th>承诺前先算账</th><td data-label="在这个内核里落在哪">DL 准入控制 + 每周期 runtime throttle</td><td data-label="付出的代价">做不到的请求直接拒绝，或留出余量</td></tr><tr><th>常见路径快，正确性优先</th><td data-label="在这个内核里落在哪">fair 快路径、on_rq=MIGRATING、on_cpu 屏障</td><td data-label="付出的代价">代码复杂，读起来费劲</td></tr></tbody></table></div><p>这些取舍会互相打架。想要低延迟，就得让实时线程压住普通线程；压得太狠，普通线程会饿，于是有了 95% 的 RT 带宽上限。想要缓存热，就别迁移；都不迁移，负载又会歪，于是有了唤醒挑核和周期性的负载均衡。想要内核路径简单，就别到处抢占；延迟要求上来了，又得加 <code>PREEMPT</code> 和 <code>lazy</code>。</p>
-<p><mark class="mk-blue">没有一组参数能同时把延迟、吞吐、公平、功耗都做到最好。</mark> 内核的做法是选一组默认值，再把旋钮交出去：<code>nice</code>、<code>sched_setattr()</code>、<code>cgroup</code> 的 <code>cpu.max</code>、<code>taskset</code>、<code>preempt=</code>。调度器的任务不是找最优解，是在给定约束下选一组能接受的解。</p>
+<p>因此线程不是被从头调用一次：它上次在 <code>switch_to()</code> 中被换下，这次从同一位置返回，继续执行 <code>finish_task_switch()</code> 之后的代码。<mark class="mk-blue">调度器保存的是暂停的位置，不是执行起点。</mark></p>
+<h2 id="这些机制背后的取舍"><span class="num">09</span>这些机制背后的取舍</h2>
+<p>下表汇总前述机制，每一行是一个结构、它解决的问题和它带来的代价：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>取舍</th><th>在这个内核里落在哪</th><th>付出的代价</th></tr></thead><tbody><tr><th>资格判断在排序之前</th><td data-label="在这个内核里落在哪">__state、cpus_ptr 是布尔门；不通过就不进比较</td><td data-label="付出的代价">多几步判断，换来语义不混</td></tr><tr><th>等待事件与等待 CPU 用两套结构</th><td data-label="在这个内核里落在哪">wait_queue 归子系统，rq 归调度器</td><td data-label="付出的代价">唤醒要跨模块调用</td></tr><tr><th>阻塞等待，不轮询</th><td data-label="在这个内核里落在哪">阻塞 + wake_up()，不轮询</td><td data-label="付出的代价">一次上下文切换和一条唤醒路径</td></tr><tr><th>运行队列按核划分</th><td data-label="在这个内核里落在哪">每 CPU 一个 rq、一把 rq 锁</td><td data-label="付出的代价">要额外做负载均衡</td></tr><tr><th>优先在原核运行</th><td data-label="在这个内核里落在哪">唤醒优先同核 / 热缓存，迁移要过亲和性和收益</td><td data-label="付出的代价">短时间可能不均</td></tr><tr><th>按调度类分层比较</th><td data-label="在这个内核里落在哪">stop / dl / rt / fair / idle 分层</td><td data-label="付出的代价">高类能饿死低类，只能靠带宽限制兜底</td></tr><tr><th>公平按加权长期计算</th><td data-label="在这个内核里落在哪">nice 权重、EEVDF 的 lag 和虚拟截止期</td><td data-label="付出的代价">单次调度不保证最公平</td></tr><tr><th>冲突交给配置参数决定</th><td data-label="在这个内核里落在哪">抢占模型、RT 95%、cgroup quota、affinity</td><td data-label="付出的代价">配错时延迟高于使用默认值</td></tr><tr><th>DL 先做准入控制再运行</th><td data-label="在这个内核里落在哪">DL 准入控制 + 每周期 runtime throttle</td><td data-label="付出的代价">做不到的请求直接拒绝，或留出余量</td></tr><tr><th>常见路径优先，正确性另加保证</th><td data-label="在这个内核里落在哪">fair 快路径、on_rq=MIGRATING、on_cpu 屏障</td><td data-label="付出的代价">代码复杂，读起来费劲</td></tr></tbody></table></div><p>这些取舍之间存在冲突。为降低延迟，实时线程可以压住普通线程；压制过度会使普通线程长期得不到运行，因此有 95% 的 RT 带宽上限。为使缓存保持有效，应减少迁移；完全不迁移会使负载分布不均，因此有唤醒时的选核和周期性负载均衡。为使内核路径简单，应减少抢占点；延迟要求提高后，又需要 <code>PREEMPT</code> 与 <code>lazy</code>。</p>
+<p><mark class="mk-blue">没有一组参数能同时使延迟、吞吐、公平和功耗都达到最优。</mark> 内核选取一组默认值，并暴露可调项：<code>nice</code>、<code>sched_setattr()</code>、<code>cgroup</code> 的 <code>cpu.max</code>、<code>taskset</code>、<code>preempt=</code>。调度器的工作不是求最优解，而是在给定约束下选出一组可接受的值。</p>
 <h2 id="把字段对到-proc-上"><span class="num">10</span>把字段对到 /proc 上</h2>
-<p>前面说的字段，有一部分在用户态直接看得到。下面是在一个 4 核 podman 容器里读到的值（Linux 7.1.10，<code>PREEMPT_DYNAMIC</code>），可以拿自己的机器对照：</p>
+<p>前述字段有一部分在用户态可以直接读取。下表是在一个 4 核 podman 容器中读到的值（Linux 7.1.10，<code>PREEMPT_DYNAMIC</code>）：</p>
 <table>
 <thead>
 <tr>
-<th>你看到的</th>
+<th>位置</th>
 <th>这台机器上的值</th>
 <th>对应什么</th>
 <th>怎么读</th>
@@ -2450,18 +2449,18 @@ CPU 3：正在改变 A 的 CPU affinity。
 </tr>
 </tbody>
 </table>
-<p>三点边界：这些是<strong>这台机器当时</strong>的值，不是所有内核的默认值；<code>/proc/sched_debug</code> 在这个容器里没有这个文件，所以没有贴它的输出。<code>/proc/&lt;tid&gt;/sched</code> 需要能读到目标线程（同用户或 root），读不到时不要以为是字段不存在。</p>
-<h2 id="最后记六个问题"><span class="num">11</span>最后记六个问题</h2>
-<p>如果只留一张速查，就留这六问，按顺序问：</p>
+<p>三点边界：这些值是<strong>这台机器当时</strong>的读数，不是所有内核的默认值；该容器中没有 <code>/proc/sched_debug</code>，因此未附其输出。读取 <code>/proc/&lt;tid&gt;/sched</code> 需要权限（同用户或 root）；读取失败不代表字段不存在。</p>
+<h2 id="六个问题"><span class="num">11</span>六个问题</h2>
+<p>速查只需这六问，按顺序：</p>
 <ol>
 <li><strong>它有资格吗？</strong> <code>__state == TASK_RUNNING</code>。</li>
 <li><strong>它在候选里吗？</strong> <code>on_rq</code> 已置位，或者它就是 <code>curr</code>。</li>
 <li><strong>它能在这颗核上跑吗？</strong> <code>cpus_ptr</code> 允许，CPU 是 active。</li>
 <li><strong>它在哪一层？</strong> <code>sched_class</code>：stop → dl → rt → fair → ext → idle。</li>
 <li><strong>层内怎么排？</strong> DL 看绝对 deadline，RT 看优先级，fair 看虚拟截止期，idle 兜底。</li>
-<li><strong>现在就换吗？</strong> <code>need_resched</code> 在哪个安全点被兑现。</li>
+<li><strong>现在就换吗？</strong> <code>need_resched</code> 在哪个安全点被处理。</li>
 </ol>
-<p>只有第 6 问的答案是「换」，才会走到 <code>context_switch()</code>；否则当前线程继续跑。线程不是被「调用」起来的，它是在某个安全点上被恢复的。</p>
+<p>只有第 6 问的答案是「换」，才会走到 <code>context_switch()</code>；否则当前线程继续执行。线程不是被调用起来的，它是在某个安全点上被恢复的。</p>
 <div class="quiz"><details>
         <summary>线程睡在磁盘等待队列里时，<code>__state</code> 和 <code>on_rq</code> 大概是什么？</summary>
         <div class="a"><p><code>__state</code> 是 <code>TASK_INTERRUPTIBLE</code>（或 <code>TASK_UNINTERRUPTIBLE</code>），不是 <code>TASK_RUNNING</code>；

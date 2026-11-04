@@ -28,14 +28,14 @@
       <p class="toc-title">目录</p>
       <a href="../../index.html" class="sub">← 全部笔记</a>
       <a href="#四层地图谁调用谁谁在什么时候出现">四层地图：谁调用谁，谁在什么时候出现</a>
-      <a href="#硬件层它只卖三样东西">硬件层：它只卖三样东西</a>
-      <a href="#只用硬件能拼出自旋锁但有两个硬伤">只用硬件：能拼出自旋锁，但有两个硬伤</a>
-      <a href="#内核补上的那块睡眠唤醒调度">内核补上的那块：睡眠、唤醒、调度</a>
-      <a href="#futex-的两个动作和那个救命的-expected">futex 的两个动作，和那个救命的 expected</a>
-      <a href="#为什么-wait-必须带-expected" class="sub">为什么 WAIT 必须带 expected</a>
-      <a href="#库层把原子-睡眠包成一个接口">库层：把「原子 + 睡眠」包成一个接口</a>
+      <a href="#硬件层提供什么">硬件层提供什么</a>
+      <a href="#只用硬件能拼出自旋锁缺两样能力">只用硬件能拼出自旋锁，缺两样能力</a>
+      <a href="#内核补上的那块阻塞唤醒调度">内核补上的那块：阻塞、唤醒、调度</a>
+      <a href="#futex-的两个动作与-expected-参数">futex 的两个动作与 expected 参数</a>
+      <a href="#wait-为什么必须带-expected" class="sub">WAIT 为什么必须带 expected</a>
+      <a href="#库层把原子操作与阻塞封装成接口">库层把原子操作与阻塞封装成接口</a>
       <a href="#应用层四种常见组合">应用层：四种常见组合</a>
-      <a href="#全链路一次有竞争的加锁四个角色怎么配合">全链路：一次有竞争的加锁，四个角色怎么配合</a>
+      <a href="#一次有竞争的加锁里四个角色各做什么">一次有竞争的加锁里四个角色各做什么</a>
       <a href="#为什么不能只用一层">为什么不能只用一层</a>
       <a href="#一句话总结" class="sub">一句话总结</a>
   </aside>
@@ -59,8 +59,8 @@
    ↓ 依赖
 硬件层      CAS · 原子加减 · 内存屏障 · 缓存一致性
 </code></pre></div>
-<p>这张清单大体是对的，只有一处要挪：<strong>futex 不属于硬件层</strong>。它是 Linux 的一个系统调用，坐在「硬件之上、库之下」—— 硬件提供原子性，内核提供睡眠和唤醒，库把两者包成 <code>mutex</code> 这样的接口。</p>
-<p>一句话概括四层各自卖什么：</p>
+<p>上面这份清单有一处需要更正：<strong>futex 不属于硬件层</strong>。它是 Linux 的一个系统调用，位于硬件之上、库之下——硬件提供原子性，内核提供阻塞与唤醒，库把两者封装成 <code>mutex</code> 这样的接口。</p>
+<p>四层各自提供什么：</p>
 <table>
 <thead>
 <tr>
@@ -73,7 +73,7 @@
 <tr>
 <td>应用</td>
 <td>保护什么、锁粒度多大、几个原语怎么组合</td>
-<td>不提供原子性，也不提供睡眠</td>
+<td>不提供原子性，也不提供阻塞</td>
 </tr>
 <tr>
 <td>库</td>
@@ -82,17 +82,17 @@
 </tr>
 <tr>
 <td>内核</td>
-<td>睡眠、唤醒、调度（futex 就是这套能力的入口）</td>
+<td>阻塞、唤醒、调度（futex 就是这套能力的入口）</td>
 <td>不管锁状态，也不判断谁能拿到锁</td>
 </tr>
 <tr>
 <td>硬件</td>
 <td>原子性（CAS / 原子加减）、可见性（屏障）</td>
-<td>不认识「锁」，不会排队，不会让线程睡</td>
+<td>不认识「锁」，不排队，不阻塞线程</td>
 </tr>
 </tbody>
 </table>
-<p>这篇按「一层怎么长出下一层」走：先看硬件能给什么，再看只用硬件会缺什么，然后看内核补上什么、库怎么包、应用怎么用，最后把一次加锁的完整配合串起来。</p>
+<p>本文按「一层如何长出下一层」的顺序展开：先看硬件提供什么，再看只用硬件会缺什么，然后看内核补什么、库怎么封装、应用怎么组合，最后把一次加锁的完整配合串起来。</p>
 <h2 id="四层地图谁调用谁谁在什么时候出现"><span class="num">01</span>四层地图：谁调用谁，谁在什么时候出现</h2>
 <figure class="archfig" data-arch style="--arch-max-width:1600px" data-boundaries="nested" data-pano data-parts='{"queue":{"label":"任务队列","sub":"最典型的「锁 + 条件变量」","detail":"生产者加锁放任务、通知；消费者加锁取任务，没活儿就 wait。==wait 会原子地放锁并睡下==，醒来后再把锁拿回来。"},"mutex":{"label":"mutex","sub":"库层的核心抽象","detail":"它只保证三件事：同一时刻一个持有者、进出有 acquire/release 语义、抢不到会阻塞。可重入、超时、优先级继承都是在这一层加的。"},"cond":{"label":"条件变量","sub":"等谓词，不等锁","detail":"它自己不记状态。判断「队列空不空」必须拿着 mutex 做，否则会出现「判断完、睡下之前，条件已经成立」的窗口。"},"sem":{"label":"信号量","sub":"一个会阻塞的计数器","detail":"P 操作（减一）减不动就睡，V 操作（加一）加完唤醒一个。它和 mutex 的区别是允许多个持有者。"},"futex":{"label":"futex","sub":"内核提供的睡眠入口","detail":"它只认一个 32 位字和它的地址。==用户态告诉内核「这个地址上有人在等」，内核负责让他们睡和醒==。"},"atomic":{"label":"原子指令","sub":"互斥的物理基础","detail":"一条 CAS 就能把「读、比较、写」变成不可分割的一步。没有它，用户态根本没法实现互斥。"}}' data-tours='[{"id":"fast","label":"无竞争：一路到底，不进内核","steps":[{"at":["queue","mutex"],"text":"任务队列调 `lock()`。这时没有别人抢，库层只需要一条原子指令。"},{"at":["mutex","atomic","cache"],"text":"CAS 把状态字从 0 改成 1，==全程用户态==；内核完全不知道这把锁存在。"},{"at":["futex","sched"],"text":"这条路径上，内核层两个零件一次都没被调用。"}]},{"id":"slow","label":"有竞争：把地址交给内核","steps":[{"at":["mutex","futex"],"text":"CAS 失败了。库层不再空转，把状态字地址交给内核，说「这个地址上有人在等」。"},{"at":["futex","sched"],"text":"内核把线程挂进等待队列，调度器换别人上核。==这一刻 CPU 才真正被让出来==。"},{"at":["queue"],"text":"等持锁的人解锁并唤醒，线程回到就绪队列，再从 CAS 重试。"}]}]' data-frames='[{"id":"app","boundary":0,"kind":"classification","label":"应用层 · 你要保护的东西","detail":"这一层关心的是「哪段代码要互斥」「锁粒度多大」，不关心锁怎么实现。","members":["queue","pool"],"depth":1},{"id":"lib","boundary":1,"kind":"classification","label":"语言 / 库层 · 你调用的接口","detail":"这一层决定语义：互斥、acquire/release、可重入、超时、公平性。它自己用原子指令和 futex 拼出这些语义。","members":["mutex","cond","sem"],"depth":1},{"id":"kern","boundary":2,"kind":"classification","label":"内核层 · 只有睡和醒才进来","detail":"内核只做两件事：把线程挂起、把它放回就绪队列。它不知道「锁」是什么，只知道「这个地址上有人在等」。","members":["futex","sched"],"depth":1},{"id":"hw","boundary":3,"kind":"classification","label":"硬件层 · 原子性与可见性","detail":"原子指令保证读改写不被打断，缓存一致性保证一行只有一个主人，屏障保证顺序。","members":["atomic","cache","barrier"],"depth":1}]'>
       <div class="arch-boundary-ui">
@@ -388,23 +388,24 @@
       <figcaption>从上往下读：应用调库，库在抢不到时才把地址交给内核，内核让线程睡；快路径那条线从库直接下到硬件，跳过内核。</figcaption>
       <div class="pano-ui"></div>
       <p class="arch-hint"><span class="idle">点头上的任意一个框看它的关系，点区域标题看分组含义，点零件看完整归属路径</span><span class="focused">再点一次空白处取消</span></p>
-    </figure><p>四条边里最值得记住的是 <code>mutex → atomic</code> 那条：<mark class="mk-blue">它绕过了整个内核层</mark>。无竞争时锁的成本几乎只有硬件那 2 纳秒级的原子操作加一点库的开销，这也是「锁其实很快」这个说法的来源。</p>
-<h2 id="硬件层它只卖三样东西"><span class="num">02</span>硬件层：它只卖三样东西</h2>
-<p>硬件不认识「锁」。它能提供的只有三样，而这三样刚好够拼出互斥：</p>
+    </figure><p>四条边中，<code>mutex → atomic</code> 这条绕过了整个内核层。无竞争时，锁的成本只有硬件那 2 纳秒级的原子操作加上少量库开销；「锁很快」这个说法指的就是这条路径，不包含有竞争的情况。</p>
+<h2 id="硬件层提供什么"><span class="num">02</span>硬件层提供什么</h2>
+<p>硬件不认识「锁」这个概念。它能提供的有三样，这三样足以拼出互斥：</p>
 <ol>
 <li><strong>原子读改写</strong>：CAS、xchg、原子加减。保证「读、改、写」三步之间别的核插不进来。实测一次原子加一 <strong>2.2 ns</strong>。</li>
-<li><strong>缓存行与一致性</strong>：写之前要先拿到这一行的独占，别的核的副本作废。一行只有一个主人，这是「同一时刻只有一个线程改」的物理基础。</li>
+<li><strong>缓存行与一致性</strong>：写之前要先拿到这一行的独占，别的核的副本作废。一行在同一时刻只有一个核持有独占权，这是同一时刻只有一个线程能修改它的原因。</li>
 <li><strong>内存屏障</strong>：保证前面的写真的发布出去，后面的读不会提前。</li>
 </ol>
-<p>第三样最容易误解，展开在 <a href="../lock-memory-barriers/">锁为什么慢：写缓冲、失效队列和内存屏障</a> 里。这里只留一句：屏障不是刷缓存，是等写缓冲和失效队列排空。</p>
-<p>硬件<strong>不提供</strong>的东西同样重要：</p>
+<p>第三样最容易与其他机制混淆，展开在 <a href="../lock-memory-barriers/">锁为什么慢：写缓冲、失效队列和内存屏障</a> 里。这里只给一句区分：屏障不刷新缓存，它等待写缓冲和失效队列排空。</p>
+<p>硬件不提供的部分同样需要写明：</p>
 <ul>
-<li>它不会排队。两个线程同时 CAS，谁赢是硬件仲裁的结果，没有先来后到。</li>
-<li>它不会让线程睡。抢不到只能继续占着 CPU 自旋。</li>
-<li>它不知道「锁」这个概念。锁是软件在这一层之上造出来的约定。</li>
+<li>硬件不排队。两个线程同时 CAS 时，谁成功由硬件仲裁决定，没有先来后到。</li>
+<li>硬件不让线程阻塞。争抢失败的线程只能继续占用 CPU 自旋。</li>
+<li>硬件没有「锁」这个概念。锁是软件在这一层之上建立的约定。</li>
 </ul>
-<h2 id="只用硬件能拼出自旋锁但有两个硬伤"><span class="num">03</span>只用硬件：能拼出自旋锁，但有两个硬伤</h2>
-<p>先证明硬件确实够用。下面这把锁只用了 C11 原子操作，没有任何系统调用：</p>
+<p>三样能力合起来只保证单个操作的原子性和顺序，不保证任何调度行为；线程什么时候让出 CPU，不在这三样里。</p>
+<h2 id="只用硬件能拼出自旋锁缺两样能力"><span class="num">03</span>只用硬件能拼出自旋锁，缺两样能力</h2>
+<p>先用一个例子说明硬件足够拼出互斥。下面这把锁只用 C11 原子操作，不发起任何系统调用：</p>
 <div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-c">#include &lt;stdatomic.h&gt;
 
 typedef struct { _Atomic int word; } spinlock_t;   // 0 空闲，1 占用
@@ -423,12 +424,12 @@ static void spin_unlock(spinlock_t *l) {
     atomic_store_explicit(&amp;l-&gt;word, 0, memory_order_release);
 }
 </code></pre></div>
-<p>它能工作，但有两个硬伤：</p>
+<p>它能工作，但缺两样能力：</p>
 <ul>
-<li><strong>抢不到就烧 CPU。</strong> 线程没有「让出」的能力，只能一直问「好了吗」。</li>
-<li><strong>没有排队。</strong> 谁手快谁赢，饥饿是可能的；优先级低的线程拿着锁时，高优先级线程也只能干等（优先级反转）。</li>
+<li><strong>争抢失败时持续占用 CPU。</strong> 线程没有让出的能力，只能反复检查锁状态。</li>
+<li><strong>没有排队机制。</strong> 谁先成功谁获得锁，因此存在饥饿；低优先级线程持锁时，高优先级线程只能等待（优先级反转）。</li>
 </ul>
-<p>第一个硬伤可以量。4 个线程、每次临界区约 2 ms、同样的总工作量：</p>
+<p>第一项可以量化。4 个线程、每次临界区约 2 ms、总工作量相同：</p>
 <table>
 <thead>
 <tr>
@@ -453,9 +454,10 @@ static void spin_unlock(spinlock_t *l) {
 </tr>
 </tbody>
 </table>
-<p>墙钟几乎一样，但自旋版多烧了 1.5 倍的 CPU —— 那些时间全花在「转着圈问」上。<mark class="mk-blue">临界区越长、线程越多，这个比例越难看。</mark></p>
-<p>要让线程在等的时候真的把 CPU 交出去，就需要一种用户态没有的能力：<strong>把一条正在运行的线程从 CPU 上摘下来，之后再放回去</strong>。这就是内核存在的理由。</p>
-<h2 id="内核补上的那块睡眠唤醒调度"><span class="num">04</span>内核补上的那块：睡眠、唤醒、调度</h2>
+<p>墙钟时间接近，自旋版多消耗 1.5 倍 CPU 时间，这部分时间用于反复检查锁状态。<mark class="mk-blue">临界区越长、线程越多，这个比值越大。</mark></p>
+<p>要让线程在等待期间不再占用 CPU，需要一种用户态不具备的能力：<strong>把正在运行的线程从 CPU 上移出，之后再恢复运行</strong>。这一能力由内核提供。</p>
+<p>这组数据只覆盖 4 个线程、2 ms 临界区的一种配置；其他配置下的比值需要重新测量。</p>
+<h2 id="内核补上的那块阻塞唤醒调度"><span class="num">04</span>内核补上的那块：阻塞、唤醒、调度</h2>
 <p>内核能做三件用户态做不到的事：</p>
 <table>
 <thead>
@@ -471,36 +473,37 @@ static void spin_unlock(spinlock_t *l) {
 </tr>
 <tr>
 <td>按地址维护等待队列</td>
-<td>队列在内核里，用户态没有权限操作别人的调度状态</td>
+<td>队列在内核里，用户态没有权限操作别的线程的调度状态</td>
 </tr>
 <tr>
-<td>把睡着的线程放回就绪队列</td>
+<td>把阻塞的线程放回就绪队列</td>
 <td>需要调度器参与，还要处理优先级、CPU 亲和性</td>
 </tr>
 </tbody>
 </table>
-<p>但内核<strong>不应该</strong>接管整把锁。如果每次加锁都进内核，无竞争这个最常见的情况就要付一次系统调用的钱。实测本机一次最便宜的系统调用（<code>getpid()</code>）<strong>约 134 ns</strong>，已经是一把无竞争锁（~9 ns）的 15 倍。</p>
-<p>于是 Linux 的设计是：<strong>内核只提供「睡」和「醒」两个动作，锁的策略全部留在用户态。</strong></p>
-<p>这套机制叫 futex（Fast Userspace Mutex）。它的关键设计只有一句话：</p>
+<p>但内核不应接管整把锁。若每次加锁都进入内核，无竞争这一最常见情况就要支付一次系统调用。实测本机一次最便宜的系统调用（<code>getpid()</code>）<strong>约 134 ns</strong>，是一把无竞争锁（~9 ns）的 15 倍。</p>
+<p>因此 Linux 的设计是：<strong>内核只提供阻塞与唤醒两个动作，锁的策略全部留在用户态。</strong></p>
+<p>这套机制叫 futex（Fast Userspace Mutex）。它的关键设计是一句话：</p>
 <blockquote>
 <p><mark class="mk-blue">状态字在用户态，内核只按地址管等待队列。</mark></p>
 </blockquote>
-<p>无竞争时，用户态原子指令直接改状态字，内核连这个地址存在都不知道；只有抢不到、准备睡时，才把地址交给内核。futex 手册的原话是：这个 32 位字「把用户态的同步和内核的阻塞实现连了起来」。</p>
-<h2 id="futex-的两个动作和那个救命的-expected"><span class="num">05</span>futex 的两个动作，和那个救命的 expected</h2>
-<p>系统调用的样子（通常由 C 库包一层，你平时不会直接写）：</p>
+<p>无竞争时，用户态原子指令直接修改状态字，内核不知道这个地址存在；只有在争抢失败、准备阻塞时，才把地址交给内核。futex 手册的原话是：这个 32 位字「把用户态的同步和内核的阻塞实现连了起来」。</p>
+<p>「不进入内核」只对无竞争路径成立；一旦需要阻塞或唤醒，仍要付出一次系统调用。</p>
+<h2 id="futex-的两个动作与-expected-参数"><span class="num">05</span>futex 的两个动作与 expected 参数</h2>
+<p>系统调用的形式如下（通常由 C 库封装，应用不直接调用）：</p>
 <div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-c">long futex(uint32_t *uaddr, int op, uint32_t val,
            const struct timespec *timeout, uint32_t *uaddr2, uint32_t val3);
 </code></pre></div>
 <ul>
-<li><code>FUTEX_WAIT</code>：<strong>如果这个地址还是我以为的值，就让我睡。</strong></li>
-<li><code>FUTEX_WAKE</code>：<strong>把这个地址上等着的线程，最多叫醒 N 个。</strong></li>
+<li><code>FUTEX_WAIT</code>：<strong>如果这个地址的值仍等于预期值，就让调用线程阻塞。</strong></li>
+<li><code>FUTEX_WAKE</code>：<strong>在这个地址上唤醒最多 N 个阻塞的线程。</strong></li>
 </ul>
-<p>参数拆开看：</p>
+<p>参数如下：</p>
 <table>
 <thead>
 <tr>
 <th>参数</th>
-<th>大白话</th>
+<th>含义</th>
 <th>细节</th>
 </tr>
 </thead>
@@ -512,38 +515,38 @@ static void spin_unlock(spinlock_t *l) {
 </tr>
 <tr>
 <td><code>op</code></td>
-<td>要干什么</td>
-<td><code>FUTEX_WAIT</code> / <code>FUTEX_WAKE</code>；带 <code>_PRIVATE</code> 表示只在本进程内用，内核可以少做点事</td>
+<td>执行哪个操作</td>
+<td><code>FUTEX_WAIT</code> / <code>FUTEX_WAKE</code>；带 <code>_PRIVATE</code> 表示只在本进程内使用，内核可以减少检查</td>
 </tr>
 <tr>
 <td><code>val</code></td>
-<td>WAIT 时是「期望值」，WAKE 时是「最多叫醒几个」</td>
-<td>WAIT：值不等于 <code>val</code> 就立刻返回 <code>EAGAIN</code>，不睡；WAKE：常用 <code>1</code> 或 <code>INT_MAX</code></td>
+<td>WAIT 时是期望值，WAKE 时是最多唤醒数</td>
+<td>WAIT：值不等于 <code>val</code> 就立刻返回 <code>EAGAIN</code>，不进入阻塞；WAKE：常用 <code>1</code> 或 <code>INT_MAX</code></td>
 </tr>
 <tr>
 <td><code>timeout</code></td>
-<td>最多睡多久</td>
-<td>相对时间（毫秒级精度）；传 <code>NULL</code> 表示一直睡</td>
+<td>最长阻塞时间</td>
+<td>相对时间（毫秒级精度）；传 <code>NULL</code> 表示一直阻塞</td>
 </tr>
 <tr>
 <td><code>uaddr2</code> / <code>val3</code></td>
-<td>给 requeue 这类高级操作用的</td>
+<td>供 requeue 这类高级操作使用</td>
 <td>普通的 wait / wake 用不到</td>
 </tr>
 </tbody>
 </table>
-<p>返回值也要看清楚：</p>
+<p>返回值需要区分：</p>
 <ul>
-<li><code>FUTEX_WAIT</code> 返回 0，只说明「我被叫醒了」，<strong>不代表条件成立</strong> —— 手册明确说可能是伪唤醒，所以必须回到循环里重新检查。</li>
-<li><code>FUTEX_WAKE</code> 返回实际叫醒了几个；返回 0 说明队列里没人。</li>
+<li><code>FUTEX_WAIT</code> 返回 0 只说明线程被唤醒，<strong>不代表条件成立</strong>：手册明确说明存在伪唤醒，因此必须回到循环里重新检查条件。</li>
+<li><code>FUTEX_WAKE</code> 返回实际唤醒的线程数；返回 0 表示队列为空。</li>
 </ul>
-<h3 id="为什么-wait-必须带-expected">为什么 WAIT 必须带 expected</h3>
-<p>这是 futex 最关键的一步。假设没有这个检查：</p>
+<h3 id="wait-为什么必须带-expected">WAIT 为什么必须带 expected</h3>
+<p>这是 futex 最关键的一步。假设没有这项检查，时序如下：</p>
 <ol>
-<li>线程 B 读锁字，发现是 1（有人占着），决定睡；</li>
-<li>就在 B 真正睡下去之前，线程 A 解锁，把锁字改成 0，然后 <code>FUTEX_WAKE</code>；</li>
-<li>但 B 还没进队列，这次唤醒没找到人，返回 0；</li>
-<li>B 这才睡下去 —— 而锁已经空了，没有人会再来叫它。</li>
+<li>线程 B 读锁字，发现是 1（有人占着），决定阻塞；</li>
+<li>就在 B 真正进入阻塞之前，线程 A 解锁，把锁字改成 0，然后 <code>FUTEX_WAKE</code>；</li>
+<li>但 B 还没进队列，这次唤醒没有找到目标线程，返回 0；</li>
+<li>B 此时才进入阻塞 —— 而锁已经空闲，之后没有线程会再唤醒它。</li>
 </ol>
 <div class="seqd has-grid" data-seq data-n="3"
       style="--seq-fill:url(#s-fill-1);--seq-open:url(#s-fill-1-open)">
@@ -567,17 +570,18 @@ static void spin_unlock(spinlock_t *l) {
           <b>线程 A</b><small>持锁者</small>
         </div></div></div>
       <div class="seqd-body"><div class="smsg is-self" data-from="b" data-to="b" data-kind="self" data-i="1" data-note="①"><span class="snote">①</span><span class="slabel">读锁字 = 1</span></div><div class="smsg is-self" data-from="b" data-to="b" data-kind="self" data-i="2" data-note="②"><span class="snote">②</span><span class="slabel">决定睡（还没进内核）</span></div><div class="smsg is-self" data-from="a" data-to="a" data-kind="self" data-i="3" data-note="③"><span class="snote">③</span><span class="slabel">写锁字 = 0</span></div><div class="smsg" data-from="a" data-to="k" data-kind="sync" data-i="4" data-note="④"><span class="snote">④</span><span class="slabel">FUTEX_WAKE(1)</span></div><div class="smsg" data-from="k" data-to="a" data-kind="reply" data-i="5" data-note="⑤"><span class="snote">⑤</span><span class="slabel">队列空，返回 0</span></div><div class="smsg" data-from="b" data-to="k" data-kind="sync" data-i="6" data-note="⑥"><span class="snote">⑥</span><span class="slabel">FUTEX_WAIT(addr, 1)</span></div><div class="smsg" data-from="k" data-to="b" data-kind="reply" data-i="7" data-note="⑦"><span class="snote">⑦</span><span class="slabel">值已是 0，立刻 EAGAIN</span></div><div class="smsg is-self" data-from="b" data-to="b" data-kind="self" data-i="8" data-note="⑧"><span class="snote">⑧</span><span class="slabel">没睡成，回去重试 CAS</span></div></div>
-    </div><p>第 ⑥ 步就是 <code>expected</code> 起作用的地方：内核在把 B 挂进队列之前，会<strong>原子地</strong>做「读值 → 和 1 比较 → 决定睡不睡」。因为 A 已经把值改成 0，比较失败，B 直接拿到 <code>EAGAIN</code> 返回，不会睡死。手册把这个参数的目的写得很直接：<mark class="mk-blue">防止丢唤醒</mark>。</p>
-<h2 id="库层把原子-睡眠包成一个接口"><span class="num">06</span>库层：把「原子 + 睡眠」包成一个接口</h2>
-<p>到了 <code>mutex</code> 这一层，程序员看到的是契约，不是机制。POSIX 对 <code>pthread_mutex_lock</code> 的约定是：</p>
+    </div><p>第 ⑥ 步是 <code>expected</code> 起作用的位置：内核在把 B 加入等待队列之前，会<strong>原子地</strong>执行「读值 → 与 1 比较 → 决定是否阻塞」。此时 A 已把值改为 0，比较失败，B 直接返回 <code>EAGAIN</code>，不会进入阻塞。手册对这一参数的目的写得很直接：<mark class="mk-blue">防止丢唤醒</mark>。</p>
+<p><code>expected</code> 只覆盖「检查与入队之间」这一个窗口，不解决唤醒之后的再次竞争。</p>
+<h2 id="库层把原子操作与阻塞封装成接口"><span class="num">06</span>库层把原子操作与阻塞封装成接口</h2>
+<p>在 <code>mutex</code> 这一层，使用者面对的是契约而不是机制。POSIX 对 <code>pthread_mutex_lock</code> 的约定是：</p>
 <ul>
 <li>锁已经被别的线程持有，调用线程<strong>必须阻塞</strong>，直到锁可用；</li>
 <li>返回时，调用线程成为持有者；</li>
 <li>类型决定重入行为：普通锁重复加锁会死锁，<code>ERRORCHECK</code> 返回错误，<code>RECURSIVE</code> 计数加一；</li>
 <li>还有 robust（持有者死掉时返回 <code>EOWNERDEAD</code>）、优先级继承这些变体。</li>
 </ul>
-<p>这些语义 futex 一个都不提供。<mark class="mk-blue">futex 只会睡和醒，是库把它们组织成「锁」。</mark></p>
-<p>一个典型实现只要三样东西：一个 32 位状态字、一条快路径、一条慢路径。状态字常写成三种值：</p>
+<p>这些语义 futex 都不提供。<mark class="mk-blue">futex 只提供阻塞与唤醒，是库把它们组织成「锁」。</mark></p>
+<p>一个典型实现只需要三样：一个 32 位状态字、一条快路径、一条慢路径。状态字通常取三种值：</p>
 <table>
 <thead>
 <tr>
@@ -604,8 +608,9 @@ static void spin_unlock(spinlock_t *l) {
 </tr>
 </tbody>
 </table>
-<p>第三种值是个优化：如果解锁时看到的是 1（没人等），就完全不用进内核。futex 手册也提到解锁路径「可以进一步优化以避免不必要的唤醒」。</p>
-<p>把三条路径写在一起，就是 <code>mutex</code> 的全部骨架：</p>
+<p>第三种值是一项优化：解锁时看到 1（无人等待），就不需要进入内核。futex 手册也提到解锁路径「可以进一步优化以避免不必要的唤醒」。</p>
+<p>三条路径合起来，就是 <code>mutex</code> 的完整结构：</p>
+<p>三种取值是一种常见实现，不是 POSIX 规定的编码；不同运行时的状态字含义不同。</p>
 <div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-c">// futex_wait / futex_wake 就是 §05 那两个系统调用的包装
 // 状态字：0 空闲，1 占用，2 占用且有等待者
 static void mutex_lock(_Atomic int *w) {
@@ -629,9 +634,9 @@ static void mutex_unlock(_Atomic int *w) {
         futex_wake(w, 1);
 }
 </code></pre></div>
-<p>三行注释对应三条路径：快路径不进内核，慢路径睡，解锁路径按需唤醒。C++ 的 <code>std::mutex</code>、Java 的 <code>synchronized</code>（HotSpot 的 monitor）、Rust 的 <code>Mutex</code> 在各自的运行时里都是这个形状，差别在状态字怎么编码、自旋多久、是否支持优先级继承。</p>
+<p>三行注释对应三条路径：快路径不进入内核，慢路径阻塞，解锁路径按需唤醒。C++ 的 <code>std::mutex</code>、Java 的 <code>synchronized</code>（HotSpot 的 monitor）、Rust 的 <code>Mutex</code> 在各自的运行时里都是这一结构，差别在状态字怎么编码、自旋多久、是否支持优先级继承。</p>
 <h2 id="应用层四种常见组合"><span class="num">07</span>应用层：四种常见组合</h2>
-<p>库层给了积木，应用层负责选组合：</p>
+<p>库层提供的原语确定之后，应用层负责组合：</p>
 <table>
 <thead>
 <tr>
@@ -663,9 +668,10 @@ static void mutex_unlock(_Atomic int *w) {
 </tr>
 </tbody>
 </table>
-<p>一个容易忽略的点：<strong>条件变量等的是谓词，不是锁。</strong> 「队列非空」这个判断必须和 <code>wait</code> 在同一个互斥区间里完成，否则又会出现「判断完、睡下之前，条件已经成立」的窗口 —— 这和 §05 那个丢唤醒是同一个坑，只是发生在库层。</p>
-<h2 id="全链路一次有竞争的加锁四个角色怎么配合"><span class="num">08</span>全链路：一次有竞争的加锁，四个角色怎么配合</h2>
-<p>把前面的零件按时间顺序摆开，就是一次完整的「程序 / 库 / 内核 / 硬件」配合：</p>
+<p><strong>条件变量等待的是谓词，不是锁。</strong> 「队列非空」这个判断必须和 <code>wait</code> 在同一个互斥区间里完成，否则会出现「判断完成、进入阻塞之前，条件已经成立」的窗口；这与 §05 的丢唤醒是同一类问题，只是发生在库层。</p>
+<p>这一节列的是常见组合，不是完整清单；组合的选择取决于临界区长度和争抢强度。</p>
+<h2 id="一次有竞争的加锁里四个角色各做什么"><span class="num">08</span>一次有竞争的加锁里四个角色各做什么</h2>
+<p>把前面的零件按时间顺序排开，一次完整的配合涉及程序、库、内核与硬件四层：</p>
 <div class="seqd has-grid" data-seq data-n="4"
       style="--seq-fill:url(#s-fill-2);--seq-open:url(#s-fill-2-open)">
       <svg class="seqd-svg" aria-hidden="true">
@@ -690,14 +696,15 @@ static void mutex_unlock(_Atomic int *w) {
           <b>线程 B</b><small>抢不到的那个</small>
         </div></div></div>
       <div class="seqd-body"><div class="smsg" data-from="a" data-to="lib" data-kind="sync" data-i="1" data-note="①"><span class="snote">①</span><span class="slabel">lock()</span></div><div class="smsg" data-from="lib" data-to="a" data-kind="reply" data-i="2" data-note="②"><span class="snote">②</span><span class="slabel">CAS 0→1 成功</span></div><div class="smsg is-self" data-from="a" data-to="a" data-kind="self" data-i="3" data-note="③"><span class="snote">③</span><span class="slabel">临界区</span></div><div class="smsg" data-from="b" data-to="lib" data-kind="sync" data-i="4" data-note="④"><span class="snote">④</span><span class="slabel">lock()</span></div><div class="smsg is-self" data-from="lib" data-to="lib" data-kind="self" data-i="5" data-note="⑤"><span class="snote">⑤</span><span class="slabel">CAS 失败，自旋</span></div><div class="smsg" data-from="lib" data-to="k" data-kind="sync" data-i="6" data-note="⑥"><span class="snote">⑥</span><span class="slabel">FUTEX_WAIT(addr, 2)</span></div><div class="smsg" data-from="k" data-to="b" data-kind="reply" data-i="7" data-note="⑦"><span class="snote">⑦</span><span class="slabel">挂进队列，调度走</span></div><div class="smsg" data-from="a" data-to="lib" data-kind="sync" data-i="8" data-note="⑧"><span class="snote">⑧</span><span class="slabel">unlock()</span></div><div class="smsg" data-from="lib" data-to="k" data-kind="sync" data-i="9" data-note="⑨"><span class="snote">⑨</span><span class="slabel">FUTEX_WAKE(1)</span></div><div class="smsg" data-from="k" data-to="b" data-kind="reply" data-i="10" data-note="⑩"><span class="snote">⑩</span><span class="slabel">放回就绪队列</span></div><div class="smsg" data-from="b" data-to="lib" data-kind="sync" data-i="11" data-note="⑪"><span class="snote">⑪</span><span class="slabel">醒来，重试 CAS</span></div><div class="smsg" data-from="lib" data-to="b" data-kind="reply" data-i="12" data-note="⑫"><span class="snote">⑫</span><span class="slabel">成功，进入临界区</span></div></div>
-    </div><p>逐段看角色分工：</p>
+    </div><p>各层分工如下：</p>
 <ul>
-<li><strong>程序（线程 A / B）</strong>：只调 <code>lock()</code> / <code>unlock()</code>，不知道下面发生了什么。</li>
+<li><strong>程序（线程 A / B）</strong>：只调用 <code>lock()</code> / <code>unlock()</code>，不感知下层实现。</li>
 <li><strong>库（mutex）</strong>：决定什么时候用原子指令（②）、什么时候自旋（⑤）、什么时候交给内核（⑥）、什么时候唤醒（⑨）。</li>
-<li><strong>内核</strong>：只做两件事 —— 把 B 挂起（⑦）、把 B 放回就绪队列（⑩）。它从头到尾不知道「锁」是什么。</li>
+<li><strong>内核</strong>：只做两件事 —— 把 B 挂起（⑦）、把 B 放回就绪队列（⑩）；它不感知「锁」这个概念。</li>
 <li><strong>硬件</strong>：提供 ② 里那条 CAS 的原子性，以及 ② / ⑧ 两条边界上的顺序保证（acquire / release）。</li>
 </ul>
-<p>第 ⑪ 步值得单独说：<mark class="mk-blue">被唤醒不等于拿到锁</mark>。可能是别人先抢到了，也可能是伪唤醒，所以醒来必须回到 <code>while</code> 里重新检查 —— 这也是 §05 里 <code>EAGAIN</code> 和伪唤醒那两个细节的用途。</p>
+<p>第 ⑪ 步需要单独说明：<mark class="mk-blue">被唤醒不等于获得锁</mark>。可能是其他线程先抢到了锁，也可能是伪唤醒，因此醒来后必须回到 <code>while</code> 中重新检查条件；这也是 §05 中 <code>EAGAIN</code> 与伪唤醒两个细节的用途。</p>
+<p>这张图描述的是有竞争且需要阻塞的一次加锁；无竞争路径只经过 ② 与 ⑧，不进入内核。</p>
 <h2 id="为什么不能只用一层"><span class="num">09</span>为什么不能只用一层</h2>
 <table>
 <thead>
@@ -710,7 +717,7 @@ static void mutex_unlock(_Atomic int *w) {
 <tbody>
 <tr>
 <td>只用 CAS（自旋）</td>
-<td>抢不到就烧 CPU，没有排队</td>
+<td>抢不到就持续占用 CPU，没有排队</td>
 <td>同样工作量，CPU 时间 1.00× → 2.50×</td>
 </tr>
 <tr>
@@ -730,8 +737,8 @@ static void mutex_unlock(_Atomic int *w) {
 </tr>
 </tbody>
 </table>
-<p>这张表也解释了题面那个疑问：<strong>futex 和 mutex 不在同一层，因为它们是两种不同的东西</strong> —— futex 是「让你睡」的机制，mutex 是「保证互斥」的语义。把 futex 归到硬件层会漏掉内核；把 mutex 归到内核层会把语义当成机制。</p>
-<p>最后，分层不是绝对的，几种常见的例外：</p>
+<p>上表也解释了开头的疑问：<strong>futex 和 mutex 不在同一层，因为它们是两种不同的东西</strong> —— futex 是让线程阻塞的机制，mutex 是保证互斥的语义。把 futex 归到硬件层会漏掉内核；把 mutex 归到内核层会把语义当成机制。</p>
+<p>分层不是绝对的，常见例外如下：</p>
 <ul>
 <li><strong>自旋锁</strong>：只碰硬件，一次系统调用都不进。适合临界区只有几条指令的场景。</li>
 <li><strong>读写锁 / 条件变量 / 信号量</strong>：在 Linux 上通常共用 futex，但各自维护不同的状态字和等待队列。</li>
@@ -739,6 +746,7 @@ static void mutex_unlock(_Atomic int *w) {
 <li><strong>Go 的 <code>sync.Mutex</code></strong>：在自旋和排队之间做了折中，竞争久了会切到「饥饿模式」，把锁直接交给等待最久的 goroutine。</li>
 <li><strong>跨机器的「锁」</strong>：没有共享内存，也没有 futex，只能靠租约、超时和一致性协议 —— 那是另一套分层。</li>
 </ul>
+<p>这些例外说明分层是主要路径上的划分，不是硬性边界；判断一个新原语属于哪一层，看它需要谁配合才能完成互斥。</p>
 <div class="summary">
       <h3 id="一句话总结">一句话总结</h3>
       <p>硬件给原子性，内核给睡眠与唤醒，库把两者包成 mutex 的语义，应用层决定锁的粒度与组合。
