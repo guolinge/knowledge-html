@@ -1614,6 +1614,30 @@ text: |
 
 ---
 
+### 第 9.5 步 · 语言关卡：交给另一个模型
+
+内容和图定下来之后、发布之前，留一遍只做语言的修改。==这一遍不要自己做。==
+
+写稿时模型同时在查事实、排结构、写句子，语言规则永远排在最后；单独一遍、换一个模型、只做这一件事，才有机会执行。把语言规则继续往第 7 步和原则 ⑪ 里堆，改的是写稿那一遍，不是这一遍。
+
+调用方式：`worker` 默认继承当前模型，==必须显式指定 `model`==，否则这一遍还是同一个模型在改。
+
+```js
+subagent({
+  agent: "worker",
+  model: "futu-gateway/gpt-6.1-terra",   // 换成你实际用来改文字的模型
+  task: "读 .agents/skills/plain-rewrite/SKILL.md 和 notes/<slug>/note.md，按 skill 执行；只改 note.md 的正文和 meta.json 的 title/summary；改前备份到 /tmp；完成后给报告。",
+})
+```
+
+等它回来之后，主 agent 只做验收，不再自己判断文字好不好：
+
+1. `git diff` 看非正文区域有没有被动过：代码块、`raw`、YAML、链接、`sources`。动过就退回重跑。
+2. `npm run check`、`npm run build:standalone`、`npm run visual-check`。
+3. 只留一份 `note.md`。不要留 `-revised.html` 这种平行产物 —— 两份都会烂。
+
+新 skill 在 `.agents/skills/plain-rewrite/`。它不写具体句式，只给一个测试和一套动作：冷读 → 标记断点 → 归类 → 只改标记处 → 复读。
+
 ### 第 10 步 · 交付后的自我反馈
 
 ```callout
