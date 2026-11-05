@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>chan 是一块堆内存吗：四块东西，三条路</title>
-<meta name="description" content="把「一块内存」拆成四块：8 字节的变量、112 字节的 hchan、可能不存在的环形缓冲区、以及有人被挂住时才出现的 sudog 链。然后跟着一次 ch &lt;- v 走三条路 —— 路径 ① 直接越过缓冲区交接，路径 ③ 连数据都不复制，只有路径 ② 才真的写进那块内存。" />
+<title>Go channel：变量、缓冲区与同步</title>
+<meta name="description" content="以 Go 1.26.2 darwin/arm64 的本机实测为例，区分 8 字节的 channel 变量、112 字节的 hchan、可能不存在的环形缓冲区，以及等待时才出现的 sudog 链。一次发送可以直接交接、写入缓冲区，或在挂起时不复制待发值、而是记录它的地址；缓冲区已满且有发送方等待时，接收方会先取队头，再把待发值填进同一槽位并唤醒发送方。" />
 <style>
 /* ============================================================
    theme.css — 设计 token 与页面骨架
@@ -7446,7 +7446,7 @@ svg[data-preset="blueprint"] .c-security-group,
       <a href="#makechan堆上到底几块">makechan：堆上到底几块</a>
       <a href="#缓冲区里放的是什么">缓冲区里放的是什么</a>
       <a href="#三条跟着来的语义">三条跟着来的语义</a>
-      <a href="#happens-before-是第四样东西" class="sub">happens-before 是第四样东西</a>
+      <a href="#happens-before收发和关闭的顺序保证" class="sub">happens-before：收发和关闭的顺序保证</a>
       <a href="#什么时候别用-channel">什么时候别用 channel</a>
       <a href="#回到那个问题" class="sub">回到那个问题</a>
       <a href="#速查">速查</a>
@@ -7455,8 +7455,8 @@ svg[data-preset="blueprint"] .c-security-group,
   <main>
     <div class="hero">
       <span class="eyebrow">● Go · 并发</span>
-      <h1>chan 是一块堆内存吗：四块东西，三条路</h1>
-      <p class="lede">把「一块内存」拆成四块：8 字节的变量、112 字节的 hchan、可能不存在的环形缓冲区、以及有人被挂住时才出现的 sudog 链。然后跟着一次 ch &lt;- v 走三条路 —— 路径 ① 直接越过缓冲区交接，路径 ③ 连数据都不复制，只有路径 ② 才真的写进那块内存。</p>
+      <h1>Go channel：变量、缓冲区与同步</h1>
+      <p class="lede">以 Go 1.26.2 darwin/arm64 的本机实测为例，区分 8 字节的 channel 变量、112 字节的 hchan、可能不存在的环形缓冲区，以及等待时才出现的 sudog 链。一次发送可以直接交接、写入缓冲区，或在挂起时不复制待发值、而是记录它的地址；缓冲区已满且有发送方等待时，接收方会先取队头，再把待发值填进同一槽位并唤醒发送方。</p>
     </div>
 
 <aside class="needs">
@@ -8243,12 +8243,14 @@ value := &lt;-ch
 </div>
         </div>
       </dialog>
-    </div><p>这两轮问答都答到了同一个问题的两面：「chan 是不是一块堆内存」和「chan 是不是为了同步」。它们其实指向同一件东西 —— 一个<strong>由四部分组成的 runtime 对象</strong>，其中只有一块装元素。</p>
-<p>这篇把原文压成两张图：这个对象长什么样，以及一次发送会走哪条路。</p>
-<p>先把「一块堆内存」这个说法拆开。它至少混了三层：</p>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>你在说哪一层</th><th>它是什么</th><th>在哪</th><th>本机实测占多少</th></tr></thead><tbody><tr><th>那个变量 <code>ch</code></th><td data-label="它是什么">你代码里的一个名字，内容是 8 字节指针</td><td data-label="在哪">跟着它所在的作用域走，通常就在栈上或者结构体里</td><td data-label="本机实测占多少">8 字节</td></tr><tr><th>runtime 的 <code>hchan</code> 对象</th><td data-label="它是什么"><code>make(chan ...)</code> 造出来的东西，元数据都在这</td><td data-label="在哪">堆</td><td data-label="本机实测占多少">112 字节（arm64）</td></tr><tr><th>装元素的那块 <code>buf</code></th><td data-label="它是什么">环形缓冲区，只在容量大于 0、且元素不是零大小时才有</td><td data-label="在哪">堆（可能和 <code>hchan</code> 同一块，也可能分开，见 §04）</td><td data-label="本机实测占多少"><code>容量 × 元素大小</code></td></tr></tbody></table></div><p>而真正让 channel 成为 channel 的，<strong>不是其中任何一块内存</strong>，是两条等待队列加一把锁。§03 会看到：一次发送甚至可以不碰缓冲区。</p>
+    </div><p>Go 的 channel 让 goroutine 交换数据，也让发送和接收在必要时等待对方。例如，<code>ch := make(chan int, 3)</code> 创建一个容量为 3 的 channel，<code>ch &lt;- 1</code> 发送一个值，<code>&lt;-ch</code> 接收一个值。接收方还没取走数据时，发送方最多可以先放入 3 个 <code>int</code>；容量为 0 时则没有暂存槽位，收发双方需要配合才能完成交接。</p>
+<p>这些行为靠什么实现？channel 是一块存放元素的堆内存，还是一种同步机制？代码里的 <code>ch</code> 变量和 <code>make</code> 创建的 runtime 对象 <code>hchan</code> 不是同一件事：<code>ch</code> 保存指针，<code>hchan</code> 管理缓冲区和等待队列。</p>
+<p>这篇先区分代码里的变量、runtime 的对象和等待队列，再看一次发送会走哪条路。</p>
+<p>文中的 runtime 实现、字节数和分配次数以本机的 Go 1.26.2 darwin/arm64 为准，不代表所有版本和平台。先把「一块堆内存」这个说法中混在一起的三层分开：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>你在说哪一层</th><th>它是什么</th><th>在哪</th><th>本机实测占多少</th></tr></thead><tbody><tr><th>那个变量 <code>ch</code></th><td data-label="它是什么">代码里的 channel 变量，保存一个 8 字节的指针；nil 时不指向对象</td><td data-label="在哪">跟着它所在的作用域走，通常在栈上或者结构体里</td><td data-label="本机实测占多少">8 字节</td></tr><tr><th>runtime 的 <code>hchan</code> 对象</th><td data-label="它是什么"><code>make(chan ...)</code> 创建的运行时对象，保存 channel 的状态</td><td data-label="在哪">堆</td><td data-label="本机实测占多少">112 字节（arm64）</td></tr><tr><th>装元素的那块 <code>buf</code></th><td data-label="它是什么">环形缓冲区，只在容量大于 0、且元素不是零大小时才有</td><td data-label="在哪">堆（可能和 <code>hchan</code> 同一块，也可能分开，见 §04）</td><td data-label="本机实测占多少"><code>容量 × 元素大小</code></td></tr></tbody></table></div><p>但只看分配了多少内存还不够：channel 还靠两条等待队列和一把锁协调收发。§03 会看到，一次发送甚至可以不经过缓冲区。</p>
 <h2 id="四块东西各在哪"><span class="num">01</span>四块东西，各在哪</h2>
-<figure class="archfig" data-arch style="--arch-max-width:1586px" data-boundaries="nested" data-pano data-parts='{"chvar":{"label":"ch 变量","sub":"你代码里的那个名字","detail":"它和 `make` 造出来的对象是两样东西。`var ch chan int` 声明了一个 8 字节的变量，但它是 nil —— 没有指向任何 hchan，所以发送和接收都会永久阻塞。`make` 之后它才指向一个真实对象。","facts":{"大小":"8 字节","在哪":"跟着作用域","是 nil 时":"没有 hchan"}},"hchan":{"label":"runtime 的 hchan","sub":"元数据、两条链、一把锁","detail":"这个类型的字段随版本变化，但四组东西一直在：队列状态（qcount / dataqsiz）、两个游标（sendx / recvx）、两条等待链（sendq / recvq）、以及保护它们的锁。","facts":{"分配":"mallocgc","本机实测":"112 字节","为什么加锁":"多个 G 会同时进来"}},"ring":{"label":"环形缓冲区","sub":"唯一真正装元素的地方","detail":"元素按 sendx 写进去、按 recvx 读出来，两个游标追上就环回。容量 0 时 runtime 不给它分配内存，`buf` 指向 hchan 自己 —— 见 §04。","facts":{"多大":"dataqsiz × elemsize","谁写":"chansend 路径②","谁读":"chanrecv 路径②"}},"suds":{"label":"sudog 链","sub":"被挂住的 G","detail":"发送方放不下时不会复制数据 —— 它把自己包成一个 sudog，里面存的是「值在哪个地址」，挂到 sendq 上然后 park。所以一个卡住的 channel 里，数据还在发送方的栈上。","facts":{"谁造":"acquireSudog","记住":"值的地址","什么时候消失":"被唤醒 à"}}}' data-tours='[{"id":"blocks","label":"数一数一共几块","steps":[{"at":["chvar"],"text":"先说最外层：你在代码里写的 `ch`，本身只是一个 8 字节的指针。它不是对象，只是一个名字。"},{"at":["hchan"],"text":"一次 `make` 一定造出这个。所有状态都在这 112 字节里：装了几个、能装几个、两个游标、关没关、谁在等。"},{"at":["ring"],"text":"这是唯一装元素的地方。容量 0 时它根本不存在 —— 所以「chan 是一块堆内存」在无缓冲 channel 上就不成立。"},{"at":["suds"],"text":"有人被卡住时才有它。注意 sudog 里存的是值的地址，不是值的副本。"}]},{"id":"swap","label":"变的是什么","steps":[{"at":["chvar","hchan"],"text":"复制 `ch` 只是复制那 8 字节，两个名字指同一个 hchan。这是「引用类型」的全部含义。"},{"at":["hchan","ring"],"text":"关闭 channel 只改 hchan 里的 `closed`，缓冲区里的元素一个都不动 —— 已经放进去的还能读完。"}]}]' data-frames='[{"id":"stack","boundary":0,"kind":"classification","label":"栈 · 只有这个名字","detail":"你写的 `ch` 变量本身只有 8 字节，存的是一个指针。把它赋给别的变量、当参数传进函数，复制的都是这 8 字节 —— 底层还是同一个 hchan。","members":["chvar"],"depth":1},{"id":"heap","boundary":1,"kind":"contains","label":"堆 · make 的时候造的","detail":"一次 `make` 至少造出 hchan；`buf` 和 sudog 是它的附属。搞清楚「一共几块」要把 makechan 的三个分支分开看（§04）。","members":["hchan","ring","suds"],"depth":1}]'>
+<p>图中的 <code>G</code> 是 goroutine，<code>sudog</code> 是 runtime 用来记录等待者的结构。<code>sendq</code> 和 <code>recvq</code> 分别是等待发送和等待接收的队列；<code>park</code> 表示挂起当前 goroutine。</p>
+<figure class="archfig" data-arch style="--arch-max-width:1586px" data-boundaries="nested" data-pano data-parts='{"chvar":{"label":"ch 变量","sub":"你代码里的那个名字","detail":"它和 `make` 造出来的对象是两样东西。`var ch chan int` 声明了一个 8 字节的变量，但它是 nil —— 没有指向任何 hchan，所以发送和接收都会永久阻塞。`make` 之后它才指向一个真实对象。","facts":{"大小":"8 字节","在哪":"跟着作用域","是 nil 时":"没有 hchan"}},"hchan":{"label":"runtime 的 hchan","sub":"元数据、两条链、一把锁","detail":"这个类型的字段随版本变化，但四组东西一直在：队列状态（qcount / dataqsiz）、两个游标（sendx / recvx）、两条等待链（sendq / recvq）、以及保护它们的锁。qcount 是缓冲区里的元素数，dataqsiz 是容量；sendx 和 recvx 分别记录下一次写、读的位置，走到末尾后各自回到开头。","facts":{"分配":"mallocgc","本机实测":"112 字节","为什么加锁":"多个 G 会同时进来"}},"ring":{"label":"环形缓冲区","sub":"用来暂存元素的地方","detail":"元素按 sendx 写进去、按 recvx 读出来，游标各自在走到末尾时环回。容量 0 时 runtime 不给它分配内存，`buf` 指向 hchan 自己 —— 见 §04。","facts":{"多大":"dataqsiz × elemsize","谁写":"chansend 路径② / chanrecv 路径①（缓冲满时）","谁读":"chanrecv 路径①（缓冲满时）或②"}},"suds":{"label":"sudog 链","sub":"被挂住的 G","detail":"发送方放不下时不会把值复制到缓冲区 —— runtime 取得一个 sudog，记录当前 goroutine 和待发送值的地址，挂到 sendq 上然后 park。待发送值仍在发送方提供的地址，通常在栈上，也可能在堆上。","facts":{"谁造":"acquireSudog","记住":"值的地址","什么时候消失":"被唤醒"}}}' data-tours='[{"id":"blocks","label":"数一数一共几块","steps":[{"at":["chvar"],"text":"最外层是代码里的 `ch` 变量。在本机，它保存一个 8 字节的指针；这个变量不是 `make` 创建的 hchan 对象。"},{"at":["hchan"],"text":"一次 `make` 一定造出这个。所有状态都在这 112 字节里：装了几个、能装几个、两个游标、关没关、谁在等。"},{"at":["ring"],"text":"这是暂存元素的地方。容量 0 时它不存在；即使只分配一个 hchan，也没有装元素的缓冲区。"},{"at":["suds"],"text":"有人被卡住时才有它。注意 sudog 里存的是值的地址，不是值的副本。"}]},{"id":"swap","label":"变的是什么","steps":[{"at":["chvar","hchan"],"text":"复制 `ch` 只是复制那 8 字节，两个名字指同一个 hchan。这是「引用类型」的全部含义。"},{"at":["hchan","ring"],"text":"关闭 channel 时，runtime 置位 `closed`，清空 recvq 和 sendq，再唤醒等待者；缓冲区里的元素不会被清掉，已经放进去的还能读完。"}]}]' data-frames='[{"id":"stack","boundary":0,"kind":"classification","label":"栈 · ch 变量","detail":"你写的 `ch` 变量本身只有 8 字节，存的是一个指针。把它赋给别的变量、当参数传进函数，复制的都是这 8 字节 —— 底层还是同一个 hchan。","members":["chvar"],"depth":1},{"id":"heap","boundary":1,"kind":"contains","label":"堆 · hchan、缓冲区和等待记录","detail":"一次 `make` 创建 hchan；buf 是否单独分配取决于 makechan 的三个分支（§04）。sudog 则在 goroutine 等待时取得。","members":["hchan","ring","suds"],"depth":1}]'>
       <div class="arch-boundary-ui">
           <div class="arch-boundary-toolbar"><span class="arch-boundary-label">边界</span>
             <button type="button" data-boundary-mode="nested" aria-pressed="true">多层归属框</button>
@@ -8284,11 +8286,11 @@ value := &lt;-ch
         <rect width="100%" height="100%" fill="url(#chan-parts-grid)" />
 
         <!-- Boundaries (behind everything) -->
-        <g class="arch-frame" data-frame="stack" data-depth="1" data-frame-flat="false" data-frame-kind="classification" role="button" tabindex="0" aria-pressed="false" aria-label="栈 · 只有这个名字"><title>你写的 `ch` 变量本身只有 8 字节，存的是一个指针。把它赋给别的变量、当参数传进函数，复制的都是这 8 字节 —— 底层还是同一个 hchan。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="0" data-frame-members="chvar" x="10" y="152" width="242" height="164" rx="12" class="c-region" stroke-width="1"/>
-        <text x="18" y="170" class="t-cloud" font-size="9" font-weight="600">栈 · 只有这个名字</text></g>
+        <g class="arch-frame" data-frame="stack" data-depth="1" data-frame-flat="false" data-frame-kind="classification" role="button" tabindex="0" aria-pressed="false" aria-label="栈 · ch 变量"><title>你写的 `ch` 变量本身只有 8 字节，存的是一个指针。把它赋给别的变量、当参数传进函数，复制的都是这 8 字节 —— 底层还是同一个 hchan。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="0" data-frame-members="chvar" x="10" y="152" width="242" height="164" rx="12" class="c-region" stroke-width="1"/>
+        <text x="18" y="170" class="t-cloud" font-size="9" font-weight="600">栈 · ch 变量</text></g>
 
-        <g class="arch-frame" data-frame="heap" data-depth="1" data-frame-flat="false" data-frame-kind="contains" role="button" tabindex="0" aria-pressed="false" aria-label="堆 · make 的时候造的"><title>一次 `make` 至少造出 hchan；`buf` 和 sudog 是它的附属。搞清楚「一共几块」要把 makechan 的三个分支分开看（§04）。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="1" data-frame-members="hchan ring suds" x="280" y="26" width="950" height="390" rx="12" class="c-region" stroke-width="1"/>
-        <text x="288" y="44" class="t-cloud" font-size="9" font-weight="600">堆 · make 的时候造的</text></g>
+        <g class="arch-frame" data-frame="heap" data-depth="1" data-frame-flat="false" data-frame-kind="contains" role="button" tabindex="0" aria-pressed="false" aria-label="堆 · hchan、缓冲区和等待记录"><title>一次 `make` 创建 hchan；buf 是否单独分配取决于 makechan 的三个分支（§04）。sudog 则在 goroutine 等待时取得。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="1" data-frame-members="hchan ring suds" x="280" y="26" width="950" height="390" rx="12" class="c-region" stroke-width="1"/>
+        <text x="288" y="44" class="t-cloud" font-size="9" font-weight="600">堆 · hchan、缓冲区和等待记录</text></g>
 
         <!-- Connection paths (before components for correct z-order) -->
         <path data-edge-from="chvar" data-edge-to="hchan" data-edge-label="一个指针" data-edge-key="0" data-edge-id="e1" data-composition-points="226,234;268,234;268,210;310,210" d="M 226 234 L 260 234 Q 268 234 268 226 L 268 218 Q 268 210 276 210 L 310 210" class="a-default" stroke-width="1.5" marker-end="url(#chan-parts-arrowhead)"/>
@@ -8296,8 +8298,8 @@ value := &lt;-ch
         <path data-edge-from="hchan" data-edge-to="suds" data-edge-label="sendq / recvq" data-edge-key="2" data-edge-id="e3" data-composition-points="666,217;718,217;718,313;770,313" d="M 666 217 L 710 217 Q 718 217 718 225 L 718 305 Q 718 313 726 313 L 770 313" class="a-default" stroke-width="1.5" marker-end="url(#chan-parts-arrowhead)"/>
 
         <!-- Components -->
-        <g id="chan-parts-node-chvar" data-nb="1" data-node-id="chvar" data-node-label="ch 变量" tabindex="0" role="button" aria-label="Focus ch 变量, 你代码里的那个名字, 栈：只有这个名字本身" aria-pressed="false" data-node-kind="external" data-node-sublabel="你代码里的那个名字" data-node-context="栈：只有这个名字本身">
-          <title>ch 变量 · 你代码里的那个名字 · 栈：只有这个名字本身</title>
+        <g id="chan-parts-node-chvar" data-nb="1" data-node-id="chvar" data-node-label="ch 变量" tabindex="0" role="button" aria-label="Focus ch 变量, 你代码里的那个名字, 栈：ch 变量" aria-pressed="false" data-node-kind="external" data-node-sublabel="你代码里的那个名字" data-node-context="栈：ch 变量">
+          <title>ch 变量 · 你代码里的那个名字 · 栈：ch 变量</title>
           <rect x="36" y="178" width="190" height="112" rx="6" class="c-mask"/>
           <rect x="36" y="178" width="190" height="112" rx="6" class="c-external" stroke-width="1.5"/>
           <g aria-hidden="true" data-semantic-sigil="external" class="semantic-sigil s-external" transform="translate(42 184) scale(0.6875)">
@@ -8314,8 +8316,8 @@ value := &lt;-ch
           <text class="nb-note" x="48" y="282" font-size="8">它不装元素，也不记录状态</text>
         </g>
 
-        <g id="chan-parts-node-hchan" data-nb="1" data-node-id="hchan" data-node-label="hchan" tabindex="0" role="button" aria-label="Focus hchan, runtime 造的对象, 堆：make 的时候一次造出来的" aria-pressed="false" data-node-kind="backend" data-node-sublabel="runtime 造的对象" data-node-context="堆：make 的时候一次造出来的">
-          <title>hchan · runtime 造的对象 · 堆：make 的时候一次造出来的</title>
+        <g id="chan-parts-node-hchan" data-nb="1" data-node-id="hchan" data-node-label="hchan" tabindex="0" role="button" aria-label="Focus hchan, runtime 造的对象, 堆：hchan、buf、sudog" aria-pressed="false" data-node-kind="backend" data-node-sublabel="runtime 造的对象" data-node-context="堆：hchan、buf、sudog">
+          <title>hchan · runtime 造的对象 · 堆：hchan、buf、sudog</title>
           <rect x="310" y="120" width="356" height="180" rx="6" class="c-mask"/>
           <rect x="310" y="120" width="356" height="180" rx="6" class="c-backend" stroke-width="1.5"/>
           <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(316 126) scale(0.6875)">
@@ -8334,8 +8336,8 @@ value := &lt;-ch
           <text class="nb-note" x="322" y="292" font-size="8">一次 make 一定分配它</text>
         </g>
 
-        <g id="chan-parts-node-ring" data-nb="1" data-node-id="ring" data-node-label="buf · 环形缓冲区" tabindex="0" role="button" aria-label="Focus buf · 环形缓冲区, 堆：make 的时候一次造出来的" aria-pressed="false" data-node-kind="database" data-node-context="堆：make 的时候一次造出来的">
-          <title>buf · 环形缓冲区 · 堆：make 的时候一次造出来的</title>
+        <g id="chan-parts-node-ring" data-nb="1" data-node-id="ring" data-node-label="buf · 环形缓冲区" tabindex="0" role="button" aria-label="Focus buf · 环形缓冲区, 堆：hchan、buf、sudog" aria-pressed="false" data-node-kind="database" data-node-context="堆：hchan、buf、sudog">
+          <title>buf · 环形缓冲区 · 堆：hchan、buf、sudog</title>
           <rect x="770" y="56" width="430" height="136" rx="6" class="c-mask"/>
           <rect x="770" y="56" width="430" height="136" rx="6" class="c-database" stroke-width="1.5"/>
           <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(776 62) scale(0.6875)">
@@ -8352,8 +8354,8 @@ value := &lt;-ch
           <text class="nb-note" x="782" y="184" font-size="8">buf 指向它</text>
         </g>
 
-        <g id="chan-parts-node-suds" data-nb="1" data-node-id="suds" data-node-label="sudog 链" tabindex="0" role="button" aria-label="Focus sudog 链, 堆：make 的时候一次造出来的" aria-pressed="false" data-node-kind="messagebus" data-node-context="堆：make 的时候一次造出来的">
-          <title>sudog 链 · 堆：make 的时候一次造出来的</title>
+        <g id="chan-parts-node-suds" data-nb="1" data-node-id="suds" data-node-label="sudog 链" tabindex="0" role="button" aria-label="Focus sudog 链, 堆：hchan、buf、sudog" aria-pressed="false" data-node-kind="messagebus" data-node-context="堆：hchan、buf、sudog">
+          <title>sudog 链 · 堆：hchan、buf、sudog</title>
           <rect x="770" y="240" width="430" height="146" rx="6" class="c-mask"/>
           <rect x="770" y="240" width="430" height="146" rx="6" class="c-messagebus" stroke-width="1.5"/>
           <g aria-hidden="true" data-semantic-sigil="messagebus" class="semantic-sigil s-messagebus" transform="translate(776 246) scale(0.6875)">
@@ -8369,7 +8371,7 @@ value := &lt;-ch
           <text class="nb-k" x="782" y="309" font-size="9">谁造的</text><text class="nb-v" x="834.2" y="309" font-size="9">acquireSudog</text>
           <text class="nb-k" x="782" y="323" font-size="9">记住什么</text><text class="nb-v" x="834.2" y="323" font-size="9">值在哪个地址</text>
           <text class="nb-k" x="782" y="337" font-size="9">挂在哪</text><text class="nb-v" x="834.2" y="337" font-size="9">sendq 或 recvq 上</text>
-          <text class="nb-note" x="782" y="378" font-size="8">数据还在对方栈上，sudog 只记地址</text>
+          <text class="nb-note" x="782" y="378" font-size="8">sudog 记录收发地址；地址不为 nil 时通常指向栈，也可能指向堆</text>
         </g>
 
         <!-- Connection labels -->
@@ -8407,17 +8409,17 @@ value := &lt;-ch
           </g>
         </g>
       </svg></div>
-      <figcaption>从右边进去。<code>hchan</code> 是骨架，<code>buf</code> 和两条 sudog 链都挂在它上面；只有 <code>buf</code> 装元素。点零件看它自己装了什么，或者用下面的导览走一遍。</figcaption>
+      <figcaption>从右边的 <code>ch</code> 看进去。<code>hchan</code> 管理 <code>buf</code> 和两条 sudog 链；关闭时置 <code>closed</code>、清空等待队列并唤醒等待者，但不会清掉缓冲区里的元素。点零件查看内容，或用下面的导览走一遍。</figcaption>
       <div class="pano-ui"></div>
       <p class="arch-hint"><span class="idle">点头上的任意一个框看它的关系，点区域标题看分组含义，点零件看完整归属路径；用「对比两个零件」出一张对照表</span><span class="focused">再点一次空白处取消</span></p>
     </figure><h2 id="变量不等于对象"><span class="num">02</span>变量不等于对象</h2>
-<p>三种写法的差别只在「有没有 hchan」：</p>
+<p>下面三种写法分别说明 nil、创建 channel 和复制 channel 变量：</p>
 <div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-go">var a chan int          // a = nil，没有 hchan。发送、接收都永久阻塞
 b := make(chan int, 3)  // b 指向一个 hchan，buf 里有 3 格
 c := b                  // c 和 b 是同一个 hchan 的两个名字
 </code></pre></div>
-<p><code>c := b</code> 复制的是那 8 字节指针。所以给函数传 channel 也只是传指针的副本 —— 函数里往 channel 塞一个值，调用方看得到。</p>
-<p><code>make</code> 才真正分配内存。本机跑 <code>testing.Benchmark</code> 量到：</p>
+<p><code>c := b</code> 复制的是那 8 字节指针，不是 hchan 或其中的元素。给函数传 channel 也是传指针的副本：函数往同一个 channel 发送值，调用方可以接收；但函数给自己的参数换一个 channel，不会改变调用方的变量。</p>
+<p><code>make</code> 才会分配 channel 的运行时对象。下面是本机用 <code>testing.Benchmark</code> 测得的每次操作分配字节数和次数（B/op 和 allocs/op）：</p>
 <div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-text">Go go1.26.2 darwin/arm64
 make(chan int)          容量0         112.0 B/op   1.00 allocs/op
 make(chan int, 3)        容量3        144.0 B/op   1.00 allocs/op
@@ -8427,14 +8429,14 @@ make(chan []int, 3)      元素含指针    192.0 B/op   2.00 allocs/op
 make(chan struct{})      零大小元素    112.0 B/op   1.00 allocs/op
 make(chan struct{}, 100) 零大小+容量   112.0 B/op   1.00 allocs/op
 </code></pre></div>
-<p>112 这个数字是 hchan 本身。容量 3 的 <code>chan int</code> 是 112 + 3×8 = 136，分配器取整到 144。<strong>注意最后两行：容量 100 的 <code>chan struct{}</code> 也只要 112 字节</strong> —— 因为元素大小是 0，<code>buf</code> 不需要空间。</p>
+<p>在这组测量里，hchan 本身占 112 字节。容量为 3 的 <code>chan int</code>，hchan 加上三个 8 字节元素共需 112 + 3×8 = 136 字节，分配器取整后实测为 144 字节。最后两行显示，<strong>容量为 100 的 <code>chan struct{}</code> 也只分配了 112 字节</strong>：元素大小是 0，<code>buf</code> 不需要空间。</p>
 <h2 id="一次-ch-v-走哪条路"><span class="num">03</span>一次 <code>ch &lt;- v</code> 走哪条路</h2>
-<p>这是回答「是不是一块内存」最直接的证据。runtime 里发送一共三条路径，按顺序试：</p>
+<p>下面讨论一个已经创建、尚未关闭的 channel，以及普通的阻塞发送。runtime 处理 <code>ch &lt;- v</code> 时，按顺序尝试三条路径。这里的 <code>qcount</code> 是缓冲区已有的元素数，<code>dataqsiz</code> 是容量，<code>sendx</code> 记录下一次写入的位置。</p>
 <div class="cards" data-cols="3"><div class="ccard tone-amber">
           <span class="tag tone-amber">先试这条</span>
           <h4>① recvq 有人等</h4>
           <p>直接交接，绕过缓冲区</p>
-          <div class="cbody"><p><code>chansend</code> 一进来就 <code>c.recvq.dequeue()</code>。拿到一个在等的接收者，就把 v <strong>直接拷进它的目标地址</strong>：</p>
+          <div class="cbody"><p><code>chansend</code> 取得锁并确认 channel 未关闭后，先试 <code>c.recvq.dequeue()</code>。拿到一个在等的接收者，就把 v <strong>直接拷进它的目标地址</strong>：</p>
 <div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-go">if sg := c.recvq.dequeue(); sg != nil {
     // We pass the value we want to send
     // directly to the receiver, bypassing
@@ -8443,8 +8445,8 @@ make(chan struct{}, 100) 零大小+容量   112.0 B/op   1.00 allocs/op
     return true
 }
 </code></pre></div>
-<p>注释里的 <code>bypassing the channel buffer (if any)</code> 是原文。<mark class="mk-blue">这条路上缓冲区一步没动。</mark></p>
-<p>无缓冲 channel 走的就是这条 —— 所以它从来没有「存过」数据。</p>
+<p>注释里的 <code>bypassing the channel buffer (if any)</code> 是原文。<mark class="mk-blue">这条路不读取或写入缓冲区里的元素。</mark></p>
+<p>无缓冲 channel 有接收方等待时走这条；没有接收方等待时走 ③。它没有缓冲区可存放元素。</p>
 </div>
           
         </div><div class="ccard tone-blue">
@@ -8458,12 +8460,12 @@ c.sendx++
 if c.sendx == c.dataqsiz { c.sendx = 0 }
 c.qcount++
 </code></pre></div>
-<p>这是唯一的「数据真的被存进那块堆内存」的路径。<code>typedmemmove</code> 是值拷贝 —— 元素类型里有什么就拷什么（§05）。</p>
+<p>这条路径由发送方把值存进缓冲区。缓冲区满时，先挂起的发送也可能由接收方把待发值填进缓冲区，见 ③。<code>typedmemmove</code> 是值拷贝 —— 元素类型里有什么就拷什么（§05）。</p>
 </div>
           
         </div><div class="ccard tone-red">
           <span class="tag tone-red">阻塞</span>
-          <h4>③ 都满了</h4>
+          <h4>③ 没有接收者，也没有空位</h4>
           <p>挂到 sendq 上，park</p>
           <div class="cbody"><p>前两条都不成立，就造一个 sudog：</p>
 <div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-go">mysg := acquireSudog()
@@ -8472,31 +8474,32 @@ mysg.g = gp
 c.sendq.enqueue(mysg)
 gopark(chanparkcommit, ...)
 </code></pre></div>
-<p><strong>注意 <code>mysg.elem.set(ep)</code> 存的是地址，不是值的副本。</strong> 数据还在发送方的栈上，sudog 只是记住了它在哪。</p>
-<p>接收方一到，会沿着这条链把值拷走，再把发送方唤醒。</p>
+<p><strong>注意 <code>mysg.elem.set(ep)</code> 存的是地址，不是值的副本。</strong> 挂起时，待发送值仍在发送方提供的地址，通常在栈上，也可能在堆上；sudog 对这个值只记录地址。</p>
+<p>如果等来的是接收方：无缓冲时，它直接从该地址取值；有缓冲且已满时，它先取走缓冲区队头，再把待发值填进空出的同一槽位。随后唤醒发送方。</p>
 </div>
           
         </div></div><p>这三条路解释了为什么「一块内存」的说法站不住：</p>
 <ul>
 <li>无缓冲 channel 永远走 ① 或 ③，<strong>一次也不写缓冲区</strong>；</li>
-<li>走 ③ 时数据也<strong>没被复制到 channel 里</strong>，还在发送方的栈上；</li>
-<li>只有走 ② 才是真正的「存进那块堆内存」。</li>
+<li>进入 ③ 挂起时，只记录待发送值的地址，<strong>不把值复制到缓冲区</strong>；值仍在发送方提供的地址，通常在栈上，也可能在堆上；</li>
+<li>走 ② 时由发送方写缓冲区；如果缓冲区已满且发送方在 ③ 等待，接收方到来时会先取走队头，把待发值填入空出的槽位，再唤醒发送方。</li>
 </ul>
+<p>下面的交互给发送和接收各自的路径编号。上面三张卡片说的是<strong>发送</strong>路径；接收的路径 ① 则是先处理 <code>sendq</code> 里的等待者。</p>
 <div class="demo" data-widget="chan-lab" data-config="{&quot;cap&quot;:3}">
       <div class="demo-head">
         <span class="title">有缓冲 · 亲手走一遍三条路</span>
-        <span class="status" data-status>先连点两次「发送一个值」，再点「接收一个值」</span>
+        <span class="status" data-status>先连点三次「发送一个值」填满缓冲区，再发送一次，最后接收</span>
         <span class="spacer"></span>
         
       </div>
       <div class="demo-body custom" data-mount></div>
     </div><p>按这个顺序点，你会看到三条路：</p>
 <ol>
-<li><strong>发送 ×2</strong> → 路径 ②，两个值进了 <code>buf[0]</code> 和 <code>buf[1]</code>，sendx 从 0 走到 2</li>
-<li><strong>发送</strong> → 路径 ②，填满 <code>buf[2]</code>，qcount 到 3</li>
-<li><strong>发送</strong> → 路径 ③，缓冲区满了，值挂到 sendq（注意 qcount 没变）</li>
-<li><strong>接收</strong> → 路径 ①，先拿走队头，再把 sendq 里的值填进同一个槽位 —— 因为队列是满的，一头出一头进</li>
+<li><strong>发送 ×3</strong> → 路径 ②，三个值依次进入 <code>buf[0]</code>、<code>buf[1]</code>、<code>buf[2]</code>，sendx 环回到 0，qcount 到 3</li>
+<li><strong>发送</strong> → 路径 ③，缓冲区满了，发送方带着值的地址挂到 sendq（qcount 没变）</li>
+<li><strong>接收</strong> → 接收路径 ①，先拿走队头，再把等待发送的值填进同一个槽位，并唤醒发送方；qcount 仍是 3</li>
 </ol>
+<p>最后一步的 ① 是接收路径，不是卡片里的发送路径 ①。想看发送路径 ①，可以点「重置」，先点「接收一个值」让接收方进入 <code>recvq</code>，再点「发送一个值」。</p>
 <div class="demo" data-widget="chan-lab" data-config="{&quot;cap&quot;:0}">
       <div class="demo-head">
         <span class="title">无缓冲 · 同样的按钮，完全不同的走法</span>
@@ -8506,14 +8509,15 @@ gopark(chanparkcommit, ...)
       </div>
       <div class="demo-body custom" data-mount></div>
     </div><p>容量 0 时状态栏里的 <code>dataqsiz</code> 是 0，缓冲区那块直接显示「没有这块」。这时：</p>
+<p>其中，发送和接收分别从重置后的初始状态开始。</p>
 <ul>
 <li><strong>发送</strong> → 路径 ③，直接挂起（<code>qcount &lt; dataqsiz</code> 变成 <code>0 &lt; 0</code>，永远不成立）</li>
 <li><strong>接收</strong> → 路径 ③，也挂起</li>
 <li>只有「一边已经在等、另一边来了」才走 ① —— 两个 goroutine 在那里碰头</li>
 </ul>
 <h2 id="makechan堆上到底几块"><span class="num">04</span>makechan：堆上到底几块</h2>
-<p><code>makechan</code> 分三个分支，直接决定「一次分配还是两次」：</p>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>你写的</th><th>走哪个分支</th><th>分配几次</th><th>本机实测</th></tr></thead><tbody><tr><th><code>make(chan int)</code></th><td data-label="走哪个分支"><code>mem == 0</code></td><td data-label="分配几次">1 次（只有 hchan）</td><td data-label="本机实测">112 B</td></tr><tr><th><code>make(chan struct{}, 100)</code></th><td data-label="走哪个分支"><code>mem == 0</code>（元素大小是 0）</td><td data-label="分配几次">1 次（只有 hchan）</td><td data-label="本机实测">112 B</td></tr><tr><th><code>make(chan int, 3)</code></th><td data-label="走哪个分支">元素不含指针：hchan 和 buf 一次分配完</td><td data-label="分配几次">1 次</td><td data-label="本机实测">144 B</td></tr><tr><th><code>make(chan []int, 3)</code></th><td data-label="走哪个分支">元素含指针：分两次</td><td data-label="分配几次">2 次</td><td data-label="本机实测">192 B</td></tr></tbody></table></div><p>源码里对应的三段：</p>
+<p>§02 的实测中，有的 <code>make</code> 分配一次，有的分配两次。runtime 的 <code>makechan</code> 会先算出 <code>mem = 容量 × 元素大小</code>，再按 <code>mem</code> 是否为 0、元素是否含指针，选择三个分支之一：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>你写的</th><th>走哪个分支</th><th>分配几次</th><th>本机实测</th></tr></thead><tbody><tr><th><code>make(chan int)</code></th><td data-label="走哪个分支"><code>mem == 0</code></td><td data-label="分配几次">1 次（只有 hchan）</td><td data-label="本机实测">112 B</td></tr><tr><th><code>make(chan struct{}, 100)</code></th><td data-label="走哪个分支"><code>mem == 0</code>（元素大小是 0）</td><td data-label="分配几次">1 次（只有 hchan）</td><td data-label="本机实测">112 B</td></tr><tr><th><code>make(chan int, 3)</code></th><td data-label="走哪个分支">元素不含指针：hchan 和 buf 一次分配完</td><td data-label="分配几次">1 次</td><td data-label="本机实测">144 B</td></tr><tr><th><code>make(chan []int, 3)</code></th><td data-label="走哪个分支">元素含指针：分两次</td><td data-label="分配几次">2 次</td><td data-label="本机实测">192 B</td></tr></tbody></table></div><p>源码里的 <code>switch</code> 按顺序判断。因此，即使元素含指针，只要容量为 0、<code>mem</code> 为 0，也会先走第一条分支：</p>
 <div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-go">switch {
 case mem == 0:
     // 容量 0，或者元素大小 0
@@ -8530,11 +8534,12 @@ default:
     c.buf = mallocgc(mem, elem, true)
 }
 </code></pre></div>
-<p><mark class="mk-blue">第一条分支是最关键的一行：<code>c.buf = c.raceaddr()</code>。</mark> 无缓冲 channel 的 <code>buf</code> 指向 <code>hchan</code> 自己 —— 不是「一块空的缓冲区」，是「根本没有缓冲区」。所以对 <code>make(chan int)</code> 来说，堆上就是一块 112 字节，里面不含任何元素槽位。</p>
-<p>第三条分支解释了一个反直觉的结果：<code>chan []int</code> 无缓冲只分配 1 次（112 B），加了容量就变 2 次（192 B）—— 因为只有这时候才需要一块能被 GC 单独标记的 buf。</p>
+<p><mark class="mk-blue">第一条分支是最关键的一行：<code>c.buf = c.raceaddr()</code>。</mark> 无缓冲 channel 的 <code>buf</code> 指向 <code>hchan</code> 自己 —— 不是「一块空的缓冲区」，是「根本没有缓冲区」。这里 <code>raceaddr()</code> 返回的是 <code>hchan</code> 内部 <code>buf</code> 字段的地址，不是另行分配的元素数组。所以对 <code>make(chan int)</code> 来说，堆上就是一块 112 字节，里面不含任何元素槽位。</p>
+<p>第三条分支解释了为什么本机的 <code>chan []int</code> 无缓冲时只分配 1 次（112 B），加了容量后变成 2 次（192 B）：只有这时候才需要一块能被 GC 单独标记的 buf。</p>
 <h2 id="缓冲区里放的是什么"><span class="num">05</span>缓冲区里放的是什么</h2>
-<p><code>typedmemmove</code> 是<strong>值拷贝</strong>，不是「把变量搬进去」。所以放进去的东西取决于元素类型：</p>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>元素类型</th><th>缓冲区里存的</th><th>原来的变量还能改吗</th></tr></thead><tbody><tr><th><code>int</code>、<code>struct{}</code>、普通结构体</th><td data-label="缓冲区里存的">整个值的一份副本</td><td data-label="原来的变量还能改吗">能。改原变量不影响 channel 里那份</td></tr><tr><th>指针、<code>slice</code>、<code>map</code>、<code>interface</code></th><td data-label="缓冲区里存的">引用头的一份副本（指针 / 三个字 / 两个字）</td><td data-label="原来的变量还能改吗">引用头能改，<strong>它指向的那块数据共享</strong></td></tr></tbody></table></div><div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-go">type T struct{ A, B int }
+<p>数据从发送方复制到缓冲区时，<code>typedmemmove</code> 做的是<strong>值拷贝</strong>，不是把原变量搬进去。复制出的值包含什么，取决于 channel 的元素类型：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>元素类型</th><th>缓冲区里存的</th><th>原来的变量还能改吗</th></tr></thead><tbody><tr><th><code>int</code>、<code>struct{}</code>、普通结构体</th><td data-label="缓冲区里存的">整个值的一份副本</td><td data-label="原来的变量还能改吗">能。改原变量不影响 channel 里那份</td></tr><tr><th>指针、<code>slice</code>、<code>map</code>、<code>interface</code></th><td data-label="缓冲区里存的">各自值的一份副本（本机 slice 是三个字，interface 是两个字）</td><td data-label="原来的变量还能改吗">指针、slice、map 可共享所指数据；interface 是否共享取决于动态类型，比如 int 是独立的值，slice 可共享底层数组</td></tr></tbody></table></div><p>结构体本身也可能包含指针或 slice：复制结构体时，这些字段的值同样被复制，但它们指向的数据仍可能被双方共享。下面的 <code>T</code> 只有整数，不包含这样的字段。</p>
+<div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-go">type T struct{ A, B int }
 
 ch1 := make(chan T, 1)
 t := T{1, 2}
@@ -8546,49 +8551,52 @@ data := []int{1, 2, 3}
 ch2 &lt;- data     // 只拷 slice header（指针 + len + cap）
 data[0] = 99    // 会影响 ch2 里那份 —— 它们指向同一个底层数组
 </code></pre></div>
-<p>所以「缓冲区里存了什么」不是 channel 决定的，是<strong>元素类型</strong>决定的。这也解释了为什么用 channel 传大结构体时，拷的是整个结构体 —— 不想拷就传指针。</p>
+<p>因此，缓冲区里保存的值由<strong>元素类型</strong>决定。用 channel 传大结构体时，复制的是整个结构体；如果不想复制整个结构体，可以传指针。</p>
 <h2 id="三条跟着来的语义"><span class="num">06</span>三条跟着来的语义</h2>
-<p>原文第 4、6 节讲了 nil、关闭和内存可见性。把它们的边界摆在一起：</p>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>channel 的状态</th><th>发送</th><th>接收</th><th>关闭</th></tr></thead><tbody><tr><th>nil（<code>var ch chan int</code>）</th><td data-label="发送">永久阻塞</td><td data-label="接收">永久阻塞</td><td data-label="关闭">panic</td></tr><tr><th>正常，但缓冲满了 / 空了</th><td data-label="发送">阻塞（挂到 sendq）</td><td data-label="接收">阻塞（挂到 recvq）</td><td data-label="关闭">唤醒所有等待者</td></tr><tr><th>已关闭，缓冲区里还有元素</th><td data-label="发送">panic</td><td data-label="接收">继续读完，然后返回零值</td><td data-label="关闭">panic（重复关闭）</td></tr><tr><th>已关闭，缓冲区已空</th><td data-label="发送">panic</td><td data-label="接收">立刻返回零值 + <code>ok == false</code></td><td data-label="关闭">panic</td></tr></tbody></table></div><p>nil channel 的「永久阻塞」不是超时，是字面意义上的永不返回。源码里那句调用写着：</p>
+<p>除了内存布局，channel 还有三类需要留意的语义：nil、关闭和内存可见性。先看直接发送、接收和关闭的结果；表里的 <code>ok</code> 来自 <code>v, ok := &lt;-ch</code>，表示这次接收是否成功。</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>channel 的状态</th><th>发送</th><th>接收</th><th>关闭</th></tr></thead><tbody><tr><th>nil（<code>var ch chan int</code>）</th><td data-label="发送">永久阻塞</td><td data-label="接收">永久阻塞</td><td data-label="关闭">panic</td></tr><tr><th>正常，但缓冲满了 / 空了</th><td data-label="发送">阻塞（挂到 sendq）</td><td data-label="接收">阻塞（挂到 recvq）</td><td data-label="关闭">唤醒所有等待者</td></tr><tr><th>已关闭，缓冲区里还有元素</th><td data-label="发送">panic</td><td data-label="接收">继续读完，然后返回零值</td><td data-label="关闭">panic（重复关闭）</td></tr><tr><th>已关闭，缓冲区已空</th><td data-label="发送">panic</td><td data-label="接收">立刻返回零值 + <code>ok == false</code></td><td data-label="关闭">panic</td></tr></tbody></table></div><p>对 nil channel 直接发送或接收会永久阻塞，不是超时。下面是源码中 nil 发送分支的调用：</p>
 <div class="code-wrap"><button class="copy" data-copy>复制</button><pre><code class="language-go">gopark(nil, nil, waitReasonChanSendNilChan, traceBlockForever, 2)
 </code></pre></div>
 <p><code>traceBlockForever</code> —— 永不被唤醒。</p>
 <p>关闭的顺序也值得记住：<code>closechan</code> 先把 <code>closed</code> 置 1，然后<strong>清空 recvq</strong>（把每个等待接收者的目标地址写成零值）和 <strong>sendq</strong>（这些发送者被唤醒后 panic），最后才 unlock 并逐个唤醒。所以「关闭时缓冲区里剩下的元素」不会被清掉，它们还能被读出来。</p>
-<h3 id="happens-before-是第四样东西">happens-before 是第四样东西</h3>
-<p>内存模型对 channel 有四条规则，逐条对应你在代码里能看到的动作：</p>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>你做的动作</th><th>保证了什么</th></tr></thead><tbody><tr><th>发送 <code>ch &lt;- v</code></th><td data-label="保证了什么">发送<strong>发生在</strong>对应接收完成之前</td></tr><tr><th>关闭 <code>close(ch)</code></th><td data-label="保证了什么">关闭<strong>发生在</strong>「因为已关闭而返回零值」的接收之前</td></tr><tr><th>无缓冲接收 <code>&lt;-ch</code></th><td data-label="保证了什么">接收<strong>发生在</strong>对应发送完成之前（所以两边真的碰头了）</td></tr><tr><th>第 k 次接收</th><td data-label="保证了什么">发生在容量为 C 的 channel 上第 k+C 次发送完成之前</td></tr></tbody></table></div><p>第四条是前三条的推广：它让一个容量为 C 的 channel 可以当计数信号量用 —— channel 里的元素个数就是「正在使用的人数」，容量就是「同时最多几个人」。</p>
+<h3 id="happens-before收发和关闭的顺序保证">happens-before：收发和关闭的顺序保证</h3>
+<p>Go 内存模型用「发生在之前」（happens-before）描述操作之间的先后关系，并据此判断一个 goroutine 的写入对另一个 goroutine 的读取是否可见。channel 的四条规则把这种顺序关系与发送、接收和关闭联系起来：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>你做的动作</th><th>保证了什么</th></tr></thead><tbody><tr><th>发送 <code>ch &lt;- v</code></th><td data-label="保证了什么">发送<strong>发生在</strong>对应接收完成之前</td></tr><tr><th>关闭 <code>close(ch)</code></th><td data-label="保证了什么">关闭<strong>发生在</strong>「因为已关闭而返回零值」的接收之前</td></tr><tr><th>无缓冲接收 <code>&lt;-ch</code></th><td data-label="保证了什么">接收<strong>发生在</strong>对应发送完成之前（所以两边真的碰头了）</td></tr><tr><th>第 k 次接收</th><td data-label="保证了什么">发生在容量为 C 的 channel 上第 k+C 次发送完成之前</td></tr></tbody></table></div><p>例如，一个 goroutine 先把共享变量写为 1，再向 channel 发送；另一个 goroutine 完成对应接收后再读取。假设没有其他写入，读取会看到 1：写入先于发送，发送先于对应接收完成，接收完成又先于读取。</p>
+<p>第四条推广的是无缓冲接收那一条规则：它让一个容量为 C 的 channel 可以当计数信号量用 —— channel 里的元素个数就是「正在使用的人数」，容量就是「同时最多几个人」。</p>
+<p>例如 C=3、k=1 时，规则说第 1 次接收发生在第 4 次发送完成之前。假设 channel 起初为空、前三次发送先填满缓冲区，后续发送要等一次接收腾出位置。计数信号量是一种特定用法：开始使用前发送一个值，使用结束后接收一个值；按这套约定使用时，缓冲区里的元素数才表示正在使用的人数。</p>
 <p><mark class="mk-blue">这四条是 channel 除了搬数据之外真正给你的东西。</mark> 前三条在本机都能复现；第四条是内存模型文档里的原话，不在 runtime 代码里。</p>
 <h2 id="什么时候别用-channel"><span class="num">07</span>什么时候别用 channel</h2>
-<p>原文第十二、十三节说得比很多教程都准，这里只压成一张表：</p>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>你真正要做的</th><th>先考虑</th><th>为什么</th></tr></thead><tbody><tr><th>把一个东西交给另一个 goroutine</th><td data-label="先考虑"><code>chan</code> 或 <code>chan</code> + <code>select</code></td><td data-label="为什么">交接本身就是语义，channel 的阻塞正好表达「还没准备好」</td></tr><tr><th>等一批 goroutine 全部结束</th><td data-label="先考虑"><code>sync.WaitGroup</code></td><td data-label="为什么">你不需要传数据，只需要一个计数，<code>WaitGroup</code> 干的就这一件事</td></tr><tr><th>保护一个共享变量</th><td data-label="先考虑"><code>sync.Mutex</code> / <code>RWMutex</code></td><td data-label="为什么">为了 <code>n++</code> 专门起一个 goroutine 再发消息过去，比加锁更慢也更绕</td></tr><tr><th>一个计数器自增</th><td data-label="先考虑"><code>sync/atomic</code></td><td data-label="为什么"><code>n++</code> 在多核上不是一步，但 <code>atomic.AddInt64</code> 是</td></tr><tr><th>取消、超时、整条调用链</th><td data-label="先考虑"><code>context.Context</code></td><td data-label="为什么">关闭一个 channel 只能广播一次，<code>context</code> 能带值和截止时间往下传</td></tr></tbody></table></div><p>判断只需要一句话：<strong>重点在「把东西交给谁」就用 channel，重点在「保护同一份东西」就用锁。</strong></p>
+<p>channel 适合在 goroutine 之间交接值，但不是每种并发任务都需要 channel。可以先按要完成的事情选择工具：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>你真正要做的</th><th>先考虑</th><th>为什么</th></tr></thead><tbody><tr><th>把一个东西交给另一个 goroutine</th><td data-label="先考虑"><code>chan</code> 或 <code>chan</code> + <code>select</code></td><td data-label="为什么">交接本身就是语义，channel 的阻塞正好表达「还没准备好」</td></tr><tr><th>等一批 goroutine 全部结束</th><td data-label="先考虑"><code>sync.WaitGroup</code></td><td data-label="为什么">不需要传数据，只需要等待；<code>WaitGroup</code> 用计数完成这件事</td></tr><tr><th>保护一个共享变量</th><td data-label="先考虑"><code>sync.Mutex</code> / <code>RWMutex</code></td><td data-label="为什么">为了 <code>n++</code> 专门起一个 goroutine 再发消息过去，比加锁更慢也更绕</td></tr><tr><th>一个计数器自增</th><td data-label="先考虑"><code>sync/atomic</code></td><td data-label="为什么"><code>n++</code> 在多核上不是一步，但 <code>atomic.AddInt64</code> 是</td></tr><tr><th>取消、超时、整条调用链</th><td data-label="先考虑"><code>context.Context</code></td><td data-label="为什么">关闭一个 channel 只能广播一次，<code>context</code> 能带值和截止时间往下传</td></tr></tbody></table></div><p>一个简单的判断是：<strong>重点在「把东西交给谁」就用 channel，重点在「保护同一份东西」就用锁。</strong></p>
 <div class="summary">
       <h3 id="回到那个问题">回到那个问题</h3>
-      <p><code>chan</code> 不是「一块堆内存」，是<mark class="mk-blue">一个 112 字节的对象，加上一块可能不存在的元素缓冲区</mark>。</p>
-<p>它的核心不是任何一块内存，而是那两条等待队列：发送方和接收方在队列上碰头，数据从一个人的栈直接拷到另一个人的栈 —— 缓冲区只是「暂时没人接」时的落脚点。</p>
+      <p>本机用 <code>make</code> 创建的 <code>chan</code> 不只是「一块装元素的堆内存」：在 Go 1.26.2 darwin/arm64 中，它有<mark class="mk-blue">一个 112 字节的 hchan 对象，以及一块可能不存在的元素缓冲区</mark>。</p>
+<p><code>hchan</code> 通过两条等待队列和一把锁协调收发：发送方和接收方可以在队列上碰头，数据从发送方的地址直接拷到接收方的目标地址；这些地址通常在栈上，也可能在堆上。缓冲区则用来暂存元素。</p>
 
     </div><h2 id="速查">速查</h2>
-<div class="compare-wrap"><table class="compare"><thead><tr><th>你手上这个</th><th>它是什么</th><th>关键点</th></tr></thead><tbody><tr><th><code>var ch chan int</code></th><td data-label="它是什么">8 字节的 nil</td><td data-label="关键点">没有 hchan，收发都永久阻塞，close 会 panic</td></tr><tr><th><code>make(chan int)</code></th><td data-label="它是什么">112 字节的 hchan</td><td data-label="关键点"><code>buf</code> 指向自己，没有元素槽位</td></tr><tr><th><code>make(chan int, 3)</code></th><td data-label="它是什么">112 + 24 字节，一次分配</td><td data-label="关键点"><code>buf</code> 紧跟在 hchan 后面</td></tr><tr><th><code>make(chan []int, 3)</code></th><td data-label="它是什么">两次分配</td><td data-label="关键点">元素含指针，buf 要被 GC 单独盯着</td></tr><tr><th><code>ch &lt;- v</code> 返回了</th><td data-label="它是什么">走了路径 ① 或 ②</td><td data-label="关键点">要么直接交接，要么写进了 buf</td></tr><tr><th><code>ch &lt;- v</code> 卡住了</th><td data-label="它是什么">走了路径 ③</td><td data-label="关键点">值还在你的栈上，sendq 上只挂了一个记录地址的 sudog</td></tr><tr><th><code>close(ch)</code></th><td data-label="它是什么">只改了 <code>closed</code></td><td data-label="关键点">缓冲区里的元素一个没动，还能读完</td></tr></tbody></table></div><div class="quiz"><details>
+<p>这里的字节数和分配次数仍以开头的本机环境为准。</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>你手上这个</th><th>它是什么</th><th>关键点</th></tr></thead><tbody><tr><th><code>var ch chan int</code></th><td data-label="它是什么">8 字节的 nil</td><td data-label="关键点">没有 hchan，收发都永久阻塞，close 会 panic</td></tr><tr><th><code>make(chan int)</code></th><td data-label="它是什么">112 字节的 hchan</td><td data-label="关键点"><code>buf</code> 指向自己，没有元素槽位</td></tr><tr><th><code>make(chan int, 3)</code></th><td data-label="它是什么">112 + 24 字节，一次分配</td><td data-label="关键点"><code>buf</code> 紧跟在 hchan 后面</td></tr><tr><th><code>make(chan []int, 3)</code></th><td data-label="它是什么">两次分配</td><td data-label="关键点">元素含指针，buf 要被 GC 单独盯着</td></tr><tr><th><code>ch &lt;- v</code> 返回了</th><td data-label="它是什么">走了路径 ①、②，或在路径 ③ 被接收方唤醒后返回</td><td data-label="关键点">③ 时有缓冲则接收方取队头并补入待发值，无缓冲则直接交接；若被关闭唤醒则 panic</td></tr><tr><th><code>ch &lt;- v</code> 卡住了</th><td data-label="它是什么">走了路径 ③</td><td data-label="关键点">值仍在发送方提供的地址（通常在栈上，也可能在堆上）；sendq 上只挂了记录地址的 sudog</td></tr><tr><th><code>close(ch)</code></th><td data-label="它是什么">置 <code>closed</code>，清空 recvq/sendq 并唤醒等待者</td><td data-label="关键点">关闭操作不清除缓冲区里的元素，还能读完</td></tr></tbody></table></div><div class="quiz"><details>
         <summary>无缓冲 channel 上有「一块装元素的堆内存」吗？</summary>
         <div class="a"><p>没有。</p>
 <p><code>make(chan int)</code> 只分配 hchan 那 112 字节，<code>makechan</code> 走的是 <code>mem == 0</code> 分支，<code>c.buf = c.raceaddr()</code> —— buf 指向 hchan 自己，一个元素槽位也没有。</p>
-<p>所以无缓冲 channel 的发送只有两条路：recvq 上有人等就<strong>直接交接</strong>（路径 ①），没人等就<strong>挂起</strong>（路径 ③）。它从来没有「把数据存起来」这个动作。</p>
+<p>所以无缓冲 channel 的发送只有两条路：recvq 上有人等就<strong>直接交接</strong>（路径 ①），没人等就<strong>挂起</strong>（路径 ③）。它从来没有把数据存进缓冲区的动作。</p>
 </div>
       </details><details>
         <summary><code>ch &lt;- v</code> 卡住的时候，v 被复制进 channel 了吗？</summary>
-        <div class="a"><p>没有。发送方把自己包成一个 sudog，<code>mysg.elem.set(ep)</code> 存的是 <strong>v 的地址</strong>，然后挂到 sendq 上 park。</p>
-<p>数据还在发送方的栈上。接收方到达时才沿着 sudog 把值拷走（无缓冲时直接从发送方栈拷到接收方栈），再唤醒发送方。</p>
-<p>这也解释了为什么阻塞中的 channel 不占「元素的副本」空间。</p>
+        <div class="a"><p>尚未由这次阻塞操作复制到缓冲区。发送方取得一个 sudog，<code>mysg.elem.set(ep)</code> 存的是 <strong>v 的地址</strong>，然后挂到 sendq 上 park。</p>
+<p>待发送值仍在发送方提供的地址，通常在栈上，也可能在堆上。如果等来接收方：无缓冲时直接从该地址拷到接收方的目标地址；缓冲区已满时先取队头，再把待发值填进同一个槽位。随后唤醒发送方。</p>
+<p>阻塞发送本身不为这个待发送值在 channel 中增加一份副本；有缓冲 channel 仍可能存着之前发送的元素。</p>
 </div>
       </details><details>
         <summary><code>make(chan []int, 3)</code> 为什么比 <code>make(chan int, 3)</code> 多一次分配？</summary>
-        <div class="a"><p>因为元素里有指针。</p>
+        <div class="a"><p>因为元素里有指针。两个例子的容量都是 3，元素大小也都不是 0，所以都不会先走 <code>mem == 0</code> 分支。</p>
 <p><code>makechan</code> 看 <code>elem.Pointers()</code>：不含指针时把 hchan 和 buf 放在<strong>同一次</strong> <code>mallocgc</code> 里（<code>hchanSize+mem</code>），buf 紧跟在 hchan 后面；含指针时分两次，让 GC 能单独扫描 buf 那块。</p>
 <p>本机实测：<code>chan int, 3</code> = 144 B / 1 次分配，<code>chan []int, 3</code> = 192 B / 2 次分配。</p>
 </div>
       </details></div>
 
     <footer>
-      <span>chan 是一块堆内存吗：四块东西，三条路</span>
+      <span>Go channel：变量、缓冲区与同步</span>
       <span>最后更新 2026-11-01 · 单文件可离线打开</span>
     </footer>
   </main>
@@ -21459,12 +21467,13 @@ WIDGETS['mysql-2pc-crash'] = (root) => {
       if (st.sendq.length > 0) {
         const v = st.sendq.shift();
         if (CAP === 0) {
-          say('p1', '路径 ① **直接接收**：无缓冲，`' + v + '` 从发送方的栈直接拷过来，并唤醒那个 G。');
+          say('p1', '路径 ① **直接接收**：无缓冲，`' + v + '` 从发送方的地址直接拷过来，并唤醒那个 G。');
         } else {
           const slot = st.recvx;
           const got = st.buf[slot];
           st.buf[slot] = v;
           st.recvx = (st.recvx + 1) % CAP;
+          st.sendx = st.recvx;   // 和 runtime 的 recv 一致：满队列一头出一头进，写指针跟着移
           say('p1', '路径 ① **从 sendq 取**：先拿走队头 `' + got + '`，再把发送方的 `' + v +
             '` 填进同一个槽位 —— 队列是满的，一头出一头进。');
         }
@@ -21554,12 +21563,14 @@ WIDGETS['mysql-2pc-crash'] = (root) => {
       qbox.append(row('recvq · 等着的接收方', st.recvq), row('sendq · 等着的发送方', st.sendq.length, st.sendq));
       qbox.append(el('div', 'cl-none', CAP === 0
         ? '无缓冲时，这两条队列是唯一的交接地点。'
-        : '队列里的值只说明「有人在等」，元素本身还在对方栈上。'));
+        : '队列里的值只说明「有人在等」，元素本身还在对方的地址上（栈或堆）。'));
 
       /* 日志 */
       logBox.textContent = '';
       if (!st.log.length) {
-        logBox.append(el('div', 'cl-line', '点下面的按钮试一次。先连点两次「发送」把缓冲区装满，再点「接收」。'));
+        logBox.append(el('div', 'cl-line', CAP === 0
+          ? '点下面的按钮试一次。先点「发送」看它卡住，再点「接收」。'
+          : '点下面的按钮试一次。先连点 ' + CAP + ' 次「发送」把缓冲区装满，再点「接收」。'));
       }
       st.log.forEach((l) => {
         const d = el('div', 'cl-line ' + l.kind);
