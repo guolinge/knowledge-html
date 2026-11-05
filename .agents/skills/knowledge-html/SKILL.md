@@ -1635,6 +1635,7 @@ subagent({
 1. `git diff` 看非正文区域有没有被动过：代码块、`raw`、YAML、链接、`sources`。动过就退回重跑。
 2. `npm run check`、`npm run build:standalone`、`npm run visual-check`。
 3. 只留一份 `note.md`。不要留 `-revised.html` 这种平行产物 —— 两份都会烂。
+4. 处理报告里的「待补」清单：能补的事实由主 agent 补进 `note.md`，再让编辑过一遍那几段；缺一整节前置的，回 `plans/<topic>.yaml` 加节点，不在这一遍硬补。
 
 新 skill 在 `.agents/skills/plain-rewrite/`。它不写具体句式，只给一个测试和一套动作：冷读 → 标记断点 → 归类 → 只改标记处 → 复读。
 
