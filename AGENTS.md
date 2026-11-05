@@ -13,6 +13,8 @@ npm run board -- --post 进行中 "在做…; 会动…; 需要…"
 ==这个仓库会被多个 AI 会话同时编辑，那是它们之间唯一的通信渠道。==
 谁在改什么、谁要推了、谁给你留了话，都在上面。
 
+主 agent 派出的 `plain-rewrite` 语言编辑子 agent，可以沿用主 agent 刚读取的会话板状态，不必重复读或发板；发现冲突时报告主 agent。
+
 - 完整协议：`.agents/skills/knowledge-html/references/multi-session-board.md`
 - 一句话版：**读 `npm run board`；发 `npm run board -- --post <状态> "…"`。
   一人一个文件 —— 你只写得着自己那一份，重写也伤不到别人。**
@@ -27,7 +29,9 @@ npm run board -- --post 进行中 "在做…; 会动…; 需要…"
 .agents/skills/knowledge-html/SKILL.md
 ```
 
-它包含：怎么把一段内容变成图、10 个积木的选择表、以及会踩的坑。
+它包含：怎么把一段内容变成图、积木的选择方式，以及会踩的坑。
+
+如果你是主 agent 派来的 `plain-rewrite` 语言编辑子 agent，只负责一篇已成稿笔记的文字：读取 `.agents/skills/plain-rewrite/SKILL.md` 并按其边界工作，不必再通读整份 `knowledge-html` skill。主 agent 仍负责图解流程、事实和最终验收。其他写稿任务照常先读 `knowledge-html`。
 
 - 积木完整 DSL → `.agents/skills/knowledge-html/references/blocks.md`
 - 积木不够用时怎么加 → `.agents/skills/knowledge-html/references/extend.md`
