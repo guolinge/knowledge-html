@@ -1,0 +1,440 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-has-toc="1">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>谁在操作 HTTP：请求交给谁、一条连接怎么分、什么时候关</title>
+<meta name="description" content="fetch 和 EventSource 并没有各自一套 HTTP 实现。顺着一条 HTTP/2 连接，把浏览器网络组件的分工、按流编号分发，以及连接在什么条件下关闭讲清楚。" />
+<link rel="stylesheet" href="../../assets/theme.css?v=19aa345f51" />
+  <link rel="stylesheet" href="../../assets/blocks.css?v=bb15413b7c" />
+  <link rel="stylesheet" href="../../assets/archify-embed.css?v=68fec0b81b" />
+</head>
+<body>
+<div id="progress"></div>
+<div id="tocScrim"></div>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <button class="icon-btn" id="tocBtn" title="目录" aria-label="展开目录" aria-controls="toc">☰</button>
+    <a class="brand" href="../../index.html"><span class="dot"></span>知识笔记</a>
+    
+    <span class="spacer"></span>
+    <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">◐</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="toc" id="toc">
+      <p class="toc-title">目录</p>
+      <a href="../../index.html" class="sub">← 全部笔记</a>
+      <a href="#执行-http-的不是协议是程序">执行 HTTP 的不是协议，是程序</a>
+      <a href="#一条连接分给两个请求凭什么不串">一条连接分给两个请求，凭什么不串</a>
+      <a href="#http11-的六条连接是六条什么">HTTP/1.1 的六条连接是六条什么</a>
+      <a href="#一次响应读完连接并不关">一次响应读完，连接并不关</a>
+      <a href="#连接什么时候关">连接什么时候关</a>
+      <a href="#三句带走">三句带走</a>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <span class="eyebrow">● 网络协议 · HTTP</span>
+      <h1>谁在操作 HTTP：请求交给谁、一条连接怎么分、什么时候关</h1>
+      <p class="lede">fetch 和 EventSource 并没有各自一套 HTTP 实现。顺着一条 HTTP/2 连接，把浏览器网络组件的分工、按流编号分发，以及连接在什么条件下关闭讲清楚。</p>
+    </div>
+
+
+    <div class="provenance"><span><b>来源</b> <a href="https://www.rfc-editor.org/rfc/rfc9112.html#section-9.1" target="_blank" rel="noopener">www.rfc-editor.org/rfc/rfc9112.html#section-9.1</a> · <a href="https://www.rfc-editor.org/rfc/rfc9112.html#section-9.2" target="_blank" rel="noopener">www.rfc-editor.org/rfc/rfc9112.html#section-9.2</a> · <a href="https://www.rfc-editor.org/rfc/rfc9112.html#section-9.3" target="_blank" rel="noopener">www.rfc-editor.org/rfc/rfc9112.html#section-9.3</a> · <a href="https://www.rfc-editor.org/rfc/rfc9112.html#section-6.3" target="_blank" rel="noopener">www.rfc-editor.org/rfc/rfc9112.html#section-6.3</a> · <a href="https://www.rfc-editor.org/rfc/rfc9112.html#section-9.6" target="_blank" rel="noopener">www.rfc-editor.org/rfc/rfc9112.html#section-9.6</a> · <a href="https://www.rfc-editor.org/rfc/rfc9113.html#section-5" target="_blank" rel="noopener">www.rfc-editor.org/rfc/rfc9113.html#section-5</a> · <a href="https://www.rfc-editor.org/rfc/rfc9113.html#section-5.1.1" target="_blank" rel="noopener">www.rfc-editor.org/rfc/rfc9113.html#section-5.1.</a> · <a href="https://www.rfc-editor.org/rfc/rfc9113.html#section-5.1.2" target="_blank" rel="noopener">www.rfc-editor.org/rfc/rfc9113.html#section-5.1.</a> · <a href="https://www.rfc-editor.org/rfc/rfc9113.html#section-6.4" target="_blank" rel="noopener">www.rfc-editor.org/rfc/rfc9113.html#section-6.4</a> · <a href="https://www.rfc-editor.org/rfc/rfc9113.html#section-6.8" target="_blank" rel="noopener">www.rfc-editor.org/rfc/rfc9113.html#section-6.8</a> · <a href="https://www.rfc-editor.org/rfc/rfc9114.html#section-1" target="_blank" rel="noopener">www.rfc-editor.org/rfc/rfc9114.html#section-1</a> · <a href="https://html.spec.whatwg.org/multipage/server-sent-events.html" target="_blank" rel="noopener">html.spec.whatwg.org/multipage/server-sent-event</a> · <a href="https://developer.mozilla.org/en-US/docs/Web/API/EventSource" target="_blank" rel="noopener">developer.mozilla.org/en-US/docs/Web/API/EventSo</a> · <a href="https://developer.mozilla.org/en-US/docs/Web/API/Response" target="_blank" rel="noopener">developer.mozilla.org/en-US/docs/Web/API/Respons</a> · <a href="https://developer.mozilla.org/en-US/docs/Web/API/Response/json" target="_blank" rel="noopener">developer.mozilla.org/en-US/docs/Web/API/Respons</a> · <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/Connection_management_in_HTTP_1.x" target="_blank" rel="noopener">developer.mozilla.org/en-US/docs/Web/HTTP/Guides</a> · <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/MIME_types" target="_blank" rel="noopener">developer.mozilla.org/en-US/docs/Web/HTTP/Guides</a> · <a href="https://nginx.org/en/docs/http/ngx_http_core_module.html#keepalive_timeout" target="_blank" rel="noopener">nginx.org/en/docs/http/ngx_http_core_module.html</a></span><span><b>生成</b> 2026-11-09</span></div>
+    <div class="provenance"><span><b>标签</b> <span class="tag tone-muted">网络协议</span> <span class="tag tone-muted">HTTP</span> <span class="tag tone-muted">HTTP/2</span> <span class="tag tone-muted">TCP</span> <span class="tag tone-muted">socket</span> <span class="tag tone-muted">浏览器</span></span></div>
+
+<blockquote>
+<p>页面里 <code>fetch(&quot;/user&quot;)</code> 和 <code>new EventSource(&quot;/events&quot;)</code> 是两个不同的调用点，它们拿到的响应最后都走在同一条 HTTP/2 连接上。既然字节共用一条 TCP 连接，回来的数据凭什么不会串？</p>
+<p>这篇回答三件事：谁在操作 HTTP、一条连接怎么分给多个请求、连接在什么条件下关闭。</p>
+</blockquote>
+<h2 id="执行-http-的不是协议是程序"><span class="num">01</span>执行 HTTP 的不是协议，是程序</h2>
+<p>TCP 和 HTTP 都是规则。规则的执行者是具体的程序：TCP 由操作系统的协议栈执行，HTTP 由拿到连接的代码执行 —— 浏览器里的网络组件、<code>curl</code>、<code>nginx</code>、Go 的 <code>net/http</code>。</p>
+<p>所以「HTTP 收到数据以后，怎么找到那个 JSON 解释器」这个问题里，没有「找」这个动作可讲。原因在时序：<mark class="mk-blue">请求发出去之前，调用方就已经和它绑好了。</mark></p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>页面里的写法</th><th>谁发出请求</th><th>谁决定怎么读响应体</th></tr></thead><tbody><tr><th><code>fetch('/user')</code></th><td data-label="谁发出请求">浏览器网络组件</td><td data-label="谁决定怎么读响应体">你的代码：调 <code>.json()</code>、<code>.text()</code>，或者直接读 <code>Response.body</code> 这条流</td></tr><tr><th><code>new EventSource('/events')</code></th><td data-label="谁发出请求">浏览器网络组件（HTML 规范里，这一步就是一次 Fetch 请求）</td><td data-label="谁决定怎么读响应体"><code>EventSource</code> 自己：按 SSE 规则逐行解释</td></tr><tr><th>script 标签加载的脚本</th><td data-label="谁发出请求">浏览器网络组件</td><td data-label="谁决定怎么读响应体">浏览器把它交给 JS 引擎执行</td></tr><tr><th>地址栏或链接跳转</th><td data-label="谁发出请求">浏览器网络组件</td><td data-label="谁决定怎么读响应体">浏览器按响应头里的类型选渲染方式</td></tr></tbody></table></div><p>这几行里只有「谁决定怎么读」不同，「谁发出请求」是同一个：浏览器的网络栈。下面这张图把这条连接两端的东西都摆出来。</p>
+<figure class="archfig" data-arch style="--arch-max-width:1570px" data-boundaries="nested" data-pano data-parts='{"js":{"label":"网页 JavaScript","sub":"两个调用点","detail":"`fetch` 和 `new EventSource` 都是页面主动发起的调用。发起的时候，它们都不知道这次请求会落在哪条连接上。"},"fa":{"label":"Promise A","detail":"调 `fetch` 立刻返回的对象。它代表「这次请求的结果」，但结果还没到。"},"es":{"label":"EventSource B","detail":"创建时就开始请求，同时注册好了解析 SSE 的回调。"},"reg":{"label":"流的登记表","detail":"==每次请求分到一个流编号，表里记下「这个编号的结果交给谁」。==这张表只有一份，两个调用点共用。"},"h2":{"label":"HTTP/2 实现","detail":"把请求变成帧，把收到的字节整理成帧，再按帧头里的流编号交给表里对应的那一项。"},"sockb":{"label":"socket","detail":"一个文件描述符。TCP 的字节从它进出，但它不认识 HTTP，也不认识 JSON。"},"socks":{"label":"socket","detail":"服务端 `accept` 出来的一条连接，每个连接一个 fd。"},"h2s":{"label":"HTTP/2 实现","detail":"与浏览器侧同一类组件。它把帧还原成方法、路径和头部，再交给路由。"},"router":{"label":"路由表","detail":"启动时把 `GET /user` 和 `getUser` 绑在一起。请求进来时查表，不是去搜索代码。"},"handler":{"label":"getUser 处理函数","detail":"被调用，返回数据。响应沿同一条路回去，字节再按流编号分一次。"}}' data-tours='[{"id":"binding","label":"一个请求怎么绑上它的调用方","steps":[{"at":["js","fa"],"text":"页面调用 `fetch(\"/user\")`，拿到一个 Promise。这个时候请求还没发出去。"},{"at":["reg","fa"],"text":"网络栈给这次请求分配一个流编号，在表里记一行：流 1 交给这个 Promise。"},{"at":["es","reg"],"text":"另一个调用点 `new EventSource(\"/events\")` 走同一张表，占流 3。"},{"at":["h2","sockb"],"text":"两条流各自变成帧，写进同一个 socket。TCP 只负责把这些字节按顺序送到对端。"},{"at":["h2s","router","handler"],"text":"服务端拆帧，看到 `GET /user`，查路由表命中 `getUser`，再调用它。"},{"at":["reg","fa","es"],"text":"响应回来时，浏览器按帧头里的流编号查同一张表，把数据交回对应的调用点。"}]},{"id":"server-side","label":"服务端为什么能立刻找到处理函数","steps":[{"at":["handler","router"],"text":"处理函数在启动时注册进路由表。之后每个请求都只是查表，不是现找。"},{"at":["h2s","router"],"text":"请求到达时先还原成方法、路径，再拿这两个值查表。少了这一步，服务端也不知道该跑哪段代码。"}]}]' data-frames='[{"id":"browser","boundary":0,"label":"浏览器","kind":"logical","detail":"这两个调用点属于页面，不属于网络栈。它们只是向网络栈要连接、要流。","members":["js","fa","es","reg","h2","sockb"],"depth":1},{"id":"stack","boundary":1,"parent":"browser","label":"网络栈","kind":"contains","detail":"组帧、拆帧、按流编号分拣都在这一层。`fetch` 和 `EventSource` 都没有自己的一套。","members":["reg","h2","sockb"],"depth":2},{"id":"server","boundary":2,"label":"服务端","kind":"logical","detail":"路由表在启动时填好，之后每个连接都查同一张表。","members":["socks","h2s","router","handler"],"depth":1}]'>
+      <div class="arch-boundary-ui">
+          <div class="arch-boundary-toolbar"><span class="arch-boundary-label">边界</span>
+            <button type="button" data-boundary-mode="nested" aria-pressed="true">多层归属框</button>
+            <button type="button" data-boundary-mode="flat" aria-pressed="false">只留一层分区</button>
+            <button type="button" data-arch-reset>恢复全图</button>
+          </div>
+          <div class="arch-address-box" aria-live="polite"><div data-arch-address>点一个零件，看完整归属路径；点一个区域标题，看这一层的含义。</div>
+            <div data-arch-frame-detail>最外框表示逻辑资源域，不表示所有对象在一块内存里。每层边界的标题说明分组依据。</div></div>
+        </div>
+      <div class="arch-canvas"><svg viewBox="0 0 1570 980" role="img" aria-labelledby="http-conn-owner-archify-diagram-title http-conn-owner-archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
+        <title id="http-conn-owner-archify-diagram-title">一条 HTTP/2 连接的两端：谁登记了请求，谁按编号把数据交回去</title>
+        <desc id="http-conn-owner-archify-diagram-description">浏览器侧两个调用点共用一套网络栈；服务端侧按路由表找到处理函数</desc>
+        <!-- Definitions -->
+        <defs>
+          <marker id="http-conn-owner-arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-default" />
+          </marker>
+          <marker id="http-conn-owner-arrowhead-emphasis" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-emphasis" />
+          </marker>
+          <marker id="http-conn-owner-arrowhead-security" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-security" />
+          </marker>
+          <marker id="http-conn-owner-arrowhead-dashed" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" class="m-dashed" />
+          </marker>
+          <pattern id="http-conn-owner-grid" width="40" height="40" patternUnits="userSpaceOnUse">
+            <path d="M 40 0 L 0 0 0 40" class="c-grid" stroke-width="0.5"/>
+          </pattern>
+        </defs>
+
+        <!-- Background Grid -->
+        <rect width="100%" height="100%" fill="url(#http-conn-owner-grid)" />
+
+        <!-- Boundaries (behind everything) -->
+        <g class="arch-frame" data-frame="browser" data-depth="1" data-frame-flat="false" data-frame-kind="logical" role="button" tabindex="0" aria-pressed="false" aria-label="浏览器"><title>这两个调用点属于页面，不属于网络栈。它们只是向网络栈要连接、要流。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="0" data-frame-members="js fa es reg h2 sockb" x="52" y="52" width="856" height="824" rx="12" class="c-region" stroke-width="1"/>
+        <text x="60" y="70" class="t-cloud" font-size="9" font-weight="600">浏览器</text></g>
+
+        <g class="arch-frame" data-frame="stack" data-depth="2" data-frame-flat="false" data-frame-kind="contains" role="button" tabindex="0" aria-pressed="false" aria-label="网络栈"><title>组帧、拆帧、按流编号分拣都在这一层。`fetch` 和 `EventSource` 都没有自己的一套。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="1" data-frame-members="reg h2 sockb" x="310" y="390" width="300" height="448" rx="12" class="c-region" stroke-width="1"/>
+        <text x="318" y="408" class="t-cloud" font-size="9" font-weight="600">网络栈</text></g>
+
+        <g class="arch-frame" data-frame="server" data-depth="1" data-frame-flat="false" data-frame-kind="logical" role="button" tabindex="0" aria-pressed="false" aria-label="服务端"><title>路由表在启动时填好，之后每个连接都查同一张表。</title><rect data-graph-role="structural-frame" data-composition-frame-kind="region" data-composition-frame-id="2" data-frame-members="socks h2s router handler" x="1112" y="272" width="396" height="604" rx="12" class="c-region" stroke-width="1"/>
+        <text x="1120" y="290" class="t-cloud" font-size="9" font-weight="600">服务端</text></g>
+
+        <!-- Connection paths (before components for correct z-order) -->
+        <path data-edge-from="js" data-edge-to="fa" data-edge-label="调用 fetch" data-edge-key="0" data-edge-id="call-fetch" data-composition-points="435,196;435,233;210,233;210,270" d="M 435 196 L 435 225 Q 435 233 427 233 L 218 233 Q 210 233 210 241 L 210 270" class="a-default" stroke-width="1.5" marker-end="url(#http-conn-owner-arrowhead)"/>
+        <path data-edge-from="js" data-edge-to="es" data-edge-label="创建对象" data-edge-key="1" data-edge-id="new-es" data-composition-points="435,196;435,233;745,233;745,270" d="M 435 196 L 435 225 Q 435 233 443 233 L 737 233 Q 745 233 745 241 L 745 270" class="a-default" stroke-width="1.5" marker-end="url(#http-conn-owner-arrowhead)"/>
+        <path data-edge-from="fa" data-edge-to="reg" data-edge-label="登记 · 流 1" data-edge-key="2" data-edge-id="reg-a" data-composition-points="210,332;210,356;326,356;326,495;350,495" d="M 210 332 L 210 348 Q 210 356 218 356 L 318 356 Q 326 356 326 364 L 326 487 Q 326 495 334 495 L 350 495" class="a-default" stroke-width="1.5" marker-end="url(#http-conn-owner-arrowhead)"/>
+        <path data-edge-from="es" data-edge-to="reg" data-edge-label="登记 · 流 3" data-edge-key="3" data-edge-id="reg-b" data-composition-points="660,301;460,301;460,430" d="M 660 301 L 468 301 Q 460 301 460 309 L 460 430" class="a-default" stroke-width="1.5" marker-end="url(#http-conn-owner-arrowhead)"/>
+        <path data-edge-from="reg" data-edge-to="h2" data-edge-label="分配编号" data-edge-key="4" data-edge-id="reg-h2" data-composition-points="460,560;460,620" d="M 460 560 L 460 620" class="a-default" stroke-width="1.5" marker-end="url(#http-conn-owner-arrowhead)"/>
+        <path data-edge-from="h2" data-edge-to="sockb" data-edge-label="写字节" data-edge-key="5" data-edge-id="h2-sock" data-composition-points="460,682;460,740" d="M 460 682 L 460 740" class="a-default" stroke-width="1.5" marker-end="url(#http-conn-owner-arrowhead)"/>
+        <path data-edge-from="sockb" data-edge-to="socks" data-edge-label="一条 TCP 连接" data-edge-key="6" data-edge-id="wire" data-composition-points="540,769;1230,769" d="M 540 769 L 1230 769" class="a-default" stroke-width="1.5" marker-end="url(#http-conn-owner-arrowhead)"/>
+        <path data-edge-from="socks" data-edge-to="h2s" data-edge-label="读字节" data-edge-key="7" data-edge-id="sock-h2s" data-composition-points="1310,740;1310,682" d="M 1310 740 L 1310 682" class="a-default" stroke-width="1.5" marker-end="url(#http-conn-owner-arrowhead)"/>
+        <path data-edge-from="h2s" data-edge-to="router" data-edge-label="GET /user" data-edge-key="8" data-edge-id="h2s-router" data-composition-points="1310,620;1310,556" d="M 1310 620 L 1310 556" class="a-default" stroke-width="1.5" marker-end="url(#http-conn-owner-arrowhead)"/>
+        <path data-edge-from="router" data-edge-to="handler" data-edge-label="查表命中" data-edge-key="9" data-edge-id="router-handler" data-composition-points="1310,490;1310,420" d="M 1310 490 L 1310 420" class="a-default" stroke-width="1.5" marker-end="url(#http-conn-owner-arrowhead)"/>
+
+        <!-- Components -->
+        <g id="http-conn-owner-node-js" data-node-id="js" data-node-label="网页 JavaScript" tabindex="0" role="button" aria-label="Focus 网页 JavaScript, fetch(&#39;/user&#39;) · new EventSource(&#39;/events&#39;), 浏览器 · 两个调用点在外面，网络栈是共用的" aria-pressed="false" data-node-kind="frontend" data-node-sublabel="fetch(&#39;/user&#39;) · new EventSource(&#39;/events&#39;)" data-node-context="浏览器 · 两个调用点在外面，网络栈是共用的">
+          <title>网页 JavaScript · fetch(&#39;/user&#39;) · new EventSource(&#39;/events&#39;) · 浏览器 · 两个调用点在外面，网络栈是共用的</title>
+          <rect x="340" y="130" width="190" height="66" rx="6" class="c-mask"/>
+          <rect x="340" y="130" width="190" height="66" rx="6" class="c-frontend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="frontend" class="semantic-sigil s-frontend" transform="translate(346 136) scale(0.6875)">
+            <rect x="2" y="3" width="12" height="10" rx="2"/>
+            <path d="M2 6.5h12"/>
+            <circle cx="4.1" cy="4.8" r=".7" class="sigil-fill"/>
+            <circle cx="6.3" cy="4.8" r=".7" class="sigil-fill"/>
+          </g>
+          <text data-detail-anchor x="435" y="161" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">网页 JavaScript</text>
+        <text data-detail="context" x="435" y="177" class="t-muted" font-size="7" text-anchor="middle">fetch(&#39;/user&#39;) · new EventSource(&#39;/events&#39;)</text>
+        </g>
+
+        <g id="http-conn-owner-node-fa" data-node-id="fa" data-node-label="Promise A" tabindex="0" role="button" aria-label="Focus Promise A, fetch 的返回值, 浏览器 · 两个调用点在外面，网络栈是共用的" aria-pressed="false" data-node-kind="frontend" data-node-sublabel="fetch 的返回值" data-node-context="浏览器 · 两个调用点在外面，网络栈是共用的">
+          <title>Promise A · fetch 的返回值 · 浏览器 · 两个调用点在外面，网络栈是共用的</title>
+          <rect x="130" y="270" width="160" height="62" rx="6" class="c-mask"/>
+          <rect x="130" y="270" width="160" height="62" rx="6" class="c-frontend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="frontend" class="semantic-sigil s-frontend" transform="translate(136 276) scale(0.6875)">
+            <rect x="2" y="3" width="12" height="10" rx="2"/>
+            <path d="M2 6.5h12"/>
+            <circle cx="4.1" cy="4.8" r=".7" class="sigil-fill"/>
+            <circle cx="6.3" cy="4.8" r=".7" class="sigil-fill"/>
+          </g>
+          <text data-detail-anchor x="210" y="299" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">Promise A</text>
+        <text data-detail="context" x="210" y="315" class="t-muted" font-size="9" text-anchor="middle">fetch 的返回值</text>
+        </g>
+
+        <g id="http-conn-owner-node-es" data-node-id="es" data-node-label="EventSource B" tabindex="0" role="button" aria-label="Focus EventSource B, onmessage 已挂上, 浏览器 · 两个调用点在外面，网络栈是共用的" aria-pressed="false" data-node-kind="frontend" data-node-sublabel="onmessage 已挂上" data-node-context="浏览器 · 两个调用点在外面，网络栈是共用的">
+          <title>EventSource B · onmessage 已挂上 · 浏览器 · 两个调用点在外面，网络栈是共用的</title>
+          <rect x="660" y="270" width="170" height="62" rx="6" class="c-mask"/>
+          <rect x="660" y="270" width="170" height="62" rx="6" class="c-frontend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="frontend" class="semantic-sigil s-frontend" transform="translate(666 276) scale(0.6875)">
+            <rect x="2" y="3" width="12" height="10" rx="2"/>
+            <path d="M2 6.5h12"/>
+            <circle cx="4.1" cy="4.8" r=".7" class="sigil-fill"/>
+            <circle cx="6.3" cy="4.8" r=".7" class="sigil-fill"/>
+          </g>
+          <text data-detail-anchor x="745" y="299" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">EventSource B</text>
+        <text data-detail="context" x="745" y="315" class="t-muted" font-size="9" text-anchor="middle">onmessage 已挂上</text>
+        </g>
+
+        <g id="http-conn-owner-node-reg" data-nb="1" data-node-id="reg" data-node-label="流的登记表" tabindex="0" role="button" aria-label="Focus 流的登记表, 发出前登记，回来看编号, 浏览器 · 两个调用点在外面，网络栈是共用的 › 浏览器网络栈 · 只有这一套" aria-pressed="false" data-node-kind="database" data-node-sublabel="发出前登记，回来看编号" data-node-context="浏览器 · 两个调用点在外面，网络栈是共用的 › 浏览器网络栈 · 只有这一套">
+          <title>流的登记表 · 发出前登记，回来看编号 · 浏览器 · 两个调用点在外面，网络栈是共用的 › 浏览器网络栈 · 只有这一套</title>
+          <rect x="350" y="430" width="220" height="130" rx="6" class="c-mask"/>
+          <rect x="350" y="430" width="220" height="130" rx="6" class="c-database" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(356 436) scale(0.6875)">
+            <ellipse cx="8" cy="4" rx="5" ry="2"/>
+            <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
+          </g>
+          <rect class="nb-badge" x="488.4" y="438" width="69.6" height="15" rx="7.5"/>
+          <text class="nb-badge-t" x="523.2" y="449" font-size="8" text-anchor="middle">每个连接一张</text>
+          <text class="nb-title" x="384" y="451" font-size="10.5" font-weight="600">流的登记表</text>
+          <line class="nb-hr" x1="358" y1="458" x2="562" y2="458"/>
+          <text class="nb-k" x="362" y="498" font-size="9">流 1</text><text class="nb-v" x="392.6" y="498" font-size="9">Promise A</text>
+          <text class="nb-k" x="362" y="512" font-size="9">流 3</text><text class="nb-v" x="392.6" y="512" font-size="9">EventSource B</text>
+          <text class="nb-note" x="362" y="552" font-size="8">编号由发起方分配，回来时按它查表</text>
+        </g>
+
+        <g id="http-conn-owner-node-h2" data-node-id="h2" data-node-label="HTTP/2 实现" tabindex="0" role="button" aria-label="Focus HTTP/2 实现, 组帧 / 拆帧, 浏览器 · 两个调用点在外面，网络栈是共用的 › 浏览器网络栈 · 只有这一套" aria-pressed="false" data-node-kind="backend" data-node-sublabel="组帧 / 拆帧" data-node-context="浏览器 · 两个调用点在外面，网络栈是共用的 › 浏览器网络栈 · 只有这一套">
+          <title>HTTP/2 实现 · 组帧 / 拆帧 · 浏览器 · 两个调用点在外面，网络栈是共用的 › 浏览器网络栈 · 只有这一套</title>
+          <rect x="350" y="620" width="220" height="62" rx="6" class="c-mask"/>
+          <rect x="350" y="620" width="220" height="62" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(356 626) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text data-detail-anchor x="460" y="649" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">HTTP/2 实现</text>
+        <text data-detail="context" x="460" y="665" class="t-muted" font-size="9" text-anchor="middle">组帧 / 拆帧</text>
+        </g>
+
+        <g id="http-conn-owner-node-sockb" data-node-id="sockb" data-node-label="socket" tabindex="0" role="button" aria-label="Focus socket, 连接的文件描述符, 浏览器 · 两个调用点在外面，网络栈是共用的 › 浏览器网络栈 · 只有这一套" aria-pressed="false" data-node-kind="external" data-node-sublabel="连接的文件描述符" data-node-context="浏览器 · 两个调用点在外面，网络栈是共用的 › 浏览器网络栈 · 只有这一套">
+          <title>socket · 连接的文件描述符 · 浏览器 · 两个调用点在外面，网络栈是共用的 › 浏览器网络栈 · 只有这一套</title>
+          <rect x="380" y="740" width="160" height="58" rx="6" class="c-mask"/>
+          <rect x="380" y="740" width="160" height="58" rx="6" class="c-external" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="external" class="semantic-sigil s-external" transform="translate(386 746) scale(0.6875)">
+            <rect x="2.5" y="5" width="8.5" height="8" rx="1.5"/>
+            <path d="M8 2.5h5.5V8M13.5 2.5 7.5 8.5"/>
+          </g>
+          <text data-detail-anchor x="460" y="767" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">socket</text>
+        <text data-detail="context" x="460" y="783" class="t-muted" font-size="9" text-anchor="middle">连接的文件描述符</text>
+        </g>
+
+        <g id="http-conn-owner-node-socks" data-node-id="socks" data-node-label="socket" tabindex="0" role="button" aria-label="Focus socket, accept 得到的描述符, 服务端 · 路由表在处理连接之前就填好了" aria-pressed="false" data-node-kind="external" data-node-sublabel="accept 得到的描述符" data-node-context="服务端 · 路由表在处理连接之前就填好了">
+          <title>socket · accept 得到的描述符 · 服务端 · 路由表在处理连接之前就填好了</title>
+          <rect x="1230" y="740" width="160" height="58" rx="6" class="c-mask"/>
+          <rect x="1230" y="740" width="160" height="58" rx="6" class="c-external" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="external" class="semantic-sigil s-external" transform="translate(1236 746) scale(0.6875)">
+            <rect x="2.5" y="5" width="8.5" height="8" rx="1.5"/>
+            <path d="M8 2.5h5.5V8M13.5 2.5 7.5 8.5"/>
+          </g>
+          <text data-detail-anchor x="1310" y="767" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">socket</text>
+        <text data-detail="context" x="1310" y="783" class="t-muted" font-size="9" text-anchor="middle">accept 得到的描述符</text>
+        </g>
+
+        <g id="http-conn-owner-node-h2s" data-node-id="h2s" data-node-label="HTTP/2 实现" tabindex="0" role="button" aria-label="Focus HTTP/2 实现, 拆帧，认出 GET /user, 服务端 · 路由表在处理连接之前就填好了" aria-pressed="false" data-node-kind="backend" data-node-sublabel="拆帧，认出 GET /user" data-node-context="服务端 · 路由表在处理连接之前就填好了">
+          <title>HTTP/2 实现 · 拆帧，认出 GET /user · 服务端 · 路由表在处理连接之前就填好了</title>
+          <rect x="1210" y="620" width="200" height="62" rx="6" class="c-mask"/>
+          <rect x="1210" y="620" width="200" height="62" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(1216 626) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text data-detail-anchor x="1310" y="649" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">HTTP/2 实现</text>
+        <text data-detail="context" x="1310" y="665" class="t-muted" font-size="9" text-anchor="middle">拆帧，认出 GET /user</text>
+        </g>
+
+        <g id="http-conn-owner-node-router" data-node-id="router" data-node-label="路由表" tabindex="0" role="button" aria-label="Focus 路由表, GET /user → getUser, 服务端 · 路由表在处理连接之前就填好了" aria-pressed="false" data-node-kind="backend" data-node-sublabel="GET /user → getUser" data-node-context="服务端 · 路由表在处理连接之前就填好了">
+          <title>路由表 · GET /user → getUser · 服务端 · 路由表在处理连接之前就填好了</title>
+          <rect x="1210" y="490" width="200" height="66" rx="6" class="c-mask"/>
+          <rect x="1210" y="490" width="200" height="66" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(1216 496) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text data-detail-anchor x="1310" y="521" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">路由表</text>
+        <text data-detail="context" x="1310" y="537" class="t-muted" font-size="9" text-anchor="middle">GET /user → getUser</text>
+        </g>
+
+        <g id="http-conn-owner-node-handler" data-node-id="handler" data-node-label="getUser 处理函数" tabindex="0" role="button" aria-label="Focus getUser 处理函数, 启动时注册, 服务端 · 路由表在处理连接之前就填好了" aria-pressed="false" data-node-kind="backend" data-node-sublabel="启动时注册" data-node-context="服务端 · 路由表在处理连接之前就填好了">
+          <title>getUser 处理函数 · 启动时注册 · 服务端 · 路由表在处理连接之前就填好了</title>
+          <rect x="1190" y="350" width="240" height="70" rx="6" class="c-mask"/>
+          <rect x="1190" y="350" width="240" height="70" rx="6" class="c-backend" stroke-width="1.5"/>
+          <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(1196 356) scale(0.6875)">
+            <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
+          </g>
+          <text data-detail-anchor x="1310" y="383" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">getUser 处理函数</text>
+        <text data-detail="context" x="1310" y="399" class="t-muted" font-size="9" text-anchor="middle">启动时注册</text>
+        </g>
+
+        <!-- Connection labels -->
+        <g data-detail="context" data-edge-from="js" data-edge-to="fa" data-edge-label="调用 fetch" data-edge-key="0" data-edge-id="call-fetch">
+          <rect x="293" y="223" width="58" height="14" rx="3" class="c-mask"/>
+          <text x="322" y="233" class="t-muted" font-size="8" text-anchor="middle">调用 fetch</text>
+        </g>
+        <g data-detail="context" data-edge-from="js" data-edge-to="es" data-edge-label="创建对象" data-edge-key="1" data-edge-id="new-es">
+          <rect x="565.8" y="223" width="48.4" height="14" rx="3" class="c-mask"/>
+          <text x="590" y="233" class="t-muted" font-size="8" text-anchor="middle">创建对象</text>
+        </g>
+        <g data-detail="context" data-edge-from="fa" data-edge-to="reg" data-edge-label="登记 · 流 1" data-edge-key="2" data-edge-id="reg-a">
+          <rect x="178.6" y="410" width="62.8" height="14" rx="3" class="c-mask"/>
+          <text x="210" y="420" class="t-muted" font-size="8" text-anchor="middle">登记 · 流 1</text>
+        </g>
+        <g data-detail="context" data-edge-from="es" data-edge-to="reg" data-edge-label="登记 · 流 3" data-edge-key="3" data-edge-id="reg-b">
+          <rect x="513.6" y="403" width="62.8" height="14" rx="3" class="c-mask"/>
+          <text x="545" y="413" class="t-muted" font-size="8" text-anchor="middle">登记 · 流 3</text>
+        </g>
+        <g data-detail="context" data-edge-from="reg" data-edge-to="h2" data-edge-label="分配编号" data-edge-key="4" data-edge-id="reg-h2">
+          <rect x="435.8" y="580" width="48.4" height="14" rx="3" class="c-mask"/>
+          <text x="460" y="590" class="t-muted" font-size="8" text-anchor="middle">分配编号</text>
+        </g>
+        <g data-detail="context" data-edge-from="h2" data-edge-to="sockb" data-edge-label="写字节" data-edge-key="5" data-edge-id="h2-sock">
+          <rect x="440.6" y="701" width="38.8" height="14" rx="3" class="c-mask"/>
+          <text x="460" y="711" class="t-muted" font-size="8" text-anchor="middle">写字节</text>
+        </g>
+        <g data-detail="context" data-edge-from="sockb" data-edge-to="socks" data-edge-label="一条 TCP 连接" data-edge-key="6" data-edge-id="wire">
+          <rect x="973.8" y="759" width="72.4" height="14" rx="3" class="c-mask"/>
+          <text x="1010" y="769" class="t-muted" font-size="8" text-anchor="middle">一条 TCP 连接</text>
+        </g>
+        <g data-detail="context" data-edge-from="socks" data-edge-to="h2s" data-edge-label="读字节" data-edge-key="7" data-edge-id="sock-h2s">
+          <rect x="1290.6" y="701" width="38.8" height="14" rx="3" class="c-mask"/>
+          <text x="1310" y="711" class="t-muted" font-size="8" text-anchor="middle">读字节</text>
+        </g>
+        <g data-detail="context" data-edge-from="h2s" data-edge-to="router" data-edge-label="GET /user" data-edge-key="8" data-edge-id="h2s-router">
+          <rect x="1283.4" y="578" width="53.199999999999996" height="14" rx="3" class="c-mask"/>
+          <text x="1310" y="588" class="t-muted" font-size="8" text-anchor="middle">GET /user</text>
+        </g>
+        <g data-detail="context" data-edge-from="router" data-edge-to="handler" data-edge-label="查表命中" data-edge-key="9" data-edge-id="router-handler">
+          <rect x="1285.8" y="445" width="48.4" height="14" rx="3" class="c-mask"/>
+          <text x="1310" y="455" class="t-muted" font-size="8" text-anchor="middle">查表命中</text>
+        </g>
+
+        <!-- Legend -->
+        <g data-legend data-legend-bridge>
+          <text x="40" y="944" class="t-primary" font-size="12" font-weight="650">Legend</text>
+          <g data-legend-semantic-kind="frontend" data-legend-kind="frontend" data-legend-label="Frontend" data-legend-x="40" data-legend-baseline="964" data-legend-width="83">
+            <rect x="40" y="955" width="16" height="10" rx="2.5" class="c-frontend" stroke-width="1"/>
+            <text x="62" y="964" class="t-muted" font-size="10" font-weight="500">Frontend</text>
+          </g>
+          <g data-legend-semantic-kind="backend" data-legend-kind="backend" data-legend-label="Backend" data-legend-x="145" data-legend-baseline="964" data-legend-width="78">
+            <rect x="145" y="955" width="16" height="10" rx="2.5" class="c-backend" stroke-width="1"/>
+            <text x="167" y="964" class="t-muted" font-size="10" font-weight="500">Backend</text>
+          </g>
+          <g data-legend-semantic-kind="database" data-legend-kind="database" data-legend-label="Database" data-legend-x="245" data-legend-baseline="964" data-legend-width="83">
+            <rect x="245" y="955" width="16" height="10" rx="2.5" class="c-database" stroke-width="1"/>
+            <text x="267" y="964" class="t-muted" font-size="10" font-weight="500">Database</text>
+          </g>
+          <g data-legend-semantic-kind="external" data-legend-kind="external" data-legend-label="External" data-legend-x="350" data-legend-baseline="964" data-legend-width="83">
+            <rect x="350" y="955" width="16" height="10" rx="2.5" class="c-external" stroke-width="1"/>
+            <text x="372" y="964" class="t-muted" font-size="10" font-weight="500">External</text>
+          </g>
+        </g>
+      </svg></div>
+      <figcaption>从左边 <code>fetch</code> 的调用点进去。它先在登记表里占一个流编号，数据回来时也靠这个编号回到它。右边服务端同一个道理，只是登记表换成了路由表。</figcaption>
+      <div class="pano-ui"></div>
+      <p class="arch-hint"><span class="idle">点头上的任意一个框看它的关系，点区域标题看分组含义，点零件看完整归属路径</span><span class="focused">再点一次空白处取消</span></p>
+    </figure><p>图上这两侧是同一种结构：<strong>拿数据的一方，都是提前登记过的。</strong> 浏览器登记的是流编号，服务端登记的是路径。</p>
+<p>表里的「流」是这条连接里的一条逻辑通道，一次请求占一条。</p>
+<p><code>Content-Type</code> 不参与这个选择。同一个地址，<code>fetch</code> 拿到的是一段文本，<code>EventSource</code> 拿到的是一串事件；差别来自调用者是谁，不来自响应头。</p>
+<p><code>EventSource</code> 那一行值得单独说：HTML 规范里，它发起的就是一次 Fetch 请求 —— 和小节标题里那个 <code>fetch</code> 走同一套机制。所以它没有第二套 HTTP 实现，只在响应体上多了一个 SSE 解析器。</p>
+<h2 id="一条连接分给两个请求凭什么不串"><span class="num">02</span>一条连接分给两个请求，凭什么不串</h2>
+<p>上图画的是位置关系。真正让人不放心的是字节交错的时候会发生什么，所以走一遍到达顺序。</p>
+<p>HTTP/2 把请求和响应切成带头的片段，叫帧（frame）。每个帧开头写着它属于哪条流，接收方据此分开。帧的字节长什么样（9 字节帧头、流编号在哪几位）在<a href="../http-binary-framing/">从字节看懂 HTTP/1.1 与 HTTP/2</a>里逐字节拆过。</p>
+<div class="demo" data-widget="stepper" data-config="{&quot;steps&quot;:[{&quot;label&quot;:&quot;① HEADERS 流 1&quot;,&quot;code&quot;:&quot;HEADERS  stream=1  :method=GET  :path=/user&quot;,&quot;note&quot;:&quot;流 1 的响应头到了。Response 对象这时已经有了，响应体还在后面。&quot;},{&quot;label&quot;:&quot;② HEADERS 流 3&quot;,&quot;code&quot;:&quot;HEADERS  stream=3  :status=200\ncontent-type: text/event-stream&quot;,&quot;note&quot;:&quot;流 3 的响应头。EventSource 检查状态码和类型，合格才开始解析。&quot;},{&quot;label&quot;:&quot;③ DATA 流 1&quot;,&quot;code&quot;:&quot;DATA  stream=1  {\&quot;name\&quot;:&quot;,&quot;note&quot;:&quot;流 1 的响应体只到一半。&quot;},{&quot;label&quot;:&quot;④ DATA 流 3&quot;,&quot;code&quot;:&quot;DATA  stream=3  data: hello&quot;,&quot;note&quot;:&quot;另一条流的数据插在中间。TCP 不知道这些字节属于谁。&quot;},{&quot;label&quot;:&quot;⑤ DATA 流 1&quot;,&quot;code&quot;:&quot;DATA  stream=1  \&quot;小林\&quot;}&quot;,&quot;note&quot;:&quot;流 1 的后半段。两段接起来才是完整 JSON。&quot;},{&quot;label&quot;:&quot;⑥ END_STREAM 流 1&quot;,&quot;code&quot;:&quot;DATA  stream=1  END_STREAM&quot;,&quot;note&quot;:&quot;这条流结束。response.json() 这时才能解析成功。&quot;},{&quot;label&quot;:&quot;⑦ DATA 流 3&quot;,&quot;code&quot;:&quot;DATA  stream=3  data: world&quot;,&quot;note&quot;:&quot;流 3 没有结束。SSE 一直开着，连接也一直开着。&quot;}]}">
+      <div class="demo-head">
+        <span class="title">同一条 TCP 连接上，两条流的帧依次到达</span>
+        <span class="status" data-status></span>
+        <span class="spacer"></span>
+        
+      </div>
+      <div class="demo-body custom" data-mount></div>
+    </div><p>三层各管一段：</p>
+<table>
+<thead>
+<tr>
+<th>层</th>
+<th>这一层负责什么</th>
+<th>这一层不管什么</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>TCP</td>
+<td>字节的先后顺序</td>
+<td>这些字节属于哪个请求</td>
+</tr>
+<tr>
+<td>HTTP/2 实现</td>
+<td>每个帧属于哪个流（帧头里有 31 位的流标识）</td>
+<td>这个流的数据要交给页面里的谁</td>
+</tr>
+<tr>
+<td>登记表</td>
+<td>流 1 交给 Promise A，流 3 交给 EventSource B</td>
+<td>数据是 JSON 还是 SSE</td>
+</tr>
+</tbody>
+</table>
+<div class="callout tone-amber">
+      <span class="ic">⚠</span>
+      <div><p><mark class="mk-amber">流编号不表示响应是什么内容。</mark>它是一个由发起方分配的整数（客户端用奇数），作用只是让帧和发请求时登记的那一条对上。</p>
+<p>数据交给调用方之后才被解析：<code>.json()</code> 按 JSON 规则读，<code>EventSource</code> 按 SSE 规则读。</p>
+</div>
+    </div><p>还有一层要说清：如果这两次请求各走一条 TCP 连接，这张表根本不需要 —— 一个 socket 只有一个主人。<strong>共用连接省下了握手和慢启动，代价就是多一层分拣。</strong></p>
+<h2 id="http11-的六条连接是六条什么"><span class="num">03</span>HTTP/1.1 的六条连接是六条什么</h2>
+<p>HTTP/1.1 没有流编号。它的规范 RFC 9112 §9.2 把这个限制写得很直接：它不包含用来关联请求和响应的标识，只能靠响应到达的顺序；客户端必须维护一张未完成请求的列表，按发送顺序把每个响应配给最早的、还没拿到最终响应的那个请求。</p>
+<p>那张列表就是 HTTP/1.1 的登记表，一条队列。一条连接上同一时刻只有一个响应在传，因为多传就没法按顺序认领。</p>
+<div class="ow">
+  <div class="ow-case">
+    <div class="ow-head">
+      <span class="tag tone-blue">HTTP/1.1</span>
+      <b>同时 6 个请求，开 6 条连接</b>
+      <small>一条 HTTP 连接对应一条 TCP 连接，所以并行只能靠多开。</small>
+    </div>
+    <div class="ow-axis">每条连接各自占一条 TCP 连接</div>
+    <div class="ow-band"><div class="ow-blk tone-blue grow">连接 1<em>GET /a.js</em></div><div style="display:flex;align-items:center;font:600 13px var(--mono);color:var(--muted)">→</div><div class="ow-fill">socket 1 · TCP 1</div></div>
+    <div class="ow-band"><div class="ow-blk tone-blue grow">连接 2<em>GET /b.css</em></div><div style="display:flex;align-items:center;font:600 13px var(--mono);color:var(--muted)">→</div><div class="ow-fill">socket 2 · TCP 2</div></div>
+    <div class="ow-band"><div class="ow-blk tone-blue grow">连接 3<em>GET /c.png</em></div><div style="display:flex;align-items:center;font:600 13px var(--mono);color:var(--muted)">→</div><div class="ow-fill">socket 3 · TCP 3</div></div>
+    <div class="ow-band"><div class="ow-blk tone-blue grow">连接 4<em>GET /user</em></div><div style="display:flex;align-items:center;font:600 13px var(--mono);color:var(--muted)">→</div><div class="ow-fill">socket 4 · TCP 4</div></div>
+    <div class="ow-band"><div class="ow-blk tone-blue grow">连接 5<em>GET /events</em></div><div style="display:flex;align-items:center;font:600 13px var(--mono);color:var(--muted)">→</div><div class="ow-fill">socket 5 · TCP 5</div></div>
+    <div class="ow-band"><div class="ow-blk tone-blue grow">连接 6<em>GET /d.json</em></div><div style="display:flex;align-items:center;font:600 13px var(--mono);color:var(--muted)">→</div><div class="ow-fill">socket 6 · TCP 6</div></div>
+  </div>
+  <div class="ow-case">
+    <div class="ow-head">
+      <span class="tag tone-violet">HTTP/2</span>
+      <b>同一批请求，共用 1 条连接</b>
+      <small>每条流一个编号，帧交错着走同一条 TCP 连接。</small>
+    </div>
+    <div class="ow-axis">一条 HTTP 连接，仍然只对应一条 TCP 连接</div>
+    <div class="ow-band"><div class="ow-blk tone-violet">流 1</div><div class="ow-blk tone-violet">流 3</div><div class="ow-blk tone-violet">流 5</div><div class="ow-blk tone-violet">流 7</div><div class="ow-blk tone-violet">流 9</div><div class="ow-blk tone-violet">流 11</div><div style="display:flex;align-items:center;font:600 13px var(--mono);color:var(--muted)">→</div><div class="ow-fill">socket 1 · TCP 1</div></div>
+  </div>
+</div>
+<p>「6」不是一个标准值。MDN 的描述是：早期浏览器对每个域名开 2 到 3 条，后来普遍涨到 6 条。它是浏览器的实现选择，具体数字看版本。</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>问题</th><th>HTTP/1.1</th><th>HTTP/2</th><th>HTTP/3</th></tr></thead><tbody><tr><th>一条连接上同时能传几个响应</th><td data-label="HTTP/1.1">一个，按顺序</td><td data-label="HTTP/2">多个流交错</td><td data-label="HTTP/3">多个流交错</td></tr><tr><th>同时发 6 个请求要几条传输连接</th><td data-label="HTTP/1.1">6 条 TCP</td><td data-label="HTTP/2">1 条 TCP</td><td data-label="HTTP/3">1 条 QUIC，走 UDP</td></tr><tr><th>响应靠什么认领</th><td data-label="HTTP/1.1">到达顺序</td><td data-label="HTTP/2">帧头里的流编号</td><td data-label="HTTP/3">QUIC 的流编号</td></tr><tr><th>一条 HTTP 连接对应几条传输连接</th><td data-label="HTTP/1.1">一条</td><td data-label="HTTP/2">一条</td><td data-label="HTTP/3">一条 QUIC 连接，没有 TCP</td></tr></tbody></table></div><p>最后一行的依据是 RFC 9112 §9.1 的原文：每条 HTTP 连接对应一条底下的传输连接（&quot;Each HTTP connection maps to one underlying transport connection&quot;）。所以那 6 条 HTTP/1.1 连接是 6 条 TCP 连接，不是 6 条 HTTP 叠在 1 条 TCP 上。</p>
+<div class="callout tone-violet">
+      <span class="ic">🧭</span>
+      <div><p><strong>这个 1:1 说的是「每一段」。</strong></p>
+<p>经过代理时，浏览器到代理是一条 HTTP 连接，代理到源站是另一条，两条各自对应自己的传输连接。端到端看过去是两段，不是一条 HTTP 连接横跨两条 TCP。</p>
+<p>HTTP/3 换掉了传输层：RFC 9114 把 HTTP 语义映射到 QUIC 上 —— QUIC 是 HTTP/3 用的传输协议，跑在 UDP 上，自己管流和重传。那里没有 TCP 连接可对应。</p>
+</div>
+    </div><h2 id="一次响应读完连接并不关"><span class="num">04</span>一次响应读完，连接并不关</h2>
+<p>现在的连接默认留着复用：HTTP/1.1 的规范 RFC 9112 §9.3 写明它默认使用持久连接（persistent connection），一条连接上可以跑多个请求和响应。空下来的连接不是丢掉，而是放回浏览器内部的一组里等下一个请求，这组连接叫连接池。</p>
+<p>既然留着，就必须能自己判断「这次响应到哪结束」，否则后面的字节会被当成下一个响应。判断方式按协议不同：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>情形</th><th>HTTP/1.1 怎么判断</th><th>HTTP/2 怎么判断</th></tr></thead><tbody><tr><th>响应头写了 <code>Content-Length</code></th><td data-label="HTTP/1.1 怎么判断">读够这么多字节</td><td data-label="HTTP/2 怎么判断">帧头自带长度，收到带 <code>END_STREAM</code> 标志的帧才算这条流结束</td></tr><tr><th>响应头写了 <code>Transfer-Encoding: chunked</code></th><td data-label="HTTP/1.1 怎么判断">一直读到长度为 0 的那一块</td><td data-label="HTTP/2 怎么判断">同上</td></tr><tr><th>两个都没有</th><td data-label="HTTP/1.1 怎么判断">只能等服务端关闭连接（HTTP/1.0 的兼容做法）</td><td data-label="HTTP/2 怎么判断">不出现这种情况：帧必然有边界</td></tr><tr><th>读完这一刻</th><td data-label="HTTP/1.1 怎么判断">连接不关，回到连接池等下一个请求</td><td data-label="HTTP/2 怎么判断">这条流关闭，连接和别的流继续</td></tr></tbody></table></div><p><mark class="mk-blue">读到本次响应的结尾，只说明这一次传完了；连接关不关是另一件事。</mark></p>
+<p>HTTP/2 里「一条流结束」和「整条连接结束」差得更远：<code>END_STREAM</code> 只是把这一条流送进 closed，同一条连接上其他流照常收发。一条流的两个方向各自结束，两个都结束了，这条流才彻底关闭。</p>
+<h2 id="连接什么时候关"><span class="num">05</span>连接什么时候关</h2>
+<p>连接关闭有几种来源，发起的时机和后果不一样。一条连接会服务多个请求，所以它有明确的状态。从建好到关掉，中间只有这几种转移：</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>发生什么</th><th>从哪个状态</th><th>到哪个状态</th></tr></thead><tbody><tr><th>发出请求</th><td data-label="从哪个状态">连接建好，空闲</td><td data-label="到哪个状态">请求在途</td></tr><tr><th>读到本次响应的结尾（长度读满、读到 0 块、收到 <code>END_STREAM</code>）</th><td data-label="从哪个状态">请求在途</td><td data-label="到哪个状态">响应读完，连接进池</td></tr><tr><th>又来一个请求</th><td data-label="从哪个状态">响应读完，连接进池</td><td data-label="到哪个状态">请求在途</td></tr><tr><th>空闲超时、被连接池淘汰、对端发来 <code>GOAWAY</code></th><td data-label="从哪个状态">响应读完，连接进池</td><td data-label="到哪个状态">连接关闭</td></tr><tr><th>取消、协议出错、链路断开</th><td data-label="从哪个状态">请求在途</td><td data-label="到哪个状态">连接关闭</td></tr></tbody></table></div><p>这个表里有两次「连接关闭」，但发起方不同。下一张表把它们分开。</p>
+<div class="compare-wrap"><table class="compare"><thead><tr><th>谁发起</th><th>怎么表示</th><th>正在传的请求会怎样</th></tr></thead><tbody><tr><th>服务端要关（维护、缩容）</th><td data-label="怎么表示">HTTP/1.1 响应头带 <code>Connection: close</code>；HTTP/2 发 <code>GOAWAY</code> 帧</td><td data-label="正在传的请求会怎样">1.1：本次响应传完才关；2：<code>GOAWAY</code> 带上最后处理过的流编号，编号更大的流没被处理，可以重试</td></tr><tr><th>浏览器空闲超时</th><td data-label="怎么表示">直接关闭底层 socket</td><td data-label="正在传的请求会怎样">只有没有在途请求时才会走到这一步</td></tr><tr><th>服务端空闲超时</th><td data-label="怎么表示">直接关闭底层 socket（nginx 的 <code>keepalive_timeout</code> 默认 75 秒）</td><td data-label="正在传的请求会怎样">客户端下一个请求会失败，需要重连</td></tr><tr><th>取消请求或协议出错</th><td data-label="怎么表示">1.1：关掉整条连接；2：发 <code>RST_STREAM</code>，只关这一条流</td><td data-label="正在传的请求会怎样">1.1：后面的字节没法认领；2：其他流不受影响</td></tr><tr><th>链路断开</th><td data-label="怎么表示">TCP 的 <code>FIN</code> / <code>RST</code>，或者超时</td><td data-label="正在传的请求会怎样">两种协议都直接看到连接没了；HTTP/2 里没传完的流需要重试</td></tr></tbody></table></div><p>为什么 HTTP/1.1 取消一个请求要关掉整条连接：响应只能按到达顺序对应请求，中间丢了一段，后面的字节就配不上任何一个请求。HTTP/2 有 <code>RST_STREAM</code>，它把一条流直接送进 closed，同一条连接上的其他流继续。</p>
+<p><code>GOAWAY</code> 值得单看一眼，因为它回答了「服务端要下线，正在跑的请求怎么办」：</p>
+<div class="callout tone-violet">
+      <span class="ic">🧭</span>
+      <div><p><code>GOAWAY</code> 里带着<strong>最后处理过的流编号</strong>。编号比它大的流，服务端要么没收到、要么没开始处理，客户端可以换条连接重试。</p>
+<p>HTTP/2 的规范 RFC 9113 §6.8 建议关连接之前先发 <code>GOAWAY</code>：不发的话，客户端不知道那个 POST 到底有没有被处理过。</p>
+<p>常见做法是发两次：第一次把编号放到最大（2³¹-1），意思是「先别开新流」；等手头的流跑完，再发一次带真实编号的，然后关传输连接。</p>
+</div>
+    </div><h2 id="三句带走"><span class="num">06</span>三句带走</h2>
+<ol>
+<li>执行 HTTP 的是程序，不是协议。请求发出去之前，「结果交给谁」已经写进了登记表 —— 浏览器写流编号，服务端写路径。</li>
+<li>一条连接分给多个请求，靠的是流编号。HTTP/1.1 没有编号，只能靠顺序，所以并行就要多开连接。</li>
+<li>一次响应结束和连接关闭是两件事。关闭有协议信号（<code>Connection: close</code>、<code>GOAWAY</code>、<code>RST_STREAM</code>），也有超时和断链。</li>
+</ol>
+<div class="quiz"><details>
+        <summary>同一个页面里，<code>fetch</code> 和 <code>EventSource</code> 各自有一套 HTTP 实现吗？</summary>
+        <div class="a"><p>没有。浏览器只有一套网络栈，两者都向它要连接；HTML 规范里，<code>EventSource</code> 发起的请求就是一次 Fetch 请求。</p>
+<p>区别在拿到响应体之后：<code>fetch</code> 把响应体交给你的代码决定怎么读，<code>EventSource</code> 按 SSE 规则逐行解析。</p>
+</div>
+      </details><details>
+        <summary>一条 HTTP/2 连接上同时有两条响应在传，浏览器靠什么分清哪段字节属于谁？</summary>
+        <div class="a"><p>帧头里的流编号。发请求时已经登记了「流 1 交给这个对象」，数据到达时按编号查表。</p>
+<p>TCP 只保证字节顺序，不认识这个编号；<code>Content-Type</code> 也不负责把响应交给谁。</p>
+</div>
+      </details><details>
+        <summary>一条 HTTP/1.1 连接上，浏览器怎么知道这次响应读完了？</summary>
+        <div class="a"><p>有 <code>Content-Length</code> 就读够那么多字节；有 <code>chunked</code> 就等长度为 0 的那一块；两个都没有时，只能等服务端关闭连接。</p>
+<p>读完这次响应不会关闭连接 —— 连接默认留着复用，直到空闲超时或者某一方发了 <code>Connection: close</code>。</p>
+</div>
+      </details></div>
+
+    <footer>
+      <span>谁在操作 HTTP：请求交给谁、一条连接怎么分、什么时候关</span>
+      <span>最后更新 2026-11-09 · 单文件可离线打开</span>
+    </footer>
+  </main>
+</div>
+
+<script src="../../assets/app.js?v=08e2d79727"></script>
+</body>
+</html>
